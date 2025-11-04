@@ -14,21 +14,13 @@ impl Nip01SmokeTests {
     pub async fn run_all(client: &AuditClient) -> AuditResult {
         let mut results = AuditResult::new("NIP-01 Smoke Tests");
         
-        // Run tests in parallel
-        let tests = vec![
-            Self::test_websocket_connection(client),
-            Self::test_send_receive_event(client),
-            Self::test_create_subscription(client),
-            Self::test_close_subscription(client),
-            Self::test_reject_invalid_signature(client),
-            Self::test_reject_invalid_event_id(client),
-        ];
-        
-        let test_results = futures::future::join_all(tests).await;
-        
-        for result in test_results {
-            results.add(result);
-        }
+        // Run tests sequentially to avoid future type issues
+        results.add(Self::test_websocket_connection(client).await);
+        results.add(Self::test_send_receive_event(client).await);
+        results.add(Self::test_create_subscription(client).await);
+        results.add(Self::test_close_subscription(client).await);
+        results.add(Self::test_reject_invalid_signature(client).await);
+        results.add(Self::test_reject_invalid_event_id(client).await);
         
         results
     }
@@ -68,7 +60,6 @@ impl Nip01SmokeTests {
             let event = client
                 .event_builder(Kind::TextNote, "NIP-01 smoke test event")
                 .build(client.keys())
-                .await
                 .map_err(|e| format!("Failed to build event: {}", e))?;
             
             // Send event
@@ -123,7 +114,6 @@ impl Nip01SmokeTests {
             let event = client
                 .event_builder(Kind::TextNote, "Subscription test event")
                 .build(client.keys())
-                .await
                 .map_err(|e| format!("Failed to build event: {}", e))?;
             
             client
@@ -193,38 +183,37 @@ impl Nip01SmokeTests {
         )
         .run(|| async {
             // Create a valid event
-            let mut event = client
+            let event = client
                 .event_builder(Kind::TextNote, "Invalid signature test")
                 .build(client.keys())
-                .await
                 .map_err(|e| format!("Failed to build event: {}", e))?;
             
             // Corrupt the signature by creating a new event with wrong sig
             // We'll use a different key to sign, creating an invalid signature
             let wrong_keys = Keys::generate();
-            let wrong_event = EventBuilder::new(
-                event.kind,
-                event.content.clone(),
-                event.tags.clone(),
-            )
-            .to_event(&wrong_keys)
-            .await
-            .map_err(|e| format!("Failed to build wrong event: {}", e))?;
+            let wrong_event = EventBuilder::new(event.kind, event.content.clone())
+                .tags(event.tags.clone())
+                .sign_with_keys(&wrong_keys)
+                .map_err(|e| format!("Failed to build wrong event: {}", e))?;
             
-            // Create event with mismatched pubkey and signature
+            // Create event JSON with mismatched pubkey and signature
             // This should be rejected by the relay
-            event = Event {
-                id: event.id,
-                pubkey: event.pubkey,
-                created_at: event.created_at,
-                kind: event.kind,
-                tags: event.tags,
-                content: event.content,
-                sig: wrong_event.sig, // Wrong signature!
-            };
+            let invalid_event_json = serde_json::json!({
+                "id": event.id.to_hex(),
+                "pubkey": event.pubkey.to_hex(),
+                "created_at": event.created_at.as_u64(),
+                "kind": event.kind.as_u16(),
+                "tags": event.tags,
+                "content": event.content,
+                "sig": wrong_event.sig.to_string(), // Wrong signature!
+            });
+            
+            // Parse it back to an Event
+            let invalid_event: Event = serde_json::from_value(invalid_event_json)
+                .map_err(|e| format!("Failed to create invalid event: {}", e))?;
             
             // Try to send the invalid event
-            let result = client.send_event(event).await;
+            let result = client.send_event(invalid_event).await;
             
             // We expect this to fail
             if result.is_ok() {
@@ -248,25 +237,28 @@ impl Nip01SmokeTests {
         )
         .run(|| async {
             // Create a valid event
-            let mut event = client
+            let event = client
                 .event_builder(Kind::TextNote, "Invalid ID test")
                 .build(client.keys())
-                .await
                 .map_err(|e| format!("Failed to build event: {}", e))?;
             
-            // Corrupt the ID
-            event = Event {
-                id: EventId::all_zeros(), // Wrong ID!
-                pubkey: event.pubkey,
-                created_at: event.created_at,
-                kind: event.kind,
-                tags: event.tags,
-                content: event.content,
-                sig: event.sig,
-            };
+            // Create event JSON with corrupted ID
+            let invalid_event_json = serde_json::json!({
+                "id": EventId::all_zeros().to_hex(), // Wrong ID!
+                "pubkey": event.pubkey.to_hex(),
+                "created_at": event.created_at.as_u64(),
+                "kind": event.kind.as_u16(),
+                "tags": event.tags,
+                "content": event.content,
+                "sig": event.sig.to_string(),
+            });
+            
+            // Parse it back to an Event
+            let invalid_event: Event = serde_json::from_value(invalid_event_json)
+                .map_err(|e| format!("Failed to create invalid event: {}", e))?;
             
             // Try to send the invalid event
-            let result = client.send_event(event).await;
+            let result = client.send_event(invalid_event).await;
             
             // We expect this to fail
             if result.is_ok() {

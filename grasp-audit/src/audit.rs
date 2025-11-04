@@ -1,7 +1,6 @@
 //! Audit configuration and event tagging
 
 use nostr_sdk::prelude::*;
-use std::time::Duration;
 
 /// Audit configuration
 #[derive(Debug, Clone)]
@@ -113,13 +112,13 @@ impl AuditEventBuilder {
     }
     
     /// Build the event with audit tags
-    pub async fn build(self, keys: &Keys) -> anyhow::Result<Event> {
+    pub fn build(self, keys: &Keys) -> anyhow::Result<Event> {
         let mut all_tags = self.tags;
         all_tags.extend(self.config.audit_tags());
         
-        let event = EventBuilder::new(self.kind, self.content, all_tags)
-            .to_event(keys)
-            .await?;
+        let event = EventBuilder::new(self.kind, self.content)
+            .tags(all_tags)
+            .sign_with_keys(keys)?;
         
         Ok(event)
     }
@@ -168,15 +167,14 @@ mod tests {
         }));
     }
     
-    #[tokio::test]
-    async fn test_audit_event_builder() {
+    #[test]
+    fn test_audit_event_builder() {
         let config = AuditConfig::ci();
         let keys = Keys::generate();
         
         let event = AuditEventBuilder::new(Kind::TextNote, "test", config.clone())
             .tag(Tag::custom(TagKind::Custom("test".into()), vec!["value"]))
             .build(&keys)
-            .await
             .unwrap();
         
         // Should have our custom tag + 3 audit tags
