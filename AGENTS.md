@@ -30,6 +30,7 @@ ngit-grasp/
 ├── docs/archive/               # Completed session/phase docs
 │   ├── 2025-11-04-tag-migration.md
 │   ├── 2025-11-04-flake-migration.md
+│   ├── 2025-11-04-cleanup-visual-summary.txt  # Visual summaries
 │   └── 2025-11-03-architecture-investigation.md
 │
 ├── docs/learnings/             # Extracted knowledge (permanent)
@@ -47,6 +48,24 @@ ngit-grasp/
     └── history/               # Conversation history
 ```
 
+### File Type Guidelines
+
+**Markdown (.md):**
+- Primary format for all documentation
+- Easy to read in plain text and rendered
+- Supports code blocks, links, tables
+- Version control friendly
+
+**Text (.txt):**
+- Only for visual ASCII art summaries
+- Must be archived after session (never permanent)
+- Examples: status boxes, visual diagrams
+- Archive to `docs/archive/YYYY-MM-DD-name.txt`
+
+**Other formats:**
+- Avoid unless absolutely necessary
+- If needed, document in README.md why
+
 ---
 
 ## 📋 Document Lifecycle
@@ -62,13 +81,16 @@ ngit-grasp/
 - `TAG_MIGRATION_COMPLETE.md` → Archive when next phase starts
 - `SESSION_2025_11_04_SUMMARY.md` → Archive at session end
 - `NEXT_STEPS.md` → Update continuously, archive when complete
+- `STATUS_VISUAL.txt` → Archive immediately after session
 
 **Rules:**
 - ✅ Use descriptive names with dates: `YYYY-MM-DD-description.md`
 - ✅ Mark status clearly: `[WIP]`, `[COMPLETE]`, `[ARCHIVED]`
 - ✅ Include date and context at top
+- ✅ Use `.md` for docs, `.txt` only for ASCII art summaries
 - ❌ Don't let root accumulate more than 5-10 working docs
 - ❌ Don't create duplicates (merge or link instead)
+- ❌ Don't keep `.txt` files in root (archive immediately)
 
 ### 2. Permanent Documentation (docs/)
 
@@ -132,7 +154,7 @@ ngit-grasp/
 
 ### When to Clean Up
 
-**Trigger:** Root directory has >10 markdown files  
+**Trigger:** Root directory has >10 markdown files OR any .txt files  
 **Frequency:** End of each major phase or weekly  
 **Responsibility:** AI agents should proactively suggest cleanup
 
@@ -142,6 +164,9 @@ ngit-grasp/
    ```bash
    # Find old working docs
    ls -lt *.md | head -20
+   
+   # Check for .txt files (should always be archived)
+   ls -la *.txt
    ```
 
 2. **Extract Learnings**
@@ -151,8 +176,11 @@ ngit-grasp/
 
 3. **Archive Completed Work**
    ```bash
-   # Move to archive with date prefix
+   # Archive markdown with date prefix
    mv TAG_MIGRATION_COMPLETE.md docs/archive/2025-11-04-tag-migration.md
+   
+   # Archive .txt files immediately
+   mv STATUS_VISUAL.txt docs/archive/2025-11-04-status-visual.txt
    ```
 
 4. **Delete Obsolete Documents**
@@ -171,19 +199,23 @@ ngit-grasp/
 # Before cleanup (36 files in root!)
 ls *.md | wc -l
 # 36
+ls *.txt | wc -l
+# 5
 
-# After cleanup (5-8 files in root)
+# After cleanup (3-5 files in root)
 ls *.md
 # README.md
 # AGENTS.md
-# CHANGELOG.md
 # CURRENT_STATUS.md
-# NEXT_STEPS.md
+
+ls *.txt
+# (none - all archived)
 
 # Archived
 ls docs/archive/
 # 2025-11-04-tag-migration.md
 # 2025-11-04-flake-migration.md
+# 2025-11-04-cleanup-visual-summary.txt
 # 2025-11-03-architecture-investigation.md
 # ...
 
@@ -319,6 +351,55 @@ When you:
 
 ---
 
+## 📄 File Format Guidelines
+
+### When to Use .txt Files
+
+**Use .txt ONLY for:**
+- ASCII art visual summaries
+- Box diagrams with Unicode characters
+- Terminal-style status displays
+
+**Examples of appropriate .txt content:**
+```
+╔════════════════════════════════════════╗
+║  STATUS: ✅ COMPLETE                   ║
+╚════════════════════════════════════════╝
+```
+
+**Rules:**
+- ✅ Create in root during session for visual impact
+- ✅ Archive immediately after session ends
+- ✅ Use descriptive names: `CLEANUP_VISUAL_SUMMARY.txt`
+- ❌ Never keep .txt files in root long-term
+- ❌ Don't use .txt for regular documentation
+- ❌ Don't duplicate information (use .md instead)
+
+**Lifecycle:**
+```
+Create .txt → Use in session → Archive immediately
+```
+
+### When to Use .md Files
+
+**Use .md for ALL documentation:**
+- Architecture docs
+- Session summaries
+- Status reports
+- Learnings
+- Planning documents
+- API documentation
+- User guides
+
+**Why markdown is preferred:**
+- Renders nicely on GitHub/GitLab
+- Supports code blocks with syntax highlighting
+- Easy to link between documents
+- Better for long-form content
+- Version control friendly
+
+---
+
 ## 📝 Writing Guidelines
 
 ### Markdown Style
@@ -400,6 +481,11 @@ cargo build
    - `YYYY-MM-DD-description.md` for working docs
    - `topic-name.md` for permanent docs
 
+5. **Choose correct file format**
+   - Use `.md` for all documentation (default)
+   - Use `.txt` ONLY for ASCII art visual summaries
+   - Archive `.txt` files immediately after session
+
 ### During Development
 
 1. **Update status markers**
@@ -431,9 +517,11 @@ cargo build
 
 ### Cleanup Time
 
-1. **Review all root .md files**
+1. **Review all root .md and .txt files**
 2. **Extract learnings to docs/learnings/**
 3. **Archive completed work to docs/archive/**
+   - `.md` files: Extract learnings first
+   - `.txt` files: Archive immediately (no extraction needed)
 4. **Delete obsolete duplicates**
 5. **Update links in active docs**
 6. **Commit with clear message**
@@ -472,9 +560,17 @@ cargo build
 
 - [ ] Moved to docs/archive/
 - [ ] Renamed with date prefix
-- [ ] ARCHIVED marker at top
-- [ ] Learnings extracted first
+- [ ] ARCHIVED marker at top (for .md files)
+- [ ] Learnings extracted first (for .md files)
 - [ ] Not referenced in active docs
+
+### For .txt Files
+
+- [ ] Contains only ASCII art/visual summaries
+- [ ] Created in root for session use
+- [ ] Archived immediately after session
+- [ ] Not used for regular documentation
+- [ ] Descriptive filename with purpose clear
 
 ---
 
@@ -517,6 +613,8 @@ cargo build
 6. **Use descriptive names** - Future you will thank you
 7. **Check before creating** - Document might already exist
 8. **Update as you go** - Don't wait for cleanup time
+9. **Use .md by default** - Only use .txt for ASCII art
+10. **Archive .txt immediately** - Don't let them linger
 
 ---
 
