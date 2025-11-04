@@ -12,6 +12,7 @@ use crate::config::Config;
 pub struct Storage {
     events: Arc<RwLock<HashMap<String, Event>>>,
     data_path: String,
+    domain: String,
 }
 
 impl Storage {
@@ -22,7 +23,12 @@ impl Storage {
         Ok(Storage {
             events: Arc::new(RwLock::new(HashMap::new())),
             data_path: config.relay_data_path.clone(),
+            domain: config.domain.clone(),
         })
+    }
+
+    pub fn get_domain(&self) -> String {
+        self.domain.clone()
     }
 
     pub async fn store_event(&self, event: Event) -> Result<()> {

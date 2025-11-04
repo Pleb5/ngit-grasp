@@ -1,6 +1,6 @@
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
-use nostr_sdk::{Event, EventId, Filter};
+use nostr_sdk::{Event, EventId, Filter, Kind};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -11,6 +11,7 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
+use crate::nostr::events::{validate_announcement, validate_state, KIND_REPOSITORY_ANNOUNCEMENT, KIND_REPOSITORY_STATE};
 use crate::storage::Storage;
 
 type Subscriptions = Arc<RwLock<HashMap<String, Vec<Filter>>>>;
@@ -138,6 +139,35 @@ async fn handle_event(arr: &[Value], storage: &Storage) -> Result<Vec<Value>> {
     // Check if event already exists
     if storage.get_event(&event_id.to_hex()).await.is_some() {
         return Ok(vec![json!(["OK", event_id.to_hex(), true, "duplicate: event already exists"])]);
+    }
+
+    // Validate repository announcements (kind 30617)
+    if event.kind == Kind::from(KIND_REPOSITORY_ANNOUNCEMENT) {
+        // Get domain from storage config
+        let domain = storage.get_domain();
+        
+        match validate_announcement(&event, &domain) {
+            Ok(()) => {
+                info!("✅ Valid repository announcement: {} ({})", event_id, event.kind);
+            }
+            Err(e) => {
+                warn!("❌ Invalid repository announcement: {}", e);
+                return Ok(vec![json!(["OK", event_id.to_hex(), false, format!("invalid: {}", e)])]);
+            }
+        }
+    }
+
+    // Validate repository state announcements (kind 30618)
+    if event.kind == Kind::from(KIND_REPOSITORY_STATE) {
+        match validate_state(&event) {
+            Ok(()) => {
+                info!("✅ Valid repository state: {} ({})", event_id, event.kind);
+            }
+            Err(e) => {
+                warn!("❌ Invalid repository state: {}", e);
+                return Ok(vec![json!(["OK", event_id.to_hex(), false, format!("invalid: {}", e)])]);
+            }
+        }
     }
 
     // Store the event

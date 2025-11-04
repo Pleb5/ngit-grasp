@@ -76,16 +76,21 @@ This approach provides:
 git clone https://gitworkshop.dev/ngit-grasp
 cd ngit-grasp
 
-# Build
-cargo build --release
+# Build (using Nix for reproducible environment)
+nix develop -c cargo build --release
 
 # Configure
 cp .env.example .env
 # Edit .env with your settings
 
 # Run
-cargo run --release
+nix develop -c cargo run --release
+
+# Run tests
+nix develop -c cargo test --lib
 ```
+
+**Don't have Nix?** See [Getting Started Tutorial](docs/tutorials/getting-started.md) for alternative setup methods.
 
 ## Configuration
 
@@ -114,23 +119,64 @@ We use the **[Diátaxis](https://diataxis.fr/)** framework for documentation:
 
 See [Architecture Overview](docs/explanation/architecture.md) for system design and [Test Strategy](docs/reference/test-strategy.md) for testing approach.
 
+### Running Tests
+
+We have two test suites:
+
+**1. Main Project Tests (ngit-grasp)**
+
 ```bash
-# Run tests
-cargo test
+# Run unit tests (no external dependencies)
+nix develop -c cargo test --lib
 
-# Run compliance tests
-cargo test --test compliance
+# Run integration tests (tests our relay implementation)
+# First, start ngit-grasp relay in one terminal:
+NGIT_BIND_ADDRESS=127.0.0.1:7000 nix develop -c cargo run
 
+# Then in another terminal, run integration tests:
+nix develop -c cargo test --test announcement_tests --ignored
+
+# Or use the test script (starts relay automatically):
+./test_relay.sh
+```
+
+**2. GRASP Audit Tool (grasp-audit)**
+
+The audit tool tests GRASP compliance of any relay (including ours or external ones).
+
+```bash
+# Enter grasp-audit directory
+cd grasp-audit
+
+# Run unit tests
+nix develop -c cargo test
+
+# Test against our ngit-grasp relay:
+# First, start ngit-grasp (in another terminal):
+cd .. && NGIT_BIND_ADDRESS=127.0.0.1:7000 nix develop -c cargo run
+
+# Then run audit:
+nix develop -c cargo run -- --url ws://127.0.0.1:7000
+
+# Or test against any external relay:
+nix develop -c cargo run -- --url wss://relay.example.com
+```
+
+### Development Commands
+
+```bash
 # Run with logging
-RUST_LOG=debug cargo run
+RUST_LOG=debug nix develop -c cargo run
 
 # Check code
-cargo clippy
-cargo fmt --check
+nix develop -c cargo clippy
+nix develop -c cargo fmt --check
 
-# Generate test coverage
-cargo tarpaulin --out Html
+# Generate test coverage (requires tarpaulin)
+nix develop -c cargo tarpaulin --out Html
 ```
+
+**Note:** Always use `nix develop` to ensure the correct build environment. See [docs/how-to/nix-flakes.md](docs/how-to/nix-flakes.md) for details.
 
 ## Project Structure
 
