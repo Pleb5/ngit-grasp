@@ -112,15 +112,8 @@ impl TestRelay {
 
     /// Stop the relay
     pub async fn stop(mut self) {
-        // Send SIGTERM to gracefully shutdown
-        #[cfg(unix)]
-        {
-            use nix::sys::signal::{kill, Signal};
-            use nix::unistd::Pid;
-            
-            let pid = Pid::from_raw(self.process.id() as i32);
-            let _ = kill(pid, Signal::SIGTERM);
-        }
+        // Kill the process (gracefully if possible)
+        let _ = self.process.kill();
 
         // Wait a bit for graceful shutdown
         sleep(Duration::from_millis(100)).await;
