@@ -1,0 +1,179 @@
+//! Test relay fixture
+//!
+//! Provides automatic relay lifecycle management for integration tests.
+
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
+use tokio::time::sleep;
+
+/// Test relay fixture that manages relay lifecycle
+///
+/// Automatically starts and stops the ngit-grasp relay for testing.
+/// Uses a random port to avoid conflicts.
+pub struct TestRelay {
+    process: Child,
+    url: String,
+    port: u16,
+}
+
+impl TestRelay {
+    /// Start a test relay instance
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use common::TestRelay;
+    ///
+    /// #[tokio::test]
+    /// async fn test_something() {
+    ///     let relay = TestRelay::start().await;
+    ///     // Use relay.url() for testing
+    ///     relay.stop().await;
+    /// }
+    /// ```
+    pub async fn start() -> Self {
+        Self::start_with_port(Self::find_free_port()).await
+    }
+
+    /// Start relay on a specific port
+    pub async fn start_with_port(port: u16) -> Self {
+        let bind_address = format!("127.0.0.1:{}", port);
+        let url = format!("ws://127.0.0.1:{}", port);
+
+        // Use the built binary directly (faster than cargo run)
+        let binary_path = std::env::current_exe()
+            .expect("Failed to get current exe")
+            .parent()
+            .expect("Failed to get parent dir")
+            .parent()
+            .expect("Failed to get grandparent dir")
+            .join("ngit-grasp");
+
+        // Start the relay process
+        let process = Command::new(&binary_path)
+            .env("NGIT_BIND_ADDRESS", &bind_address)
+            .env("NGIT_DOMAIN", &bind_address) // Set domain to match bind address
+            .env("RUST_LOG", "warn") // Less logging during tests
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("Failed to start relay process");
+
+        let relay = Self {
+            process,
+            url,
+            port,
+        };
+
+        // Wait for relay to be ready
+        relay.wait_for_ready().await;
+
+        relay
+    }
+
+    /// Get the relay WebSocket URL
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Get the relay port
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Get the relay domain (host:port)
+    pub fn domain(&self) -> String {
+        format!("127.0.0.1:{}", self.port)
+    }
+
+    /// Wait for the relay to be ready to accept connections
+    async fn wait_for_ready(&self) {
+        let max_attempts = 50; // 5 seconds total
+        let delay = Duration::from_millis(100);
+
+        for attempt in 0..max_attempts {
+            // Try to connect to the relay
+            match tokio::net::TcpStream::connect(format!("127.0.0.1:{}", self.port)).await {
+                Ok(_) => {
+                    // Connection successful, relay is ready
+                    // Give it a tiny bit more time to fully initialize
+                    sleep(Duration::from_millis(100)).await;
+                    return;
+                }
+                Err(_) => {
+                    if attempt == max_attempts - 1 {
+                        panic!("Relay failed to start after {} attempts", max_attempts);
+                    }
+                    sleep(delay).await;
+                }
+            }
+        }
+    }
+
+    /// Stop the relay
+    pub async fn stop(mut self) {
+        // Send SIGTERM to gracefully shutdown
+        #[cfg(unix)]
+        {
+            use nix::sys::signal::{kill, Signal};
+            use nix::unistd::Pid;
+            
+            let pid = Pid::from_raw(self.process.id() as i32);
+            let _ = kill(pid, Signal::SIGTERM);
+        }
+
+        // Wait a bit for graceful shutdown
+        sleep(Duration::from_millis(100)).await;
+
+        // Force kill if still running
+        let _ = self.process.kill();
+        let _ = self.process.wait();
+    }
+
+    /// Find a free port to use for testing
+    fn find_free_port() -> u16 {
+        use std::net::TcpListener;
+        
+        // Bind to port 0 to get a random free port
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .expect("Failed to bind to random port");
+        
+        let port = listener.local_addr()
+            .expect("Failed to get local address")
+            .port();
+        
+        // Drop the listener to free the port
+        drop(listener);
+        
+        port
+    }
+}
+
+impl Drop for TestRelay {
+    fn drop(&mut self) {
+        // Ensure process is killed when TestRelay is dropped
+        let _ = self.process.kill();
+        let _ = self.process.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore] // Requires relay binary to be built
+    async fn test_relay_lifecycle() {
+        let relay = TestRelay::start().await;
+        assert!(relay.url().starts_with("ws://127.0.0.1:"));
+        assert!(relay.port() > 0);
+        relay.stop().await;
+    }
+
+    #[test]
+    fn test_find_free_port() {
+        let port = TestRelay::find_free_port();
+        assert!(port > 0);
+        // Port is u16, so it's always < 65536
+    }
+}

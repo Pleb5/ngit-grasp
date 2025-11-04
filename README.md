@@ -129,16 +129,27 @@ We have two test suites:
 # Run unit tests (no external dependencies)
 nix develop -c cargo test --lib
 
-# Run integration tests (tests our relay implementation)
-# First, start ngit-grasp relay in one terminal:
-NGIT_BIND_ADDRESS=127.0.0.1:7000 nix develop -c cargo run
+# Run all integration tests (automatic relay management)
+nix develop -c cargo test --test nip01_compliance --test nip34_announcements
 
-# Then in another terminal, run integration tests:
-nix develop -c cargo test --test announcement_tests --ignored
+# Run NIP-01 compliance tests
+nix develop -c cargo test --test nip01_compliance
 
-# Or use the test script (starts relay automatically):
-./test_relay.sh
+# Run NIP-34 announcement tests
+nix develop -c cargo test --test nip34_announcements
+
+# With detailed output
+nix develop -c cargo test --test nip01_compliance -- --nocapture
+
+# Run specific test
+nix develop -c cargo test --test nip01_compliance test_nip01_smoke
 ```
+
+**Integration tests automatically:**
+- Start a fresh relay instance
+- Run compliance tests using grasp-audit library
+- Clean up when done
+- No manual relay management needed!
 
 **2. GRASP Audit Tool (grasp-audit)**
 
@@ -151,12 +162,8 @@ cd grasp-audit
 # Run unit tests
 nix develop -c cargo test
 
-# Test against our ngit-grasp relay:
-# First, start ngit-grasp (in another terminal):
-cd .. && NGIT_BIND_ADDRESS=127.0.0.1:7000 nix develop -c cargo run
-
-# Then run audit:
-nix develop -c cargo run -- --url ws://127.0.0.1:7000
+# Test against any relay (including external ones)
+nix develop -c cargo run -- --url wss://relay.example.com
 
 # Or test against any external relay:
 nix develop -c cargo run -- --url wss://relay.example.com
