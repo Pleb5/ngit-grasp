@@ -35,7 +35,7 @@ Following the prompt to implement **Option B** (parallel development with separa
 ```bash
 # 1. Build (2 minutes)
 cd grasp-audit
-nix-shell
+nix develop
 cargo build
 
 # 2. Unit tests (1 minute)
@@ -79,7 +79,7 @@ cargo run --example simple_audit
 - `IMPLEMENTATION_COMPLETE.md` - This file
 
 ### Configuration
-- `grasp-audit/shell.nix` - NixOS dev environment
+- `grasp-audit/flake.nix` - NixOS dev environment (flake-based)
 - `grasp-audit/Cargo.toml` - Dependencies
 - `grasp-audit/Cargo.lock` - Locked versions
 

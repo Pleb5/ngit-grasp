@@ -2,6 +2,8 @@ Read DOCUMENTATION_INDEX.md and then the test strategy. We want to prove the con
 
 Here was the prompt in response to the COMPLIANCE_TEST_PROPOSAL.md and you got started by creating the GRASP_AUDIT_PLAN.md and everything in grasp-audit: Option b: do build and test Nostr Relay features in paralell. use a seperate crate for tests instead of grasp-compliance-tests call it grasp-audit. We need to support isolated tests, running in parallel for cicd and tests that could be run to audit a production service, we could use specific tags or string in events to indicate they are audits can be cleaned up by a script regularly. another idea is to send deletion events but that leaves a trails of deletion events for the relay to store so the our other idea is better. Integrate that into the plan then try it out for the smoke tests and report back.
 
+please use flake.nix instead of shell.nix. you can use ../ngit/flake.nix as a reference. do that and then proceed.
+
 Next we will implement the OOTB relay to make these tests pass.
 
 Then add line 2 test

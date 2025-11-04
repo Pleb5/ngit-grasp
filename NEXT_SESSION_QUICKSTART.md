@@ -23,7 +23,7 @@
 ```bash
 # 1. Enter development environment (NixOS)
 cd grasp-audit
-nix-shell
+nix develop
 
 # 2. Build (2 minutes)
 cargo build
@@ -165,7 +165,7 @@ Results: 6/6 passed (100.0%)
 **Solution:**
 ```bash
 cd grasp-audit
-nix-shell  # This loads gcc and other tools
+nix develop  # This loads gcc and other tools
 cargo build
 ```
 
@@ -261,7 +261,7 @@ grasp-audit audit --relay ws://localhost:7000
 
 ```bash
 # Enter dev environment
-cd grasp-audit && nix-shell
+cd grasp-audit && nix develop
 
 # Build
 cargo build

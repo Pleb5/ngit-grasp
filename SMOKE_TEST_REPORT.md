@@ -322,19 +322,11 @@ error: linker `cc` not found
 
 ### Solutions
 
-**Option 1: Create shell.nix**
-```nix
-{ pkgs ? import <nixpkgs> {} }:
-
-pkgs.mkShell {
-  buildInputs = with pkgs; [
-    rustc
-    cargo
-    gcc
-    pkg-config
-    openssl
-  ];
-}
+**Option 1: Use flake.nix (Provided)**
+```bash
+cd grasp-audit
+nix develop
+cargo build
 ```
 
 **Option 2: Use nix-shell with inline expression**
@@ -457,7 +449,7 @@ Expected: Tests run in read-only mode, see real events
 ## Next Steps
 
 ### Immediate (Unblock Build)
-1. ✅ Create `shell.nix` for NixOS environment
+1. ✅ Create `flake.nix` for NixOS environment
 2. ✅ Build grasp-audit
 3. ✅ Run unit tests
 4. ✅ Document build process
@@ -528,9 +520,8 @@ Reference: `GRASP_AUDIT_PLAN.md`
 
 1. **Set up build environment:**
    ```bash
-   # Create shell.nix (see Solutions section)
-   nix-shell
    cd grasp-audit
+   nix develop
    cargo build
    ```
 

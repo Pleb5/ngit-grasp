@@ -11,7 +11,7 @@
 ```bash
 # Enter development shell
 cd grasp-audit
-nix-shell
+nix develop
 
 # Build the project
 cargo build
@@ -135,7 +135,7 @@ async fn main() -> Result<()> {
 
 **Solution (NixOS):**
 ```bash
-nix-shell  # Use the provided shell.nix
+nix develop  # Use the provided flake.nix
 ```
 
 **Solution (Other Linux):**

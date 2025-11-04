@@ -124,6 +124,9 @@ cargo run --example simple_audit
 ## Testing
 
 ```bash
+# Enter dev environment (NixOS)
+nix develop
+
 # Run unit tests
 cargo test
 
