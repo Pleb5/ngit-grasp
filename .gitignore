@@ -2,8 +2,13 @@
 .ai/
 
 # Rust build artifacts
+target/
 grasp-audit/target
 
 # Working directory (session-specific temporary files)
 work/*
 !work/README.md
+
+# Environment and data
+.env
+data/

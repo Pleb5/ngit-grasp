@@ -1,0 +1,53 @@
+[package]
+name = "ngit-grasp"
+version = "0.1.0"
+edition = "2021"
+authors = ["ngit-grasp contributors"]
+license = "MIT"
+description = "A GRASP (Git Relays Authorized via Signed-Nostr Proofs) implementation in Rust"
+repository = "https://gitworkshop.dev/ngit-grasp"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+tokio-tungstenite = "0.21"
+
+# WebSocket
+tungstenite = "0.21"
+futures-util = "0.3"
+
+# HTTP server (for future use)
+# actix-web = "4.4"
+# actix-cors = "0.7"
+
+# Nostr
+nostr-sdk = "0.43"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Configuration
+dotenvy = "0.15"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Git (for future use)
+# git-http-backend = "0.3"
+
+[dev-dependencies]
+# Testing
+tokio-test = "0.4"
+
+[[bin]]
+name = "ngit-grasp"
+path = "src/main.rs"
+
+[workspace]
+members = [".", "grasp-audit"]
