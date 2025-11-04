@@ -1,3 +1,9 @@
+# AI assistant context
 .ai/
 
+# Rust build artifacts
 grasp-audit/target
+
+# Working directory (session-specific temporary files)
+work/*
+!work/README.md

@@ -99,9 +99,20 @@ Environment variables (see `.env.example`):
 - `NGIT_RELAY_DATA_PATH`: Path to store Nostr events
 - `NGIT_BIND_ADDRESS`: Server bind address (default: `127.0.0.1:8080`)
 
+## Documentation
+
+We use the **[Diátaxis](https://diataxis.fr/)** framework for documentation:
+
+- **[Tutorials](docs/tutorials/)** - Learn by doing (Getting Started, First Audit)
+- **[How-To Guides](docs/how-to/)** - Solve specific problems (Deploy, Configure)
+- **[Reference](docs/reference/)** - Look up technical details (Config, Protocols)
+- **[Explanation](docs/explanation/)** - Understand concepts (Architecture, Decisions)
+
+**Start here:** [Documentation Index](docs/README.md)
+
 ## Development
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed architecture documentation and [docs/TEST_STRATEGY.md](docs/TEST_STRATEGY.md) for comprehensive testing approach.
+See [Architecture Overview](docs/explanation/architecture.md) for system design and [Test Strategy](docs/reference/test-strategy.md) for testing approach.
 
 ```bash
 # Run tests

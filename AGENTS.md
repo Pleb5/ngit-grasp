@@ -10,7 +10,7 @@
 
 ### Overview
 
-We maintain a **clean, hierarchical documentation structure** to avoid documentation sprawl. All working documents have a defined lifecycle and location.
+We use the **[Diátaxis](https://diataxis.fr/) framework** for all documentation. This prevents documentation sprawl by organizing content into four clear categories based on purpose and audience.
 
 ```
 ngit-grasp/
@@ -18,35 +18,87 @@ ngit-grasp/
 ├── AGENTS.md                    # This file - agent guidelines
 ├── CHANGELOG.md                 # User-facing changes (semver)
 │
-├── docs/                        # Permanent technical documentation
-│   ├── README.md               # Docs navigation guide
-│   ├── ARCHITECTURE.md         # System architecture
-│   ├── TEST_STRATEGY.md        # Testing approach
-│   ├── GIT_PROTOCOL.md         # Git protocol reference
-│   ├── COMPARISON.md           # vs other implementations
-│   ├── GETTING_STARTED.md      # Setup guide
-│   └── DECISION_SUMMARY.md     # Key architectural decisions
+├── work/                        # Temporary session files (.gitignore'd)
+│   ├── README.md               # Only file committed to git
+│   └── *.md                    # Session notes, status, plans (temporary)
 │
-├── docs/archive/               # Completed session/phase docs
-│   ├── 2025-11-04-tag-migration.md
-│   ├── 2025-11-04-flake-migration.md
-│   ├── 2025-11-04-cleanup-visual-summary.txt  # Visual summaries
-│   └── 2025-11-03-architecture-investigation.md
-│
-├── docs/learnings/             # Extracted knowledge (permanent)
-│   ├── nix-flakes.md          # Flake gotchas and patterns
-│   ├── nostr-sdk.md           # nostr-sdk patterns and upgrades
-│   └── git-http-backend.md    # Git protocol learnings
+├── docs/                        # All documentation (Diátaxis structure)
+│   ├── README.md               # Navigation guide with quadrant diagram
+│   │
+│   ├── tutorials/              # Learning-oriented (practical + learning)
+│   │   ├── getting-started.md  # First-time setup
+│   │   └── first-audit.md      # Running your first audit
+│   │
+│   ├── how-to/                 # Task-oriented (practical + working)
+│   │   ├── deploy.md           # Production deployment
+│   │   ├── nix-flakes.md       # Nix environment setup
+│   │   ├── test-compliance.md  # Running compliance tests
+│   │   └── upgrade-nostr-sdk.md # SDK upgrade guide
+│   │
+│   ├── reference/              # Information-oriented (theoretical + working)
+│   │   ├── git-protocol.md     # Git Smart HTTP protocol
+│   │   ├── grasp-protocol.md   # GRASP specification
+│   │   ├── configuration.md    # All config options
+│   │   ├── test-strategy.md    # Testing reference
+│   │   └── api.md              # Internal API docs
+│   │
+│   ├── explanation/            # Understanding-oriented (theoretical + learning)
+│   │   ├── architecture.md     # System design overview
+│   │   ├── inline-authorization.md # Why inline auth?
+│   │   ├── comparison.md       # vs ngit-relay
+│   │   └── decisions.md        # Design decisions
+│   │
+│   ├── archive/                # Historical session notes
+│   │   └── YYYY-MM-DD-*.md     # Completed work
+│   │
+│   └── learnings/              # DEPRECATED - migrated to Diátaxis
+│       └── README.md           # Migration notice
 │
 ├── grasp-audit/                # Audit tool subproject
 │   ├── README.md              # Main audit docs
-│   ├── QUICK_START.md         # Getting started
-│   └── docs/
-│       └── archive/           # Audit-specific archives
+│   └── docs/                  # Follows same Diátaxis structure
+│       ├── tutorials/
+│       ├── how-to/
+│       ├── reference/
+│       └── explanation/
 │
 └── .ai/                        # AI assistant context (ignored in git)
     └── history/               # Conversation history
 ```
+
+### Diátaxis Framework
+
+All documentation MUST fit into one of four categories:
+
+**📚 Tutorials** (`docs/tutorials/`)
+- **Purpose:** Learning-oriented, teach by doing
+- **Audience:** Newcomers, beginners
+- **Style:** Step-by-step lessons with guaranteed outcomes
+- **Examples:** Getting Started, First Audit
+- **Question:** "Can you teach me to...?"
+
+**🔧 How-To Guides** (`docs/how-to/`)
+- **Purpose:** Task-oriented, solve problems
+- **Audience:** Users with basic knowledge
+- **Style:** Practical recipes and solutions
+- **Examples:** Deploy, Configure, Troubleshoot
+- **Question:** "How do I...?"
+
+**📖 Reference** (`docs/reference/`)
+- **Purpose:** Information-oriented, technical facts
+- **Audience:** Users looking up specific information
+- **Style:** Dry, factual, comprehensive
+- **Examples:** API docs, Config options, Protocols
+- **Question:** "What is...?"
+
+**💡 Explanation** (`docs/explanation/`)
+- **Purpose:** Understanding-oriented, clarify concepts
+- **Audience:** Users wanting deeper understanding
+- **Style:** Discussion, context, alternatives
+- **Examples:** Architecture, Design Decisions, Comparisons
+- **Question:** "Why...?"
+
+**See:** [Diátaxis documentation](https://diataxis.fr/) for detailed guidance.
 
 ### File Type Guidelines
 
@@ -70,46 +122,62 @@ ngit-grasp/
 
 ## 📋 Document Lifecycle
 
-### 1. Working Documents (Root Level)
+### 1. Working Documents (work/ Directory)
 
-**Purpose:** Active development, session notes, status reports  
-**Location:** Project root  
-**Lifecycle:** Created → Updated → Archived  
-**Retention:** Archive after completion, delete if obsolete
+**Purpose:** Session-specific temporary files  
+**Location:** `work/` directory (.gitignore'd)  
+**Lifecycle:** Created → Used → Archived or Deleted  
+**Retention:** Archive valuable content, delete rest at session end
 
 **Examples:**
-- `TAG_MIGRATION_COMPLETE.md` → Archive when next phase starts
-- `SESSION_2025_11_04_SUMMARY.md` → Archive at session end
-- `NEXT_STEPS.md` → Update continuously, archive when complete
-- `STATUS_VISUAL.txt` → Archive immediately after session
+- `work/session-notes.md` → Session notes and progress
+- `work/status.md` → Current status report
+- `work/migration-plan.md` → Planning document
+- `work/visual-summary.txt` → ASCII art summaries
 
 **Rules:**
-- ✅ Use descriptive names with dates: `YYYY-MM-DD-description.md`
-- ✅ Mark status clearly: `[WIP]`, `[COMPLETE]`, `[ARCHIVED]`
-- ✅ Include date and context at top
-- ✅ Use `.md` for docs, `.txt` only for ASCII art summaries
-- ❌ Don't let root accumulate more than 5-10 working docs
-- ❌ Don't create duplicates (merge or link instead)
-- ❌ Don't keep `.txt` files in root (archive immediately)
+- ✅ Create ALL session-specific docs in `work/`
+- ✅ Use descriptive names (no date prefix needed)
+- ✅ Archive valuable content to `docs/archive/YYYY-MM-DD-name.md`
+- ✅ Delete obsolete files at session end
+- ✅ Keep `work/` clean (empty except README.md when not in session)
+- ❌ Don't commit `work/` contents to git (except README.md)
+- ❌ Don't reference `work/` docs from permanent documentation
+- ❌ Don't let `work/` accumulate files between sessions
+
+**Why work/ instead of root:**
+- Keeps root clean (only README.md, AGENTS.md, CHANGELOG.md)
+- Clear separation: permanent vs. temporary
+- Not committed to git (reduces noise)
+- Easy to clean up (just `rm -rf work/*`)
 
 ### 2. Permanent Documentation (docs/)
 
 **Purpose:** Long-term reference, architecture, guides  
-**Location:** `docs/`  
+**Location:** `docs/` (organized by Diátaxis category)  
 **Lifecycle:** Created → Maintained → Updated  
 **Retention:** Permanent (version controlled)
 
+**Structure:**
+- `docs/tutorials/` - Learning-oriented lessons
+- `docs/how-to/` - Task-oriented guides
+- `docs/reference/` - Information-oriented facts
+- `docs/explanation/` - Understanding-oriented discussion
+
 **Examples:**
-- `docs/ARCHITECTURE.md` - System design
-- `docs/TEST_STRATEGY.md` - Testing approach
-- `docs/learnings/nix-flakes.md` - Extracted knowledge
+- `docs/tutorials/getting-started.md` - First-time setup
+- `docs/how-to/deploy.md` - Deployment guide
+- `docs/reference/configuration.md` - Config options
+- `docs/explanation/architecture.md` - System design
 
 **Rules:**
+- ✅ Categorize by Diátaxis framework (tutorial/how-to/reference/explanation)
 - ✅ Keep updated as project evolves
 - ✅ Use clear structure and headings
 - ✅ Link between related docs
 - ❌ Don't duplicate information (use links)
 - ❌ Don't include session-specific details
+- ❌ Don't put docs in wrong category (see Diátaxis guide)
 
 ### 3. Archive (docs/archive/)
 
@@ -129,24 +197,24 @@ ngit-grasp/
 - ❌ Don't modify after archiving
 - ❌ Don't reference in active documentation
 
-### 4. Learnings (docs/learnings/)
+### 4. Learnings (DEPRECATED)
 
-**Purpose:** Reusable knowledge, gotchas, patterns  
-**Location:** `docs/learnings/`  
-**Lifecycle:** Extracted → Maintained → Updated  
-**Retention:** Permanent (living documents)
+**Status:** `docs/learnings/` is deprecated - content migrated to Diátaxis structure
+
+**Migration:**
+- Gotchas and patterns → `docs/how-to/`
+- Technical details → `docs/reference/`
+- Understanding concepts → `docs/explanation/`
 
 **Examples:**
-- `docs/learnings/nix-flakes.md` - Flake patterns and gotchas
-- `docs/learnings/nostr-sdk.md` - SDK upgrade notes
-- `docs/learnings/git-http-backend.md` - Git protocol tips
+- `learnings/nix-flakes.md` → `how-to/nix-flakes.md`
+- `learnings/nostr-sdk.md` → `reference/nostr-sdk-upgrade.md`
+- `learnings/git-http-backend.md` → `reference/git-protocol.md`
 
 **Rules:**
-- ✅ Extract from session docs before archiving
-- ✅ Organize by topic, not by session
-- ✅ Include code examples
-- ✅ Update as we learn more
-- ❌ Don't duplicate official docs (link instead)
+- ❌ Don't create new files in `docs/learnings/`
+- ✅ Migrate existing content to appropriate Diátaxis category
+- ✅ Add redirect notice in old location
 
 ---
 
@@ -154,76 +222,107 @@ ngit-grasp/
 
 ### When to Clean Up
 
-**Trigger:** Root directory has >10 markdown files OR any .txt files  
-**Frequency:** End of each major phase or weekly  
-**Responsibility:** AI agents should proactively suggest cleanup
+**Trigger:** End of session OR `work/` has >5 files  
+**Frequency:** End of each session (mandatory)  
+**Responsibility:** AI agents should proactively clean up before session end
 
 ### Cleanup Steps
 
-1. **Identify Completed Documents**
+1. **Review work/ Directory**
    ```bash
-   # Find old working docs
-   ls -lt *.md | head -20
-   
-   # Check for .txt files (should always be archived)
-   ls -la *.txt
+   # List all working docs
+   ls -la work/
    ```
 
-2. **Extract Learnings**
-   - Review each completed doc
-   - Extract gotchas, patterns, solutions
-   - Add to appropriate `docs/learnings/*.md`
+2. **Extract to Diátaxis Categories**
+   - Review each doc in `work/`
+   - Extract valuable content to appropriate category:
+     - Gotchas/solutions → `docs/how-to/`
+     - Technical facts → `docs/reference/`
+     - Concepts/design → `docs/explanation/`
+     - Lessons → `docs/tutorials/`
 
-3. **Archive Completed Work**
+3. **Archive Important Session Docs**
    ```bash
-   # Archive markdown with date prefix
-   mv TAG_MIGRATION_COMPLETE.md docs/archive/2025-11-04-tag-migration.md
-   
-   # Archive .txt files immediately
-   mv STATUS_VISUAL.txt docs/archive/2025-11-04-status-visual.txt
+   # Archive valuable session docs with date prefix
+   mv work/migration-complete.md docs/archive/2025-11-04-migration-complete.md
+   mv work/visual-summary.txt docs/archive/2025-11-04-visual-summary.txt
    ```
 
-4. **Delete Obsolete Documents**
-   - Duplicates (keep most recent/complete)
-   - Superseded documents
-   - Pure status reports (no learnings)
+4. **Delete Temporary Files**
+   ```bash
+   # Delete obsolete working docs
+   rm work/status.md
+   rm work/notes.md
+   
+   # Or clean everything
+   rm -rf work/*
+   # (work/README.md is safe - in .gitignore exception)
+   ```
 
-5. **Update References**
-   - Update links in active docs
-   - Update README.md if needed
-   - Commit changes
+5. **Verify Clean State**
+   ```bash
+   # Root should only have these:
+   ls *.md
+   # README.md
+   # AGENTS.md
+   # (CHANGELOG.md when created)
+   
+   # work/ should be empty (except README.md)
+   ls work/
+   # README.md
+   ```
+
+6. **Commit Changes**
+   - Commit new permanent docs
+   - Commit archived docs
+   - Note: work/ contents not committed (gitignored)
 
 ### Example Cleanup
 
 ```bash
-# Before cleanup (36 files in root!)
-ls *.md | wc -l
-# 36
-ls *.txt | wc -l
-# 5
-
-# After cleanup (3-5 files in root)
+# Before cleanup (messy root!)
 ls *.md
 # README.md
 # AGENTS.md
 # CURRENT_STATUS.md
+# DIATAXIS_MIGRATION.md
+# SUMMARY.md
+# SESSION_NOTES.md
+# ... (many more)
 
-ls *.txt
-# (none - all archived)
+# After cleanup (clean root!)
+ls *.md
+# README.md
+# AGENTS.md
+
+# Working files in work/ during session
+ls work/
+# README.md
+# session-notes.md
+# status.md
+
+# After session cleanup
+ls work/
+# README.md
+# (all session files archived or deleted)
 
 # Archived
-ls docs/archive/
-# 2025-11-04-tag-migration.md
-# 2025-11-04-flake-migration.md
-# 2025-11-04-cleanup-visual-summary.txt
-# 2025-11-03-architecture-investigation.md
+ls docs/archive/ | tail -5
+# 2025-11-04-diataxis-migration.md
+# 2025-11-04-diataxis-complete.md
+# 2025-11-04-diataxis-migration-visual.txt
+# 2025-11-04-session-summary.md
 # ...
 
-# Learnings extracted
-ls docs/learnings/
+# Permanent docs in Diátaxis structure
+ls docs/tutorials/
+# getting-started.md
+# first-audit.md
+
+ls docs/how-to/
 # nix-flakes.md
-# nostr-sdk.md
-# git-http-backend.md
+# deploy.md
 ```
 
 ---
@@ -472,16 +571,28 @@ cargo build
    - Use sections/subsections
 
 3. **Determine correct location**
-   - Working doc → Root
-   - Permanent → docs/
-   - Learning → docs/learnings/
-   - Historical → docs/archive/
+   - Session-specific? → `work/` (temporary, gitignored)
+   - Teaching beginners? → `docs/tutorials/`
+   - Solving a problem? → `docs/how-to/`
+   - Technical reference? → `docs/reference/`
+   - Explaining concepts? → `docs/explanation/`
+   - Historical? → `docs/archive/`
 
-4. **Use descriptive names with dates**
-   - `YYYY-MM-DD-description.md` for working docs
-   - `topic-name.md` for permanent docs
+4. **Ask the Diátaxis questions:**
+   - "Can you teach me to...?" → Tutorial
+   - "How do I...?" → How-To
+   - "What is...?" → Reference
+   - "Why...?" → Explanation
 
-5. **Choose correct file format**
+5. **Use descriptive names**
+   - Working docs: `session-notes.md`, `status.md` (in `work/`)
+   - Archived docs: `YYYY-MM-DD-description.md` (in `docs/archive/`)
+   - Tutorials: `getting-started.md`, `first-audit.md`
+   - How-To: `deploy.md`, `nix-flakes.md`
+   - Reference: `configuration.md`, `api.md`
+   - Explanation: `architecture.md`, `decisions.md`
+
+6. **Choose correct file format**
    - Use `.md` for all documentation (default)
    - Use `.txt` ONLY for ASCII art visual summaries
    - Archive `.txt` files immediately after session
@@ -502,29 +613,62 @@ cargo build
 
 ### End of Session
 
-1. **Suggest cleanup if needed**
-   - Count root .md files
-   - Suggest archiving completed docs
+1. **Clean up work/ directory (MANDATORY)**
+   - Archive valuable session docs to `docs/archive/YYYY-MM-DD-*.md`
+   - Delete temporary status reports
+   - Extract content to Diátaxis categories if needed
+   - Verify `work/` is empty (except README.md)
 
-2. **Create session summary**
-   - What was accomplished
-   - What's next
-   - Any blockers
+2. **Create session summary (if valuable)**
+   - Archive to `docs/archive/YYYY-MM-DD-session-summary.md`
+   - Include: accomplishments, next steps, blockers
 
 3. **Update permanent docs**
    - Sync README.md with reality
    - Update relevant docs/ files
+   - Commit changes
 
-### Cleanup Time
+4. **Verify clean state**
+   ```bash
+   ls *.md  # Should only show README.md, AGENTS.md
+   ls work/  # Should only show README.md
+   ```
 
-1. **Review all root .md and .txt files**
-2. **Extract learnings to docs/learnings/**
-3. **Archive completed work to docs/archive/**
-   - `.md` files: Extract learnings first
-   - `.txt` files: Archive immediately (no extraction needed)
-4. **Delete obsolete duplicates**
-5. **Update links in active docs**
-6. **Commit with clear message**
+### Cleanup Time (End of Session)
+
+1. **Review work/ directory**
+   ```bash
+   ls -la work/
+   ```
+
+2. **Extract content to appropriate Diátaxis category:**
+   - Gotchas/solutions → `docs/how-to/`
+   - Technical facts → `docs/reference/`
+   - Concepts/design → `docs/explanation/`
+   - Lessons → `docs/tutorials/`
+
+3. **Archive valuable session docs**
+   ```bash
+   mv work/important-notes.md docs/archive/2025-11-04-session-notes.md
+   mv work/visual-summary.txt docs/archive/2025-11-04-visual-summary.txt
+   ```
+
+4. **Delete temporary files**
+   ```bash
+   rm work/status.md
+   rm work/temp-notes.md
+   ```
+
+5. **Verify clean state**
+   ```bash
+   ls *.md  # Only README.md, AGENTS.md
+   ls work/  # Only README.md
+   ```
+
+6. **Commit permanent changes**
+   - Commit new/updated permanent docs
+   - Commit archived docs
+   - Note: work/ not committed (gitignored)
 
 ---
 

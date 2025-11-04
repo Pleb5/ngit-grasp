@@ -1,0 +1,225 @@
+# Explanation
+
+**Understanding-oriented documentation** - Concepts, design decisions, and the "why" behind ngit-grasp.
+
+---
+
+## What Is Explanation?
+
+Explanation documentation helps you **understand concepts** and design decisions, providing context and discussing alternatives.
+
+**Characteristics:**
+- ✅ Understanding-oriented (clarify concepts)
+- ✅ Theoretical (ideas and design)
+- ✅ Discuss alternatives
+- ✅ Provide context and background
+- ✅ Answer "why" questions
+
+**Not explanation:**
+- ❌ Step-by-step lessons (those are Tutorials)
+- ❌ Problem-solving recipes (those are How-To)
+- ❌ Technical specifications (those are Reference)
+
+---
+
+## Available Explanation Documentation
+
+### [Architecture Overview](architecture.md)
+**Understand the system design and component interaction**
+
+**Topics:**
+- Overall architecture
+- Component responsibilities
+- Data flows
+- Technology choices
+- Design patterns
+
+**Read when:** You want to understand how ngit-grasp works as a system
+
+---
+
+### [Inline Authorization](inline-authorization.md)
+**Why we validate pushes inline instead of using Git hooks**
+
+**Topics:**
+- The authorization problem
+- Git hooks approach
+- Inline approach
+- Comparison and trade-offs
+- Implementation details
+
+**Read when:** You want to understand the core architectural decision
+
+---
+
+### [Design Decisions](decisions.md)
+**Key architectural choices and their rationale**
+
+**Topics:**
+- Inline authorization vs hooks
+- Technology stack choices
+- Storage design
+- API design
+- Performance considerations
+
+**Read when:** You want to know why things are the way they are
+
+---
+
+### [Comparison with ngit-relay](comparison.md)
+**How ngit-grasp differs from the reference implementation**
+
+**Topics:**
+- Architecture comparison
+- Component differences
+- Trade-offs
+- Migration path
+- Compatibility
+
+**Read when:** You're familiar with ngit-relay and want to understand differences
+
+---
+
+## Planned Explanation Documentation
+
+### GRASP Protocol Design
+**Status:** 🔜 Planned
+
+**Topics:**
+- Why Nostr for Git?
+- Authorization model
+- Trust and verification
+- Decentralization benefits
+
+---
+
+### Storage Architecture
+**Status:** 🔜 Planned
+
+**Topics:**
+- Why separate Git and Nostr storage?
+- Indexing strategy
+- Performance considerations
+- Scaling approach
+
+---
+
+### Testing Philosophy
+**Status:** 🔜 Planned
+
+**Topics:**
+- Why test isolation?
+- Integration vs unit tests
+- Compliance testing approach
+- Test-driven development
+
+---
+
+### Performance Considerations
+**Status:** 🔜 Planned
+
+**Topics:**
+- Async architecture
+- Caching strategy
+- Database choices
+- Bottlenecks and solutions
+
+---
+
+## How to Use Explanation Documentation
+
+1. **Read to understand** - Not to accomplish a task
+2. **Follow your curiosity** - Read what interests you
+3. **Connect concepts** - Link ideas together
+4. **Question and explore** - Think critically
+
+**Not sure if this is what you need?**
+- Want to learn by doing? → [Tutorials](../tutorials/)
+- Need to solve a problem? → [How-To Guides](../how-to/)
+- Looking for technical details? → [Reference](../reference/)
+
+---
+
+## Contributing Explanation Documentation
+
+When writing explanation:
+
+**DO:**
+- ✅ Discuss concepts and ideas
+- ✅ Provide context and background
+- ✅ Explain alternatives
+- ✅ Use analogies and examples
+- ✅ Connect to broader context
+- ✅ Answer "why" questions
+
+**DON'T:**
+- ❌ Provide step-by-step instructions (link to Tutorials/How-To)
+- ❌ List technical details (link to Reference)
+- ❌ Assume you must be comprehensive
+- ❌ Avoid opinions (explanation can be opinionated)
+
+**Template:**
+```markdown
+# Explanation: [Topic]
+
+**Purpose:** [What concept/decision this explains]  
+**Audience:** [Who wants to understand this]
+
+---
+
+## The Problem/Question
+
+[What are we trying to understand?]
+
+---
+
+## Background
+
+[Context and history]
+
+---
+
+## Our Approach
+
+[How we address it]
+
+### Why This Works
+
+[Explanation of benefits]
+
+### Trade-offs
+
+[What we gain and lose]
+
+---
+
+## Alternatives Considered
+
+### [Alternative 1]
+
+**Pros:**
+- [Benefits]
+
+**Cons:**
+- [Drawbacks]
+
+**Why we didn't choose it:**
+[Reasoning]
+
+---
+
+## Conclusion
+
+[Summary of understanding]
+
+---
+
+## Related Documentation
+- [Links to relevant docs]
+```
+
+See [Diátaxis: Explanation](https://diataxis.fr/explanation/) for detailed guidance.
+
+---
+
+*Part of the [ngit-grasp documentation](../README.md) using the [Diátaxis](https://diataxis.fr/) framework.*
