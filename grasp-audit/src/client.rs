@@ -95,16 +95,11 @@ impl AuditClient {
         
         if self.config.mode == AuditMode::CI {
             // In CI mode, only see our own audit events
-            // Filter by "g" tag (grasp-audit marker) and "r" tag (run ID)
+            // Filter by "t" tags (hashtags)
+            let t_tag = SingleLetterTag::lowercase(Alphabet::T);
             filter = filter
-                .custom_tag(
-                    SingleLetterTag::lowercase(Alphabet::G),
-                    "grasp-audit"
-                )
-                .custom_tag(
-                    SingleLetterTag::lowercase(Alphabet::R),
-                    &self.config.run_id
-                );
+                .custom_tag(t_tag, "grasp-audit-test-event")
+                .custom_tag(t_tag, format!("audit-{}", self.config.run_id));
         }
         // In Production mode, see all events (no filter modification)
         

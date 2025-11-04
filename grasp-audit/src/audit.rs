@@ -65,22 +65,21 @@ impl AuditConfig {
     pub fn audit_tags(&self) -> Vec<Tag> {
         use nostr_sdk::prelude::{Alphabet, SingleLetterTag};
         
+        // Use "t" tags for categorization (standard NIP-01 hashtag type)
+        let t_tag = SingleLetterTag::lowercase(Alphabet::T);
+        
         vec![
-            // Use single-letter tags for filtering support
-            // "g" = grasp-audit marker
             Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::G)),
-                vec!["grasp-audit"]
+                TagKind::SingleLetter(t_tag),
+                vec!["grasp-audit-test-event"]
             ),
-            // "r" = audit run ID
             Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::R)),
-                vec![self.run_id.clone()]
+                TagKind::SingleLetter(t_tag),
+                vec![format!("audit-{}", self.run_id)]
             ),
-            // "c" = cleanup timestamp
             Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::C)),
-                vec![self.cleanup_after.to_string()]
+                TagKind::SingleLetter(t_tag),
+                vec![format!("audit-cleanup-after-{}", self.cleanup_after.as_u64())]
             ),
         ]
     }
@@ -159,35 +158,30 @@ mod tests {
         
         assert_eq!(tags.len(), 3);
         
-        let g_tag = SingleLetterTag::lowercase(Alphabet::G);
-        let r_tag = SingleLetterTag::lowercase(Alphabet::R);
-        let c_tag = SingleLetterTag::lowercase(Alphabet::C);
+        let t_tag = SingleLetterTag::lowercase(Alphabet::T);
         
-        // Check "g" tag (grasp-audit marker)
-        assert!(tags.iter().any(|t| {
-            if let TagKind::SingleLetter(letter) = t.kind() {
-                letter == g_tag
+        // All tags should be "t" tags (hashtags)
+        for tag in &tags {
+            if let TagKind::SingleLetter(letter) = tag.kind() {
+                assert_eq!(letter, t_tag);
             } else {
-                false
+                panic!("Expected SingleLetter tag");
             }
+        }
+        
+        // Check for "t" tag with "grasp-audit-test-event"
+        assert!(tags.iter().any(|t| {
+            t.content() == Some("grasp-audit-test-event")
         }));
         
-        // Check "r" tag (audit run ID)
+        // Check for "t" tag with "audit-{run_id}"
         assert!(tags.iter().any(|t| {
-            if let TagKind::SingleLetter(letter) = t.kind() {
-                letter == r_tag
-            } else {
-                false
-            }
+            t.content().map(|c| c.starts_with("audit-ci-")).unwrap_or(false)
         }));
         
-        // Check "c" tag (cleanup timestamp)
+        // Check for "t" tag with "audit-cleanup-after-{timestamp}"
         assert!(tags.iter().any(|t| {
-            if let TagKind::SingleLetter(letter) = t.kind() {
-                letter == c_tag
-            } else {
-                false
-            }
+            t.content().map(|c| c.starts_with("audit-cleanup-after-")).unwrap_or(false)
         }));
     }
     
