@@ -18,11 +18,27 @@ impl AuditClient {
         let keys = Keys::generate();
         let client = Client::new(keys.clone());
         
+        // Add relay and connect
         client.add_relay(relay_url).await?;
         client.connect().await;
         
-        // Wait a bit for connection to establish
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Wait for connection to establish (with retries)
+        let mut attempts = 0;
+        while attempts < 20 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            
+            let relays = client.relays().await;
+            let connected = relays.values().any(|r| r.is_connected());
+            
+            if connected {
+                break;
+            }
+            
+            attempts += 1;
+        }
+        
+        // Give it a bit more time to stabilize
+        tokio::time::sleep(Duration::from_millis(200)).await;
         
         Ok(Self {
             client,
@@ -57,6 +73,11 @@ impl AuditClient {
         let output = self.client.send_event(&event).await?;
         let event_id = *output.id();
         
+        // Check if any relay rejected the event
+        if output.success.is_empty() && !output.failed.is_empty() {
+            return Err(anyhow!("All relays rejected the event"));
+        }
+        
         // Wait a bit for event to propagate
         tokio::time::sleep(Duration::from_millis(100)).await;
         
@@ -70,16 +91,19 @@ impl AuditClient {
     
     /// Query events, optionally filtered to this audit run
     pub async fn query(&self, mut filter: Filter) -> Result<Vec<Event>> {
+        use nostr_sdk::prelude::{Alphabet, SingleLetterTag};
+        
         if self.config.mode == AuditMode::CI {
             // In CI mode, only see our own audit events
+            // Filter by "g" tag (grasp-audit marker) and "r" tag (run ID)
             filter = filter
                 .custom_tag(
-                    SingleLetterTag::lowercase(Alphabet::G), 
-                    "true"  // grasp-audit tag
+                    SingleLetterTag::lowercase(Alphabet::G),
+                    "grasp-audit"
                 )
                 .custom_tag(
-                    SingleLetterTag::lowercase(Alphabet::R), 
-                    &self.config.run_id  // audit-run-id tag
+                    SingleLetterTag::lowercase(Alphabet::R),
+                    &self.config.run_id
                 );
         }
         // In Production mode, see all events (no filter modification)

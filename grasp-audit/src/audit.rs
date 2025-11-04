@@ -63,17 +63,23 @@ impl AuditConfig {
     
     /// Get audit tags for an event
     pub fn audit_tags(&self) -> Vec<Tag> {
+        use nostr_sdk::prelude::{Alphabet, SingleLetterTag};
+        
         vec![
+            // Use single-letter tags for filtering support
+            // "g" = grasp-audit marker
             Tag::custom(
-                TagKind::Custom(std::borrow::Cow::Borrowed("grasp-audit")),
-                vec!["true"]
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::G)),
+                vec!["grasp-audit"]
             ),
+            // "r" = audit run ID
             Tag::custom(
-                TagKind::Custom(std::borrow::Cow::Borrowed("audit-run-id")),
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::R)),
                 vec![self.run_id.clone()]
             ),
+            // "c" = cleanup timestamp
             Tag::custom(
-                TagKind::Custom(std::borrow::Cow::Borrowed("audit-cleanup")),
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::C)),
                 vec![self.cleanup_after.to_string()]
             ),
         ]
@@ -146,24 +152,42 @@ mod tests {
     
     #[test]
     fn test_audit_tags() {
+        use nostr_sdk::prelude::{Alphabet, SingleLetterTag};
+        
         let config = AuditConfig::ci();
         let tags = config.audit_tags();
         
         assert_eq!(tags.len(), 3);
         
-        // Check grasp-audit tag
+        let g_tag = SingleLetterTag::lowercase(Alphabet::G);
+        let r_tag = SingleLetterTag::lowercase(Alphabet::R);
+        let c_tag = SingleLetterTag::lowercase(Alphabet::C);
+        
+        // Check "g" tag (grasp-audit marker)
         assert!(tags.iter().any(|t| {
-            matches!(t.kind(), TagKind::Custom(k) if k == "grasp-audit")
+            if let TagKind::SingleLetter(letter) = t.kind() {
+                letter == g_tag
+            } else {
+                false
+            }
         }));
         
-        // Check audit-run-id tag
+        // Check "r" tag (audit run ID)
         assert!(tags.iter().any(|t| {
-            matches!(t.kind(), TagKind::Custom(k) if k == "audit-run-id")
+            if let TagKind::SingleLetter(letter) = t.kind() {
+                letter == r_tag
+            } else {
+                false
+            }
         }));
         
-        // Check audit-cleanup tag
+        // Check "c" tag (cleanup timestamp)
         assert!(tags.iter().any(|t| {
-            matches!(t.kind(), TagKind::Custom(k) if k == "audit-cleanup")
+            if let TagKind::SingleLetter(letter) = t.kind() {
+                letter == c_tag
+            } else {
+                false
+            }
         }));
     }
     

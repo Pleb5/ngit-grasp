@@ -76,6 +76,9 @@ impl Nip01SmokeTests {
                 ));
             }
             
+            // Wait a bit for event to be indexed
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            
             // Try to query it back
             let filter = Filter::new()
                 .kind(Kind::TextNote)
@@ -87,7 +90,17 @@ impl Nip01SmokeTests {
                 .map_err(|e| format!("Failed to query event: {}", e))?;
             
             if events.is_empty() {
-                return Err("Event not found after sending".to_string());
+                // Debug: try querying without audit client filtering
+                eprintln!("Event not found with audit client query, trying direct client query...");
+                let direct_filter = Filter::new().kind(Kind::TextNote).id(event_id);
+                let direct_events = client.client().fetch_events(direct_filter, std::time::Duration::from_secs(5)).await
+                    .map_err(|e| format!("Direct query failed: {}", e))?;
+                let direct_vec: Vec<Event> = direct_events.into_iter().collect();
+                eprintln!("Direct query found {} events", direct_vec.len());
+                if !direct_vec.is_empty() {
+                    eprintln!("Event tags: {:?}", direct_vec[0].tags);
+                }
+                return Err(format!("Event not found after sending (direct query found {})", direct_vec.len()));
             }
             
             if events[0].id != event_id {
