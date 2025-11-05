@@ -64,35 +64,28 @@ impl Grasp01NostrRelayTests {
             "Accept valid repository announcements with service in clone and relays tags",
         )
         .run(|| async {
-            // Get relay URL from client
+            // Create a NIP-34 repository announcement event
+            let event = client.create_repo_announcement("accept_valid_repo_announcement").await
+                .map_err(|e| format!("Failed to create repository announcement: {}", e))?;
+            
+            // Get relay URL for validation
             let relay_url = client.client().relays().await
                 .keys()
                 .next()
                 .ok_or("No relay connected")?
                 .to_string();
             
-            // Convert WebSocket URL to HTTP URL for clone tag
+            // Convert WebSocket URL to HTTP URL for validation
             let http_url = relay_url
                 .replace("ws://", "http://")
                 .replace("wss://", "https://");
             
-            // Create unique repository identifier
-            let timestamp = Timestamp::now().as_u64();
-            let repo_id = format!("test-repo-{}", timestamp);
-            
-            // Get npub for clone URL
-            let npub = client.public_key().to_bech32()
-                .map_err(|e| format!("Failed to convert public key to bech32 npub format: {}", e))?;
-            
-            // Build kind 30617 repository announcement
-            let event = client.event_builder(Kind::GitRepoAnnouncement, "")
-                .tag(Tag::identifier(&repo_id))
-                .tag(Tag::custom(TagKind::Custom("name".into()), vec!["GRASP-01 Test Repository"]))
-                .tag(Tag::custom(TagKind::Custom("description".into()), vec!["Test repository for GRASP-01 compliance testing"]))
-                .tag(Tag::custom(TagKind::Custom("clone".into()), vec![format!("{}/{}/{}.git", http_url, npub, repo_id)]))
-                .tag(Tag::custom(TagKind::Custom("relays".into()), vec![relay_url.clone()]))
-                .build(client.keys())
-                .map_err(|e| format!("Failed to build repository announcement event (kind 30617): {}", e))?;
+            // Extract repo_id from the event's d tag
+            let repo_id = event.tags.iter()
+                .find(|t| t.kind() == TagKind::d())
+                .and_then(|t| t.content())
+                .ok_or("Missing d tag in announcement")?
+                .to_string();
             
             // Send the event
             let event_id = client.send_event(event.clone()).await

@@ -10,43 +10,6 @@ use nostr_sdk::prelude::*;
 pub struct Nip01SmokeTests;
 
 impl Nip01SmokeTests {
-    /// Create a NIP-34 repository announcement event
-    ///
-    /// This helper creates a properly formatted NIP-34 announcement that will be
-    /// accepted by GRASP relays (which require events to list the relay in clone/relays tags).
-    async fn create_announcement_event(client: &AuditClient, test_name: &str) -> Result<Event, String> {
-        // Get relay URL from client
-        let relay_url = client.client().relays().await
-            .keys()
-            .next()
-            .ok_or("No relay URL found")?
-            .to_string();
-        
-        // Convert ws:// to http:// for clone URL
-        let http_url = relay_url
-            .replace("ws://", "http://")
-            .replace("wss://", "https://");
-        
-        // Create unique repository identifier
-        let repo_id = format!("{}-{}", test_name, uuid::Uuid::new_v4());
-        let npub = client.public_key().to_bech32()
-            .map_err(|e| format!("Failed to encode npub: {}", e))?;
-        
-        // Create NIP-34 repository announcement (kind 30617)
-        // This event lists the GRASP server, so it should be accepted
-        let event = client
-            .event_builder(Kind::Custom(30617), format!("NIP-01 smoke test repository: {}", test_name))
-            .tag(Tag::identifier(&repo_id))  // d tag
-            .tag(Tag::custom(TagKind::Custom("name".into()), vec![format!("{} Test Repo", test_name)]))
-            .tag(Tag::custom(TagKind::Custom("description".into()), vec![format!("Repository for {} smoke testing", test_name)]))
-            .tag(Tag::custom(TagKind::Custom("clone".into()), vec![format!("{}/{}/{}.git", http_url, npub, repo_id)]))
-            .tag(Tag::custom(TagKind::Custom("relays".into()), vec![relay_url.clone()]))
-            .build(client.keys())
-            .map_err(|e| format!("Failed to build event: {}", e))?;
-        
-        Ok(event)
-    }
-    
     /// Run all NIP-01 smoke tests
     pub async fn run_all(client: &AuditClient) -> AuditResult {
         let mut results = AuditResult::new("NIP-01 Smoke Tests");
@@ -97,7 +60,8 @@ impl Nip01SmokeTests {
         )
         .run(|| async {
             // Create a NIP-34 announcement event
-            let event = Self::create_announcement_event(client, "send_receive_event").await?;
+            let event = client.create_repo_announcement("send_receive_event").await
+                .map_err(|e| format!("Failed to create announcement: {}", e))?;
             
             // Send event
             let event_id = client
@@ -161,7 +125,8 @@ impl Nip01SmokeTests {
         )
         .run(|| async {
             // Create a NIP-34 announcement event (accepted by GRASP relays)
-            let event = Self::create_announcement_event(client, "create_subscription").await?;
+            let event = client.create_repo_announcement("create_subscription").await
+                .map_err(|e| format!("Failed to create announcement: {}", e))?;
             
             let event_id = client
                 .send_event(event.clone())

@@ -158,6 +158,49 @@ impl AuditClient {
     pub fn keys(&self) -> &Keys {
         &self.keys
     }
+    
+    /// Create a NIP-34 repository announcement event
+    ///
+    /// This helper creates a properly formatted NIP-34 announcement that will be
+    /// accepted by GRASP relays (which require events to list the relay in clone/relays tags).
+    ///
+    /// # Arguments
+    /// * `test_name` - Name of the test (used to create unique repo identifier)
+    ///
+    /// # Returns
+    /// A built and signed Event ready to be sent to the relay
+    pub async fn create_repo_announcement(&self, test_name: &str) -> Result<Event> {
+        // Get relay URL from client
+        let relay_url = self.client.relays().await
+            .keys()
+            .next()
+            .ok_or_else(|| anyhow!("No relay connected"))?
+            .to_string();
+        
+        // Convert WebSocket URL to HTTP URL for clone tag
+        let http_url = relay_url
+            .replace("ws://", "http://")
+            .replace("wss://", "https://");
+        
+        // Create unique repository identifier using UUID for consistency
+        let repo_id = format!("{}-{}", test_name, uuid::Uuid::new_v4());
+        
+        // Get npub for clone URL
+        let npub = self.public_key().to_bech32()
+            .map_err(|e| anyhow!("Failed to convert public key to bech32 npub format: {}", e))?;
+        
+        // Build kind 30617 repository announcement
+        let event = self.event_builder(Kind::GitRepoAnnouncement, format!("Test repository for {}", test_name))
+            .tag(Tag::identifier(&repo_id))
+            .tag(Tag::custom(TagKind::custom("name"), vec![format!("{} Test Repository", test_name)]))
+            .tag(Tag::custom(TagKind::custom("description"), vec![format!("Repository for {} testing", test_name)]))
+            .tag(Tag::custom(TagKind::custom("clone"), vec![format!("{}/{}/{}.git", http_url, npub, repo_id)]))
+            .tag(Tag::custom(TagKind::custom("relays"), vec![relay_url.clone()]))
+            .build(self.keys())
+            .map_err(|e| anyhow!("Failed to build repository announcement event: {}", e))?;
+        
+        Ok(event)
+    }
 }
 
 #[cfg(test)]
