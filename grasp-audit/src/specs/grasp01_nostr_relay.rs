@@ -64,20 +64,81 @@ impl Grasp01NostrRelayTests {
             "Accept valid repository announcements with service in clone and relays tags",
         )
         .run(|| async {
-            // TODO: Implementation
-            // 1. Get service URL from client config
-            // 2. Create kind 30617 event with:
-            //    - d tag: "test-repo-{timestamp}"
-            //    - name tag: "Test Repository"
-            //    - description tag: "Test repository for GRASP-01 compliance"
-            //    - clone tag: "{service_url}/{npub}/test-repo.git"
-            //    - relays tag: "{service_ws_url}"
-            // 3. Send event to relay
-            // 4. Verify OK response (not rejected)
-            // 5. Query back with filter on kind 30617, author, d tag
-            // 6. Verify event is stored and matches what we sent
+            // Get relay URL from client
+            let relay_url = client.client().relays().await
+                .keys()
+                .next()
+                .ok_or("No relay connected")?
+                .to_string();
             
-            Err("Not implemented yet".to_string())
+            // Convert WebSocket URL to HTTP URL for clone tag
+            let http_url = relay_url
+                .replace("ws://", "http://")
+                .replace("wss://", "https://");
+            
+            // Create unique repository identifier
+            let timestamp = Timestamp::now().as_u64();
+            let repo_id = format!("test-repo-{}", timestamp);
+            
+            // Get npub for clone URL
+            let npub = client.public_key().to_bech32()
+                .map_err(|e| format!("Failed to convert pubkey to npub: {}", e))?;
+            
+            // Build kind 30617 repository announcement
+            let event = client.event_builder(Kind::GitRepoAnnouncement, "")
+                .tag(Tag::identifier(&repo_id))
+                .tag(Tag::custom(TagKind::Custom("name".into()), vec!["GRASP-01 Test Repository"]))
+                .tag(Tag::custom(TagKind::Custom("description".into()), vec!["Test repository for GRASP-01 compliance testing"]))
+                .tag(Tag::custom(TagKind::Custom("clone".into()), vec![format!("{}/{}/{}.git", http_url, npub, repo_id)]))
+                .tag(Tag::custom(TagKind::Custom("relays".into()), vec![relay_url.clone()]))
+                .build(client.keys())
+                .map_err(|e| format!("Failed to build event: {}", e))?;
+            
+            // Send the event
+            let event_id = client.send_event(event.clone()).await
+                .map_err(|e| format!("Failed to send event: {}", e))?;
+            
+            // Query back to verify it was accepted and stored
+            let filter = Filter::new()
+                .kind(Kind::GitRepoAnnouncement)
+                .author(client.public_key())
+                .identifier(&repo_id);
+            
+            let events = client.query(filter).await
+                .map_err(|e| format!("Failed to query events: {}", e))?;
+            
+            // Verify we got the event back
+            if events.is_empty() {
+                return Err("Event was not stored in relay (possibly rejected)".to_string());
+            }
+            
+            // Verify it's the same event
+            let stored_event = events.iter()
+                .find(|e| e.id == event_id)
+                .ok_or("Stored event ID doesn't match sent event")?;
+            
+            // Verify key tags are present
+            let has_clone_tag = stored_event.tags.iter()
+                .any(|t| {
+                    t.kind() == TagKind::Custom("clone".into()) &&
+                    t.content().map(|c| c.contains(&http_url)).unwrap_or(false)
+                });
+            
+            let has_relays_tag = stored_event.tags.iter()
+                .any(|t| {
+                    t.kind() == TagKind::Custom("relays".into()) &&
+                    t.content() == Some(&relay_url)
+                });
+            
+            if !has_clone_tag {
+                return Err(format!("Stored event missing clone tag with service URL ({})", http_url));
+            }
+            
+            if !has_relays_tag {
+                return Err(format!("Stored event missing relays tag with service URL ({})", relay_url));
+            }
+            
+            Ok(())
         })
         .await
     }
@@ -564,7 +625,7 @@ mod tests {
     #[ignore] // Requires running relay
     async fn test_grasp01_nostr_relay_against_relay() {
         let config = AuditConfig::ci();
-        let client = AuditClient::new("ws://localhost:8081", config)
+        let client = AuditClient::new("ws://localhost:18081", config)
             .await
             .expect("Failed to connect to relay");
         
