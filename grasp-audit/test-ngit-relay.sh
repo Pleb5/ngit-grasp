@@ -5,6 +5,8 @@ set -e
 TEST_DIR=$(mktemp -d -t grasp-audit-run-XXXXXXXXXX)
 # Pick a random port in the range 20000-30000
 PORT=$((20000 + RANDOM % 10000))
+# Generate a unique container name suffix
+CONTAINER_SUFFIX=$RANDOM
 
 echo "🧹 Using temporary directory: $TEST_DIR"
 echo "🔌 Using port: $PORT"
@@ -12,7 +14,7 @@ echo "🔌 Using port: $PORT"
 # Cleanup function
 cleanup() {
     echo "🛑 Stopping relay..."
-    docker stop "grasp-audit-run-$" 2>/dev/null || true
+    docker stop "grasp-audit-run-$CONTAINER_SUFFIX" 2>/dev/null || true
     
     echo "🧹 Cleaning up temporary directory..."
     docker run --rm -v "$TEST_DIR:/data" alpine sh -c "rm -rf /data/*" 2>/dev/null || true
@@ -27,7 +29,7 @@ mkdir -p "$TEST_DIR"/{repos,blossom,relay-db,logs}
 
 echo "🚀 Starting ngit-relay..."
 # Remove any existing container with this name
-CONTAINER_NAME="grasp-audit-run-$"
+CONTAINER_NAME="grasp-audit-run-$CONTAINER_SUFFIX"
 docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
 docker run --rm -d \
   --name "$CONTAINER_NAME" \
