@@ -452,7 +452,7 @@ impl EventAcceptancePolicyTests {
     
     /// Create an issue (kind 1621) that references a repository
     /// Uses AuditClient::create_issue helper method
-    async fn create_issue_for_repo(
+    fn create_issue_for_repo(
         client: &AuditClient,
         repo_event: &Event,
         issue_title: &str,
@@ -463,7 +463,7 @@ impl EventAcceptancePolicyTests {
     
     /// Create a NIP-22 comment (kind 1111) for an event
     /// Uses AuditClient::create_comment helper method
-    async fn create_comment_for_event(
+    fn create_comment_for_event(
         client: &AuditClient,
         event: &Event,
         content: &str,
@@ -537,7 +537,7 @@ impl EventAcceptancePolicyTests {
             Self::send_and_verify_accepted(client, repo.clone(), "repository announcement").await?;
             
             // 2. Create issue that references the repo (uses create_issue_for_repo helper)
-            let issue = Self::create_issue_for_repo(client, &repo, "Test Issue 1").await?;
+            let issue = Self::create_issue_for_repo(client, &repo, "Test Issue 1")?;
             
             // 3. Send issue and verify it's accepted
             Self::send_and_verify_accepted(client, issue, "issue referencing repo via 'a' tag").await?;
@@ -639,7 +639,7 @@ impl EventAcceptancePolicyTests {
         Self::send_and_verify_accepted(client, repo_a.clone(), "repo A").await?;
         
         // 2. Create and send Issue A (references repo A, so it's accepted)
-        let issue_a = Self::create_issue_for_repo(client, &repo_a, "Issue A").await?;
+        let issue_a = Self::create_issue_for_repo(client, &repo_a, "Issue A")?;
         Self::send_and_verify_accepted(client, issue_a.clone(), "issue A").await?;
         
         // 3. Create Repo B but DON'T send it (unaccepted) - just for creating Issue B
@@ -679,11 +679,11 @@ impl EventAcceptancePolicyTests {
         Self::send_and_verify_accepted(client, repo.clone(), "repo").await?;
         
         // 2. Create and send issue (references repo, so it's accepted)
-        let issue = Self::create_issue_for_repo(client, &repo, "Issue for comment").await?;
+        let issue = Self::create_issue_for_repo(client, &repo, "Issue for comment")?;
         Self::send_and_verify_accepted(client, issue.clone(), "issue").await?;
         
         // 3. Create comment using the helper (which adds NIP-22 tags including 'E')
-        let comment = Self::create_comment_for_event(client, &issue, "Comment content").await?;
+        let comment = Self::create_comment_for_event(client, &issue, "Comment content")?;
         
             // 4. Send comment and verify it's accepted (via E tag to accepted issue)
             Self::send_and_verify_accepted(client, comment, "comment with E tag to accepted issue").await?;
@@ -798,11 +798,11 @@ impl EventAcceptancePolicyTests {
         Self::send_and_verify_accepted(client, repo.clone(), "repo").await?;
         
         // 2. Create and send issue (references repo, so it's accepted)
-        let issue = Self::create_issue_for_repo(client, &repo, "Issue for comments").await?;
+        let issue = Self::create_issue_for_repo(client, &repo, "Issue for comments")?;
         Self::send_and_verify_accepted(client, issue.clone(), "issue").await?;
         
         // 3. Create Comment A locally but DON'T send it yet
-        let comment_a = Self::create_comment_for_event(client, &issue, "Comment A").await?;
+        let comment_a = Self::create_comment_for_event(client, &issue, "Comment A")?;
         
         // 4. Create and send Comment B that quotes Comment A (which hasn't been sent)
         let comment_b_tags = vec![
@@ -891,7 +891,7 @@ impl EventAcceptancePolicyTests {
             let unaccepted_repo = Self::create_test_repo(client, "unaccepted-repo-1").await?;
             
             // 2. Create issue that references the unaccepted repo
-            let orphan_issue = Self::create_issue_for_repo(client, &unaccepted_repo, "Orphan Issue").await?;
+            let orphan_issue = Self::create_issue_for_repo(client, &unaccepted_repo, "Orphan Issue")?;
             
             // 3. Send issue and verify it's REJECTED
             Self::send_and_verify_rejected(client, orphan_issue, "issue referencing unaccepted repo").await?;
