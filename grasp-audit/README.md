@@ -123,15 +123,160 @@ cargo run --example simple_audit
 
 ## Testing
 
+### Unit Tests
+
 ```bash
 # Enter dev environment (NixOS)
 nix develop
 
-# Run unit tests
+# Run unit tests (no relay required)
 cargo test
+```
 
-# Run integration tests (requires running relay)
+### Integration Tests Against ngit-relay
+
+Test against the reference GRASP implementation to ensure compatibility.
+
+**Note:** ngit-relay is a specialized GRASP relay that only accepts Git-related events (NIP-34). 
+Some NIP-01 smoke tests (like `send_receive_event`) will fail because ngit-relay rejects 
+non-Git events. This is expected behavior - the validation tests should still pass.
+
+```bash
+# 1. Create temporary directories for clean state
+mkdir -p /tmp/ngit-test/{repos,blossom,relay-db,logs}
+
+# 2. Start ngit-relay with fresh data (using port 8082 to avoid conflicts)
+docker run --rm -d \
+  --name ngit-relay-test \
+  -p 8082:8081 \
+  -e NGIT_DOMAIN=localhost \
+  -e NGIT_RELAY_NAME="ngit-relay test instance" \
+  -e NGIT_RELAY_DESCRIPTION="Test instance for grasp-audit" \
+  -e NGIT_OWNER_NPUB="npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr" \
+  -e NGIT_PROACTIVE_SYNC_GIT=false \
+  -e NGIT_PROACTIVE_SYNC_BLOSSOM=false \
+  -e NGIT_PROACTIVE_SYNC_NOSTR=false \
+  -e NGIT_LOG_LEVEL=INFO \
+  -v /tmp/ngit-test/repos:/srv/ngit-relay/repos \
+  -v /tmp/ngit-test/blossom:/srv/ngit-relay/blossom \
+  -v /tmp/ngit-test/relay-db:/srv/ngit-relay/relay-db \
+  -v /tmp/ngit-test/logs:/var/log/ngit-relay \
+  ghcr.io/danconwaydev/ngit-relay:latest
+
+# 3. Wait for relay to start
+sleep 3
+
+# 4. Run tests against ngit-relay on port 8082
+RELAY_URL=ws://localhost:8082 cargo test --ignored
+
+# Expected results when testing against ngit-relay:
+# - ✓ websocket_connection (basic connectivity)
+# - ✗ send_receive_event (ngit-relay rejects non-Git events - EXPECTED FAILURE)
+# - ✗ create_subscription (depends on send_receive_event - EXPECTED FAILURE)
+# - ✓ close_subscription (basic protocol)
+# - ✓ reject_invalid_signature (validation works! - KEY TEST)
+# - ✓ reject_invalid_event_id (validation works! - KEY TEST)
+#
+# Result: 4/6 passed (66.7%)
+#
+# This is CORRECT behavior! It shows ngit-relay:
+# 1. Implements NIP-01 validation correctly (rejects invalid events)
+# 2. Has restrictive acceptance policies (only accepts Git events)
+# 3. Is a properly functioning GRASP relay
+#
+# The test will exit with an error, but the validation tests passing
+# is what matters for GRASP compliance.
+
+# 5. Stop and cleanup
+docker stop ngit-relay-test
+rm -rf /tmp/ngit-test
+```
+
+**Why fresh directories?**
+- Ensures clean state for each test run
+- Prevents test pollution from previous runs
+- Matches CI environment behavior
+
+**Environment variables explained:**
+- `NGIT_DOMAIN`: Domain name (localhost for testing)
+- `NGIT_RELAY_NAME`: Relay name for NIP-11
+- `NGIT_RELAY_DESCRIPTION`: Relay description for NIP-11
+- `NGIT_OWNER_NPUB`: Relay owner's npub (uses reference impl owner)
+- `NGIT_PROACTIVE_SYNC_*`: Disable proactive sync for testing
+- `NGIT_LOG_LEVEL`: Set to INFO for debugging
+
+**Port mapping:**
+- ngit-relay serves both WebSocket (relay) and HTTP (git) on port 8081
+- WebSocket endpoint: `ws://localhost:8081/`
+- Git HTTP endpoint: `http://localhost:8081/<npub>/<identifier>.git`
+
+### Testing Against General-Purpose Relays
+
+For full NIP-01 smoke test coverage (all 6 tests passing), test against a general-purpose relay:
+
+```bash
+# Start nostr-rs-relay (accepts all event kinds)
+docker run --rm -d --name nostr-test-relay -p 7000:8080 scsibug/nostr-rs-relay
+
+# Run tests (all should pass)
+cargo test --lib -- --ignored --nocapture
+
+# Cleanup
+docker stop nostr-test-relay
+```
+
+Expected: 6/6 tests passed (100%)
+
+### Quick Test Script
+
+Save this as `test-ngit-relay.sh`:
+
+```bash
+#!/bin/bash
+set -e
+
+echo "🧹 Cleaning up old test data..."
+rm -rf /tmp/ngit-test
+mkdir -p /tmp/ngit-test/{repos,blossom,relay-db,logs}
+
+echo "🚀 Starting ngit-relay..."
+docker run --rm -d \
+  --name ngit-relay-test \
+  -p 8081:8081 \
+  -e NGIT_DOMAIN=localhost \
+  -e NGIT_RELAY_NAME="ngit-relay test instance" \
+  -e NGIT_RELAY_DESCRIPTION="Test instance for grasp-audit" \
+  -e NGIT_OWNER_NPUB="npub15qydau2hjma6ngxkl2cyar74wzyjshvl65za5k5rl69264ar2exs5cyejr" \
+  -e NGIT_PROACTIVE_SYNC_GIT=false \
+  -e NGIT_PROACTIVE_SYNC_BLOSSOM=false \
+  -e NGIT_PROACTIVE_SYNC_NOSTR=false \
+  -e NGIT_LOG_LEVEL=INFO \
+  -v /tmp/ngit-test/repos:/srv/ngit-relay/repos \
+  -v /tmp/ngit-test/blossom:/srv/ngit-relay/blossom \
+  -v /tmp/ngit-test/relay-db:/srv/ngit-relay/relay-db \
+  -v /tmp/ngit-test/logs:/var/log/ngit-relay \
+  ghcr.io/danconwaydev/ngit-relay:latest
+
+echo "⏳ Waiting for relay to start..."
+sleep 3
+
+echo "🧪 Running tests..."
 cargo test --ignored
+
+echo "🛑 Stopping relay..."
+docker stop ngit-relay-test
+
+echo "🧹 Cleaning up..."
+rm -rf /tmp/ngit-test
+
+echo "✅ Done!"
+```
+
+Then run:
+
+```bash
+chmod +x test-ngit-relay.sh
+./test-ngit-relay.sh
 ```
 
 ## Architecture
