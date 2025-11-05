@@ -653,9 +653,8 @@ mod tests {
     #[tokio::test]
     #[ignore] // Requires running relay
     async fn test_grasp01_nostr_relay_against_relay() {
-        // Read relay URL from environment variable, default to localhost:8081
-        let relay_url = std::env::var("RELAY_URL")
-            .unwrap_or_else(|_| "ws://localhost:8081".to_string());
+        // Read relay URL from environment variable - must be supplied
+        let relay_url = std::env::var("RELAY_URL")?;
         
         let config = AuditConfig::ci();
         let client = AuditClient::new(&relay_url, config)

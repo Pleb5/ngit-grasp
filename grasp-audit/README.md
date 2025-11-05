@@ -44,8 +44,8 @@ cargo install --path .
 # Run smoke tests against local relay
 grasp-audit audit --relay ws://localhost:7000 --mode ci --spec nip01-smoke
 
-# Audit production server (read-only)
-grasp-audit audit --relay wss://relay.example.com --mode production --spec all
+# Audit production server
+grasp-audit audit --relay wss://grasp.example.com --mode production --spec all
 ```
 
 ## Test Specifications
@@ -77,9 +77,9 @@ All audit events include special tags:
 ```json
 {
   "tags": [
-    ["grasp-audit", "true"],
-    ["audit-run-id", "ci-a1b2c3d4-e5f6-7890-abcd-ef1234567890"],
-    ["audit-cleanup", "2025-11-03T12:00:00Z"]
+    ["t", "grasp-audit"],
+    ["r", "audit-run-id-ci-a1b2c3d4-e5f6-7890-abcd-ef1234567890"],
+    ["r", "audit-cleanup-2025-11-03T12:00:00Z"]
   ]
 }
 ```
@@ -134,7 +134,7 @@ nix develop
 cargo test
 ```
 
-### Integration Tests Against ngit-relay
+### Integration Tests Against ngit-relay docker image
 
 Test against the reference GRASP implementation to ensure compatibility.
 
@@ -151,30 +151,14 @@ See `test-ngit-relay.sh` for full setup/cleanup details.
 
 ```bash
 # Start relay on a specific port (example uses 18081)
-docker run --rm -p 18081:8081 -e NGIT_BIND_ADDRESS=0.0.0.0:8081 ghcr.io/danconwaydev/ngit-relay:latest
+docker run --rm -p 18081:8081 ghcr.io/danconwaydev/ngit-relay:latest
 
 # In another terminal, run tests with RELAY_URL
+grasp-audit audit --relay ws://localhost:18081 --mode ci
+
+# or specific test via cargo
 RELAY_URL="ws://localhost:18081" cargo test --lib test_grasp01_nostr_relay_against_relay -- --ignored --nocapture
 ```
-
-**Note:** ngit-relay only accepts Git-related events (NIP-34). Some NIP-01 smoke tests will fail (expected). Validation tests should pass.
-
-### Testing Against General-Purpose Relays
-
-For full NIP-01 smoke test coverage (all 6 tests passing), test against a general-purpose relay:
-
-```bash
-# Start nostr-rs-relay (accepts all event kinds)
-docker run --rm -d --name nostr-test-relay -p 7000:8080 scsibug/nostr-rs-relay
-
-# Run tests (all should pass)
-cargo test --lib -- --ignored --nocapture
-
-# Cleanup
-docker stop nostr-test-relay
-```
-
-Expected: 6/6 tests passed (100%)
 
 ## Architecture
 
