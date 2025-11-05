@@ -154,17 +154,46 @@ impl Grasp01NostrRelayTests {
             "Reject repository announcements without service in clone tag",
         )
         .run(|| async {
-            // TODO: Implementation
-            // 1. Create kind 30617 event with:
-            //    - d tag: "test-repo-no-clone"
-            //    - clone tag: "https://github.com/user/repo.git" (NOT this service)
-            //    - relays tag: "{service_url}" (correct)
-            // 2. Send event to relay
-            // 3. Verify rejection (error in OK response or event not stored)
-            // 4. Query to confirm event is NOT in relay
-            // 5. Document expected error message if available
+            // Get relay URL from client
+            let relay_url = client.client().relays().await
+                .keys()
+                .next()
+                .ok_or("No relay connected")?
+                .to_string();
             
-            Err("Not implemented yet".to_string())
+            // Create unique repository identifier
+            let timestamp = Timestamp::now().as_u64();
+            let repo_id = format!("test-repo-no-clone-{}", timestamp);
+            
+            // Create repo announcement WITHOUT service in clone tag
+            let event = client.event_builder(Kind::GitRepoAnnouncement, "")
+                .tag(Tag::identifier(&repo_id))
+                .tag(Tag::custom(TagKind::Custom("name".into()), vec!["Test Repo No Clone"]))
+                .tag(Tag::custom(TagKind::Custom("clone".into()), vec!["https://github.com/user/repo.git"])) // NOT this service
+                .tag(Tag::custom(TagKind::Custom("relays".into()), vec![relay_url.clone()])) // Correct relay
+                .build(client.keys())
+                .map_err(|e| format!("Failed to build event: {}", e))?;
+            
+            let event_id = event.id;
+            
+            // Send event - expect rejection
+            let send_result = client.send_event(event.clone()).await;
+            
+            // Query to verify event is NOT stored
+            let filter = Filter::new()
+                .kind(Kind::GitRepoAnnouncement)
+                .author(client.public_key())
+                .identifier(&repo_id);
+            
+            let events = client.query(filter).await
+                .map_err(|e| format!("Failed to query events: {}", e))?;
+            
+            // Verify event was rejected (not stored)
+            if events.iter().any(|e| e.id == event_id) {
+                return Err("Relay accepted announcement without service in clone tag - should reject".to_string());
+            }
+            
+            Ok(())
         })
         .await
     }
