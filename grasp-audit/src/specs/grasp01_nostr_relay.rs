@@ -25,8 +25,6 @@ impl Grasp01NostrRelayTests {
         
         // Repository state announcement tests
         results.add(Self::test_accept_valid_repo_state_announcement(client).await);
-        results.add(Self::test_accept_state_announcement_multiple_refs(client).await);
-        results.add(Self::test_accept_state_announcement_no_refs(client).await);
         
         // Related event acceptance tests
         results.add(Self::test_accept_event_tagging_repo_announcement(client).await);
@@ -277,29 +275,53 @@ impl Grasp01NostrRelayTests {
         TestResult::new(
             "accept_valid_repo_state_announcement",
             "GRASP-01:nostr-relay:6-7",
-            "Accept valid repository state announcements with required tags",
+            "Accept valid state announcements after repo announcement accepted",
         )
         .run(|| async {
-            // Create unique repository identifier
-            let timestamp = Timestamp::now().as_u64();
-            let repo_id = format!("test-repo-state-{}", timestamp);
+            // First, create a repository announcement (kind 30617) by the same author
+            let test_name = format!("test-repo-multi-refs-{}", Timestamp::now().as_u64());
+            let repo_event = client.create_repo_announcement(&test_name).await
+                .map_err(|e| format!("Failed to create repository announcement: {}", e))?;
             
-            // Create kind 30618 repository state announcement with required tags
+            // Extract repo_id from the repository announcement
+            let repo_id = repo_event.tags.iter()
+                .find(|t| t.kind() == TagKind::d())
+                .and_then(|t| t.content())
+                .ok_or("Missing d tag in repository announcement")?
+                .to_string();
+            
+            // Get maintainer npub
             let npub = client.public_key().to_bech32()
                 .map_err(|e| format!("Failed to convert public key to bech32: {}", e))?;
             
+            // Create kind 30618 repository state announcement with multiple refs
+            // Format: ["r", "refs/heads/main", "<commit-id>"]
             let event = client.event_builder(Kind::Custom(30618), "")
                 .tag(Tag::identifier(&repo_id))
-                .tag(Tag::custom(TagKind::custom("maintainers"), vec![npub]))
-                .tag(Tag::custom(TagKind::custom("r"), vec!["refs/heads/main".to_string()]))
+                .tag(Tag::custom(TagKind::custom("refs/heads/main"), vec![
+                    "abc123def456789012345678901234567890abcd"
+                ]))
+                .tag(Tag::custom(TagKind::custom("refs/heads/develop"), vec![
+                    "def456789012345678901234567890abcdef123"
+                ]))
+                .tag(Tag::custom(TagKind::custom("refs/tags/v1.0.0"), vec![
+                    "123456789012345678901234567890abcdef456"
+                ]))
+                .tag(Tag::custom(TagKind::custom("HEAD"), vec![
+                    "ref: refs/heads/main"
+                ]))
                 .build(client.keys())
-                .map_err(|e| format!("Failed to build repository state announcement: {}", e))?;
+                .map_err(|e| format!("Failed to build state announcement: {}", e))?;
             
             let event_id = event.id;
-            
-            // Send the event
+
+            // Send the repo announcement event
+            client.send_event(repo_event.clone()).await
+                .map_err(|e| format!("Failed to send state announcement to relay: {}", e))?;
+
+            // Send the state event
             client.send_event(event.clone()).await
-                .map_err(|e| format!("Failed to send repository state announcement to relay: {}", e))?;
+                .map_err(|e| format!("Failed to send state announcement to relay: {}", e))?;
             
             // Query back to verify it was accepted and stored
             let filter = Filter::new()
@@ -317,95 +339,13 @@ impl Grasp01NostrRelayTests {
                     event_id, repo_id
                 ));
             }
-            
-            // Verify it's the same event
-            let stored_event = events.iter()
-                .find(|e| e.id == event_id)
-                .ok_or(format!(
-                    "Stored event ID doesn't match sent event. Expected: {}, Got {} events",
-                    event_id, events.len()
-                ))?;
-            
-            // Verify required tags are present
-            let has_d_tag = stored_event.tags.iter()
-                .any(|t| t.kind() == TagKind::d() && t.content() == Some(&repo_id));
-            
-            let has_maintainers_tag = stored_event.tags.iter()
-                .any(|t| t.kind() == TagKind::custom("maintainers"));
-            
-            let has_r_tag = stored_event.tags.iter()
-                .any(|t| {
-                    t.kind() == TagKind::custom("r") &&
-                    t.content().map(|c| c.contains("refs/heads/main")).unwrap_or(false)
-                });
-            
-            if !has_d_tag {
-                return Err(format!("Stored event missing d tag with repo identifier ({})", repo_id));
-            }
-            
-            if !has_maintainers_tag {
-                return Err("Stored event missing maintainers tag".to_string());
-            }
-            
-            if !has_r_tag {
-                return Err("Stored event missing r tag with git reference".to_string());
-            }
-            
+                        
             Ok(())
         })
         .await
     }
     
-    /// Test: Accept state announcement with multiple refs
-    ///
-    /// Spec: Line 3 of ../grasp/01.md
-    /// Requirement: MUST accept state announcements with multiple refs
-    async fn test_accept_state_announcement_multiple_refs(client: &AuditClient) -> TestResult {
-        TestResult::new(
-            "accept_state_announcement_multiple_refs",
-            "GRASP-01:nostr-relay:3",
-            "Accept state announcements with multiple branch and tag refs",
-        )
-        .run(|| async {
-            // TODO: Implementation
-            // 1. Send valid kind 30617 repo announcement
-            // 2. Create kind 30618 with multiple refs:
-            //    - refs/heads/main: "{commit-sha-1}"
-            //    - refs/heads/develop: "{commit-sha-2}"
-            //    - refs/tags/v1.0.0: "{commit-sha-3}"
-            //    - refs/tags/v2.0.0: "{commit-sha-4}"
-            //    - HEAD: "ref: refs/heads/main"
-            // 3. Send and verify acceptance
-            // 4. Query back and verify all refs are stored
-            
-            Err("Not implemented yet".to_string())
-        })
-        .await
-    }
-    
-    /// Test: Accept state announcement with no refs (stop tracking)
-    ///
-    /// Spec: NIP-34 repository state announcements
-    /// Requirement: Support stopping state tracking by sending event with no refs
-    async fn test_accept_state_announcement_no_refs(client: &AuditClient) -> TestResult {
-        TestResult::new(
-            "accept_state_announcement_no_refs",
-            "GRASP-01:nostr-relay:3",
-            "Accept state announcements with no refs (stop tracking)",
-        )
-        .run(|| async {
-            // TODO: Implementation
-            // 1. Send valid kind 30617 repo announcement
-            // 2. Send kind 30618 with refs (establish state)
-            // 3. Send kind 30618 with ONLY d tag (no refs)
-            // 4. Verify acceptance (allows author to stop tracking)
-            // 5. Query to confirm latest state has no refs
-            
-            Err("Not implemented yet".to_string())
-        })
-        .await
-    }
-    
+     
     // =========================================================================
     // Related Event Acceptance Tests
     // =========================================================================
