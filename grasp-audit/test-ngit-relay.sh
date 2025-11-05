@@ -1,36 +1,144 @@
 #!/bin/bash
 set -e
 
+# =============================================================================
+# Script: test-ngit-relay.sh
+# Purpose: Test ngit-relay against GRASP specifications
+#
+# This script automates the process of:
+# 1. Starting a fresh ngit-relay instance in Docker
+# 2. Running either grasp-audit CLI or cargo test suite
+# 3. Cleaning up all resources on exit (via EXIT trap)
+#
+# Features:
+# - Automatic cleanup via EXIT trap (runs even on failure)
+# - Random port selection (20000-30000) to avoid conflicts
+# - Unique temporary directories per run
+# - Support for both audit and test execution modes
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Help Function
+# -----------------------------------------------------------------------------
+show_help() {
+    cat << EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Test ngit-relay against GRASP specifications
+
+OPTIONS:
+    --mode <audit|test>    Execution mode (default: audit)
+                           audit: Run grasp-audit CLI tool
+                           test: Run cargo test suite
+    --spec <spec>          Specification to test (default: nip01-smoke)
+                           Only used in audit mode
+    --help                 Show this help message
+
+EXAMPLES:
+    # Run audit with default settings (current behavior)
+    ./test-ngit-relay.sh
+
+    # Run cargo tests instead
+    ./test-ngit-relay.sh --mode test
+
+    # Run audit with specific spec
+    ./test-ngit-relay.sh --mode audit --spec grasp01
+
+EOF
+    exit 0
+}
+
+# -----------------------------------------------------------------------------
+# Argument Parsing
+# -----------------------------------------------------------------------------
+# Default values maintain backward compatibility
+MODE="audit"
+SPEC="nip01-smoke"
+
+# Parse command-line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --mode)
+            MODE="$2"
+            shift 2
+            ;;
+        --spec)
+            SPEC="$2"
+            shift 2
+            ;;
+        --help)
+            show_help
+            ;;
+        *)
+            echo "❌ Unknown option: $1"
+            echo "Run with --help for usage information"
+            exit 1
+            ;;
+    esac
+done
+
+# Validate mode parameter
+if [ "$MODE" != "audit" ] && [ "$MODE" != "test" ]; then
+    echo "❌ Invalid mode: $MODE"
+    echo "Mode must be 'audit' or 'test'"
+    exit 1
+fi
+
+# -----------------------------------------------------------------------------
+# Environment Setup
+# -----------------------------------------------------------------------------
 # Create temporary directory with random name
+# This ensures each test run is isolated and doesn't interfere with others
 TEST_DIR=$(mktemp -d -t grasp-audit-run-XXXXXXXXXX)
-# Pick a random port in the range 20000-30000
+
+# Pick a random port in the range 20000-30000 to avoid conflicts
 PORT=$((20000 + RANDOM % 10000))
-# Generate a unique container name suffix
+
+# Generate a unique container name suffix for parallel runs
 CONTAINER_SUFFIX=$RANDOM
 
 echo "🧹 Using temporary directory: $TEST_DIR"
 echo "🔌 Using port: $PORT"
+echo "🎯 Mode: $MODE $([ "$MODE" = "audit" ] && echo "(spec: $SPEC)" || echo "")"
 
-# Cleanup function
+# -----------------------------------------------------------------------------
+# Cleanup Function
+# -----------------------------------------------------------------------------
+# This function is called automatically on script exit via trap
+# The '|| true' pattern ensures cleanup continues even if individual steps fail
 cleanup() {
+    echo ""
     echo "🛑 Stopping relay..."
+    # Stop container gracefully, ignore errors if already stopped
     docker stop "grasp-audit-run-$CONTAINER_SUFFIX" 2>/dev/null || true
     
     echo "🧹 Cleaning up temporary directory..."
+    # Use alpine container to clean Docker-created files (may have different ownership)
     docker run --rm -v "$TEST_DIR:/data" alpine sh -c "rm -rf /data/*" 2>/dev/null || true
+    # Remove the temporary directory itself
     rm -rf "$TEST_DIR"
 }
 
-# Set trap to cleanup on exit
+# Set trap to run cleanup on ANY exit (success, failure, or interrupt)
+# This ensures resources are always cleaned up
 trap cleanup EXIT
 
+# -----------------------------------------------------------------------------
+# Docker Setup
+# -----------------------------------------------------------------------------
 echo "📁 Creating data directories..."
+# Create all required directories for ngit-relay in one command
 mkdir -p "$TEST_DIR"/{repos,blossom,relay-db,logs}
 
 echo "🚀 Starting ngit-relay..."
-# Remove any existing container with this name
+# Remove any existing container with this name (defensive cleanup)
 CONTAINER_NAME="grasp-audit-run-$CONTAINER_SUFFIX"
 docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+
+# Start ngit-relay in detached mode with all required configuration
+# - Port mapping: expose internal 8081 on our random port
+# - Volume mounts: persist data in temp directory
+# - Proactive sync disabled: we control event submission via tests
 docker run --rm -d \
   --name "$CONTAINER_NAME" \
   -p "$PORT:8081" \
@@ -49,19 +157,54 @@ docker run --rm -d \
   ghcr.io/danconwaydev/ngit-relay:latest
 
 echo "⏳ Waiting for relay to start..."
+# Give the relay time to initialize before running tests
 sleep 3
 
-echo "🧪 Running tests..."
-echo ""
-echo "Note: ngit-relay only accepts Git-related events (NIP-34)."
-echo "Some NIP-01 smoke tests will fail (expected behavior)."
-echo "Validation tests should pass."
-echo ""
+# -----------------------------------------------------------------------------
+# Test Execution
+# -----------------------------------------------------------------------------
+# Execute tests based on selected mode
+# The EXIT trap ensures cleanup happens regardless of test outcome
 
-# Run the CLI tool (cleanup happens via trap even on failure)
-RELAY_URL="ws://localhost:$PORT" cargo run -- audit --relay "ws://localhost:$PORT" --mode ci --spec nip01-smoke || {
-    echo "⚠️  Some tests failed (expected for ngit-relay)"
-    echo "    Validation tests should have passed"
-}
+if [ "$MODE" = "audit" ]; then
+    echo "🧪 Running audit mode (spec: $SPEC)..."
+    echo ""
+    echo "Note: ngit-relay only accepts Git-related events (NIP-34)."
+    echo "Some NIP-01 smoke tests will fail (expected behavior)."
+    echo "Validation tests should pass."
+    echo ""
+    
+    # Run grasp-audit CLI tool
+    # - RELAY_URL: Environment variable used by audit tool
+    # - --relay: Command-line parameter for relay address
+    # - --mode ci: Continuous integration mode (structured output)
+    # - --spec: Which specification to test
+    # The '|| { }' block provides user-friendly messaging on failure
+    RELAY_URL="ws://localhost:$PORT" cargo run -- audit \
+        --relay "ws://localhost:$PORT" \
+        --mode ci \
+        --spec "$SPEC" || {
+        echo "⚠️  Some tests failed (expected for ngit-relay)"
+        echo "    Validation tests should have passed"
+    }
+    
+elif [ "$MODE" = "test" ]; then
+    echo "🧪 Running cargo test mode..."
+    echo ""
+    
+    # Run cargo test suite
+    # - RELAY_URL: Environment variable tests use to connect
+    # - --lib: Only library tests (not integration tests in tests/)
+    # - test_grasp01_nostr_relay_against_relay: Specific test module
+    # - --ignored: Run tests marked with #[ignore] (these need relay)
+    # - --nocapture: Show println! output from tests
+    RELAY_URL="ws://localhost:$PORT" cargo test \
+        --lib test_grasp01_nostr_relay_against_relay \
+        -- --ignored --nocapture || {
+        echo "⚠️  Some tests failed"
+        echo "    Review output above for details"
+    }
+fi
 
+echo ""
 echo "✅ Done!"

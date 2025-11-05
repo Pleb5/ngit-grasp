@@ -44,6 +44,39 @@ Tests marked `#[ignore]` need relay - unit tests don't.
 
 **Note:** Always use a random available port for the relay to avoid conflicts with existing services.
 
+### Standard Testing Process (Recommended)
+
+**Use test-ngit-relay.sh for automated relay management:**
+
+This script handles all relay lifecycle management automatically:
+- Starts ngit-relay in isolated Docker container
+- Uses random port to avoid conflicts
+- Creates isolated temporary directories
+- Ensures cleanup on exit (success or failure)
+- Supports both audit and test modes
+
+**Basic Usage:**
+
+```bash
+# Run cargo test suite (recommended for GRASP-01 development)
+cd grasp-audit && nix develop -c bash test-ngit-relay.sh --mode test
+
+# Run audit CLI tool (for quick validation)
+cd grasp-audit && nix develop -c bash test-ngit-relay.sh
+
+# Get help
+cd grasp-audit && ./test-ngit-relay.sh --help
+```
+
+**Benefits:**
+- No manual relay startup required
+- Automatic cleanup prevents leftover containers
+- Random port selection avoids conflicts
+- Consistent environment across all runs
+- Proper test isolation
+
+**Note:** Manual relay setup is still available but test-ngit-relay.sh is recommended for development workflows.
+
 ### Running Single Test
 
 ```bash
@@ -140,6 +173,7 @@ See `docs/archive/2025-11-04-nostr-sdk-upgrade.md` for full migration.
 4. **Test isolation:** Integration tests need relay, marked with `#[ignore]`
 5. **Work directory:** All session docs go in `work/`, NOT root
 6. **Archive naming:** Use `YYYY-MM-DD-description.md` format
+7. **Use test-ngit-relay.sh**: Always use the test script for GRASP-01 tests - it handles cleanup and port management automatically
 
 ## File Restrictions by Mode
 
@@ -152,17 +186,18 @@ Code mode can only edit files matching specific patterns (enforced by system):
 ## Quick Reference
 
 ```bash
+# Recommended: Use test-ngit-relay.sh for all testing
+cd grasp-audit && nix develop -c bash test-ngit-relay.sh --mode test
+
 # Build grasp-audit
 cd grasp-audit && nix develop -c cargo build
 
-# Run all tests (requires relay running, set RELAY_URL to match your port)
-cd grasp-audit && RELAY_URL="ws://localhost:18081" nix develop -c cargo test --ignored
+# Manual relay testing (if needed)
+# 1. Start relay: docker run --rm -p 18081:8081 ghcr.io/danconwaydev/ngit-relay:latest
+# 2. Run tests: RELAY_URL="ws://localhost:18081" nix develop -c cargo test --ignored
 
 # Run single test
 cd grasp-audit && nix develop -c cargo test --lib test_name -- --nocapture
-
-# Verify GRASP-01 tests (cleaner output)
-cd grasp-audit && RELAY_URL="ws://localhost:18081" nix develop -c cargo test --lib test_grasp01_nostr_relay_against_relay -- --ignored --nocapture 2>&1 | tail -60
 
 # Check session files
 ls work/  # Should only have README.md when clean

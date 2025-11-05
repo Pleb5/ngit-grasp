@@ -12,6 +12,28 @@ A reusable audit and compliance testing tool for GRASP protocol implementations.
 
 ## Quick Start
 
+The fastest way to run GRASP-01 compliance tests:
+
+```bash
+# Run the test suite against ngit-relay
+cd grasp-audit
+nix develop -c bash test-ngit-relay.sh --mode test
+```
+
+This automatically:
+- ✅ Starts ngit-relay in an isolated Docker container
+- ✅ Runs all GRASP-01 compliance tests
+- ✅ Cleans up resources when finished
+
+**Currently Passing:** 4/18 tests (14 tests stubbed with "Not implemented yet")
+
+For more options:
+```bash
+./test-ngit-relay.sh --help
+```
+
+## Usage Examples
+
 ### As a Library
 
 ```rust
@@ -124,6 +146,8 @@ cargo run --example simple_audit
 
 ## Testing
 
+> **TL;DR:** See the [Quick Start](#quick-start) section for the fastest way to run tests.
+
 ### Unit Tests
 
 ```bash
@@ -134,20 +158,18 @@ nix develop
 cargo test
 ```
 
-### Integration Tests Against ngit-relay docker image
+### Integration Tests
 
-Test against the reference GRASP implementation to ensure compatibility.
+The recommended approach is [`test-ngit-relay.sh`](test-ngit-relay.sh), which handles all relay lifecycle management automatically.
 
-**Automated Script (Recommended):**
+See the [Quick Start](#quick-start) section for common usage patterns.
 
-```bash
-# Handles setup, testing, and cleanup automatically
-./test-ngit-relay.sh
-```
+**Advanced: Manual Relay Setup**
 
-See `test-ngit-relay.sh` for full setup/cleanup details.
+<details>
+<summary>Click to expand manual testing instructions</summary>
 
-**Manual Testing:**
+For advanced use cases where you need direct control over the relay:
 
 ```bash
 # Start relay on a specific port (example uses 18081)
@@ -159,6 +181,8 @@ grasp-audit audit --relay ws://localhost:18081 --mode ci
 # or specific test via cargo
 RELAY_URL="ws://localhost:18081" cargo test --lib test_grasp01_nostr_relay_against_relay -- --ignored --nocapture
 ```
+
+</details>
 
 ## Architecture
 
