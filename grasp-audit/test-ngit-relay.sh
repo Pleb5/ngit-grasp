@@ -59,7 +59,7 @@ echo "Validation tests should pass."
 echo ""
 
 # Run the CLI tool (cleanup happens via trap even on failure)
-cargo run -- audit --relay "ws://localhost:$PORT" --mode ci --spec nip01-smoke || {
+RELAY_URL="ws://localhost:$PORT" cargo run -- audit --relay "ws://localhost:$PORT" --mode ci --spec nip01-smoke || {
     echo "⚠️  Some tests failed (expected for ngit-relay)"
     echo "    Validation tests should have passed"
 }

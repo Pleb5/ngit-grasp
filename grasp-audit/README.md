@@ -22,15 +22,15 @@ async fn main() -> Result<()> {
     // Create audit client for CI testing
     let config = AuditConfig::ci();
     let client = AuditClient::new("ws://localhost:7000", config).await?;
-    
+
     // Run NIP-01 smoke tests
     let results = specs::Nip01SmokeTests::run_all(&client).await;
     results.print_report();
-    
+
     if !results.all_passed() {
         std::process::exit(1);
     }
-    
+
     Ok(())
 }
 ```
@@ -85,6 +85,7 @@ All audit events include special tags:
 ```
 
 This allows:
+
 - **Isolation**: Each test run has unique ID
 - **Cleanup**: Events marked for cleanup after timestamp
 - **No deletion trails**: Direct database cleanup (no NIP-09 deletion events)
@@ -146,10 +147,14 @@ Test against the reference GRASP implementation to ensure compatibility.
 
 See `test-ngit-relay.sh` for full setup/cleanup details.
 
-**Manual One-Liner:**
+**Manual Testing:**
 
 ```bash
-# Start relay, then run: RELAY_URL="ws://localhost:$PORT" cargo test --lib -- --ignored --nocapture
+# Start relay on a specific port (example uses 18081)
+docker run --rm -p 18081:8081 -e NGIT_BIND_ADDRESS=0.0.0.0:8081 ghcr.io/danconwaydev/ngit-relay:latest
+
+# In another terminal, run tests with RELAY_URL
+RELAY_URL="ws://localhost:18081" cargo test --lib test_grasp01_nostr_relay_against_relay -- --ignored --nocapture
 ```
 
 **Note:** ngit-relay only accepts Git-related events (NIP-34). Some NIP-01 smoke tests will fail (expected). Validation tests should pass.
