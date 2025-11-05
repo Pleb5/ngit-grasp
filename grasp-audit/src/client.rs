@@ -24,17 +24,37 @@ impl AuditClient {
         
         // Wait for connection to establish (with retries)
         let mut attempts = 0;
+        let mut connected = false;
         while attempts < 20 {
             tokio::time::sleep(Duration::from_millis(100)).await;
             
             let relays = client.relays().await;
-            let connected = relays.values().any(|r| r.is_connected());
+            connected = relays.values().any(|r| r.is_connected());
             
             if connected {
                 break;
             }
             
             attempts += 1;
+        }
+        
+        // Verify we actually connected
+        if !connected {
+            return Err(anyhow!(
+                "Failed to connect to relay at '{}'\n\
+                \n\
+                Possible causes:\n\
+                  • Relay is not running at this address\n\
+                  • Network connectivity issues\n\
+                  • Incorrect URL or port\n\
+                \n\
+                To start ngit-relay for testing:\n\
+                  docker run --rm -p 18081:8081 ghcr.io/danconwaydev/ngit-relay:latest\n\
+                \n\
+                Or use the test script:\n\
+                  cd grasp-audit && ./test-ngit-relay.sh",
+                relay_url
+            ));
         }
         
         // Give it a bit more time to stabilize

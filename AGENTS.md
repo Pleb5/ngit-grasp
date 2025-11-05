@@ -33,8 +33,8 @@ nix-shell --run "cargo build"
 **Integration tests require relay running:**
 
 ```bash
-# Start ngit-relay first (choose any available port, example uses 18081)
-docker run --rm -p 18081:8081 -e NGIT_BIND_ADDRESS=0.0.0.0:8081 ghcr.io/danconwaydev/ngit-relay:latest
+# Start ngit-relay first (use any available port to avoid conflicts)
+docker run --rm -p 18081:8081 ghcr.io/danconwaydev/ngit-relay:latest
 
 # From grasp-audit directory, set RELAY_URL to match your port
 RELAY_URL="ws://localhost:18081" nix develop -c cargo test --lib test_grasp01_nostr_relay_against_relay -- --ignored --nocapture
@@ -42,12 +42,40 @@ RELAY_URL="ws://localhost:18081" nix develop -c cargo test --lib test_grasp01_no
 
 Tests marked `#[ignore]` need relay - unit tests don't.
 
+**Note:** Always use a random available port for the relay to avoid conflicts with existing services.
+
 ### Running Single Test
 
 ```bash
 # From grasp-audit/
 nix develop -c cargo test --lib specific_test_name -- --nocapture
 ```
+
+### Quick Test Verification
+
+To verify GRASP-01 compliance tests are working correctly:
+
+```bash
+cd grasp-audit && RELAY_URL="ws://localhost:18081" nix develop -c cargo test --lib test_grasp01_nostr_relay_against_relay -- --ignored --nocapture 2>&1 | tail -60
+```
+
+**Expected Output:**
+- 2-3 tests passing
+- 15 tests showing "Not implemented yet"
+
+### Troubleshooting
+
+**Buffer Size Errors:**
+If you see mpsc channel buffer size panics on first test run, this is usually transient. Simply run the tests again.
+
+**Verify Relay is Running:**
+Check if relay is accessible before running tests:
+```bash
+nak req -l 1 ws://localhost:18081  # Replace port with your chosen port
+```
+
+**Port Conflicts:**
+Always use a random available port to avoid conflicts with existing services. If a port is busy, choose a different one for docker.
 
 ## Code Patterns
 
@@ -132,6 +160,9 @@ cd grasp-audit && RELAY_URL="ws://localhost:18081" nix develop -c cargo test --i
 
 # Run single test
 cd grasp-audit && nix develop -c cargo test --lib test_name -- --nocapture
+
+# Verify GRASP-01 tests (cleaner output)
+cd grasp-audit && RELAY_URL="ws://localhost:18081" nix develop -c cargo test --lib test_grasp01_nostr_relay_against_relay -- --ignored --nocapture 2>&1 | tail -60
 
 # Check session files
 ls work/  # Should only have README.md when clean

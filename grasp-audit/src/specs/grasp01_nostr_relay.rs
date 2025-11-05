@@ -82,7 +82,7 @@ impl Grasp01NostrRelayTests {
             
             // Get npub for clone URL
             let npub = client.public_key().to_bech32()
-                .map_err(|e| format!("Failed to convert pubkey to npub: {}", e))?;
+                .map_err(|e| format!("Failed to convert public key to bech32 npub format: {}", e))?;
             
             // Build kind 30617 repository announcement
             let event = client.event_builder(Kind::GitRepoAnnouncement, "")
@@ -92,11 +92,11 @@ impl Grasp01NostrRelayTests {
                 .tag(Tag::custom(TagKind::Custom("clone".into()), vec![format!("{}/{}/{}.git", http_url, npub, repo_id)]))
                 .tag(Tag::custom(TagKind::Custom("relays".into()), vec![relay_url.clone()]))
                 .build(client.keys())
-                .map_err(|e| format!("Failed to build event: {}", e))?;
+                .map_err(|e| format!("Failed to build repository announcement event (kind 30617): {}", e))?;
             
             // Send the event
             let event_id = client.send_event(event.clone()).await
-                .map_err(|e| format!("Failed to send event: {}", e))?;
+                .map_err(|e| format!("Failed to send repository announcement to relay: {}", e))?;
             
             // Query back to verify it was accepted and stored
             let filter = Filter::new()
@@ -105,17 +105,23 @@ impl Grasp01NostrRelayTests {
                 .identifier(&repo_id);
             
             let events = client.query(filter).await
-                .map_err(|e| format!("Failed to query events: {}", e))?;
+                .map_err(|e| format!("Failed to query events from relay: {}", e))?;
             
             // Verify we got the event back
             if events.is_empty() {
-                return Err("Event was not stored in relay (possibly rejected)".to_string());
+                return Err(format!(
+                    "Event was not stored in relay (possibly rejected). Event ID: {}, Repo ID: {}",
+                    event_id, repo_id
+                ));
             }
             
             // Verify it's the same event
             let stored_event = events.iter()
                 .find(|e| e.id == event_id)
-                .ok_or("Stored event ID doesn't match sent event")?;
+                .ok_or(format!(
+                    "Stored event ID doesn't match sent event. Expected: {}, Got {} events",
+                    event_id, events.len()
+                ))?;
             
             // Verify key tags are present
             let has_clone_tag = stored_event.tags.iter()
@@ -158,7 +164,7 @@ impl Grasp01NostrRelayTests {
             let relay_url = client.client().relays().await
                 .keys()
                 .next()
-                .ok_or("No relay connected")?
+                .ok_or("No relay connected - client has no active relay connections")?
                 .to_string();
             
             // Create unique repository identifier
@@ -186,11 +192,15 @@ impl Grasp01NostrRelayTests {
                 .identifier(&repo_id);
             
             let events = client.query(filter).await
-                .map_err(|e| format!("Failed to query events: {}", e))?;
+                .map_err(|e| format!("Failed to query events from relay: {}", e))?;
             
             // Verify event was rejected (not stored)
             if events.iter().any(|e| e.id == event_id) {
-                return Err("Relay accepted announcement without service in clone tag - should reject".to_string());
+                return Err(format!(
+                    "Relay incorrectly accepted announcement without service in clone tag. \
+                    Event ID: {}, Clone URL: https://github.com/user/repo.git (should require {})",
+                    event_id, relay_url
+                ));
             }
             
             Ok(())
@@ -650,16 +660,21 @@ mod tests {
     use super::*;
     use crate::AuditConfig;
     
-    #[tokio::test]
-    #[ignore] // Requires running relay
-    async fn test_grasp01_nostr_relay_against_relay() {
-        // Read relay URL from environment variable - must be supplied
-        let relay_url = std::env::var("RELAY_URL")?;
-        
-        let config = AuditConfig::ci();
-        let client = AuditClient::new(&relay_url, config)
-            .await
-            .expect("Failed to connect to relay");
+#[tokio::test]
+#[ignore] // Requires running relay
+async fn test_grasp01_nostr_relay_against_relay() {
+    // Read relay URL from environment variable - must be supplied
+    let relay_url = std::env::var("RELAY_URL")
+        .expect("RELAY_URL environment variable must be set. Example: RELAY_URL=ws://localhost:18081");
+    
+    let config = AuditConfig::ci();
+    let client = AuditClient::new(&relay_url, config)
+        .await
+        .expect(&format!(
+            "Failed to connect to relay at {}. Ensure relay is running and accessible. \
+            Try: docker run --rm -p 18081:8081 ghcr.io/danconwaydev/ngit-relay:latest",
+            relay_url
+        ));
         
         let results = Grasp01NostrRelayTests::run_all(&client).await;
         results.print_report();
