@@ -37,6 +37,10 @@ nix-shell --run "cargo build"
 docker run --rm -p 18081:8081 ghcr.io/danconwaydev/ngit-relay:latest
 
 # From grasp-audit directory, set RELAY_URL to match your port
+# Run all ignored tests (includes GRASP-01 and other relay-dependent tests)
+RELAY_URL="ws://localhost:18081" nix develop -c cargo test --lib -- --ignored --nocapture
+
+# Or run a specific test
 RELAY_URL="ws://localhost:18081" nix develop -c cargo test --lib test_grasp01_nostr_relay_against_relay -- --ignored --nocapture
 ```
 
@@ -89,12 +93,16 @@ nix develop -c cargo test --lib specific_test_name -- --nocapture
 To verify GRASP-01 compliance tests are working correctly:
 
 ```bash
+# Run all ignored library tests (includes GRASP-01)
+cd grasp-audit && RELAY_URL="ws://localhost:18081" nix develop -c cargo test --lib -- --ignored --nocapture 2>&1 | tail -60
+
+# Or run specific GRASP-01 test
 cd grasp-audit && RELAY_URL="ws://localhost:18081" nix develop -c cargo test --lib test_grasp01_nostr_relay_against_relay -- --ignored --nocapture 2>&1 | tail -60
 ```
 
 **Expected Output:**
 - 2-3 tests passing
-- 15 tests showing "Not implemented yet"
+- 15+ tests showing "Not implemented yet"
 
 ### Troubleshooting
 
@@ -194,7 +202,8 @@ cd grasp-audit && nix develop -c cargo build
 
 # Manual relay testing (if needed)
 # 1. Start relay: docker run --rm -p 18081:8081 ghcr.io/danconwaydev/ngit-relay:latest
-# 2. Run tests: RELAY_URL="ws://localhost:18081" nix develop -c cargo test --ignored
+# 2. Run all ignored tests: RELAY_URL="ws://localhost:18081" nix develop -c cargo test --lib -- --ignored --nocapture
+# 3. Or specific test: RELAY_URL="ws://localhost:18081" nix develop -c cargo test --lib test_grasp01_nostr_relay_against_relay -- --ignored --nocapture
 
 # Run single test
 cd grasp-audit && nix develop -c cargo test --lib test_name -- --nocapture

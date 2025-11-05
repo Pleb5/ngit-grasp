@@ -195,12 +195,13 @@ elif [ "$MODE" = "test" ]; then
     # Run cargo test suite
     # - RELAY_URL: Environment variable tests use to connect
     # - --lib: Only library tests (not integration tests in tests/)
-    # - test_grasp01_nostr_relay_against_relay: Specific test module
     # - --ignored: Run tests marked with #[ignore] (these need relay)
     # - --nocapture: Show println! output from tests
+    # This runs all library tests marked with #[ignore], including:
+    #   - test_grasp01_nostr_relay_against_relay (GRASP-01 relay tests)
+    #   - Any other integration tests requiring a relay
     RELAY_URL="ws://localhost:$PORT" cargo test \
-        --lib test_grasp01_nostr_relay_against_relay \
-        -- --ignored --nocapture || {
+        --lib -- --ignored --nocapture || {
         echo "⚠️  Some tests failed"
         echo "    Review output above for details"
     }

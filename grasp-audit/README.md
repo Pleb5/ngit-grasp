@@ -178,7 +178,10 @@ docker run --rm -p 18081:8081 ghcr.io/danconwaydev/ngit-relay:latest
 # In another terminal, run tests with RELAY_URL
 grasp-audit audit --relay ws://localhost:18081 --mode ci
 
-# or specific test via cargo
+# or run all ignored tests via cargo
+RELAY_URL="ws://localhost:18081" cargo test --lib -- --ignored --nocapture
+
+# or run specific test via cargo
 RELAY_URL="ws://localhost:18081" cargo test --lib test_grasp01_nostr_relay_against_relay -- --ignored --nocapture
 ```
 
