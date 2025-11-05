@@ -49,6 +49,9 @@ impl Nip01SmokeTests {
     ///
     /// Spec: NIP-01 EVENT message
     /// Requirement: Relay MUST accept valid EVENT messages
+    /// 
+    /// For GRASP servers, we send a NIP-34 repository announcement that lists
+    /// the GRASP server in clone and relays tags (required for acceptance).
     async fn test_send_receive_event(client: &AuditClient) -> TestResult {
         TestResult::new(
             "send_receive_event",
@@ -56,9 +59,32 @@ impl Nip01SmokeTests {
             "Can send EVENT and receive OK response",
         )
         .run(|| async {
-            // Create audit event
+            // Get relay URL from client
+            let relay_url = client.client().relays().await
+                .keys()
+                .next()
+                .ok_or("No relay URL found")?
+                .to_string();
+            
+            // Convert ws:// to http:// for clone URL
+            let http_url = relay_url
+                .replace("ws://", "http://")
+                .replace("wss://", "https://");
+            
+            // Create unique repository identifier
+            let repo_id = format!("smoke-test-{}", uuid::Uuid::new_v4());
+            let npub = client.public_key().to_bech32()
+                .map_err(|e| format!("Failed to encode npub: {}", e))?;
+            
+            // Create NIP-34 repository announcement (kind 30617)
+            // This event lists the GRASP server, so it should be accepted
             let event = client
-                .event_builder(Kind::TextNote, "NIP-01 smoke test event")
+                .event_builder(Kind::Custom(30617), "NIP-01 smoke test repository")
+                .tag(Tag::identifier(&repo_id))  // d tag
+                .tag(Tag::custom(TagKind::Custom("name".into()), vec!["Smoke Test Repo"]))
+                .tag(Tag::custom(TagKind::Custom("description".into()), vec!["Repository for NIP-01 smoke testing"]))
+                .tag(Tag::custom(TagKind::Custom("clone".into()), vec![format!("{}/{}/{}.git", http_url, npub, repo_id)]))
+                .tag(Tag::custom(TagKind::Custom("relays".into()), vec![relay_url.clone()]))
                 .build(client.keys())
                 .map_err(|e| format!("Failed to build event: {}", e))?;
             
@@ -81,7 +107,7 @@ impl Nip01SmokeTests {
             
             // Try to query it back
             let filter = Filter::new()
-                .kind(Kind::TextNote)
+                .kind(Kind::Custom(30617))
                 .id(event_id);
             
             let events = client
@@ -92,7 +118,7 @@ impl Nip01SmokeTests {
             if events.is_empty() {
                 // Debug: try querying without audit client filtering
                 eprintln!("Event not found with audit client query, trying direct client query...");
-                let direct_filter = Filter::new().kind(Kind::TextNote).id(event_id);
+                let direct_filter = Filter::new().kind(Kind::Custom(30617)).id(event_id);
                 let direct_events = client.client().fetch_events(direct_filter, std::time::Duration::from_secs(5)).await
                     .map_err(|e| format!("Direct query failed: {}", e))?;
                 let direct_vec: Vec<Event> = direct_events.into_iter().collect();
