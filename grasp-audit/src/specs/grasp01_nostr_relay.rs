@@ -212,16 +212,55 @@ impl Grasp01NostrRelayTests {
             "Reject repository announcements without service in relays tag",
         )
         .run(|| async {
-            // TODO: Implementation
-            // 1. Create kind 30617 event with:
-            //    - d tag: "test-repo-no-relays"
-            //    - clone tag: "{service_url}/{npub}/test-repo.git" (correct)
-            //    - relays tag: "wss://relay.damus.io" (NOT this service)
-            // 2. Send event to relay
-            // 3. Verify rejection
-            // 4. Query to confirm event is NOT in relay
+            // Get relay URL from client
+            let relay_url = client.client().relays().await
+                .keys()
+                .next()
+                .ok_or("No relay connected - client has no active relay connections")?
+                .to_string();
             
-            Err("Not implemented yet".to_string())
+            // Convert WebSocket URL to HTTP URL for clone tag
+            let http_url = relay_url
+                .replace("ws://", "http://")
+                .replace("wss://", "https://");
+            
+            // Create unique repository identifier
+            let timestamp = Timestamp::now().as_u64();
+            let repo_id = format!("test-repo-no-relays-{}", timestamp);
+            
+            // Create repo announcement WITHOUT service in relays tag
+            let event = client.event_builder(Kind::GitRepoAnnouncement, "")
+                .tag(Tag::identifier(&repo_id))
+                .tag(Tag::custom(TagKind::custom("name"), vec!["Test Repo No Relays"]))
+                .tag(Tag::custom(TagKind::custom("clone"), vec![format!("{}/{}/test-repo.git", http_url, client.public_key())])) // Correct clone
+                .tag(Tag::custom(TagKind::custom("relays"), vec!["wss://relay.damus.io"])) // NOT this service
+                .build(client.keys())
+                .map_err(|e| format!("Failed to build event: {}", e))?;
+            
+            let event_id = event.id;
+            
+            // Send event - expect rejection
+            let _send_result = client.send_event(event.clone()).await;
+            
+            // Query to verify event is NOT stored
+            let filter = Filter::new()
+                .kind(Kind::GitRepoAnnouncement)
+                .author(client.public_key())
+                .identifier(&repo_id);
+            
+            let events = client.query(filter).await
+                .map_err(|e| format!("Failed to query events from relay: {}", e))?;
+            
+            // Verify event was rejected (not stored)
+            if events.iter().any(|e| e.id == event_id) {
+                return Err(format!(
+                    "Relay incorrectly accepted announcement without service in relays tag. \
+                    Event ID: {}, Relays URL: wss://relay.damus.io (should require {})",
+                    event_id, relay_url
+                ));
+            }
+            
+            Ok(())
         })
         .await
     }
@@ -232,27 +271,87 @@ impl Grasp01NostrRelayTests {
     
     /// Test: Accept valid repository state announcements
     ///
-    /// Spec: Line 3 of ../grasp/01.md
-    /// Requirement: MUST accept repo state announcements
+    /// Spec: Lines 6-7 of ../grasp/01.md
+    /// Requirement: MUST accept repo state announcements with d, maintainers, and r tags
     async fn test_accept_valid_repo_state_announcement(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_valid_repo_state_announcement",
-            "GRASP-01:nostr-relay:3",
-            "Accept valid repository state announcements",
+            "GRASP-01:nostr-relay:6-7",
+            "Accept valid repository state announcements with required tags",
         )
         .run(|| async {
-            // TODO: Implementation
-            // 1. First send valid kind 30617 (repo announcement) - prerequisite
-            // 2. Create kind 30618 event with:
-            //    - d tag: same as repo announcement
-            //    - refs/heads/main tag: "{commit-sha}"
-            //    - HEAD tag: "ref: refs/heads/main"
-            // 3. Send state announcement
-            // 4. Verify acceptance
-            // 5. Query back to confirm stored
-            // 6. Verify all tags are preserved
+            // Create unique repository identifier
+            let timestamp = Timestamp::now().as_u64();
+            let repo_id = format!("test-repo-state-{}", timestamp);
             
-            Err("Not implemented yet".to_string())
+            // Create kind 30618 repository state announcement with required tags
+            let npub = client.public_key().to_bech32()
+                .map_err(|e| format!("Failed to convert public key to bech32: {}", e))?;
+            
+            let event = client.event_builder(Kind::Custom(30618), "")
+                .tag(Tag::identifier(&repo_id))
+                .tag(Tag::custom(TagKind::custom("maintainers"), vec![npub]))
+                .tag(Tag::custom(TagKind::custom("r"), vec!["refs/heads/main".to_string()]))
+                .build(client.keys())
+                .map_err(|e| format!("Failed to build repository state announcement: {}", e))?;
+            
+            let event_id = event.id;
+            
+            // Send the event
+            client.send_event(event.clone()).await
+                .map_err(|e| format!("Failed to send repository state announcement to relay: {}", e))?;
+            
+            // Query back to verify it was accepted and stored
+            let filter = Filter::new()
+                .kind(Kind::Custom(30618))
+                .author(client.public_key())
+                .identifier(&repo_id);
+            
+            let events = client.query(filter).await
+                .map_err(|e| format!("Failed to query events from relay: {}", e))?;
+            
+            // Verify we got the event back
+            if events.is_empty() {
+                return Err(format!(
+                    "Event was not stored in relay (possibly rejected). Event ID: {}, Repo ID: {}",
+                    event_id, repo_id
+                ));
+            }
+            
+            // Verify it's the same event
+            let stored_event = events.iter()
+                .find(|e| e.id == event_id)
+                .ok_or(format!(
+                    "Stored event ID doesn't match sent event. Expected: {}, Got {} events",
+                    event_id, events.len()
+                ))?;
+            
+            // Verify required tags are present
+            let has_d_tag = stored_event.tags.iter()
+                .any(|t| t.kind() == TagKind::d() && t.content() == Some(&repo_id));
+            
+            let has_maintainers_tag = stored_event.tags.iter()
+                .any(|t| t.kind() == TagKind::custom("maintainers"));
+            
+            let has_r_tag = stored_event.tags.iter()
+                .any(|t| {
+                    t.kind() == TagKind::custom("r") &&
+                    t.content().map(|c| c.contains("refs/heads/main")).unwrap_or(false)
+                });
+            
+            if !has_d_tag {
+                return Err(format!("Stored event missing d tag with repo identifier ({})", repo_id));
+            }
+            
+            if !has_maintainers_tag {
+                return Err("Stored event missing maintainers tag".to_string());
+            }
+            
+            if !has_r_tag {
+                return Err("Stored event missing r tag with git reference".to_string());
+            }
+            
+            Ok(())
         })
         .await
     }
