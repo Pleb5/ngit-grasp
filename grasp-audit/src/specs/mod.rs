@@ -1,7 +1,10 @@
 //! Test specifications
 
-pub mod grasp01_nostr_relay;
-pub mod nip01_smoke;
+pub mod grasp01;
 
-pub use grasp01_nostr_relay::Grasp01NostrRelayTests;
-pub use nip01_smoke::Nip01SmokeTests;
+// Re-export all test structs from grasp01 module
+pub use grasp01::{
+    EventAcceptancePolicyTests,
+    Nip01SmokeTests,
+    Nip11DocumentTests,
+};

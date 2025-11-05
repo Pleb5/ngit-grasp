@@ -232,6 +232,82 @@ impl AuditClient {
         
         Ok(event)
     }
+    
+    /// Create an issue (kind 1621) that references a repository
+    ///
+    /// # Arguments
+    /// * `repo_event` - The repository announcement event to reference
+    /// * `issue_title` - The subject/title of the issue
+    /// * `content` - The issue content/description
+    /// * `additional_tags` - Optional additional tags (e.g., for quoting other events)
+    ///
+    /// # Returns
+    /// A built and signed Event ready to be sent to the relay
+    pub fn create_issue(
+        &self,
+        repo_event: &Event,
+        issue_title: &str,
+        content: &str,
+        additional_tags: Vec<Tag>,
+    ) -> Result<Event> {
+        // Extract repo_id from the d tag
+        let repo_id = repo_event.tags.iter()
+            .find(|t| t.kind() == TagKind::d())
+            .and_then(|t| t.content())
+            .ok_or_else(|| anyhow!("Repository event must have a 'd' tag"))?
+            .to_string();
+        
+        let repo_pubkey = repo_event.pubkey;
+        let a_tag_value = format!("30617:{}:{}", repo_pubkey, repo_id);
+        
+        let mut tags = vec![
+            Tag::custom(TagKind::custom("a"), vec![a_tag_value]),
+            Tag::custom(TagKind::custom("subject"), vec![issue_title]),
+        ];
+        
+        // Add any additional tags
+        tags.extend(additional_tags);
+        
+        self.event_builder(Kind::Custom(1621), content)
+            .tags(tags)
+            .build(self.keys())
+            .map_err(|e| anyhow!("Failed to build issue event: {}", e))
+    }
+    
+    /// Create a NIP-22 comment (kind 1111) for an event
+    ///
+    /// # Arguments
+    /// * `event` - The event to comment on
+    /// * `content` - The comment content
+    /// * `additional_tags` - Optional additional tags
+    ///
+    /// # Returns
+    /// A built and signed Event ready to be sent to the relay
+    pub fn create_comment(
+        &self,
+        event: &Event,
+        content: &str,
+        additional_tags: Vec<Tag>,
+    ) -> Result<Event> {
+        let event_kind = event.kind;
+        let event_pubkey = event.pubkey;
+        let event_id = event.id;
+        
+        let mut tags = vec![
+            Tag::custom(TagKind::custom("E"), vec![event_id.to_hex(), "".to_string(), "root".to_string()]),
+            Tag::event(event_id),
+            Tag::custom(TagKind::custom("K"), vec![event_kind.as_u16().to_string()]),
+            Tag::public_key(event_pubkey),
+        ];
+        
+        // Add any additional tags
+        tags.extend(additional_tags);
+        
+        self.event_builder(Kind::Custom(1111), content)
+            .tags(tags)
+            .build(self.keys())
+            .map_err(|e| anyhow!("Failed to build comment event: {}", e))
+    }
 }
 
 #[cfg(test)]
