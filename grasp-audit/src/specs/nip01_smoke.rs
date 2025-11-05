@@ -295,9 +295,9 @@ mod tests {
     #[tokio::test]
     #[ignore] // Ignore by default since it needs a running relay
     async fn test_smoke_tests_against_relay() {
-        // Use RELAY_URL env var if set, otherwise default to localhost:7000
+        // RELAY_URL env var must be set - no default fallback
         let relay_url = std::env::var("RELAY_URL")
-            .unwrap_or_else(|_| "ws://localhost:7000".to_string());
+            .expect("RELAY_URL environment variable must be set for integration tests");
         
         let config = AuditConfig::ci();
         let client = AuditClient::new(&relay_url, config)

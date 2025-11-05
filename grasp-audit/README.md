@@ -142,13 +142,18 @@ Some NIP-01 smoke tests (like `send_receive_event`) will fail because ngit-relay
 non-Git events. This is expected behavior - the validation tests should still pass.
 
 ```bash
-# 1. Create temporary directories for clean state
-mkdir -p /tmp/ngit-test/{repos,blossom,relay-db,logs}
+# 1. Create temporary directory with unique name for clean state
+TEST_DIR=$(mktemp -d -t grasp-audit-run-XXXXXXXXXX)
+mkdir -p "$TEST_DIR"/{repos,blossom,relay-db,logs}
 
-# 2. Start ngit-relay with fresh data (using port 8082 to avoid conflicts)
+# 2. Pick a random port to avoid conflicts
+PORT=$((20000 + RANDOM % 10000))
+
+# 3. Start ngit-relay with fresh data
+CONTAINER_NAME="grasp-audit-run-$"
 docker run --rm -d \
-  --name ngit-relay-test \
-  -p 8082:8081 \
+  --name "$CONTAINER_NAME" \
+  -p "$PORT:8081" \
   -e NGIT_DOMAIN=localhost \
   -e NGIT_RELAY_NAME="ngit-relay test instance" \
   -e NGIT_RELAY_DESCRIPTION="Test instance for grasp-audit" \
@@ -157,17 +162,17 @@ docker run --rm -d \
   -e NGIT_PROACTIVE_SYNC_BLOSSOM=false \
   -e NGIT_PROACTIVE_SYNC_NOSTR=false \
   -e NGIT_LOG_LEVEL=INFO \
-  -v /tmp/ngit-test/repos:/srv/ngit-relay/repos \
-  -v /tmp/ngit-test/blossom:/srv/ngit-relay/blossom \
-  -v /tmp/ngit-test/relay-db:/srv/ngit-relay/relay-db \
-  -v /tmp/ngit-test/logs:/var/log/ngit-relay \
+  -v "$TEST_DIR/repos:/srv/ngit-relay/repos" \
+  -v "$TEST_DIR/blossom:/srv/ngit-relay/blossom" \
+  -v "$TEST_DIR/relay-db:/srv/ngit-relay/relay-db" \
+  -v "$TEST_DIR/logs:/var/log/ngit-relay" \
   ghcr.io/danconwaydev/ngit-relay:latest
 
-# 3. Wait for relay to start
+# 4. Wait for relay to start
 sleep 3
 
-# 4. Run tests against ngit-relay on port 8082
-RELAY_URL=ws://localhost:8082 cargo test --ignored
+# 5. Run tests against ngit-relay
+RELAY_URL="ws://localhost:$PORT" cargo test --ignored
 
 # Expected results when testing against ngit-relay:
 # - ✓ websocket_connection (basic connectivity)
@@ -187,9 +192,10 @@ RELAY_URL=ws://localhost:8082 cargo test --ignored
 # The test will exit with an error, but the validation tests passing
 # is what matters for GRASP compliance.
 
-# 5. Stop and cleanup
-docker stop ngit-relay-test
-rm -rf /tmp/ngit-test
+# 6. Stop and cleanup
+docker stop "$CONTAINER_NAME"
+docker run --rm -v "$TEST_DIR:/data" alpine sh -c "rm -rf /data/*" 2>/dev/null || true
+rm -rf "$TEST_DIR"
 ```
 
 **Why fresh directories?**
@@ -235,14 +241,37 @@ Save this as `test-ngit-relay.sh`:
 #!/bin/bash
 set -e
 
-echo "🧹 Cleaning up old test data..."
-rm -rf /tmp/ngit-test
-mkdir -p /tmp/ngit-test/{repos,blossom,relay-db,logs}
+# Create temporary directory with random name
+TEST_DIR=$(mktemp -d -t grasp-audit-run-XXXXXXXXXX)
+# Pick a random port in the range 20000-30000
+PORT=$((20000 + RANDOM % 10000))
+
+echo "🧹 Using temporary directory: $TEST_DIR"
+echo "🔌 Using port: $PORT"
+
+# Cleanup function
+cleanup() {
+    echo "🛑 Stopping relay..."
+    docker stop "grasp-audit-run-$" 2>/dev/null || true
+    
+    echo "🧹 Cleaning up temporary directory..."
+    docker run --rm -v "$TEST_DIR:/data" alpine sh -c "rm -rf /data/*" 2>/dev/null || true
+    rm -rf "$TEST_DIR"
+}
+
+# Set trap to cleanup on exit
+trap cleanup EXIT
+
+echo "📁 Creating data directories..."
+mkdir -p "$TEST_DIR"/{repos,blossom,relay-db,logs}
 
 echo "🚀 Starting ngit-relay..."
+# Remove any existing container with this name
+CONTAINER_NAME="grasp-audit-run-$"
+docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
 docker run --rm -d \
-  --name ngit-relay-test \
-  -p 8081:8081 \
+  --name "$CONTAINER_NAME" \
+  -p "$PORT:8081" \
   -e NGIT_DOMAIN=localhost \
   -e NGIT_RELAY_NAME="ngit-relay test instance" \
   -e NGIT_RELAY_DESCRIPTION="Test instance for grasp-audit" \
@@ -251,23 +280,22 @@ docker run --rm -d \
   -e NGIT_PROACTIVE_SYNC_BLOSSOM=false \
   -e NGIT_PROACTIVE_SYNC_NOSTR=false \
   -e NGIT_LOG_LEVEL=INFO \
-  -v /tmp/ngit-test/repos:/srv/ngit-relay/repos \
-  -v /tmp/ngit-test/blossom:/srv/ngit-relay/blossom \
-  -v /tmp/ngit-test/relay-db:/srv/ngit-relay/relay-db \
-  -v /tmp/ngit-test/logs:/var/log/ngit-relay \
+  -v "$TEST_DIR/repos:/srv/ngit-relay/repos" \
+  -v "$TEST_DIR/blossom:/srv/ngit-relay/blossom" \
+  -v "$TEST_DIR/relay-db:/srv/ngit-relay/relay-db" \
+  -v "$TEST_DIR/logs:/var/log/ngit-relay" \
   ghcr.io/danconwaydev/ngit-relay:latest
 
 echo "⏳ Waiting for relay to start..."
 sleep 3
 
 echo "🧪 Running tests..."
-cargo test --ignored
-
-echo "🛑 Stopping relay..."
-docker stop ngit-relay-test
-
-echo "🧹 Cleaning up..."
-rm -rf /tmp/ngit-test
+echo ""
+echo "Note: ngit-relay only accepts Git-related events (NIP-34)."
+echo "Some NIP-01 smoke tests will fail (expected behavior)."
+echo "Validation tests should pass."
+echo ""
+RELAY_URL="ws://localhost:$PORT" cargo test --lib -- --ignored --nocapture
 
 echo "✅ Done!"
 ```

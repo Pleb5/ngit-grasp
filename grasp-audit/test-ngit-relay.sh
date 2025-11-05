@@ -1,17 +1,37 @@
 #!/bin/bash
 set -e
 
-echo "🧹 Cleaning up old test data..."
-# Use docker to cleanup with proper permissions
-docker run --rm -v /tmp/ngit-test:/data alpine sh -c "rm -rf /data/*" 2>/dev/null || true
-mkdir -p /tmp/ngit-test/{repos,blossom,relay-db,logs}
+# Create temporary directory with random name
+TEST_DIR=$(mktemp -d -t grasp-audit-run-XXXXXXXXXX)
+# Pick a random port in the range 20000-30000
+PORT=$((20000 + RANDOM % 10000))
+
+echo "🧹 Using temporary directory: $TEST_DIR"
+echo "🔌 Using port: $PORT"
+
+# Cleanup function
+cleanup() {
+    echo "🛑 Stopping relay..."
+    docker stop "grasp-audit-run-$" 2>/dev/null || true
+    
+    echo "🧹 Cleaning up temporary directory..."
+    docker run --rm -v "$TEST_DIR:/data" alpine sh -c "rm -rf /data/*" 2>/dev/null || true
+    rm -rf "$TEST_DIR"
+}
+
+# Set trap to cleanup on exit
+trap cleanup EXIT
+
+echo "📁 Creating data directories..."
+mkdir -p "$TEST_DIR"/{repos,blossom,relay-db,logs}
 
 echo "🚀 Starting ngit-relay..."
 # Remove any existing container with this name
-docker rm -f ngit-relay-test 2>/dev/null || true
+CONTAINER_NAME="grasp-audit-run-$"
+docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
 docker run --rm -d \
-  --name ngit-relay-test \
-  -p 8082:8081 \
+  --name "$CONTAINER_NAME" \
+  -p "$PORT:8081" \
   -e NGIT_DOMAIN=localhost \
   -e NGIT_RELAY_NAME="ngit-relay test instance" \
   -e NGIT_RELAY_DESCRIPTION="Test instance for grasp-audit" \
@@ -20,10 +40,10 @@ docker run --rm -d \
   -e NGIT_PROACTIVE_SYNC_BLOSSOM=false \
   -e NGIT_PROACTIVE_SYNC_NOSTR=false \
   -e NGIT_LOG_LEVEL=INFO \
-  -v /tmp/ngit-test/repos:/srv/ngit-relay/repos \
-  -v /tmp/ngit-test/blossom:/srv/ngit-relay/blossom \
-  -v /tmp/ngit-test/relay-db:/srv/ngit-relay/relay-db \
-  -v /tmp/ngit-test/logs:/var/log/ngit-relay \
+  -v "$TEST_DIR/repos:/srv/ngit-relay/repos" \
+  -v "$TEST_DIR/blossom:/srv/ngit-relay/blossom" \
+  -v "$TEST_DIR/relay-db:/srv/ngit-relay/relay-db" \
+  -v "$TEST_DIR/logs:/var/log/ngit-relay" \
   ghcr.io/danconwaydev/ngit-relay:latest
 
 echo "⏳ Waiting for relay to start..."
@@ -35,12 +55,6 @@ echo "Note: ngit-relay only accepts Git-related events (NIP-34)."
 echo "Some NIP-01 smoke tests will fail (expected behavior)."
 echo "Validation tests should pass."
 echo ""
-RELAY_URL=ws://localhost:8082 cargo test --lib -- --ignored --nocapture
-
-echo "🛑 Stopping relay..."
-docker stop ngit-relay-test
-
-echo "🧹 Cleaning up..."
-docker run --rm -v /tmp/ngit-test:/data alpine sh -c "rm -rf /data/*" 2>/dev/null || true
+RELAY_URL="ws://localhost:$PORT" cargo test --lib -- --ignored --nocapture
 
 echo "✅ Done!"
