@@ -94,23 +94,35 @@ Basic Nostr relay functionality:
 
 ## Audit Event Strategy
 
-All audit events include special tags:
+All audit events automatically include special tags for isolation and cleanup:
 
 ```json
 {
   "tags": [
-    ["t", "grasp-audit"],
-    ["r", "audit-run-id-ci-a1b2c3d4-e5f6-7890-abcd-ef1234567890"],
-    ["r", "audit-cleanup-2025-11-03T12:00:00Z"]
+    ["t", "grasp-audit-test-event"],
+    ["t", "audit-ci-a1b2c3d4-e5f6-7890-abcd-ef1234567890"],
+    ["t", "audit-cleanup-after-1730822334"]
   ]
 }
 ```
 
-This allows:
+**Tag Format:**
 
-- **Isolation**: Each test run has unique ID
-- **Cleanup**: Events marked for cleanup after timestamp
-- **No deletion trails**: Direct database cleanup (no NIP-09 deletion events)
+- `["t", "grasp-audit-test-event"]` - Identifies all audit-related events
+- `["t", "audit-{run_id}"]` - Unique identifier for each audit run
+  - CI mode: `audit-ci-{uuid}`
+  - Production mode: `audit-prod-audit-{timestamp}`
+- `["t", "audit-cleanup-after-{unix_timestamp}"]` - Cleanup scheduling
+  - CI mode: Current time + 3600 seconds (1 hour)
+  - Production mode: Current time + 300 seconds (5 minutes)
+
+**Benefits:**
+
+- **Automatic**: Tags added automatically to all events via `AuditEventBuilder`
+- **Isolation**: Each test run has unique ID for event filtering
+- **Cleanup**: Events marked for cleanup after timestamp (direct database cleanup)
+- **No deletion trails**: No NIP-09 deletion events needed
+- **Discovery**: Easy to query all audit events via hashtag
 
 ## Modes
 

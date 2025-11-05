@@ -158,6 +158,46 @@ EventBuilder::new(kind, content).tags(tags)
 
 See `docs/archive/2025-11-04-nostr-sdk-upgrade.md` for full migration.
 
+### Audit Event Tagging (grasp-audit)
+
+**All audit events automatically include cleanup tags:**
+
+The grasp-audit system automatically adds three tags to every event for production cleanup and test isolation. These tags are added transparently via [`AuditEventBuilder::build()`](grasp-audit/src/audit.rs:120-129) with 100% coverage through [`AuditClient::event_builder()`](grasp-audit/src/client.rs:107-138).
+
+**Automatic Tags (no manual intervention needed):**
+
+```rust
+// These tags are automatically added to EVERY audit event:
+["t", "grasp-audit-test-event"]              // Identifies all audit test events
+["t", "audit-{run_id}"]                      // Unique ID for this audit run (correlates events)
+["t", "audit-cleanup-after-{unix_timestamp}"] // Unix timestamp for cleanup scheduling
+```
+
+**Tag Format Details:**
+
+- Uses standard NIP-01 `"t"` (hashtag) tags for maximum compatibility
+- Unix timestamps (not ISO 8601) for easier database queries
+- All tags added automatically when calling `client.event_builder().build()`
+- No manual tag management required
+
+**Verifying Tags in Tests:**
+
+```rust
+// Test that verifies automatic tag addition:
+// See: grasp-audit/src/client.rs:273-302
+#[test]
+fn test_audit_tags_automatically_added() {
+    // Creates event and verifies all three tags are present
+}
+```
+
+**Testing Implications:**
+
+- All audit events are tagged for easy cleanup
+- Use `run_id` tag to correlate events from same audit run
+- Tags enable production relay cleanup scripts
+- No special handling needed in test code - tags are automatic
+
 ## Documentation
 
 **Diátaxis Framework Used:**

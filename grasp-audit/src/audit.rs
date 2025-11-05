@@ -61,7 +61,45 @@ impl AuditConfig {
         }
     }
     
-    /// Get audit tags for an event
+    /// Get audit tags that are automatically added to all events
+    ///
+    /// These tags are automatically added to all events created via [`AuditEventBuilder`].
+    /// They provide isolation, cleanup scheduling, and easy discovery of audit events.
+    ///
+    /// # Tag Format
+    ///
+    /// All tags use the `"t"` (hashtag) format for maximum relay compatibility:
+    ///
+    /// 1. `["t", "grasp-audit-test-event"]` - Identifies all audit-related events
+    /// 2. `["t", "audit-{run_id}"]` - Unique identifier for this audit run
+    ///    - CI mode: `audit-ci-{uuid}`
+    ///    - Production mode: `audit-prod-audit-{timestamp}`
+    /// 3. `["t", "audit-cleanup-after-{unix_timestamp}"]` - Cleanup timestamp
+    ///    - CI mode: Current time + 3600 seconds (1 hour)
+    ///    - Production mode: Current time + 300 seconds (5 minutes)
+    ///
+    /// # Purpose
+    ///
+    /// - **Isolation**: Each test run has a unique ID for event filtering in CI mode
+    /// - **Cleanup**: Events marked for cleanup after timestamp (enables direct DB cleanup)
+    /// - **Discovery**: Easy to query all audit events via hashtag
+    /// - **No deletion trails**: Avoids NIP-09 deletion events by using direct cleanup
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use grasp_audit::AuditConfig;
+    ///
+    /// let config = AuditConfig::ci();
+    /// let tags = config.audit_tags();
+    ///
+    /// // Tags will look like:
+    /// // [
+    /// //   ["t", "grasp-audit-test-event"],
+    /// //   ["t", "audit-ci-a1b2c3d4-e5f6-7890-abcd-ef1234567890"],
+    /// //   ["t", "audit-cleanup-after-1730822334"]
+    /// // ]
+    /// ```
     pub fn audit_tags(&self) -> Vec<Tag> {
         use nostr_sdk::prelude::{Alphabet, SingleLetterTag};
         

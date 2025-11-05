@@ -104,7 +104,38 @@ impl AuditClient {
         Ok(event_id)
     }
     
-    /// Create an event builder with audit tags
+    /// Create an event builder that automatically includes audit tags
+    ///
+    /// All events built through this method will automatically have audit tags appended
+    /// when you call `.build()`. These tags provide isolation, cleanup scheduling, and
+    /// easy discovery of audit events.
+    ///
+    /// # Automatic Tags Added
+    ///
+    /// When you call `.build()` on the returned builder, these tags will be automatically added:
+    /// - `["t", "grasp-audit-test-event"]` - Identifies all audit events
+    /// - `["t", "audit-{run_id}"]` - Unique ID for this audit run
+    /// - `["t", "audit-cleanup-after-{timestamp}"]` - Cleanup scheduling
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use grasp_audit::*;
+    /// # async fn example() -> anyhow::Result<()> {
+    /// let config = AuditConfig::ci();
+    /// let client = AuditClient::new("ws://localhost:7000", config).await?;
+    ///
+    /// // Create event with automatic audit tags
+    /// let event = client.event_builder(Kind::TextNote, "test content")
+    ///     .tag(Tag::custom(TagKind::custom("custom"), vec!["value"]))
+    ///     .build(client.keys())?;
+    ///
+    /// // Event now has both your custom tag AND the 3 audit tags
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// See [`AuditConfig::audit_tags()`] for details on the tag format.
     pub fn event_builder(&self, kind: Kind, content: impl Into<String>) -> AuditEventBuilder {
         AuditEventBuilder::new(kind, content, self.config.clone())
     }
@@ -236,5 +267,50 @@ mod tests {
         
         // Builder should be created successfully
         // (We can't test the internal config field as it's private, which is correct)
+    }
+    
+    #[test]
+    fn test_audit_tags_automatically_added() {
+        let config = AuditConfig::ci();
+        let keys = Keys::generate();
+        let client = AuditClient {
+            client: Client::new(keys.clone()),
+            config: config.clone(),
+            keys: keys.clone(),
+        };
+        
+        // Create an event with a custom tag
+        let event = client.event_builder(Kind::TextNote, "test content")
+            .tag(Tag::custom(TagKind::custom("custom"), vec!["value"]))
+            .build(&keys)
+            .unwrap();
+        
+        // Should have custom tag (1) + 3 audit tags = at least 4 tags
+        assert!(event.tags.len() >= 4, "Expected at least 4 tags, got {}", event.tags.len());
+        
+        // Verify audit tags are present by checking tag content
+        let tag_contents: Vec<String> = event.tags.iter()
+            .filter_map(|t| t.content().map(|s| s.to_string()))
+            .collect();
+        
+        // Check for the three required audit tags
+        assert!(
+            tag_contents.contains(&"grasp-audit-test-event".to_string()),
+            "Missing 'grasp-audit-test-event' tag"
+        );
+        assert!(
+            tag_contents.iter().any(|t| t.starts_with("audit-ci-")),
+            "Missing 'audit-ci-*' tag"
+        );
+        assert!(
+            tag_contents.iter().any(|t| t.starts_with("audit-cleanup-after-")),
+            "Missing 'audit-cleanup-after-*' tag"
+        );
+        
+        // Verify the custom tag is also present
+        assert!(
+            tag_contents.contains(&"value".to_string()),
+            "Missing custom tag value"
+        );
     }
 }
