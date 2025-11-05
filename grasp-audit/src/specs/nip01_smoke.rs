@@ -10,6 +10,43 @@ use nostr_sdk::prelude::*;
 pub struct Nip01SmokeTests;
 
 impl Nip01SmokeTests {
+    /// Create a NIP-34 repository announcement event
+    ///
+    /// This helper creates a properly formatted NIP-34 announcement that will be
+    /// accepted by GRASP relays (which require events to list the relay in clone/relays tags).
+    async fn create_announcement_event(client: &AuditClient, test_name: &str) -> Result<Event, String> {
+        // Get relay URL from client
+        let relay_url = client.client().relays().await
+            .keys()
+            .next()
+            .ok_or("No relay URL found")?
+            .to_string();
+        
+        // Convert ws:// to http:// for clone URL
+        let http_url = relay_url
+            .replace("ws://", "http://")
+            .replace("wss://", "https://");
+        
+        // Create unique repository identifier
+        let repo_id = format!("{}-{}", test_name, uuid::Uuid::new_v4());
+        let npub = client.public_key().to_bech32()
+            .map_err(|e| format!("Failed to encode npub: {}", e))?;
+        
+        // Create NIP-34 repository announcement (kind 30617)
+        // This event lists the GRASP server, so it should be accepted
+        let event = client
+            .event_builder(Kind::Custom(30617), format!("NIP-01 smoke test repository: {}", test_name))
+            .tag(Tag::identifier(&repo_id))  // d tag
+            .tag(Tag::custom(TagKind::Custom("name".into()), vec![format!("{} Test Repo", test_name)]))
+            .tag(Tag::custom(TagKind::Custom("description".into()), vec![format!("Repository for {} smoke testing", test_name)]))
+            .tag(Tag::custom(TagKind::Custom("clone".into()), vec![format!("{}/{}/{}.git", http_url, npub, repo_id)]))
+            .tag(Tag::custom(TagKind::Custom("relays".into()), vec![relay_url.clone()]))
+            .build(client.keys())
+            .map_err(|e| format!("Failed to build event: {}", e))?;
+        
+        Ok(event)
+    }
+    
     /// Run all NIP-01 smoke tests
     pub async fn run_all(client: &AuditClient) -> AuditResult {
         let mut results = AuditResult::new("NIP-01 Smoke Tests");
@@ -59,34 +96,8 @@ impl Nip01SmokeTests {
             "Can send EVENT and receive OK response",
         )
         .run(|| async {
-            // Get relay URL from client
-            let relay_url = client.client().relays().await
-                .keys()
-                .next()
-                .ok_or("No relay URL found")?
-                .to_string();
-            
-            // Convert ws:// to http:// for clone URL
-            let http_url = relay_url
-                .replace("ws://", "http://")
-                .replace("wss://", "https://");
-            
-            // Create unique repository identifier
-            let repo_id = format!("smoke-test-{}", uuid::Uuid::new_v4());
-            let npub = client.public_key().to_bech32()
-                .map_err(|e| format!("Failed to encode npub: {}", e))?;
-            
-            // Create NIP-34 repository announcement (kind 30617)
-            // This event lists the GRASP server, so it should be accepted
-            let event = client
-                .event_builder(Kind::Custom(30617), "NIP-01 smoke test repository")
-                .tag(Tag::identifier(&repo_id))  // d tag
-                .tag(Tag::custom(TagKind::Custom("name".into()), vec!["Smoke Test Repo"]))
-                .tag(Tag::custom(TagKind::Custom("description".into()), vec!["Repository for NIP-01 smoke testing"]))
-                .tag(Tag::custom(TagKind::Custom("clone".into()), vec![format!("{}/{}/{}.git", http_url, npub, repo_id)]))
-                .tag(Tag::custom(TagKind::Custom("relays".into()), vec![relay_url.clone()]))
-                .build(client.keys())
-                .map_err(|e| format!("Failed to build event: {}", e))?;
+            // Create a NIP-34 announcement event
+            let event = Self::create_announcement_event(client, "send_receive_event").await?;
             
             // Send event
             let event_id = client
@@ -149,20 +160,17 @@ impl Nip01SmokeTests {
             "Can create subscription with REQ and receive EOSE",
         )
         .run(|| async {
-            // Create a test event first
-            let event = client
-                .event_builder(Kind::TextNote, "Subscription test event")
-                .build(client.keys())
-                .map_err(|e| format!("Failed to build event: {}", e))?;
+            // Create a NIP-34 announcement event (accepted by GRASP relays)
+            let event = Self::create_announcement_event(client, "create_subscription").await?;
             
-            client
+            let event_id = client
                 .send_event(event.clone())
                 .await
                 .map_err(|e| format!("Failed to send event: {}", e))?;
             
-            // Subscribe to events
+            // Subscribe to NIP-34 announcements from this author
             let filter = Filter::new()
-                .kind(Kind::TextNote)
+                .kind(Kind::Custom(30617))
                 .author(client.public_key());
             
             let events = client
