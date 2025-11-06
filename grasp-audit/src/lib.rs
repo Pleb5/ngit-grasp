@@ -29,12 +29,14 @@
 //! ```
 
 pub mod audit;
+pub mod fixtures;
 pub mod client;
 pub mod isolation;
 pub mod result;
 pub mod specs;
 
 pub use audit::{AuditConfig, AuditMode};
+pub use fixtures::{ContextMode, FixtureKind, TestContext};
 pub use client::AuditClient;
 pub use result::{AuditResult, TestResult};
 

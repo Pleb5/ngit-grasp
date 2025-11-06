@@ -13,6 +13,18 @@ pub struct AuditClient {
 }
 
 impl AuditClient {
+    /// Create a new audit client for testing (no relay connection)
+    #[cfg(test)]
+    pub fn new_test(config: AuditConfig) -> Self {
+        let keys = Keys::generate();
+        let client = Client::new(keys.clone());
+        Self {
+            client,
+            config,
+            keys,
+        }
+    }
+    
     /// Create a new audit client
     pub async fn new(relay_url: &str, config: AuditConfig) -> Result<Self> {
         let keys = Keys::generate();
@@ -216,7 +228,7 @@ impl AuditClient {
             .replace("wss://", "https://");
         
         // Create unique repository identifier using UUID for consistency
-        let repo_id = format!("{}-{}", test_name, uuid::Uuid::new_v4());
+        let repo_id = format!("{}-{}", test_name, &uuid::Uuid::new_v4().to_string()[..8]);
         
         // Get npub for clone URL
         let npub = self.public_key().to_bech32()

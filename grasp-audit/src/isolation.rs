@@ -17,7 +17,7 @@ pub fn generate_test_id() -> String {
 
 /// Generate a unique audit run ID for CI
 pub fn generate_ci_run_id() -> String {
-    format!("ci-{}", uuid::Uuid::new_v4())
+    format!("ci-{}", &uuid::Uuid::new_v4().to_string()[..8])
 }
 
 /// Generate a unique audit run ID for production

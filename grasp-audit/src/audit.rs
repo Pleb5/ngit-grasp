@@ -31,7 +31,7 @@ pub enum AuditMode {
 impl AuditConfig {
     /// Create config for CI/CD testing
     pub fn ci() -> Self {
-        let run_id = format!("ci-{}", uuid::Uuid::new_v4());
+        let run_id = format!("ci-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         Self {
             run_id,
             mode: AuditMode::CI,
