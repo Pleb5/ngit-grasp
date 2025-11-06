@@ -93,9 +93,11 @@ impl AuditClient {
         let output = self.client.send_event(&event).await?;
         let event_id = *output.id();
         
-        // Check if any relay rejected the event
-        if output.success.is_empty() && !output.failed.is_empty() {
-            return Err(anyhow!("All relays rejected the event"));
+        // Check if any relay rejected the event and return the error message
+        if !output.failed.is_empty() {
+            // Get the first failed relay error message
+            let (relay_url, error) = output.failed.iter().next().unwrap();
+            return Err(anyhow!("Relay {} rejected event: {}", relay_url, error));
         }
         
         // Wait a bit for event to propagate

@@ -480,8 +480,7 @@ impl EventAcceptancePolicyTests {
     ) -> Result<(), String> {
         let event_id = event.id;
         
-        client.send_event(event).await
-            .map_err(|e| e.to_string())?;
+        client.send_event(event).await?;
         
         tokio::time::sleep(Duration::from_millis(100)).await;
         
