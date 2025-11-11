@@ -199,18 +199,25 @@ impl<'a> TestContext<'a> {
             }
             
             FixtureKind::RepoWithIssue => {
-                // First create repo
+                use nostr_sdk::prelude::*;
+                
+                // First create and send repo
                 let test_name = format!("fixture-{:?}-{}", FixtureKind::ValidRepo, &uuid::Uuid::new_v4().to_string()[..8]);
                 let repo = self.client.create_repo_announcement(&test_name).await?;
                 self.client.send_event(repo.clone()).await?;
                 
-                // Then create issue referencing it
-                self.client.create_issue(
+                // Then create issue referencing it - this will have 'a' tag to repo
+                // Note: We build the issue but DON'T send it here - the caller will send it
+                let issue = self.client.create_issue(
                     &repo,
                     "Test Issue",
                     "Issue content for testing",
                     vec![],
-                )
+                )?;
+                
+                // Return the issue - tests can extract repo reference from its 'a' tag
+                // The caller (create_fresh/get_or_create_shared) will send this event
+                Ok(issue)
             }
             
             FixtureKind::RepoWithComment => {

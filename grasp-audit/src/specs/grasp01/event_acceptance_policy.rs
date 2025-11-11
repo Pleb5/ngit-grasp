@@ -645,26 +645,9 @@ impl EventAcceptancePolicyTests {
             // Create TestContext
             let ctx = TestContext::new(client);
             
-            // Get repo with issue fixture (mode-aware)
-            let repo_a = ctx.get_fixture(FixtureKind::RepoWithIssue).await
+            // Get repo with issue fixture (mode-aware) - returns the issue event
+            let issue_a = ctx.get_fixture(FixtureKind::RepoWithIssue).await
                 .map_err(|e| format!("Test setup failed: could not get repo with issue fixture: {}", e))?;
-            
-            // Extract the issue from the repo_a event (it's stored as the first 'e' tag)
-            let issue_a_id = repo_a.tags.iter()
-                .find(|t| t.kind() == TagKind::e())
-                .and_then(|t| t.content())
-                .ok_or("Missing issue reference in RepoWithIssue fixture")?;
-            
-            // Query to get the actual issue event
-            let filter = Filter::new().id(
-                nostr_sdk::EventId::from_hex(issue_a_id)
-                    .map_err(|e| format!("Invalid issue ID: {}", e))?
-            );
-            let issues = client.query(filter).await
-                .map_err(|e| format!("Failed to query issue: {}", e))?;
-            let issue_a = issues.first()
-                .ok_or("Issue not found")?
-                .clone();
             
             // Create Repo B but DON'T send it (unaccepted) - just for creating Issue B
             let repo_b = Self::create_test_repo(client, "repo-b").await?;
@@ -701,26 +684,9 @@ impl EventAcceptancePolicyTests {
             // Create TestContext
             let ctx = TestContext::new(client);
             
-            // Get repo with issue fixture (mode-aware)
-            let repo = ctx.get_fixture(FixtureKind::RepoWithIssue).await
+            // Get repo with issue fixture (mode-aware) - returns the issue event
+            let issue = ctx.get_fixture(FixtureKind::RepoWithIssue).await
                 .map_err(|e| format!("Test setup failed: could not get repo with issue fixture: {}", e))?;
-            
-            // Extract the issue from the repo event (it's stored as the first 'e' tag)
-            let issue_id = repo.tags.iter()
-                .find(|t| t.kind() == TagKind::e())
-                .and_then(|t| t.content())
-                .ok_or("Missing issue reference in RepoWithIssue fixture")?;
-            
-            // Query to get the actual issue event
-            let filter = Filter::new().id(
-                nostr_sdk::EventId::from_hex(issue_id)
-                    .map_err(|e| format!("Invalid issue ID: {}", e))?
-            );
-            let issues = client.query(filter).await
-                .map_err(|e| format!("Failed to query issue: {}", e))?;
-            let issue = issues.first()
-                .ok_or("Issue not found")?
-                .clone();
             
             // Create comment using the helper (which adds NIP-22 tags including 'E')
             let comment = Self::create_comment_for_event(client, &issue, "Comment content")?;
