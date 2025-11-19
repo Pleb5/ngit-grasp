@@ -1,12 +1,11 @@
 /// NIP-34 Git Repository Event Handling
-/// 
-/// This module handles Git repository announcements (kind 30617) and 
+///
+/// This module handles Git repository announcements (kind 30617) and
 /// repository state announcements (kind 30618) according to NIP-34 and GRASP-01.
 ///
 /// Reference:
 /// - NIP-34: https://nips.nostr.com/34
 /// - GRASP-01: https://gitworkshop.dev/danconwaydev.com/grasp/01.md
-
 use anyhow::{anyhow, Result};
 use nostr_sdk::{Event, Kind, TagKind, ToBech32};
 
@@ -138,8 +137,8 @@ impl RepositoryAnnouncement {
     }
 
     /// Check if this announcement lists the service (both clone and relay)
-    /// 
-    /// GRASP-01 requirement: MUST reject announcements that do not list 
+    ///
+    /// GRASP-01 requirement: MUST reject announcements that do not list
     /// the service in both `clone` and `relays` tags unless implementing GRASP-05.
     pub fn lists_service(&self, domain: &str) -> bool {
         self.has_clone_url(domain) && self.has_relay(domain)
@@ -278,19 +277,19 @@ impl RepositoryState {
 }
 
 /// Validate a repository announcement according to GRASP-01
-/// 
+///
 /// Returns Ok(()) if valid, Err with reason if invalid.
 pub fn validate_announcement(event: &Event, domain: &str) -> Result<()> {
     // Must be kind 30617
     if event.kind != Kind::from(KIND_REPOSITORY_ANNOUNCEMENT) {
-        return Err(anyhow!("Invalid kind: expected {}", KIND_REPOSITORY_ANNOUNCEMENT));
+        return Err(anyhow!(
+            "Invalid kind: expected {}",
+            KIND_REPOSITORY_ANNOUNCEMENT
+        ));
     }
 
     // Must have identifier
-    let has_identifier = event
-        .tags
-        .iter()
-        .any(|t| t.kind() == TagKind::d());
+    let has_identifier = event.tags.iter().any(|t| t.kind() == TagKind::d());
     if !has_identifier {
         return Err(anyhow!("Missing required 'd' tag (identifier)"));
     }
@@ -298,7 +297,7 @@ pub fn validate_announcement(event: &Event, domain: &str) -> Result<()> {
     // Parse full announcement to validate structure
     let announcement = RepositoryAnnouncement::from_event(event.clone())?;
 
-    // GRASP-01: MUST reject announcements that do not list the service 
+    // GRASP-01: MUST reject announcements that do not list the service
     // in both `clone` and `relays` tags unless implementing GRASP-05
     if !announcement.lists_service(domain) {
         return Err(anyhow!(
@@ -313,7 +312,7 @@ pub fn validate_announcement(event: &Event, domain: &str) -> Result<()> {
 }
 
 /// Validate a repository state announcement according to GRASP-01
-/// 
+///
 /// Returns Ok(()) if valid, Err with reason if invalid.
 pub fn validate_state(event: &Event) -> Result<()> {
     // Must be kind 30618
@@ -322,10 +321,7 @@ pub fn validate_state(event: &Event) -> Result<()> {
     }
 
     // Must have identifier
-    let has_identifier = event
-        .tags
-        .iter()
-        .any(|t| t.kind() == TagKind::d());
+    let has_identifier = event.tags.iter().any(|t| t.kind() == TagKind::d());
     if !has_identifier {
         return Err(anyhow!("Missing required 'd' tag (identifier)"));
     }
@@ -352,7 +348,7 @@ mod tests {
         relays: Vec<&str>,
     ) -> Event {
         use nostr_sdk::Tag;
-        
+
         let mut tags = vec![Tag::custom(
             nostr_sdk::TagKind::d(),
             vec![identifier.to_string()],
@@ -372,18 +368,15 @@ mod tests {
             ));
         }
 
-        EventBuilder::new(
-            Kind::from(KIND_REPOSITORY_ANNOUNCEMENT),
-            "Test repository",
-        )
-        .tags(tags)
-        .sign_with_keys(keys)
-        .unwrap()
+        EventBuilder::new(Kind::from(KIND_REPOSITORY_ANNOUNCEMENT), "Test repository")
+            .tags(tags)
+            .sign_with_keys(keys)
+            .unwrap()
     }
 
     fn create_state_event(keys: &Keys, identifier: &str, branches: Vec<(&str, &str)>) -> Event {
         use nostr_sdk::Tag;
-        
+
         let mut tags = vec![Tag::custom(
             nostr_sdk::TagKind::d(),
             vec![identifier.to_string()],
@@ -392,10 +385,7 @@ mod tests {
         for (branch, commit) in branches {
             tags.push(Tag::custom(
                 nostr_sdk::TagKind::Custom("ref".into()),
-                vec![
-                    format!("refs/heads/{}", branch),
-                    commit.to_string(),
-                ],
+                vec![format!("refs/heads/{}", branch), commit.to_string()],
             ));
         }
 
@@ -428,12 +418,9 @@ mod tests {
     #[test]
     fn test_parse_announcement_missing_identifier() {
         let keys = create_test_keys();
-        let event = EventBuilder::new(
-            Kind::from(KIND_REPOSITORY_ANNOUNCEMENT),
-            "Test repository",
-        )
-        .sign_with_keys(&keys)
-        .unwrap();
+        let event = EventBuilder::new(Kind::from(KIND_REPOSITORY_ANNOUNCEMENT), "Test repository")
+            .sign_with_keys(&keys)
+            .unwrap();
 
         let result = RepositoryAnnouncement::from_event(event);
         assert!(result.is_err());
@@ -539,7 +526,7 @@ mod tests {
     #[test]
     fn test_announcement_maintainers() {
         use nostr_sdk::Tag;
-        
+
         let keys = create_test_keys();
         let maintainer_keys = create_test_keys();
 
@@ -558,13 +545,10 @@ mod tests {
         // Add maintainer
         tags.push(Tag::public_key(maintainer_keys.public_key()));
 
-        let event = EventBuilder::new(
-            Kind::from(KIND_REPOSITORY_ANNOUNCEMENT),
-            "Test repository",
-        )
-        .tags(tags)
-        .sign_with_keys(&keys)
-        .unwrap();
+        let event = EventBuilder::new(Kind::from(KIND_REPOSITORY_ANNOUNCEMENT), "Test repository")
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .unwrap();
 
         let announcement = RepositoryAnnouncement::from_event(event).unwrap();
         assert_eq!(announcement.maintainers.len(), 1);
@@ -573,7 +557,7 @@ mod tests {
     #[test]
     fn test_state_with_tags() {
         use nostr_sdk::Tag;
-        
+
         let keys = create_test_keys();
         let mut tags = vec![Tag::custom(
             nostr_sdk::TagKind::d(),

@@ -11,7 +11,7 @@ pub fn generate_test_id() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    
+
     format!("test-{}-{}", timestamp, counter)
 }
 
@@ -26,29 +26,29 @@ pub fn generate_prod_run_id() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    
+
     format!("prod-audit-{}", timestamp)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_generate_test_id() {
         let id1 = generate_test_id();
         let id2 = generate_test_id();
-        
+
         assert_ne!(id1, id2);
         assert!(id1.starts_with("test-"));
     }
-    
+
     #[test]
     fn test_generate_ci_run_id() {
         let id = generate_ci_run_id();
         assert!(id.starts_with("ci-"));
     }
-    
+
     #[test]
     fn test_generate_prod_run_id() {
         let id = generate_prod_run_id();

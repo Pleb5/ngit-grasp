@@ -1,7 +1,6 @@
 /// Landing Page Handler
-/// 
+///
 /// Serves the HTML landing page or upgrades to WebSocket for Nostr relay connections.
-
 use actix_web::{web, HttpRequest, HttpResponse, Result};
 use nostr_relay_builder::LocalRelay;
 
@@ -16,12 +15,16 @@ pub async fn handle(
 ) -> Result<HttpResponse> {
     // Check if this is a WebSocket upgrade request
     if let Some(upgrade) = req.headers().get("upgrade") {
-        if upgrade.to_str().unwrap_or("").eq_ignore_ascii_case("websocket") {
+        if upgrade
+            .to_str()
+            .unwrap_or("")
+            .eq_ignore_ascii_case("websocket")
+        {
             // Delegate to WebSocket handler
             return crate::http::websocket::handle(req, stream, relay).await;
         }
     }
-    
+
     // Otherwise, serve the landing page
     let html = format!(
         include_str!("../../templates/landing.html"),
@@ -30,7 +33,7 @@ pub async fn handle(
         domain = config.domain,
         bind_address = config.bind_address,
     );
-    
+
     Ok(HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
         .body(html))

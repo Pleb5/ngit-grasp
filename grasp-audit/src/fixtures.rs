@@ -33,13 +33,13 @@ use std::sync::{Arc, Mutex};
 pub enum FixtureKind {
     /// Basic repository announcement (kind 30617)
     ValidRepo,
-    
+
     /// Repository with one issue (kind 1621)
     RepoWithIssue,
-    
+
     /// Repository with issue and comment (kind 1111)
     RepoWithComment,
-    
+
     /// Repository state announcement (kind 30618)
     RepoState,
 }
@@ -49,7 +49,7 @@ pub enum FixtureKind {
 pub enum ContextMode {
     /// Create fresh fixtures for each request (test isolation)
     Isolated,
-    
+
     /// Reuse shared fixtures across requests (minimal events)
     Shared,
 }
@@ -104,7 +104,7 @@ impl<'a> TestContext<'a> {
             cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
-    
+
     /// Create a test context with explicit mode override
     ///
     /// This is useful for testing the context itself or for advanced use cases
@@ -116,7 +116,7 @@ impl<'a> TestContext<'a> {
             cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
-    
+
     /// Get a fixture, creating it if needed based on mode
     ///
     /// # Behavior
@@ -139,7 +139,7 @@ impl<'a> TestContext<'a> {
             ContextMode::Shared => self.get_or_create_shared(kind).await,
         }
     }
-    
+
     /// Get the underlying client for direct access
     ///
     /// This allows tests to use the client directly when needed while still
@@ -147,23 +147,27 @@ impl<'a> TestContext<'a> {
     pub fn client(&self) -> &'a AuditClient {
         self.client
     }
-    
+
     /// Get the current context mode
     pub fn mode(&self) -> ContextMode {
         self.mode
     }
-    
+
     /// Create a fresh fixture (always creates new)
     async fn create_fresh(&self, kind: FixtureKind) -> Result<Event> {
-        let event = self.build_fixture(kind).await
+        let event = self
+            .build_fixture(kind)
+            .await
             .with_context(|| format!("Failed to build {:?} fixture", kind))?;
-        
-        self.client.send_event(event.clone()).await
+
+        self.client
+            .send_event(event.clone())
+            .await
             .with_context(|| format!("Failed to send {:?} fixture event to relay", kind))?;
-        
+
         Ok(event)
     }
-    
+
     /// Get or create a shared fixture (caches for reuse)
     async fn get_or_create_shared(&self, kind: FixtureKind) -> Result<Event> {
         // Check cache first
@@ -173,39 +177,54 @@ impl<'a> TestContext<'a> {
                 return Ok(event.clone());
             }
         }
-        
+
         // Not in cache, create it
-        let event = self.build_fixture(kind).await
+        let event = self
+            .build_fixture(kind)
+            .await
             .with_context(|| format!("Failed to build {:?} fixture for shared cache", kind))?;
-        
-        self.client.send_event(event.clone()).await
-            .with_context(|| format!("Failed to send {:?} fixture event to relay (shared cache)", kind))?;
-        
+
+        self.client
+            .send_event(event.clone())
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to send {:?} fixture event to relay (shared cache)",
+                    kind
+                )
+            })?;
+
         // Store in cache
         {
             let mut cache = self.cache.lock().unwrap();
             cache.insert(kind, event.clone());
         }
-        
+
         Ok(event)
     }
-    
+
     /// Build a fixture event (doesn't send it)
     async fn build_fixture(&self, kind: FixtureKind) -> Result<Event> {
         match kind {
             FixtureKind::ValidRepo => {
-                let test_name = format!("fixture-{:?}-{}", kind, &uuid::Uuid::new_v4().to_string()[..8]);
+                let test_name = format!(
+                    "fixture-{:?}-{}",
+                    kind,
+                    &uuid::Uuid::new_v4().to_string()[..8]
+                );
                 self.client.create_repo_announcement(&test_name).await
             }
-            
+
             FixtureKind::RepoWithIssue => {
-                use nostr_sdk::prelude::*;
-                
                 // First create and send repo
-                let test_name = format!("fixture-{:?}-{}", FixtureKind::ValidRepo, &uuid::Uuid::new_v4().to_string()[..8]);
+                let test_name = format!(
+                    "fixture-{:?}-{}",
+                    FixtureKind::ValidRepo,
+                    &uuid::Uuid::new_v4().to_string()[..8]
+                );
                 let repo = self.client.create_repo_announcement(&test_name).await?;
                 self.client.send_event(repo.clone()).await?;
-                
+
                 // Then create issue referencing it - this will have 'a' tag to repo
                 // Note: We build the issue but DON'T send it here - the caller will send it
                 let issue = self.client.create_issue(
@@ -214,64 +233,70 @@ impl<'a> TestContext<'a> {
                     "Issue content for testing",
                     vec![],
                 )?;
-                
+
                 // Return the issue - tests can extract repo reference from its 'a' tag
                 // The caller (create_fresh/get_or_create_shared) will send this event
                 Ok(issue)
             }
-            
+
             FixtureKind::RepoWithComment => {
                 // First create repo with issue
-                let test_name = format!("fixture-{:?}-{}", FixtureKind::ValidRepo, &uuid::Uuid::new_v4().to_string()[..8]);
+                let test_name = format!(
+                    "fixture-{:?}-{}",
+                    FixtureKind::ValidRepo,
+                    &uuid::Uuid::new_v4().to_string()[..8]
+                );
                 let repo = self.client.create_repo_announcement(&test_name).await?;
                 self.client.send_event(repo.clone()).await?;
-                
-                let issue = self.client.create_issue(
-                    &repo,
-                    "Test Issue",
-                    "Issue content",
-                    vec![],
-                )?;
+
+                let issue =
+                    self.client
+                        .create_issue(&repo, "Test Issue", "Issue content", vec![])?;
                 self.client.send_event(issue.clone()).await?;
-                
+
                 // Then create comment on issue
-                self.client.create_comment(
-                    &issue,
-                    "Test comment",
-                    vec![],
-                )
+                self.client.create_comment(&issue, "Test comment", vec![])
             }
-            
+
             FixtureKind::RepoState => {
                 use nostr_sdk::prelude::*;
-                
+
                 // First create repo announcement
-                let test_name = format!("fixture-{:?}-{}", FixtureKind::ValidRepo, &uuid::Uuid::new_v4().to_string()[..8]);
+                let test_name = format!(
+                    "fixture-{:?}-{}",
+                    FixtureKind::ValidRepo,
+                    &uuid::Uuid::new_v4().to_string()[..8]
+                );
                 let repo = self.client.create_repo_announcement(&test_name).await?;
                 self.client.send_event(repo.clone()).await?;
-                
+
                 // Extract repo_id from repo announcement
-                let repo_id = repo.tags.iter()
+                let repo_id = repo
+                    .tags
+                    .iter()
                     .find(|t| t.kind() == TagKind::d())
                     .and_then(|t| t.content())
                     .ok_or_else(|| anyhow::anyhow!("Missing d tag in repo announcement"))?
                     .to_string();
-                
+
                 // Create state announcement
-                self.client.event_builder(Kind::Custom(30618), "")
+                self.client
+                    .event_builder(Kind::Custom(30618), "")
                     .tag(Tag::identifier(&repo_id))
-                    .tag(Tag::custom(TagKind::custom("refs/heads/main"), vec![
-                        "abc123def456789012345678901234567890abcd"
-                    ]))
-                    .tag(Tag::custom(TagKind::custom("HEAD"), vec![
-                        "ref: refs/heads/main"
-                    ]))
+                    .tag(Tag::custom(
+                        TagKind::custom("refs/heads/main"),
+                        vec!["abc123def456789012345678901234567890abcd"],
+                    ))
+                    .tag(Tag::custom(
+                        TagKind::custom("HEAD"),
+                        vec!["ref: refs/heads/main"],
+                    ))
                     .build(self.client.keys())
                     .map_err(|e| anyhow::anyhow!("Failed to build state announcement: {}", e))
             }
         }
     }
-    
+
     /// Clear the fixture cache
     ///
     /// This is useful for tests that want to ensure fresh fixtures
@@ -286,33 +311,36 @@ impl<'a> TestContext<'a> {
 mod tests {
     use super::*;
     use crate::AuditConfig;
-    
+
     #[test]
     fn test_context_mode_from_audit_mode() {
         assert_eq!(ContextMode::from(AuditMode::CI), ContextMode::Isolated);
-        assert_eq!(ContextMode::from(AuditMode::Production), ContextMode::Shared);
+        assert_eq!(
+            ContextMode::from(AuditMode::Production),
+            ContextMode::Shared
+        );
     }
-    
+
     #[test]
     fn test_fixture_kind_hash() {
         use std::collections::HashSet;
-        
+
         let mut set = HashSet::new();
         set.insert(FixtureKind::ValidRepo);
         set.insert(FixtureKind::RepoWithIssue);
-        
+
         assert!(set.contains(&FixtureKind::ValidRepo));
         assert!(!set.contains(&FixtureKind::RepoWithComment));
     }
-    
+
     #[tokio::test]
     async fn test_context_creation() {
         let config = AuditConfig::ci();
         let client = crate::AuditClient::new_test(config);
-        
+
         let ctx = TestContext::new(&client);
         assert_eq!(ctx.mode(), ContextMode::Isolated);
-        
+
         let ctx = TestContext::with_mode(&client, ContextMode::Shared);
         assert_eq!(ctx.mode(), ContextMode::Shared);
     }

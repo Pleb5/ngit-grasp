@@ -13,7 +13,7 @@ impl Nip01SmokeTests {
     /// Run all NIP-01 smoke tests
     pub async fn run_all(client: &AuditClient) -> AuditResult {
         let mut results = AuditResult::new("NIP-01 Smoke Tests");
-        
+
         // Run tests sequentially to avoid future type issues
         results.add(Self::test_websocket_connection(client).await);
         results.add(Self::test_send_receive_event(client).await);
@@ -21,10 +21,10 @@ impl Nip01SmokeTests {
         results.add(Self::test_close_subscription(client).await);
         results.add(Self::test_reject_invalid_signature(client).await);
         results.add(Self::test_reject_invalid_event_id(client).await);
-        
+
         results
     }
-    
+
     /// Test 1: Can establish WebSocket connection
     ///
     /// Spec: NIP-01 basic requirement
@@ -39,17 +39,17 @@ impl Nip01SmokeTests {
             if !client.is_connected().await {
                 return Err("Failed to connect to relay".to_string());
             }
-            
+
             Ok(())
         })
         .await
     }
-    
+
     /// Test 2: Can send EVENT and receive OK response
     ///
     /// Spec: NIP-01 EVENT message
     /// Requirement: Relay MUST accept valid EVENT messages
-    /// 
+    ///
     /// For GRASP servers, we send a NIP-34 repository announcement that lists
     /// the GRASP server in clone and relays tags (required for acceptance).
     async fn test_send_receive_event(client: &AuditClient) -> TestResult {
@@ -60,15 +60,17 @@ impl Nip01SmokeTests {
         )
         .run(|| async {
             // Create a NIP-34 announcement event
-            let event = client.create_repo_announcement("send_receive_event").await
+            let event = client
+                .create_repo_announcement("send_receive_event")
+                .await
                 .map_err(|e| format!("Failed to create announcement: {}", e))?;
-            
+
             // Send event
             let event_id = client
                 .send_event(event.clone())
                 .await
                 .map_err(|e| format!("Failed to send event: {}", e))?;
-            
+
             // Verify we got an event ID back
             if event_id != event.id {
                 return Err(format!(
@@ -76,43 +78,47 @@ impl Nip01SmokeTests {
                     event.id, event_id
                 ));
             }
-            
+
             // Wait a bit for event to be indexed
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            
+
             // Try to query it back
-            let filter = Filter::new()
-                .kind(Kind::Custom(30617))
-                .id(event_id);
-            
+            let filter = Filter::new().kind(Kind::Custom(30617)).id(event_id);
+
             let events = client
                 .query(filter)
                 .await
                 .map_err(|e| format!("Failed to query event: {}", e))?;
-            
+
             if events.is_empty() {
                 // Debug: try querying without audit client filtering
                 eprintln!("Event not found with audit client query, trying direct client query...");
                 let direct_filter = Filter::new().kind(Kind::Custom(30617)).id(event_id);
-                let direct_events = client.client().fetch_events(direct_filter, std::time::Duration::from_secs(5)).await
+                let direct_events = client
+                    .client()
+                    .fetch_events(direct_filter, std::time::Duration::from_secs(5))
+                    .await
                     .map_err(|e| format!("Direct query failed: {}", e))?;
                 let direct_vec: Vec<Event> = direct_events.into_iter().collect();
                 eprintln!("Direct query found {} events", direct_vec.len());
                 if !direct_vec.is_empty() {
                     eprintln!("Event tags: {:?}", direct_vec[0].tags);
                 }
-                return Err(format!("Event not found after sending (direct query found {})", direct_vec.len()));
+                return Err(format!(
+                    "Event not found after sending (direct query found {})",
+                    direct_vec.len()
+                ));
             }
-            
+
             if events[0].id != event_id {
                 return Err("Retrieved event has different ID".to_string());
             }
-            
+
             Ok(())
         })
         .await
     }
-    
+
     /// Test 3: Can create subscription with REQ
     ///
     /// Spec: NIP-01 REQ message
@@ -125,34 +131,36 @@ impl Nip01SmokeTests {
         )
         .run(|| async {
             // Create a NIP-34 announcement event (accepted by GRASP relays)
-            let event = client.create_repo_announcement("create_subscription").await
+            let event = client
+                .create_repo_announcement("create_subscription")
+                .await
                 .map_err(|e| format!("Failed to create announcement: {}", e))?;
-            
-            let event_id = client
+
+            let _event_id = client
                 .send_event(event.clone())
                 .await
                 .map_err(|e| format!("Failed to send event: {}", e))?;
-            
+
             // Subscribe to NIP-34 announcements from this author
             let filter = Filter::new()
                 .kind(Kind::Custom(30617))
                 .author(client.public_key());
-            
+
             let events = client
                 .subscribe(vec![filter], Some(std::time::Duration::from_secs(5)))
                 .await
                 .map_err(|e| format!("Failed to subscribe: {}", e))?;
-            
+
             // Should have at least our event
             if events.is_empty() {
                 return Err("No events received from subscription".to_string());
             }
-            
+
             Ok(())
         })
         .await
     }
-    
+
     /// Test 4: Can close subscription with CLOSE
     ///
     /// Spec: NIP-01 CLOSE message
@@ -167,22 +175,20 @@ impl Nip01SmokeTests {
             // For now, we just verify we can query events
             // Full subscription management with CLOSE would require
             // lower-level WebSocket access
-            
-            let filter = Filter::new()
-                .kind(Kind::TextNote)
-                .limit(1);
-            
+
+            let filter = Filter::new().kind(Kind::TextNote).limit(1);
+
             let _events = client
                 .subscribe(vec![filter], Some(std::time::Duration::from_secs(2)))
                 .await
                 .map_err(|e| format!("Failed to subscribe: {}", e))?;
-            
+
             // If we got here, subscription worked
             Ok(())
         })
         .await
     }
-    
+
     /// Test 5: Rejects events with invalid signatures
     ///
     /// Spec: NIP-01 event validation
@@ -199,7 +205,7 @@ impl Nip01SmokeTests {
                 .event_builder(Kind::TextNote, "Invalid signature test")
                 .build(client.keys())
                 .map_err(|e| format!("Failed to build event: {}", e))?;
-            
+
             // Corrupt the signature by creating a new event with wrong sig
             // We'll use a different key to sign, creating an invalid signature
             let wrong_keys = Keys::generate();
@@ -207,7 +213,7 @@ impl Nip01SmokeTests {
                 .tags(event.tags.clone())
                 .sign_with_keys(&wrong_keys)
                 .map_err(|e| format!("Failed to build wrong event: {}", e))?;
-            
+
             // Create event JSON with mismatched pubkey and signature
             // This should be rejected by the relay
             let invalid_event_json = serde_json::json!({
@@ -219,24 +225,24 @@ impl Nip01SmokeTests {
                 "content": event.content,
                 "sig": wrong_event.sig.to_string(), // Wrong signature!
             });
-            
+
             // Parse it back to an Event
             let invalid_event: Event = serde_json::from_value(invalid_event_json)
                 .map_err(|e| format!("Failed to create invalid event: {}", e))?;
-            
+
             // Try to send the invalid event
             let result = client.send_event(invalid_event).await;
-            
+
             // We expect this to fail
             if result.is_ok() {
                 return Err("Relay accepted event with invalid signature".to_string());
             }
-            
+
             Ok(())
         })
         .await
     }
-    
+
     /// Test 6: Rejects events with invalid event IDs
     ///
     /// Spec: NIP-01 event ID validation
@@ -253,7 +259,7 @@ impl Nip01SmokeTests {
                 .event_builder(Kind::TextNote, "Invalid ID test")
                 .build(client.keys())
                 .map_err(|e| format!("Failed to build event: {}", e))?;
-            
+
             // Create event JSON with corrupted ID
             let invalid_event_json = serde_json::json!({
                 "id": EventId::all_zeros().to_hex(), // Wrong ID!
@@ -264,19 +270,19 @@ impl Nip01SmokeTests {
                 "content": event.content,
                 "sig": event.sig.to_string(),
             });
-            
+
             // Parse it back to an Event
             let invalid_event: Event = serde_json::from_value(invalid_event_json)
                 .map_err(|e| format!("Failed to create invalid event: {}", e))?;
-            
+
             // Try to send the invalid event
             let result = client.send_event(invalid_event).await;
-            
+
             // We expect this to fail
             if result.is_ok() {
                 return Err("Relay accepted event with invalid ID".to_string());
             }
-            
+
             Ok(())
         })
         .await
@@ -287,25 +293,25 @@ impl Nip01SmokeTests {
 mod tests {
     use super::*;
     use crate::AuditConfig;
-    
+
     // Note: These tests require a running relay
     // They are integration tests, not unit tests
-    
+
     #[tokio::test]
     #[ignore] // Ignore by default since it needs a running relay
     async fn test_smoke_tests_against_relay() {
         // RELAY_URL env var must be set - no default fallback
         let relay_url = std::env::var("RELAY_URL")
             .expect("RELAY_URL environment variable must be set for integration tests");
-        
+
         let config = AuditConfig::ci();
         let client = AuditClient::new(&relay_url, config)
             .await
             .expect("Failed to connect to relay");
-        
+
         let results = Nip01SmokeTests::run_all(&client).await;
         results.print_report();
-        
+
         assert!(results.all_passed(), "Some smoke tests failed");
     }
 }

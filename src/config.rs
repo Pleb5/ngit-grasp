@@ -19,10 +19,8 @@ impl Config {
         dotenvy::dotenv().ok();
 
         Ok(Config {
-            domain: env::var("NGIT_DOMAIN")
-                .unwrap_or_else(|_| "localhost:8080".to_string()),
-            owner_npub: env::var("NGIT_OWNER_NPUB")
-                .context("NGIT_OWNER_NPUB must be set")?,
+            domain: env::var("NGIT_DOMAIN").unwrap_or_else(|_| "localhost:8080".to_string()),
+            owner_npub: env::var("NGIT_OWNER_NPUB").context("NGIT_OWNER_NPUB must be set")?,
             relay_name: env::var("NGIT_RELAY_NAME")
                 .unwrap_or_else(|_| "ngit-grasp relay".to_string()),
             relay_description: env::var("NGIT_RELAY_DESCRIPTION")

@@ -59,11 +59,7 @@ impl TestRelay {
             .spawn()
             .expect("Failed to start relay process");
 
-        let relay = Self {
-            process,
-            url,
-            port,
-        };
+        let relay = Self { process, url, port };
 
         // Wait for relay to be ready
         relay.wait_for_ready().await;
@@ -126,18 +122,18 @@ impl TestRelay {
     /// Find a free port to use for testing
     fn find_free_port() -> u16 {
         use std::net::TcpListener;
-        
+
         // Bind to port 0 to get a random free port
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .expect("Failed to bind to random port");
-        
-        let port = listener.local_addr()
+        let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind to random port");
+
+        let port = listener
+            .local_addr()
             .expect("Failed to get local address")
             .port();
-        
+
         // Drop the listener to free the port
         drop(listener);
-        
+
         port
     }
 }
