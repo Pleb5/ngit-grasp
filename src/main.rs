@@ -3,8 +3,8 @@ use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 mod config;
+mod http;
 mod nostr;
-mod storage;
 
 use config::Config;
 
@@ -16,21 +16,23 @@ async fn main() -> Result<()> {
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
-    info!("Starting ngit-grasp...");
+    info!("Starting ngit-grasp with nostr-relay-builder...");
 
     // Load configuration
     let config = Config::from_env()?;
     info!("Configuration loaded: {}", config.bind_address);
 
-    // Initialize storage
-    let storage = storage::Storage::new(&config)?;
-    info!("Storage initialized at: {}", config.relay_data_path);
+    // Create Nostr relay with NIP-34 validation
+    if let Ok(relay) = nostr::builder::create_relay(&config) {
+        info!(
+            "Relay created with NIP-34 validation for domain: {}",
+            config.domain
+        );
 
-    // Start Nostr relay
-    let relay = nostr::relay::RelayServer::new(config.clone(), storage)?;
-    
-    info!("Starting Nostr relay on {}", config.bind_address);
-    relay.run().await?;
+        // Start HTTP server with integrated relay
+        info!("Starting HTTP server on {}", config.bind_address);
+        http::run_server(config, relay).await?;
+    }
 
     Ok(())
 }

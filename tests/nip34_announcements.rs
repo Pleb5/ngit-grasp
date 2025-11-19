@@ -36,7 +36,9 @@ const KIND_REPOSITORY_ANNOUNCEMENT: u16 = 30617;
 const KIND_REPOSITORY_STATE: u16 = 30618;
 
 /// Helper to connect to a test relay
-async fn connect_to_relay(url: &str) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+async fn connect_to_relay(
+    url: &str,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
     let (ws, _) = connect_async(url)
         .await
         .expect("Failed to connect to relay");
@@ -54,10 +56,7 @@ fn create_announcement(
     let mut tags = vec![Tag::custom(TagKind::d(), vec![identifier.to_string()])];
 
     for url in clone_urls {
-        tags.push(Tag::custom(
-            TagKind::Clone,
-            vec![url],
-        ));
+        tags.push(Tag::custom(TagKind::Clone, vec![url]));
     }
 
     for relay in relays {
@@ -94,10 +93,10 @@ fn create_state(keys: &Keys, identifier: &str, branches: Vec<(&str, &str)>) -> n
 #[tokio::test]
 async fn test_relay_accepts_connection() {
     let relay = TestRelay::start().await;
-    
+
     // Try to connect
     let ws = connect_to_relay(relay.url()).await;
-    
+
     drop(ws); // Clean disconnect
 }
 
@@ -119,14 +118,14 @@ async fn test_accepts_valid_announcement() {
 
     // Send event
     let event_msg = json!(["EVENT", event]);
-    ws.send(Message::Text(event_msg.to_string()))
+    ws.send(Message::Text(event_msg.to_string().into()))
         .await
         .expect("Failed to send event");
 
     // Read response
     if let Some(Ok(Message::Text(text))) = ws.next().await {
         let response: Value = serde_json::from_str(&text).expect("Failed to parse response");
-        
+
         // Should be ["OK", event_id, true, ""]
         assert_eq!(response[0], "OK");
         assert_eq!(response[1], event.id.to_hex());
@@ -146,9 +145,7 @@ async fn test_rejects_announcement_without_clone() {
     let relay = TestRelay::start().await;
     let keys = Keys::generate();
 
-    let (mut ws, _) = connect_async(relay.url())
-        .await
-        .expect("Failed to connect");
+    let (mut ws, _) = connect_async(relay.url()).await.expect("Failed to connect");
 
     // Missing clone tag
     let event = create_announcement(
@@ -160,18 +157,18 @@ async fn test_rejects_announcement_without_clone() {
     );
 
     let event_msg = json!(["EVENT", event]);
-    ws.send(Message::Text(event_msg.to_string()))
+    ws.send(Message::Text(event_msg.to_string().into()))
         .await
         .expect("Failed to send event");
 
     if let Some(Ok(Message::Text(text))) = ws.next().await {
         let response: Value = serde_json::from_str(&text).expect("Failed to parse");
-        
+
         // Should be rejected
         assert_eq!(response[0], "OK");
         assert_eq!(response[1], event.id.to_hex());
         assert_eq!(response[2], false, "Event should be rejected");
-        
+
         let message = response[3].as_str().unwrap();
         assert!(
             message.contains("clone") || message.contains("invalid"),
@@ -190,9 +187,7 @@ async fn test_rejects_announcement_without_relay() {
     let relay = TestRelay::start().await;
     let keys = Keys::generate();
 
-    let (mut ws, _) = connect_async(relay.url())
-        .await
-        .expect("Failed to connect");
+    let (mut ws, _) = connect_async(relay.url()).await.expect("Failed to connect");
 
     // Missing relay tag
     let event = create_announcement(
@@ -204,18 +199,18 @@ async fn test_rejects_announcement_without_relay() {
     );
 
     let event_msg = json!(["EVENT", event]);
-    ws.send(Message::Text(event_msg.to_string()))
+    ws.send(Message::Text(event_msg.to_string().into()))
         .await
         .expect("Failed to send event");
 
     if let Some(Ok(Message::Text(text))) = ws.next().await {
         let response: Value = serde_json::from_str(&text).expect("Failed to parse");
-        
+
         // Should be rejected
         assert_eq!(response[0], "OK");
         assert_eq!(response[1], event.id.to_hex());
         assert_eq!(response[2], false, "Event should be rejected");
-        
+
         let message = response[3].as_str().unwrap();
         assert!(
             message.contains("relays") || message.contains("invalid"),
@@ -233,9 +228,7 @@ async fn test_rejects_announcement_for_other_service() {
     let relay = TestRelay::start().await;
     let keys = Keys::generate();
 
-    let (mut ws, _) = connect_async(relay.url())
-        .await
-        .expect("Failed to connect");
+    let (mut ws, _) = connect_async(relay.url()).await.expect("Failed to connect");
 
     // Lists different service
     let event = create_announcement(
@@ -247,13 +240,13 @@ async fn test_rejects_announcement_for_other_service() {
     );
 
     let event_msg = json!(["EVENT", event]);
-    ws.send(Message::Text(event_msg.to_string()))
+    ws.send(Message::Text(event_msg.to_string().into()))
         .await
         .expect("Failed to send event");
 
     if let Some(Ok(Message::Text(text))) = ws.next().await {
         let response: Value = serde_json::from_str(&text).expect("Failed to parse");
-        
+
         // Should be rejected
         assert_eq!(response[0], "OK");
         assert_eq!(response[1], event.id.to_hex());
@@ -269,9 +262,7 @@ async fn test_accepts_valid_state() {
     let relay = TestRelay::start().await;
     let keys = Keys::generate();
 
-    let (mut ws, _) = connect_async(relay.url())
-        .await
-        .expect("Failed to connect");
+    let (mut ws, _) = connect_async(relay.url()).await.expect("Failed to connect");
 
     let event = create_state(
         &keys,
@@ -280,13 +271,13 @@ async fn test_accepts_valid_state() {
     );
 
     let event_msg = json!(["EVENT", event]);
-    ws.send(Message::Text(event_msg.to_string()))
+    ws.send(Message::Text(event_msg.to_string().into()))
         .await
         .expect("Failed to send event");
 
     if let Some(Ok(Message::Text(text))) = ws.next().await {
         let response: Value = serde_json::from_str(&text).expect("Failed to parse");
-        
+
         // Should be accepted
         assert_eq!(response[0], "OK");
         assert_eq!(response[1], event.id.to_hex());
@@ -302,9 +293,7 @@ async fn test_accepts_state_with_multiple_branches() {
     let relay = TestRelay::start().await;
     let keys = Keys::generate();
 
-    let (mut ws, _) = connect_async(relay.url())
-        .await
-        .expect("Failed to connect");
+    let (mut ws, _) = connect_async(relay.url()).await.expect("Failed to connect");
 
     let event = create_state(
         &keys,
@@ -317,13 +306,13 @@ async fn test_accepts_state_with_multiple_branches() {
     );
 
     let event_msg = json!(["EVENT", event]);
-    ws.send(Message::Text(event_msg.to_string()))
+    ws.send(Message::Text(event_msg.to_string().into()))
         .await
         .expect("Failed to send event");
 
     if let Some(Ok(Message::Text(text))) = ws.next().await {
         let response: Value = serde_json::from_str(&text).expect("Failed to parse");
-        
+
         assert_eq!(response[0], "OK");
         assert_eq!(response[2], true, "State event should be accepted");
     } else {
@@ -337,9 +326,7 @@ async fn test_rejects_state_without_identifier() {
     let relay = TestRelay::start().await;
     let keys = Keys::generate();
 
-    let (mut ws, _) = connect_async(relay.url())
-        .await
-        .expect("Failed to connect");
+    let (mut ws, _) = connect_async(relay.url()).await.expect("Failed to connect");
 
     // Create state without identifier
     let event = EventBuilder::new(Kind::from(KIND_REPOSITORY_STATE), "")
@@ -347,18 +334,18 @@ async fn test_rejects_state_without_identifier() {
         .expect("Failed to sign event");
 
     let event_msg = json!(["EVENT", event]);
-    ws.send(Message::Text(event_msg.to_string()))
+    ws.send(Message::Text(event_msg.to_string().into()))
         .await
         .expect("Failed to send event");
 
     if let Some(Ok(Message::Text(text))) = ws.next().await {
         let response: Value = serde_json::from_str(&text).expect("Failed to parse");
-        
+
         // Should be rejected
         assert_eq!(response[0], "OK");
         assert_eq!(response[1], event.id.to_hex());
         assert_eq!(response[2], false, "Event should be rejected");
-        
+
         let message = response[3].as_str().unwrap();
         assert!(
             message.contains("identifier") || message.contains("invalid"),
@@ -376,21 +363,22 @@ async fn test_query_announcements() {
     let relay = TestRelay::start().await;
     let keys = Keys::generate();
 
-    let (mut ws, _) = connect_async(relay.url())
-        .await
-        .expect("Failed to connect");
+    let (mut ws, _) = connect_async(relay.url()).await.expect("Failed to connect");
 
     // Send an announcement
     let event = create_announcement(
         &keys,
         &relay.domain(),
         "query-test-repo",
-        vec![format!("https://{}/alice/query-test-repo.git", relay.domain())],
+        vec![format!(
+            "https://{}/alice/query-test-repo.git",
+            relay.domain()
+        )],
         vec![format!("wss://{}", relay.domain())],
     );
 
     let event_msg = json!(["EVENT", event]);
-    ws.send(Message::Text(event_msg.to_string()))
+    ws.send(Message::Text(event_msg.to_string().into()))
         .await
         .expect("Failed to send event");
 
@@ -409,7 +397,7 @@ async fn test_query_announcements() {
         }
     ]);
 
-    ws.send(Message::Text(req.to_string()))
+    ws.send(Message::Text(req.to_string().into()))
         .await
         .expect("Failed to send REQ");
 
@@ -420,7 +408,7 @@ async fn test_query_announcements() {
     for _ in 0..10 {
         if let Some(Ok(Message::Text(text))) = ws.next().await {
             let response: Value = serde_json::from_str(&text).expect("Failed to parse");
-            
+
             if response[0] == "EVENT" {
                 assert_eq!(response[1], "test-sub");
                 found_event = true;
@@ -442,9 +430,7 @@ async fn test_query_states() {
     let relay = TestRelay::start().await;
     let keys = Keys::generate();
 
-    let (mut ws, _) = connect_async(relay.url())
-        .await
-        .expect("Failed to connect");
+    let (mut ws, _) = connect_async(relay.url()).await.expect("Failed to connect");
 
     // Send a state event
     let event = create_state(
@@ -454,7 +440,7 @@ async fn test_query_states() {
     );
 
     let event_msg = json!(["EVENT", event]);
-    ws.send(Message::Text(event_msg.to_string()))
+    ws.send(Message::Text(event_msg.to_string().into()))
         .await
         .expect("Failed to send event");
 
@@ -473,7 +459,7 @@ async fn test_query_states() {
         }
     ]);
 
-    ws.send(Message::Text(req.to_string()))
+    ws.send(Message::Text(req.to_string().into()))
         .await
         .expect("Failed to send REQ");
 
@@ -484,7 +470,7 @@ async fn test_query_states() {
     for _ in 0..10 {
         if let Some(Ok(Message::Text(text))) = ws.next().await {
             let response: Value = serde_json::from_str(&text).expect("Failed to parse");
-            
+
             if response[0] == "EVENT" {
                 assert_eq!(response[1], "test-sub");
                 found_event = true;
@@ -506,21 +492,22 @@ async fn test_duplicate_announcement() {
     let relay = TestRelay::start().await;
     let keys = Keys::generate();
 
-    let (mut ws, _) = connect_async(relay.url())
-        .await
-        .expect("Failed to connect");
+    let (mut ws, _) = connect_async(relay.url()).await.expect("Failed to connect");
 
     let event = create_announcement(
         &keys,
         &relay.domain(),
         "duplicate-test",
-        vec![format!("https://{}/alice/duplicate-test.git", relay.domain())],
+        vec![format!(
+            "https://{}/alice/duplicate-test.git",
+            relay.domain()
+        )],
         vec![format!("wss://{}", relay.domain())],
     );
 
     // Send first time
     let event_msg = json!(["EVENT", event]);
-    ws.send(Message::Text(event_msg.to_string()))
+    ws.send(Message::Text(event_msg.to_string().into()))
         .await
         .expect("Failed to send event");
 
@@ -531,14 +518,14 @@ async fn test_duplicate_announcement() {
 
     // Send second time (duplicate)
     let event_msg = json!(["EVENT", event]);
-    ws.send(Message::Text(event_msg.to_string()))
+    ws.send(Message::Text(event_msg.to_string().into()))
         .await
         .expect("Failed to send event");
 
     if let Some(Ok(Message::Text(text))) = ws.next().await {
         let response2: Value = serde_json::from_str(&text).expect("Failed to parse");
         assert_eq!(response2[2], true, "Duplicate should be acknowledged");
-        
+
         let message = response2[3].as_str().unwrap();
         assert!(
             message.contains("duplicate") || message.is_empty(),

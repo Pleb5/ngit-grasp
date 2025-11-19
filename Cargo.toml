@@ -10,18 +10,19 @@ repository = "https://gitworkshop.dev/ngit-grasp"
 [dependencies]
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
-tokio-tungstenite = "0.21"
 
-# WebSocket
-tungstenite = "0.21"
-futures-util = "0.3"
+# HTTP server
+actix-web = "4.4"
+actix-ws = "0.3"
 
-# HTTP server (for future use)
-# actix-web = "4.4"
-# actix-cors = "0.7"
+# Nostr relay
+nostr-relay-builder = "0.44"
 
 # Nostr
-nostr-sdk = "0.43"
+nostr-sdk = "0.44"
+
+# Utilities
+futures-util = "0.3"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -37,6 +38,7 @@ dotenvy = "0.15"
 # Error handling
 anyhow = "1.0"
 thiserror = "1.0"
+tokio-tungstenite = "0.28.0"
 
 # Git (for future use)
 # git-http-backend = "0.3"
