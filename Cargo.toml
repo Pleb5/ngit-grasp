@@ -11,9 +11,10 @@ repository = "https://gitworkshop.dev/ngit-grasp"
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
 
-# HTTP server
-actix-web = "4.4"
-actix-ws = "0.3"
+# HTTP server (hyper for relay integration)
+hyper = { version = "1.4", features = ["full"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "http1", "http2"] }
+http-body-util = "0.1"
 
 # Nostr relay
 nostr-relay-builder = "0.44"
@@ -23,6 +24,7 @@ nostr-sdk = "0.44"
 
 # Utilities
 futures-util = "0.3"
+base64 = "0.22"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -38,7 +40,6 @@ dotenvy = "0.15"
 # Error handling
 anyhow = "1.0"
 thiserror = "1.0"
-tokio-tungstenite = "0.28.0"
 
 # Git (for future use)
 # git-http-backend = "0.3"
