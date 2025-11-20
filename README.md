@@ -28,12 +28,13 @@ Unlike the reference implementation ([ngit-relay](https://gitworkshop.dev/npub15
 
 The key architectural decision is **inline authorization** rather than Git hooks:
 
-- The `git-http-backend` crate provides low-level access to the Git protocol
+- Vendored and customised `git-http-backend` crate provides low-level access to the Git protocol
 - We intercept the `git-receive-pack` operation before spawning the Git process
 - Push validation happens by checking the Nostr relay for the latest state event
 - Only matching pushes are forwarded to the actual Git repository
 
 This approach provides:
+
 - **Better error messages**: Direct HTTP responses vs. hook stderr
 - **Simpler deployment**: No hook management or symlinks
 - **Tighter integration**: Shared state between Git and Nostr components
@@ -42,6 +43,7 @@ This approach provides:
 ## GRASP Compliance
 
 ### GRASP-01 (Core Service Requirements)
+
 - ✅ NIP-01 compliant Nostr relay at `/`
 - ✅ Accepts NIP-34 repository announcements and state events
 - ✅ Git Smart HTTP service at `/<npub>/<identifier>.git`
@@ -52,11 +54,13 @@ This approach provides:
 - ✅ NIP-11 relay information document
 
 ### GRASP-02 (Proactive Sync) - Planned
+
 - 🔄 Proactive event sync from listed relays
 - 🔄 Proactive Git data sync from listed clone URLs
 - 🔄 PR data fetching and serving
 
 ### GRASP-05 (Archive) - Planned
+
 - 🔄 Accept repositories not listing this instance
 - 🔄 Backup/mirror mode operation
 
@@ -64,7 +68,7 @@ This approach provides:
 
 - **Rust**: Core language
 - **actix-web**: HTTP server framework
-- **git-http-backend**: Git protocol handling
+- **git-http-backend**: Git protocol handling but vendored and customised for authorisation logic
 - **nostr-relay-builder**: Nostr relay infrastructure from rust-nostr
 - **nostr-sdk**: Nostr event handling and validation
 - **tokio**: Async runtime
@@ -72,8 +76,10 @@ This approach provides:
 ## Quick Start
 
 ```bash
+# install ngit
+curl -Ls https://ngit.dev/install.sh | bash
 # Clone the repository
-git clone https://gitworkshop.dev/ngit-grasp
+git clone nostr://danconwaydev.com/relay.ngit.dev/ngit-grasp
 cd ngit-grasp
 
 # Build (using Nix for reproducible environment)
@@ -146,6 +152,7 @@ nix develop -c cargo test --test nip01_compliance test_nip01_smoke
 ```
 
 **Integration tests automatically:**
+
 - Start a fresh relay instance
 - Run compliance tests using grasp-audit library
 - Clean up when done
@@ -213,20 +220,20 @@ ngit-grasp/
 
 ## Comparison with ngit-relay
 
-| Feature | ngit-relay (Go) | ngit-grasp (Rust) |
-|---------|----------------|-------------------|
-| Language | Go | Rust |
-| Components | nginx + git-http-backend + hooks + Khatru | Single integrated binary |
-| Authorization | Pre-receive Git hook | Inline during receive-pack |
-| Deployment | Docker + supervisord | Single binary |
-| Testing | Go tests + shell scripts | Rust unit + integration tests |
-| Performance | Good | Excellent (zero-copy, async) |
+| Feature       | ngit-relay (Go)                           | ngit-grasp (Rust)             |
+| ------------- | ----------------------------------------- | ----------------------------- |
+| Language      | Go                                        | Rust                          |
+| Components    | nginx + git-http-backend + hooks + Khatru | Single integrated binary      |
+| Authorization | Pre-receive Git hook                      | Inline during receive-pack    |
+| Deployment    | Docker + supervisord                      | Single binary                 |
+| Testing       | Go tests + shell scripts                  | Rust unit + integration tests |
+| Performance   | Good                                      | Excellent (zero-copy, async)  |
 
 ## Contributing
 
 Contributions welcome! Please:
 
-1. Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+1. Read [docs/explanation/architecture.md](docs/ARCHITECTURE.md)
 2. Open an issue to discuss major changes
 3. Follow Rust conventions and run `cargo fmt` + `cargo clippy`
 4. Add tests for new functionality
