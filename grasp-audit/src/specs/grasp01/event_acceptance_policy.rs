@@ -551,11 +551,36 @@ impl EventAcceptancePolicyTests {
     ) -> Result<(), String> {
         let event_id = event.id;
 
-        client
-            .send_event(event)
-            .await
-            .map_err(|e| format!("Failed to send event to relay: {}", e))?;
+        // Try to send event - rejection may cause send_event to fail with an error
+        let send_result = client.send_event(event).await;
+        
+        // If send succeeded, the relay might have accepted it (we'll verify below)
+        // If send failed, check if it's a rejection error (expected)
+        if let Err(e) = send_result {
+            let err_msg = e.to_string().to_lowercase();
+            // Check if error message indicates rejection (not network/other errors)
+            if err_msg.contains("rejected") || err_msg.contains("blocked") {
+                // Expected rejection - verify event is NOT in database
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                
+                let filter = Filter::new().id(event_id);
+                let events = client
+                    .query(filter)
+                    .await
+                    .map_err(|e| format!("Failed to query relay for verification: {}", e))?;
 
+                if !events.is_empty() {
+                    return Err(format!("Event was rejected but still stored: {}", description));
+                }
+                
+                return Ok(()); // Rejected as expected
+            } else {
+                // Unexpected error (network, etc.)
+                return Err(format!("Failed to send event to relay: {}", e));
+            }
+        }
+
+        // Send succeeded, verify event was NOT stored (relay should have rejected)
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let filter = Filter::new().id(event_id);
@@ -877,6 +902,26 @@ impl EventAcceptancePolicyTests {
                 )
             })?;
 
+            // Verify repo is queryable (ensures it's fully indexed before we reference it)
+            let repo_id = Self::extract_d_tag(&repo).ok_or("Failed to extract repo_id")?;
+            let verify_filter = Filter::new()
+                .kind(Kind::GitRepoAnnouncement)
+                .author(repo.pubkey)
+                .identifier(repo_id);
+            
+            // Poll until repo is available (with timeout)
+            for _ in 0..10 {
+                let events = client.query(verify_filter.clone()).await
+                    .map_err(|e| format!("Failed to verify repo: {}", e))?;
+                if !events.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            
+            // Extra delay to ensure relay's internal database is fully synchronized
+            tokio::time::sleep(Duration::from_millis(200)).await;
+
             // Create Kind 1 note locally but DON'T send it yet
             let kind1_note = client
                 .event_builder(Kind::TextNote, "Note to be referenced")
@@ -938,33 +983,16 @@ impl EventAcceptancePolicyTests {
             // Create TestContext
             let ctx = TestContext::new(client);
 
-            // Get repo with issue fixture (mode-aware)
-            let repo = ctx
+            // Get issue fixture (mode-aware) - RepoWithIssue returns the issue event directly
+            let issue = ctx
                 .get_fixture(FixtureKind::RepoWithIssue)
                 .await
                 .map_err(|e| {
                     format!(
-                        "Test setup failed: could not get repo with issue fixture: {}",
+                        "Test setup failed: could not get issue fixture: {}",
                         e
                     )
                 })?;
-
-            // Extract the issue from the repo event (it's stored as the first 'e' tag)
-            let issue_id = repo
-                .tags
-                .iter()
-                .find(|t| t.kind() == TagKind::e())
-                .and_then(|t| t.content())
-                .ok_or("Missing issue reference in RepoWithIssue fixture")?;
-
-            // Query to get the actual issue event
-            let filter = Filter::new().id(nostr_sdk::EventId::from_hex(issue_id)
-                .map_err(|e| format!("Invalid issue ID: {}", e))?);
-            let issues = client
-                .query(filter)
-                .await
-                .map_err(|e| format!("Failed to query issue: {}", e))?;
-            let issue = issues.first().ok_or("Issue not found")?.clone();
 
             // Create Comment A locally but DON'T send it yet
             let comment_a = Self::create_comment_for_event(client, &issue, "Comment A")?;
