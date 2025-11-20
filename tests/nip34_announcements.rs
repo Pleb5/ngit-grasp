@@ -5,9 +5,9 @@
 //!
 //! # Test Strategy
 //!
-//! - Uses TestRelay fixture for ngit-grasp relay lifecycle management
-//! - Uses grasp-audit's EventAcceptancePolicyTests for actual test logic
-//! - Minimal duplication - single source of truth in grasp-audit
+//! - Each test runs in complete isolation with its own fresh relay instance
+//! - Uses macro to eliminate boilerplate while maintaining test isolation
+//! - Calls individual test methods from grasp-audit for minimal duplication
 //!
 //! # Running Tests
 //!
@@ -16,7 +16,7 @@
 //! cargo test --test nip34_announcements
 //!
 //! # Run specific test
-//! cargo test --test nip34_announcements test_grasp01_event_acceptance
+//! cargo test --test nip34_announcements test_reject_orphan_kind1
 //!
 //! # With output
 //! cargo test --test nip34_announcements -- --nocapture
@@ -27,124 +27,48 @@ mod common;
 use common::TestRelay;
 use grasp_audit::*;
 
-/// Test GRASP-01 event acceptance policy against ngit-grasp relay
+/// Macro to generate isolated integration tests
 ///
-/// This test runs all GRASP-01 event acceptance policy tests from grasp-audit
-/// against the ngit-grasp relay implementation.
-///
-/// Tests cover:
-/// - Repository announcement acceptance/rejection
-/// - Repository state announcement acceptance
-/// - Events tagging accepted repositories
-/// - Transitive event acceptance (events tagging accepted events)
-/// - Forward reference acceptance (events tagged by accepted events)
-/// - Rejection of unrelated events
-#[tokio::test]
-async fn test_grasp01_event_acceptance() {
-    // Start test relay
-    let relay = TestRelay::start().await;
+/// Each test runs with its own fresh relay instance to ensure complete isolation.
+/// This eliminates rate-limiting issues and ensures tests don't interfere with each other.
+macro_rules! isolated_test {
+    ($test_name:ident) => {
+        #[tokio::test]
+        async fn $test_name() {
+            let relay = TestRelay::start().await;
+            let config = AuditConfig::ci();
+            let client = AuditClient::new(relay.url(), config)
+                .await
+                .expect("Failed to create audit client");
 
-    // Create audit client in CI mode (isolated testing)
-    let config = AuditConfig::ci();
-    let client = AuditClient::new(relay.url(), config)
-        .await
-        .expect("Failed to create audit client");
+            let result = specs::EventAcceptancePolicyTests::$test_name(&client).await;
 
-    // Run all GRASP-01 event acceptance policy tests
-    let results = specs::EventAcceptancePolicyTests::run_all(&client).await;
+            relay.stop().await;
 
-    // Print detailed report
-    results.print_report();
-
-    // Stop relay
-    relay.stop().await;
-
-    // Assert all tests passed
-    assert!(
-        results.all_passed(),
-        "GRASP-01 event acceptance tests failed: {}/{} passed",
-        results.passed_count(),
-        results.total_count()
-    );
+            assert!(
+                result.passed,
+                "{} failed: {}",
+                stringify!($test_name),
+                result.error.as_deref().unwrap_or("unknown error")
+            );
+        }
+    };
 }
 
-/// Test that relay accepts valid repository announcements
-///
-/// Demonstrates running individual test categories from the suite
-#[tokio::test]
-async fn test_accepts_repository_announcements() {
-    let relay = TestRelay::start().await;
-    let config = AuditConfig::ci();
-    let client = AuditClient::new(relay.url(), config)
-        .await
-        .expect("Failed to create audit client");
-
-    // Run all tests
-    let results = specs::EventAcceptancePolicyTests::run_all(&client).await;
-
-    relay.stop().await;
-
-    // Filter to only repository announcement tests
-    let announcement_tests: Vec<_> = results
-        .results
-        .iter()
-        .filter(|t| {
-            t.spec_ref.contains("repo") || t.name.contains("announcement") || t.name.contains("state")
-        })
-        .collect();
-
-    // Verify we have announcement tests
-    assert!(
-        !announcement_tests.is_empty(),
-        "No repository announcement tests found"
-    );
-
-    // All should pass
-    for test in announcement_tests {
-        assert!(
-            test.passed,
-            "Repository test failed: {} - {}",
-            test.name,
-            test.error.as_deref().unwrap_or("unknown error")
-        );
-    }
-}
-
-/// Test that relay properly validates clone and relays tags
-///
-/// This is a critical security requirement for GRASP-01
-#[tokio::test]
-async fn test_validates_service_tags() {
-    let relay = TestRelay::start().await;
-    let config = AuditConfig::ci();
-    let client = AuditClient::new(relay.url(), config)
-        .await
-        .expect("Failed to create audit client");
-
-    let results = specs::EventAcceptancePolicyTests::run_all(&client).await;
-
-    relay.stop().await;
-
-    // Filter to rejection tests (these verify tag validation)
-    let rejection_tests: Vec<_> = results
-        .results
-        .iter()
-        .filter(|t| t.name.contains("reject"))
-        .collect();
-
-    // Should have rejection tests
-    assert!(
-        !rejection_tests.is_empty(),
-        "No rejection tests found (these are critical for security)"
-    );
-
-    // All rejection tests should pass
-    for test in rejection_tests {
-        assert!(
-            test.passed,
-            "Rejection test failed: {} - {}\nThis is a security issue!",
-            test.name,
-            test.error.as_deref().unwrap_or("unknown error")
-        );
-    }
-}
+// Generate isolated tests for all GRASP-01 event acceptance policy tests
+isolated_test!(test_accept_valid_repo_announcement);
+isolated_test!(test_reject_repo_announcement_missing_clone_tag);
+isolated_test!(test_reject_repo_announcement_missing_relays_tag);
+isolated_test!(test_accept_valid_repo_state_announcement);
+isolated_test!(test_accept_issue_via_a_tag);
+isolated_test!(test_accept_comment_via_capital_a_tag);
+isolated_test!(test_accept_kind1_via_q_tag);
+isolated_test!(test_accept_issue_quoting_issue_via_q);
+isolated_test!(test_accept_comment_via_capital_e_tag);
+isolated_test!(test_accept_kind1_via_e_tag);
+isolated_test!(test_accept_kind1_referenced_in_issue);
+isolated_test!(test_accept_comment_referenced_in_comment);
+isolated_test!(test_accept_kind1_referenced_in_kind1);
+isolated_test!(test_reject_orphan_issue);
+isolated_test!(test_reject_orphan_kind1);
+isolated_test!(test_reject_comment_quoting_other_repo);

@@ -143,7 +143,7 @@ impl EventAcceptancePolicyTests {
     /// **Using TestContext pattern:**
     /// - In CI mode: Creates fresh repo for full isolation
     /// - In Production mode: Reuses cached repo to minimize events
-    async fn test_accept_valid_repo_announcement(client: &AuditClient) -> TestResult {
+    pub async fn test_accept_valid_repo_announcement(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_valid_repo_announcement",
             "GRASP-01:nostr-relay:3-5",
@@ -246,7 +246,7 @@ impl EventAcceptancePolicyTests {
     ///
     /// Spec: Line 5 of ../grasp/01.md
     /// Requirement: MUST reject announcements not listing service (unless GRASP-05)
-    async fn test_reject_repo_announcement_missing_clone_tag(client: &AuditClient) -> TestResult {
+    pub async fn test_reject_repo_announcement_missing_clone_tag(client: &AuditClient) -> TestResult {
         TestResult::new(
             "reject_repo_announcement_missing_clone_tag",
             "GRASP-01:nostr-relay:5",
@@ -320,7 +320,7 @@ impl EventAcceptancePolicyTests {
     ///
     /// Spec: Line 5 of ../grasp/01.md
     /// Requirement: MUST reject announcements not listing service in relays
-    async fn test_reject_repo_announcement_missing_relays_tag(client: &AuditClient) -> TestResult {
+    pub async fn test_reject_repo_announcement_missing_relays_tag(client: &AuditClient) -> TestResult {
         TestResult::new(
             "reject_repo_announcement_missing_relays_tag",
             "GRASP-01:nostr-relay:5",
@@ -412,7 +412,7 @@ impl EventAcceptancePolicyTests {
     /// This test demonstrates the new TestContext pattern:
     /// - In CI mode: Creates fresh repo for full isolation
     /// - In Production mode: Reuses cached repo to minimize events
-    async fn test_accept_valid_repo_state_announcement(client: &AuditClient) -> TestResult {
+    pub async fn test_accept_valid_repo_state_announcement(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_valid_repo_state_announcement",
             "GRASP-01:nostr-relay:6-7",
@@ -579,7 +579,7 @@ impl EventAcceptancePolicyTests {
     ///
     /// **EXAMPLE: Using TestContext for prerequisite events**
     /// Demonstrates how TestContext simplifies test setup while supporting dual modes
-    async fn test_accept_issue_via_a_tag(client: &AuditClient) -> TestResult {
+    pub async fn test_accept_issue_via_a_tag(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_issue_via_a_tag",
             "GRASP-01:event-acceptance:1.1",
@@ -614,7 +614,7 @@ impl EventAcceptancePolicyTests {
     /// **Using TestContext pattern:**
     /// - In CI mode: Creates fresh repo for full isolation
     /// - In Production mode: Reuses cached repo to minimize events
-    async fn test_accept_comment_via_capital_a_tag(client: &AuditClient) -> TestResult {
+    pub async fn test_accept_comment_via_capital_a_tag(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_comment_via_A_tag",
             "GRASP-01:event-acceptance:1.2",
@@ -666,7 +666,7 @@ impl EventAcceptancePolicyTests {
     /// **Using TestContext pattern:**
     /// - In CI mode: Creates fresh repo for full isolation
     /// - In Production mode: Reuses cached repo to minimize events
-    async fn test_accept_kind1_via_q_tag(client: &AuditClient) -> TestResult {
+    pub async fn test_accept_kind1_via_q_tag(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_kind1_via_q_tag",
             "GRASP-01:event-acceptance:1.3",
@@ -715,7 +715,7 @@ impl EventAcceptancePolicyTests {
     /// **Using TestContext pattern:**
     /// - In CI mode: Creates fresh repo+issue for full isolation
     /// - In Production mode: Reuses cached repo+issue to minimize events
-    async fn test_accept_issue_quoting_issue_via_q(client: &AuditClient) -> TestResult {
+    pub async fn test_accept_issue_quoting_issue_via_q(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_issue_quoting_issue_via_q",
             "GRASP-01:event-acceptance:2.1",
@@ -761,7 +761,7 @@ impl EventAcceptancePolicyTests {
     /// **Using TestContext pattern:**
     /// - In CI mode: Creates fresh repo+issue for full isolation
     /// - In Production mode: Reuses cached repo+issue to minimize events
-    async fn test_accept_comment_via_capital_e_tag(client: &AuditClient) -> TestResult {
+    pub async fn test_accept_comment_via_capital_e_tag(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_comment_via_E_tag",
             "GRASP-01:event-acceptance:2.2",
@@ -799,7 +799,7 @@ impl EventAcceptancePolicyTests {
     /// **Using TestContext pattern:**
     /// - In CI mode: Creates fresh repo for full isolation
     /// - In Production mode: Reuses cached repo to minimize events
-    async fn test_accept_kind1_via_e_tag(client: &AuditClient) -> TestResult {
+    pub async fn test_accept_kind1_via_e_tag(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_kind1_via_e_tag",
             "GRASP-01:event-acceptance:2.3",
@@ -859,7 +859,7 @@ impl EventAcceptancePolicyTests {
     /// **Using TestContext pattern:**
     /// - In CI mode: Creates fresh repo for full isolation
     /// - In Production mode: Reuses cached repo to minimize events
-    async fn test_accept_kind1_referenced_in_issue(client: &AuditClient) -> TestResult {
+    pub async fn test_accept_kind1_referenced_in_issue(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_kind1_referenced_in_issue",
             "GRASP-01:event-acceptance:3.1",
@@ -928,7 +928,7 @@ impl EventAcceptancePolicyTests {
     /// **Using TestContext pattern:**
     /// - In CI mode: Creates fresh repo+issue for full isolation
     /// - In Production mode: Reuses cached repo+issue to minimize events
-    async fn test_accept_comment_referenced_in_comment(client: &AuditClient) -> TestResult {
+    pub async fn test_accept_comment_referenced_in_comment(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_comment_referenced_in_comment",
             "GRASP-01:event-acceptance:3.2",
@@ -1010,7 +1010,7 @@ impl EventAcceptancePolicyTests {
     /// **Using TestContext pattern:**
     /// - In CI mode: Creates fresh repo for full isolation
     /// - In Production mode: Reuses cached repo to minimize events
-    async fn test_accept_kind1_referenced_in_kind1(client: &AuditClient) -> TestResult {
+    pub async fn test_accept_kind1_referenced_in_kind1(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_kind1_referenced_in_kind1",
             "GRASP-01:event-acceptance:3.3",
@@ -1070,7 +1070,7 @@ impl EventAcceptancePolicyTests {
     // ============================================================
 
     /// Test 4.1: Issue referencing unaccepted repo should be rejected
-    async fn test_reject_orphan_issue(client: &AuditClient) -> TestResult {
+    pub async fn test_reject_orphan_issue(client: &AuditClient) -> TestResult {
         TestResult::new(
             "reject_orphan_issue",
             "GRASP-01:event-acceptance:4.1",
@@ -1098,7 +1098,7 @@ impl EventAcceptancePolicyTests {
     }
 
     /// Test 4.2: Generic kind 1 note with no repo references should be rejected
-    async fn test_reject_orphan_kind1(client: &AuditClient) -> TestResult {
+    pub async fn test_reject_orphan_kind1(client: &AuditClient) -> TestResult {
         TestResult::new(
             "reject_orphan_kind1",
             "GRASP-01:event-acceptance:4.2",
@@ -1126,7 +1126,7 @@ impl EventAcceptancePolicyTests {
     /// - In CI mode: Creates fresh accepted repo for full isolation
     /// - In Production mode: Reuses cached accepted repo to minimize events
     /// - Note: Unaccepted repo B is always created fresh (not cached) since it must remain unaccepted
-    async fn test_reject_comment_quoting_other_repo(client: &AuditClient) -> TestResult {
+    pub async fn test_reject_comment_quoting_other_repo(client: &AuditClient) -> TestResult {
         TestResult::new(
             "reject_comment_quoting_other_repo",
             "GRASP-01:event-acceptance:4.3",

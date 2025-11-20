@@ -29,7 +29,7 @@ impl Nip01SmokeTests {
     ///
     /// Spec: NIP-01 basic requirement
     /// Requirement: MUST serve a relay at / via WebSocket
-    async fn test_websocket_connection(client: &AuditClient) -> TestResult {
+    pub async fn test_websocket_connection(client: &AuditClient) -> TestResult {
         TestResult::new(
             "websocket_connection",
             "NIP-01:basic",
@@ -52,7 +52,7 @@ impl Nip01SmokeTests {
     ///
     /// For GRASP servers, we send a NIP-34 repository announcement that lists
     /// the GRASP server in clone and relays tags (required for acceptance).
-    async fn test_send_receive_event(client: &AuditClient) -> TestResult {
+    pub async fn test_send_receive_event(client: &AuditClient) -> TestResult {
         TestResult::new(
             "send_receive_event",
             "NIP-01:event-message",
@@ -123,7 +123,7 @@ impl Nip01SmokeTests {
     ///
     /// Spec: NIP-01 REQ message
     /// Requirement: Relay MUST support REQ subscriptions
-    async fn test_create_subscription(client: &AuditClient) -> TestResult {
+    pub async fn test_create_subscription(client: &AuditClient) -> TestResult {
         TestResult::new(
             "create_subscription",
             "NIP-01:req-message",
@@ -165,7 +165,7 @@ impl Nip01SmokeTests {
     ///
     /// Spec: NIP-01 CLOSE message
     /// Requirement: Relay MUST support CLOSE to end subscriptions
-    async fn test_close_subscription(client: &AuditClient) -> TestResult {
+    pub async fn test_close_subscription(client: &AuditClient) -> TestResult {
         TestResult::new(
             "close_subscription",
             "NIP-01:close-message",
@@ -193,7 +193,7 @@ impl Nip01SmokeTests {
     ///
     /// Spec: NIP-01 event validation
     /// Requirement: Relay MUST reject events with invalid signatures
-    async fn test_reject_invalid_signature(client: &AuditClient) -> TestResult {
+    pub async fn test_reject_invalid_signature(client: &AuditClient) -> TestResult {
         TestResult::new(
             "reject_invalid_signature",
             "NIP-01:validation",
@@ -247,7 +247,7 @@ impl Nip01SmokeTests {
     ///
     /// Spec: NIP-01 event ID validation
     /// Requirement: Relay MUST reject events where ID doesn't match hash
-    async fn test_reject_invalid_event_id(client: &AuditClient) -> TestResult {
+    pub async fn test_reject_invalid_event_id(client: &AuditClient) -> TestResult {
         TestResult::new(
             "reject_invalid_event_id",
             "NIP-01:validation",

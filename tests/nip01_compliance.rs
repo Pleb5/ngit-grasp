@@ -1,13 +1,13 @@
 //! NIP-01 Compliance Integration Tests
 //!
 //! Tests ngit-grasp relay's NIP-01 compliance using grasp-audit library.
-//! Avoids code duplication by delegating to grasp-audit's test suite.
+//! Uses isolated test pattern for complete test independence.
 //!
 //! # Test Strategy
 //!
-//! - Uses TestRelay fixture for ngit-grasp relay lifecycle management
-//! - Uses grasp-audit's Nip01SmokeTests for actual test logic
-//! - Minimal duplication - single source of truth in grasp-audit
+//! - Each test runs in complete isolation with its own fresh relay instance
+//! - Uses macro to eliminate boilerplate while maintaining test isolation
+//! - Calls individual test methods from grasp-audit for minimal duplication
 //!
 //! # Running Tests
 //!
@@ -16,7 +16,7 @@
 //! cargo test --test nip01_compliance
 //!
 //! # Run specific test
-//! cargo test --test nip01_compliance test_nip01_smoke
+//! cargo test --test nip01_compliance test_websocket_connection
 //!
 //! # With output
 //! cargo test --test nip01_compliance -- --nocapture
@@ -27,87 +27,41 @@ mod common;
 use common::TestRelay;
 use grasp_audit::*;
 
-/// Test NIP-01 smoke tests against ngit-grasp relay
+/// Macro to generate isolated integration tests
 ///
-/// This test runs all NIP-01 smoke tests from grasp-audit against
-/// the ngit-grasp relay implementation.
-///
-/// Tests cover:
-/// - WebSocket connection
-/// - Event send/receive
-/// - Subscriptions (REQ/CLOSE)
-/// - Event validation (signature, ID)
-#[tokio::test]
-async fn test_nip01_smoke() {
-    // Start test relay
-    let relay = TestRelay::start().await;
+/// Each test runs with its own fresh relay instance to ensure complete isolation.
+/// This eliminates flakiness and ensures tests don't interfere with each other.
+macro_rules! isolated_test {
+    ($test_name:ident) => {
+        #[tokio::test]
+        async fn $test_name() {
+            let relay = TestRelay::start().await;
+            let config = AuditConfig::ci();
+            let client = AuditClient::new(relay.url(), config)
+                .await
+                .expect("Failed to create audit client");
 
-    // Create audit client in CI mode (isolated testing)
-    let config = AuditConfig::ci();
-    let client = AuditClient::new(relay.url(), config)
-        .await
-        .expect("Failed to create audit client");
+            let result = specs::Nip01SmokeTests::$test_name(&client).await;
 
-    // Run all NIP-01 smoke tests
-    let results = specs::Nip01SmokeTests::run_all(&client).await;
+            relay.stop().await;
 
-    // Print detailed report
-    results.print_report();
-
-    // Stop relay
-    relay.stop().await;
-
-    // Assert all tests passed
-    assert!(
-        results.all_passed(),
-        "NIP-01 smoke tests failed: {}/{} passed",
-        results.passed_count(),
-        results.total_count()
-    );
+            assert!(
+                result.passed,
+                "{} failed: {}",
+                stringify!($test_name),
+                result.error.as_deref().unwrap_or("unknown error")
+            );
+        }
+    };
 }
 
-/// Test that relay properly validates events
-///
-/// Critical security test - ensures relay validates:
-/// - Event signatures
-/// - Event IDs
-/// - Other NIP-01 requirements
-#[tokio::test]
-async fn test_relay_validates_events() {
-    let relay = TestRelay::start().await;
-    let config = AuditConfig::ci();
-    let client = AuditClient::new(relay.url(), config)
-        .await
-        .expect("Failed to create audit client");
-
-    // Run smoke tests which include validation tests
-    let results = specs::Nip01SmokeTests::run_all(&client).await;
-
-    relay.stop().await;
-
-    // Filter to validation tests
-    let validation_tests: Vec<_> = results
-        .results
-        .iter()
-        .filter(|t| t.name.contains("reject") || t.name.contains("invalid"))
-        .collect();
-
-    // Should have validation tests
-    assert!(
-        !validation_tests.is_empty(),
-        "No validation tests found (these are critical for security)"
-    );
-
-    // All validation tests should pass
-    for test in validation_tests {
-        assert!(
-            test.passed,
-            "Validation test failed: {} - {}\nThis is a security issue!",
-            test.name,
-            test.error.as_deref().unwrap_or("unknown error")
-        );
-    }
-}
+// Generate isolated tests for all NIP-01 smoke tests
+isolated_test!(test_websocket_connection);
+isolated_test!(test_send_receive_event);
+isolated_test!(test_create_subscription);
+isolated_test!(test_close_subscription);
+isolated_test!(test_reject_invalid_signature);
+isolated_test!(test_reject_invalid_event_id);
 
 /// Test relay lifecycle management
 ///
