@@ -84,6 +84,25 @@ impl AuditClient {
         self.keys.public_key()
     }
 
+    /// Get the relay URL
+    pub async fn relay_url(&self) -> Result<String> {
+        let relays = self.client.relays().await;
+        let relay = relays.values().next()
+            .ok_or_else(|| anyhow!("No relays configured"))?;
+        Ok(relay.url().to_string())
+    }
+
+    /// Convert WebSocket URL to HTTP(S) URL for NIP-11 requests
+    pub fn ws_to_http_url(ws_url: &str) -> Result<String> {
+        if ws_url.starts_with("ws://") {
+            Ok(ws_url.replace("ws://", "http://"))
+        } else if ws_url.starts_with("wss://") {
+            Ok(ws_url.replace("wss://", "https://"))
+        } else {
+            Err(anyhow!("Invalid WebSocket URL: {}", ws_url))
+        }
+    }
+
     /// Check if connected to relay
     pub async fn is_connected(&self) -> bool {
         // Check if we have any connected relays

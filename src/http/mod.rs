@@ -2,6 +2,7 @@
 ///
 /// Provides hyper HTTP server with WebSocket upgrade support for the Nostr relay.
 pub mod landing;
+pub mod nip11;
 
 use std::future::Future;
 use std::net::SocketAddr;
@@ -45,6 +46,32 @@ impl Service<Request<Incoming>> for HttpService {
 
     fn call(&self, req: Request<Incoming>) -> Self::Future {
         let base = Response::builder().header("server", "ngit-grasp");
+
+        // Check for NIP-11 relay information request (Accept: application/nostr+json)
+        if let Some(accept) = req.headers().get("accept") {
+            if accept
+                .to_str()
+                .map(|s| s.contains("application/nostr+json"))
+                .unwrap_or(false)
+            {
+                let doc = nip11::RelayInformationDocument::from_config(&self.config);
+                let json = doc.to_json().unwrap_or_else(|e| {
+                    tracing::error!("Failed to serialize NIP-11 document: {}", e);
+                    "{}".to_string()
+                });
+                
+                tracing::debug!("Serving NIP-11 relay information document to {}", self.remote);
+                
+                return Box::pin(async move {
+                    Ok(base
+                        .status(200)
+                        .header("content-type", "application/nostr+json")
+                        .header("access-control-allow-origin", "*")
+                        .body(json)
+                        .unwrap())
+                });
+            }
+        }
 
         // Check if this is a WebSocket upgrade request
         if let (Some(c), Some(w)) = (

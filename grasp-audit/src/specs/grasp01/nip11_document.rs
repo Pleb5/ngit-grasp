@@ -34,25 +34,53 @@ impl Nip11DocumentTests {
     ///
     /// Spec: Line 11 of ../grasp/01.md
     /// Requirement: MUST serve NIP-11 document
-    async fn test_nip11_document_exists(_client: &AuditClient) -> TestResult {
+    pub async fn test_nip11_document_exists(client: &AuditClient) -> TestResult {
         TestResult::new(
             "nip11_document_exists",
             "GRASP-01:nostr-relay:11",
             "Serve NIP-11 relay information document",
         )
         .run(|| async {
-            // TODO: Implementation
             // 1. Extract HTTP(S) URL from client's WebSocket URL
-            //    - ws://localhost:8081 -> http://localhost:8081
-            //    - wss://relay.example.com -> https://relay.example.com
-            // 2. HTTP GET to base URL with header:
-            //    - Accept: application/nostr+json
-            // 3. Verify 200 OK response
-            // 4. Verify response is valid JSON
-            // 5. Parse as NIP-11 document
-            // 6. Verify has required fields (name, description, etc.)
+            let ws_url = client.relay_url().await
+                .map_err(|e| format!("Failed to get relay URL: {}", e))?;
+            let http_url = AuditClient::ws_to_http_url(&ws_url)
+                .map_err(|e| format!("Failed to convert WebSocket URL to HTTP: {}", e))?;
 
-            Err("Not implemented yet".to_string())
+            // 2. HTTP GET to base URL with Accept: application/nostr+json header
+            let http_client = reqwest::Client::new();
+            let response = http_client
+                .get(&http_url)
+                .header("Accept", "application/nostr+json")
+                .send()
+                .await
+                .map_err(|e| format!("Failed to fetch NIP-11 document: {}", e))?;
+
+            // 3. Verify 200 OK response
+            if !response.status().is_success() {
+                return Err(format!(
+                    "Expected 200 OK, got {} {}",
+                    response.status().as_u16(),
+                    response.status().canonical_reason().unwrap_or("Unknown")
+                ));
+            }
+
+            // 4. Verify response is valid JSON
+            let json_text = response.text().await
+                .map_err(|e| format!("Failed to read response body: {}", e))?;
+            
+            let doc: serde_json::Value = serde_json::from_str(&json_text)
+                .map_err(|e| format!("Response is not valid JSON: {}", e))?;
+
+            // 5. Verify has required NIP-11 fields
+            let required_fields = ["name", "description", "software", "version"];
+            for field in &required_fields {
+                if !doc.get(field).is_some() {
+                    return Err(format!("Missing required NIP-11 field: {}", field));
+                }
+            }
+
+            Ok(())
         })
         .await
     }
@@ -61,22 +89,68 @@ impl Nip11DocumentTests {
     ///
     /// Spec: Line 12 of ../grasp/01.md
     /// Requirement: MUST list supported GRASPs as string array
-    async fn test_nip11_supported_grasps_field(_client: &AuditClient) -> TestResult {
+    pub async fn test_nip11_supported_grasps_field(client: &AuditClient) -> TestResult {
         TestResult::new(
             "nip11_supported_grasps_field",
             "GRASP-01:nostr-relay:12",
             "NIP-11 document includes supported_grasps field with GRASP-01",
         )
         .run(|| async {
-            // TODO: Implementation
-            // 1. Fetch NIP-11 document (same as above)
-            // 2. Verify `supported_grasps` field exists
-            // 3. Verify it's a JSON array of strings
-            // 4. Verify array includes "GRASP-01"
-            // 5. Verify format: each entry matches pattern "GRASP-\d{2}"
-            // 6. Document other GRASPs found (for info)
+            // 1. Fetch NIP-11 document
+            let ws_url = client.relay_url().await
+                .map_err(|e| format!("Failed to get relay URL: {}", e))?;
+            let http_url = AuditClient::ws_to_http_url(&ws_url)
+                .map_err(|e| format!("Failed to convert WebSocket URL to HTTP: {}", e))?;
 
-            Err("Not implemented yet".to_string())
+            let http_client = reqwest::Client::new();
+            let response = http_client
+                .get(&http_url)
+                .header("Accept", "application/nostr+json")
+                .send()
+                .await
+                .map_err(|e| format!("Failed to fetch NIP-11 document: {}", e))?;
+
+            let json_text = response.text().await
+                .map_err(|e| format!("Failed to read response body: {}", e))?;
+            
+            let doc: serde_json::Value = serde_json::from_str(&json_text)
+                .map_err(|e| format!("Response is not valid JSON: {}", e))?;
+
+            // 2. Verify `supported_grasps` field exists
+            let supported_grasps = doc.get("supported_grasps")
+                .ok_or_else(|| "Missing required field: supported_grasps".to_string())?;
+
+            // 3. Verify it's a JSON array
+            let grasps_array = supported_grasps.as_array()
+                .ok_or_else(|| "supported_grasps must be an array".to_string())?;
+
+            // 4. Verify array includes "GRASP-01"
+            let grasp_strings: Vec<String> = grasps_array
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+
+            if !grasp_strings.contains(&"GRASP-01".to_string()) {
+                return Err(format!(
+                    "supported_grasps must include 'GRASP-01', found: {:?}",
+                    grasp_strings
+                ));
+            }
+
+            // 5. Verify format: each entry should match pattern "GRASP-\d{2}"
+            let grasp_pattern = regex::Regex::new(r"^GRASP-\d{2}$")
+                .map_err(|e| format!("Failed to compile regex: {}", e))?;
+            
+            for grasp in &grasp_strings {
+                if !grasp_pattern.is_match(grasp) {
+                    return Err(format!(
+                        "Invalid GRASP format: '{}' (expected GRASP-XX where XX is two digits)",
+                        grasp
+                    ));
+                }
+            }
+
+            Ok(())
         })
         .await
     }
@@ -85,23 +159,47 @@ impl Nip11DocumentTests {
     ///
     /// Spec: Line 13 of ../grasp/01.md
     /// Requirement: MUST list repository acceptance criteria
-    async fn test_nip11_repo_acceptance_criteria_field(_client: &AuditClient) -> TestResult {
+    pub async fn test_nip11_repo_acceptance_criteria_field(client: &AuditClient) -> TestResult {
         TestResult::new(
             "nip11_repo_acceptance_criteria_field",
             "GRASP-01:nostr-relay:13",
             "NIP-11 document includes repo_acceptance_criteria field",
         )
         .run(|| async {
-            // TODO: Implementation
             // 1. Fetch NIP-11 document
-            // 2. Verify `repo_acceptance_criteria` field exists
-            // 3. Verify it's a string (human-readable)
-            // 4. Verify non-empty
-            // 5. Document the criteria (for info)
-            // Examples: "Must list this relay in clone and relays tags"
-            //           "Pre-payment required via Lightning invoice"
+            let ws_url = client.relay_url().await
+                .map_err(|e| format!("Failed to get relay URL: {}", e))?;
+            let http_url = AuditClient::ws_to_http_url(&ws_url)
+                .map_err(|e| format!("Failed to convert WebSocket URL to HTTP: {}", e))?;
 
-            Err("Not implemented yet".to_string())
+            let http_client = reqwest::Client::new();
+            let response = http_client
+                .get(&http_url)
+                .header("Accept", "application/nostr+json")
+                .send()
+                .await
+                .map_err(|e| format!("Failed to fetch NIP-11 document: {}", e))?;
+
+            let json_text = response.text().await
+                .map_err(|e| format!("Failed to read response body: {}", e))?;
+            
+            let doc: serde_json::Value = serde_json::from_str(&json_text)
+                .map_err(|e| format!("Response is not valid JSON: {}", e))?;
+
+            // 2. Verify `repo_acceptance_criteria` field exists
+            let criteria = doc.get("repo_acceptance_criteria")
+                .ok_or_else(|| "Missing required field: repo_acceptance_criteria".to_string())?;
+
+            // 3. Verify it's a string
+            let criteria_str = criteria.as_str()
+                .ok_or_else(|| "repo_acceptance_criteria must be a string".to_string())?;
+
+            // 4. Verify non-empty
+            if criteria_str.trim().is_empty() {
+                return Err("repo_acceptance_criteria must not be empty".to_string());
+            }
+
+            Ok(())
         })
         .await
     }
@@ -110,24 +208,47 @@ impl Nip11DocumentTests {
     ///
     /// Spec: Line 14 of ../grasp/01.md
     /// Requirement: MUST include curation if curated, omit otherwise
-    async fn test_nip11_curation_field(_client: &AuditClient) -> TestResult {
+    pub async fn test_nip11_curation_field(client: &AuditClient) -> TestResult {
         TestResult::new(
             "nip11_curation_field",
             "GRASP-01:nostr-relay:14",
             "NIP-11 curation field present if curated, absent otherwise",
         )
         .run(|| async {
-            // TODO: Implementation
             // 1. Fetch NIP-11 document
-            // 2. Check if `curation` field exists
-            // 3. If present:
-            //    - Verify it's a non-empty string
-            //    - Document the curation policy
-            // 4. If absent:
-            //    - Document that no curation beyond SPAM prevention
-            // 5. Both cases are valid per spec
+            let ws_url = client.relay_url().await
+                .map_err(|e| format!("Failed to get relay URL: {}", e))?;
+            let http_url = AuditClient::ws_to_http_url(&ws_url)
+                .map_err(|e| format!("Failed to convert WebSocket URL to HTTP: {}", e))?;
 
-            Err("Not implemented yet".to_string())
+            let http_client = reqwest::Client::new();
+            let response = http_client
+                .get(&http_url)
+                .header("Accept", "application/nostr+json")
+                .send()
+                .await
+                .map_err(|e| format!("Failed to fetch NIP-11 document: {}", e))?;
+
+            let json_text = response.text().await
+                .map_err(|e| format!("Failed to read response body: {}", e))?;
+            
+            let doc: serde_json::Value = serde_json::from_str(&json_text)
+                .map_err(|e| format!("Response is not valid JSON: {}", e))?;
+
+            // 2. Check if `curation` field exists
+            if let Some(curation) = doc.get("curation") {
+                // 3. If present: verify it's a non-empty string
+                let curation_str = curation.as_str()
+                    .ok_or_else(|| "curation field must be a string when present".to_string())?;
+
+                if curation_str.trim().is_empty() {
+                    return Err("curation field must not be empty when present".to_string());
+                }
+            }
+            // 4. If absent: both cases are valid per spec
+
+            // 5. Both cases are valid - test passes
+            Ok(())
         })
         .await
     }
