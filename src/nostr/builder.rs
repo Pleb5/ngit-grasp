@@ -171,32 +171,41 @@ impl Nip34WritePolicy {
 
     /// Check if any accepted event references this event (forward reference)
     ///
-    /// For addressable events (kind >= 30000): Only checks addressable reference tags (a, A, q)
+    /// For regular replaceable events (10000-19999): Checks addressable tags with kind:pubkey format
+    /// For parameterized replaceable (30000-39999): Checks addressable tags with kind:pubkey:d-identifier format
     /// For regular events: Only checks event ID reference tags (e, E, q)
     ///
-    /// This optimization recognizes that addressable events won't be referenced by ID,
-    /// and regular events won't be referenced by coordinate.
+    /// This optimization recognizes that replaceable events are referenced by coordinate address,
+    /// while regular events are referenced by event ID.
     async fn is_referenced_by_accepted(
         database: &Arc<MemoryDatabase>,
         event: &Event,
     ) -> Result<bool, String> {
-        // Check if this is an addressable event (parameterized replaceable)
-        let is_addressable = event.kind.as_u16() >= 30000 && event.kind.as_u16() < 40000;
+        let kind_u16 = event.kind.as_u16();
+        
+        // Check if this is any kind of replaceable event
+        let is_regular_replaceable = kind_u16 >= 10000 && kind_u16 < 20000;
+        let is_parameterized_replaceable = kind_u16 >= 30000 && kind_u16 < 40000;
 
-        if is_addressable {
-            // For addressable events, build the coordinate string (handles empty identifier)
-            let identifier = event.tags.iter()
-                .find_map(|tag| {
-                    let tag_vec = tag.clone().to_vec();
-                    if tag_vec.len() >= 2 && tag_vec[0] == "d" {
-                        Some(tag_vec[1].clone())
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_default(); // Empty string if no 'd' tag
-            
-            let address = format!("{}:{}:{}", event.kind.as_u16(), event.pubkey.to_hex(), identifier);
+        if is_regular_replaceable || is_parameterized_replaceable {
+            // Build the appropriate address format based on event type
+            let address = if is_parameterized_replaceable {
+                // For parameterized replaceable: kind:pubkey:d-identifier format (2 colons)
+                let identifier = event.tags.iter()
+                    .find_map(|tag| {
+                        let tag_vec = tag.clone().to_vec();
+                        if tag_vec.len() >= 2 && tag_vec[0] == "d" {
+                            Some(tag_vec[1].clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default(); // Empty string if no 'd' tag
+                format!("{}:{}:{}", event.kind.as_u16(), event.pubkey.to_hex(), identifier)
+            } else {
+                // For regular replaceable: kind:pubkey format (1 colon)
+                format!("{}:{}", event.kind.as_u16(), event.pubkey.to_hex())
+            };
             
             // Check addressable reference tags: a, A, q (with address format)
             let addressable_tags = [
