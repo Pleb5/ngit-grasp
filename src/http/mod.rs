@@ -8,12 +8,13 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 
-use hyper::body::Incoming;
+use hyper::body::{Bytes, Incoming};
 use hyper::header::{CONNECTION, SEC_WEBSOCKET_ACCEPT, UPGRADE};
 use hyper::server::conn::http1;
 use hyper::service::Service;
-use hyper::{Request, Response};
+use hyper::{Method, Request, Response};
 use hyper_util::rt::TokioIo;
+use http_body_util::BodyExt;
 use nostr_sdk::hashes::sha1::Hash as Sha1Hash;
 use nostr_sdk::hashes::{Hash, HashEngine};
 use nostr_relay_builder::LocalRelay;
@@ -21,6 +22,7 @@ use tokio::net::TcpListener;
 use base64::Engine;
 
 use crate::config::Config;
+use crate::git;
 
 /// HTTP Service that serves both WebSocket (relay) and HTML landing page
 struct HttpService {
@@ -46,6 +48,78 @@ impl Service<Request<Incoming>> for HttpService {
 
     fn call(&self, req: Request<Incoming>) -> Self::Future {
         let base = Response::builder().header("server", "ngit-grasp");
+        let path = req.uri().path().to_string();
+        let query = req.uri().query().map(|s| s.to_string());
+        let method = req.method().clone();
+        let git_data_path = self.config.git_data_path.clone();
+
+        // Check for Git HTTP requests first
+        if let Some((npub, identifier, subpath)) = git::parse_git_url(&path) {
+            let npub = npub.to_string();
+            let identifier = identifier.to_string();
+            let subpath = subpath.to_string();
+            
+            tracing::debug!("Git request: {} {} (npub={}, id={}, subpath={})",
+                method, path, npub, identifier, subpath);
+
+            let repo_path = git::resolve_repo_path(&git_data_path, &npub, &identifier);
+
+            return Box::pin(async move {
+                let result = match (method.as_ref(), subpath.as_str()) {
+                    // GET /info/refs?service=git-upload-pack or git-receive-pack
+                    (m, sp) if m == Method::GET && sp.starts_with("info/refs") => {
+                        // Parse query string for service parameter
+                        let service = query.as_deref().unwrap_or("")
+                            .strip_prefix("service=")
+                            .and_then(git::protocol::GitService::from_query_param);
+
+                        match service {
+                            Some(svc) => {
+                                git::handlers::handle_info_refs(repo_path, svc).await
+                            }
+                            None => {
+                                Err(git::handlers::GitError::RepositoryNotFound)
+                            }
+                        }
+                    }
+                    
+                    // POST /git-upload-pack (clone/fetch)
+                    (m, "git-upload-pack") if m == Method::POST => {
+                        // Read request body
+                        let body_bytes = req.collect().await
+                            .map(|collected| collected.to_bytes())
+                            .unwrap_or_else(|_| Bytes::new());
+                        
+                        git::handlers::handle_upload_pack(repo_path, body_bytes).await
+                    }
+                    
+                    // POST /git-receive-pack (push)
+                    (m, "git-receive-pack") if m == Method::POST => {
+                        // Read request body
+                        let body_bytes = req.collect().await
+                            .map(|collected| collected.to_bytes())
+                            .unwrap_or_else(|_| Bytes::new());
+                        
+                        git::handlers::handle_receive_pack(repo_path, body_bytes).await
+                    }
+                    
+                    _ => {
+                        Err(git::handlers::GitError::RepositoryNotFound)
+                    }
+                };
+
+                match result {
+                    Ok(response) => Ok(response),
+                    Err(e) => {
+                        tracing::error!("Git handler error: {}", e);
+                        Ok(Response::builder()
+                            .status(e.status_code())
+                            .body(format!("Git error: {}", e))
+                            .unwrap())
+                    }
+                }
+            });
+        }
 
         // Check for NIP-11 relay information request (Accept: application/nostr+json)
         if let Some(accept) = req.headers().get("accept") {
