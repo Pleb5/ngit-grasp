@@ -30,7 +30,7 @@ impl GitSubprocess {
         let repo_path = repo_path.as_ref();
         
         let mut cmd = Command::new("git");
-        cmd.arg(service.as_str());
+        cmd.arg(service.command_name());
         
         if advertise {
             cmd.arg("--advertise-refs");

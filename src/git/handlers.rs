@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 use hyper::{body::Bytes, Response, StatusCode};
+use http_body_util::Full;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, warn};
 
@@ -16,7 +17,7 @@ use super::subprocess::GitSubprocess;
 pub async fn handle_info_refs(
     repo_path: PathBuf,
     service: GitService,
-) -> Result<Response<String>, GitError> {
+) -> Result<Response<Full<Bytes>>, GitError> {
     debug!("Handling info/refs for {:?} with service {:?}", repo_path, service);
 
     // Check if repository exists
@@ -34,11 +35,22 @@ pub async fn handle_info_refs(
 
     // Read the output from git
     let mut output = Vec::new();
+    let mut stderr_output = Vec::new();
+    
     if let Some(stdout) = git.take_stdout() {
         let mut stdout = stdout;
         stdout.read_to_end(&mut output).await
             .map_err(|e| {
                 error!("Failed to read git output: {}", e);
+                GitError::IoError(e)
+            })?;
+    }
+    
+    if let Some(stderr) = git.take_stderr() {
+        let mut stderr = stderr;
+        stderr.read_to_end(&mut stderr_output).await
+            .map_err(|e| {
+                error!("Failed to read git stderr: {}", e);
                 GitError::IoError(e)
             })?;
     }
@@ -51,7 +63,8 @@ pub async fn handle_info_refs(
         })?;
 
     if !status.success() {
-        error!("Git process failed with status: {:?}", status);
+        let stderr_str = String::from_utf8_lossy(&stderr_output);
+        error!("Git process failed with status: {:?}, stderr: {}", status, stderr_str);
         return Err(GitError::GitFailed(status.code()));
     }
 
@@ -70,7 +83,7 @@ pub async fn handle_info_refs(
         .status(StatusCode::OK)
         .header("content-type", service.advertisement_content_type())
         .header("cache-control", "no-cache")
-        .body(String::from_utf8_lossy(&response_body).to_string())
+        .body(Full::new(Bytes::from(response_body)))
         .unwrap())
 }
 
@@ -78,7 +91,7 @@ pub async fn handle_info_refs(
 pub async fn handle_upload_pack(
     repo_path: PathBuf,
     request_body: Bytes,
-) -> Result<Response<String>, GitError> {
+) -> Result<Response<Full<Bytes>>, GitError> {
     debug!("Handling upload-pack for {:?}", repo_path);
 
     if !repo_path.exists() {
@@ -99,9 +112,17 @@ pub async fn handle_upload_pack(
 
     // Read response from git's stdout
     let mut output = Vec::new();
+    let mut stderr_output = Vec::new();
+    
     if let Some(stdout) = git.take_stdout() {
         let mut stdout = stdout;
         stdout.read_to_end(&mut output).await
+            .map_err(GitError::IoError)?;
+    }
+    
+    if let Some(stderr) = git.take_stderr() {
+        let mut stderr = stderr;
+        stderr.read_to_end(&mut stderr_output).await
             .map_err(GitError::IoError)?;
     }
 
@@ -110,6 +131,8 @@ pub async fn handle_upload_pack(
         .map_err(GitError::IoError)?;
 
     if !status.success() {
+        let stderr_str = String::from_utf8_lossy(&stderr_output);
+        error!("Git upload-pack failed: {}", stderr_str);
         return Err(GitError::GitFailed(status.code()));
     }
 
@@ -117,7 +140,7 @@ pub async fn handle_upload_pack(
         .status(StatusCode::OK)
         .header("content-type", GitService::UploadPack.result_content_type())
         .header("cache-control", "no-cache")
-        .body(String::from_utf8_lossy(&output).to_string())
+        .body(Full::new(Bytes::from(output)))
         .unwrap())
 }
 
@@ -127,7 +150,7 @@ pub async fn handle_upload_pack(
 pub async fn handle_receive_pack(
     repo_path: PathBuf,
     request_body: Bytes,
-) -> Result<Response<String>, GitError> {
+) -> Result<Response<Full<Bytes>>, GitError> {
     debug!("Handling receive-pack for {:?}", repo_path);
 
     if !repo_path.exists() {
@@ -151,9 +174,17 @@ pub async fn handle_receive_pack(
 
     // Read response from git's stdout
     let mut output = Vec::new();
+    let mut stderr_output = Vec::new();
+    
     if let Some(stdout) = git.take_stdout() {
         let mut stdout = stdout;
         stdout.read_to_end(&mut output).await
+            .map_err(GitError::IoError)?;
+    }
+    
+    if let Some(stderr) = git.take_stderr() {
+        let mut stderr = stderr;
+        stderr.read_to_end(&mut stderr_output).await
             .map_err(GitError::IoError)?;
     }
 
@@ -162,6 +193,8 @@ pub async fn handle_receive_pack(
         .map_err(GitError::IoError)?;
 
     if !status.success() {
+        let stderr_str = String::from_utf8_lossy(&stderr_output);
+        error!("Git receive-pack failed: {}", stderr_str);
         return Err(GitError::GitFailed(status.code()));
     }
 
@@ -169,7 +202,7 @@ pub async fn handle_receive_pack(
         .status(StatusCode::OK)
         .header("content-type", GitService::ReceivePack.result_content_type())
         .header("cache-control", "no-cache")
-        .body(String::from_utf8_lossy(&output).to_string())
+        .body(Full::new(Bytes::from(output)))
         .unwrap())
 }
 

@@ -14,7 +14,7 @@ use hyper::server::conn::http1;
 use hyper::service::Service;
 use hyper::{Method, Request, Response};
 use hyper_util::rt::TokioIo;
-use http_body_util::BodyExt;
+use http_body_util::{BodyExt, Full};
 use nostr_sdk::hashes::sha1::Hash as Sha1Hash;
 use nostr_sdk::hashes::{Hash, HashEngine};
 use nostr_relay_builder::LocalRelay;
@@ -42,7 +42,7 @@ impl HttpService {
 }
 
 impl Service<Request<Incoming>> for HttpService {
-    type Response = Response<String>;
+    type Response = Response<Full<Bytes>>;
     type Error = String;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
@@ -65,6 +65,11 @@ impl Service<Request<Incoming>> for HttpService {
             let repo_path = git::resolve_repo_path(&git_data_path, &npub, &identifier);
 
             return Box::pin(async move {
+                // Collect request body once before the match statement
+                let body_bytes = req.collect().await
+                    .map(|collected| collected.to_bytes())
+                    .unwrap_or_else(|_| Bytes::new());
+                
                 let result = match (method.as_ref(), subpath.as_str()) {
                     // GET /info/refs?service=git-upload-pack or git-receive-pack
                     (m, sp) if m == Method::GET && sp.starts_with("info/refs") => {
@@ -85,22 +90,12 @@ impl Service<Request<Incoming>> for HttpService {
                     
                     // POST /git-upload-pack (clone/fetch)
                     (m, "git-upload-pack") if m == Method::POST => {
-                        // Read request body
-                        let body_bytes = req.collect().await
-                            .map(|collected| collected.to_bytes())
-                            .unwrap_or_else(|_| Bytes::new());
-                        
                         git::handlers::handle_upload_pack(repo_path, body_bytes).await
                     }
                     
                     // POST /git-receive-pack (push)
                     (m, "git-receive-pack") if m == Method::POST => {
-                        // Read request body
-                        let body_bytes = req.collect().await
-                            .map(|collected| collected.to_bytes())
-                            .unwrap_or_else(|_| Bytes::new());
-                        
-                        git::handlers::handle_receive_pack(repo_path, body_bytes).await
+                        git::handlers::handle_receive_pack(repo_path, body_bytes.clone()).await
                     }
                     
                     _ => {
@@ -112,9 +107,10 @@ impl Service<Request<Incoming>> for HttpService {
                     Ok(response) => Ok(response),
                     Err(e) => {
                         tracing::error!("Git handler error: {}", e);
+                        let error_msg = format!("Git error: {}", e);
                         Ok(Response::builder()
                             .status(e.status_code())
-                            .body(format!("Git error: {}", e))
+                            .body(Full::new(Bytes::from(error_msg)))
                             .unwrap())
                     }
                 }
@@ -141,7 +137,7 @@ impl Service<Request<Incoming>> for HttpService {
                         .status(200)
                         .header("content-type", "application/nostr+json")
                         .header("access-control-allow-origin", "*")
-                        .body(json)
+                        .body(Full::new(Bytes::from(json)))
                         .unwrap())
                 });
             }
@@ -185,7 +181,7 @@ impl Service<Request<Incoming>> for HttpService {
                         .header(CONNECTION, "upgrade")
                         .header(UPGRADE, "websocket")
                         .header(SEC_WEBSOCKET_ACCEPT, derived.unwrap())
-                        .body("".to_string())
+                        .body(Full::new(Bytes::new()))
                         .unwrap())
                 });
             }
@@ -197,7 +193,7 @@ impl Service<Request<Incoming>> for HttpService {
             Ok(base
                 .status(200)
                 .header("content-type", "text/html; charset=utf-8")
-                .body(html)
+                .body(Full::new(Bytes::from(html)))
                 .unwrap())
         })
     }

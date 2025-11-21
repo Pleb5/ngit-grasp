@@ -157,6 +157,14 @@ impl GitService {
         }
     }
 
+    /// Get the git command name (without "git-" prefix) for subprocess invocation
+    pub fn command_name(&self) -> &'static str {
+        match self {
+            Self::UploadPack => "upload-pack",
+            Self::ReceivePack => "receive-pack",
+        }
+    }
+
     /// Get the content type for the service advertisement
     pub fn advertisement_content_type(&self) -> &'static str {
         match self {
