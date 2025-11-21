@@ -2,6 +2,8 @@
 //!
 //! Provides automatic relay lifecycle management for integration tests.
 
+use nostr_sdk::ToBech32;
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tokio::time::sleep;
@@ -9,11 +11,12 @@ use tokio::time::sleep;
 /// Test relay fixture that manages relay lifecycle
 ///
 /// Automatically starts and stops the ngit-grasp relay for testing.
-/// Uses a random port to avoid conflicts.
+/// Uses a random port to avoid conflicts and cleans up created repositories.
 pub struct TestRelay {
     process: Child,
     url: String,
     port: u16,
+    git_data_dir: tempfile::TempDir,
 }
 
 impl TestRelay {
@@ -40,6 +43,10 @@ impl TestRelay {
         let bind_address = format!("127.0.0.1:{}", port);
         let url = format!("ws://127.0.0.1:{}", port);
 
+        // Create temporary directory for git repositories
+        let git_data_dir = tempfile::tempdir()
+            .expect("Failed to create temporary git data directory");
+
         // Use the built binary directly (faster than cargo run)
         let binary_path = std::env::current_exe()
             .expect("Failed to get current exe")
@@ -49,17 +56,29 @@ impl TestRelay {
             .expect("Failed to get grandparent dir")
             .join("ngit-grasp");
 
+        // Generate a test owner npub (using a random keypair)
+        let test_keys = nostr_sdk::Keys::generate();
+        let test_npub = test_keys.public_key().to_bech32()
+            .expect("Failed to generate test npub");
+
         // Start the relay process
         let process = Command::new(&binary_path)
             .env("NGIT_BIND_ADDRESS", &bind_address)
             .env("NGIT_DOMAIN", &bind_address) // Set domain to match bind address
+            .env("NGIT_GIT_DATA_PATH", git_data_dir.path())
+            .env("NGIT_OWNER_NPUB", &test_npub)
             .env("RUST_LOG", "warn") // Less logging during tests
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .expect("Failed to start relay process");
 
-        let relay = Self { process, url, port };
+        let relay = Self {
+            process,
+            url,
+            port,
+            git_data_dir,
+        };
 
         // Wait for relay to be ready
         relay.wait_for_ready().await;
@@ -80,6 +99,20 @@ impl TestRelay {
     /// Get the relay domain (host:port)
     pub fn domain(&self) -> String {
         format!("127.0.0.1:{}", self.port)
+    }
+
+    /// Get the git data directory path
+    pub fn git_data_dir(&self) -> &std::path::Path {
+        self.git_data_dir.path()
+    }
+
+    /// Get the expected repository path for a given npub and repo identifier
+    ///
+    /// Repositories are stored at: <git_data_dir>/<npub>/<identifier>.git
+    pub fn repo_path(&self, npub: &str, identifier: &str) -> PathBuf {
+        self.git_data_dir.path()
+            .join(npub)
+            .join(format!("{}.git", identifier))
     }
 
     /// Wait for the relay to be ready to accept connections

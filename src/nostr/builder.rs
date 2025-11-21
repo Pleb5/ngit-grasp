@@ -3,7 +3,7 @@
 /// This module integrates nostr-relay-builder with NIP-34 validation logic
 /// preserved from the original implementation.
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use nostr::nips::nip19::ToBech32;
@@ -13,7 +13,7 @@ use nostr_relay_builder::prelude::*;
 
 use crate::config::{Config, DatabaseBackend};
 use crate::nostr::events::{
-    validate_announcement, validate_state, KIND_REPOSITORY_ANNOUNCEMENT, KIND_REPOSITORY_STATE,
+    validate_announcement, validate_state, RepositoryAnnouncement, KIND_REPOSITORY_ANNOUNCEMENT, KIND_REPOSITORY_STATE,
 };
 
 /// NIP-34 Write Policy with Full GRASP-01 Event Validation
@@ -30,14 +30,51 @@ use crate::nostr::events::{
 pub struct Nip34WritePolicy {
     domain: String,
     database: Arc<MemoryDatabase>,
+    git_data_path: PathBuf,
 }
 
 impl Nip34WritePolicy {
-    pub fn new(domain: impl Into<String>, database: Arc<MemoryDatabase>) -> Self {
+    pub fn new(domain: impl Into<String>, database: Arc<MemoryDatabase>, git_data_path: impl Into<PathBuf>) -> Self {
         Self {
             domain: domain.into(),
             database,
+            git_data_path: git_data_path.into(),
         }
+    }
+
+    /// Create a bare git repository if it doesn't exist
+    /// Path format: <git_data_path>/<npub>/<identifier>.git
+    fn ensure_bare_repository(&self, announcement: &RepositoryAnnouncement) -> Result<(), String> {
+        let repo_path = self.git_data_path.join(&announcement.repo_path());
+        
+        // Check if repository already exists
+        if repo_path.exists() {
+            tracing::debug!("Repository already exists at {}", repo_path.display());
+            return Ok(());
+        }
+
+        // Create parent directory (npub directory)
+        let parent = repo_path.parent().ok_or_else(|| {
+            format!("Invalid repository path: {}", repo_path.display())
+        })?;
+        
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!("Failed to create directory {}: {}", parent.display(), e)
+        })?;
+
+        // Initialize bare repository using git command
+        let output = std::process::Command::new("git")
+            .args(&["init", "--bare", repo_path.to_str().unwrap()])
+            .output()
+            .map_err(|e| format!("Failed to execute git init: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("git init failed: {}", stderr));
+        }
+
+        tracing::info!("Created bare repository at {}", repo_path.display());
+        Ok(())
     }
 
     /// Extract all reference tags from an event (a, A, q, e, E)
@@ -269,11 +306,35 @@ impl WritePolicy for Nip34WritePolicy {
             match event.kind.as_u16() {
                 KIND_REPOSITORY_ANNOUNCEMENT => match validate_announcement(event, &domain) {
                     Ok(_) => {
-                        tracing::debug!(
-                            "Accepted repository announcement: {}",
-                            event_id_str
-                        );
-                        PolicyResult::Accept
+                        // Parse announcement to get repository details
+                        match RepositoryAnnouncement::from_event(event.clone()) {
+                            Ok(announcement) => {
+                                // Try to create bare repository if it doesn't exist
+                                if let Err(e) = self.ensure_bare_repository(&announcement) {
+                                    tracing::warn!(
+                                        "Failed to create bare repository for {}: {}",
+                                        event_id_str,
+                                        e
+                                    );
+                                    // Note: We still accept the event even if repo creation fails
+                                    // The git operation failure shouldn't prevent event acceptance
+                                }
+                                
+                                tracing::debug!(
+                                    "Accepted repository announcement: {}",
+                                    event_id_str
+                                );
+                                PolicyResult::Accept
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to parse repository announcement {}: {}",
+                                    event_id_str,
+                                    e
+                                );
+                                PolicyResult::Reject(format!("Failed to parse announcement: {}", e))
+                            }
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -432,7 +493,11 @@ pub fn create_relay(config: &Config) -> Result<LocalRelay> {
     // Clone Arc for the write policy so both relay and policy can access the database
     let builder = RelayBuilder::default()
         .database(database.clone())
-        .write_policy(Nip34WritePolicy::new(&config.domain, database.clone()));
+        .write_policy(Nip34WritePolicy::new(
+            &config.domain,
+            database.clone(),
+            &config.git_data_path,
+        ));
 
     tracing::info!(
         "Relay configured with GRASP-01 validation for domain: {}",
