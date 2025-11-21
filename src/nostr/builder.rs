@@ -73,40 +73,6 @@ impl Nip34WritePolicy {
             return Err(format!("git init failed: {}", stderr));
         }
 
-        // Create an initial empty commit so the repository can be cloned
-        // This is required because git clone fails on completely empty repositories
-        let output = std::process::Command::new("git")
-            .args(&[
-                "--git-dir", repo_path.to_str().unwrap(),
-                "commit-tree", "-m", "Initial empty commit",
-                "4b825dc642cb6eb9a060e54bf8d69288fbee4904" // Empty tree hash
-            ])
-            .output()
-            .map_err(|e| format!("Failed to create initial commit: {}", e))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!("Failed to create initial commit (repository may not be cloneable): {}", stderr);
-            // Don't fail here - the repository was created successfully
-        } else {
-            // Extract commit hash from stdout
-            let commit_hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            
-            // Create master branch pointing to this commit
-            let output = std::process::Command::new("git")
-                .args(&[
-                    "--git-dir", repo_path.to_str().unwrap(),
-                    "update-ref", "refs/heads/master", &commit_hash
-                ])
-                .output()
-                .map_err(|e| format!("Failed to create master branch: {}", e))?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                tracing::warn!("Failed to create master branch: {}", stderr);
-            }
-        }
-
         tracing::info!("Created bare repository at {}", repo_path.display());
         Ok(())
     }
