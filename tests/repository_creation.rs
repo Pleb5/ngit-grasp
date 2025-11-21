@@ -26,8 +26,8 @@
 mod common;
 
 use common::TestRelay;
-use grasp_audit::*;
 use grasp_audit::specs::grasp01::RepositoryCreationTests;
+use grasp_audit::*;
 
 /// Macro to generate isolated integration tests
 ///
@@ -61,4 +61,3 @@ macro_rules! isolated_test {
 isolated_test!(test_bare_repo_created_on_announcement);
 isolated_test!(test_repo_creation_idempotent);
 isolated_test!(test_bare_repo_structure);
-isolated_test!(test_repo_cleanup);

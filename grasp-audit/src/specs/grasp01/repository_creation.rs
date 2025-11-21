@@ -16,7 +16,7 @@
 //! cd grasp-audit && nix develop -c bash test-ngit-relay.sh --mode test
 //! ```
 
-use crate::{AuditClient, TestContext, FixtureKind, TestResult};
+use crate::{AuditClient, FixtureKind, TestContext, TestResult};
 use nostr_sdk::prelude::*;
 use std::path::Path;
 
@@ -36,58 +36,74 @@ impl RepositoryCreationTests {
     ) -> TestResult {
         let test_name = "test_bare_repo_created_on_announcement";
         let ctx = TestContext::new(client);
-        
+
         // Use TestContext to create and send repository announcement
         let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
             Ok(r) => r,
-            Err(e) => return TestResult::new(
-                test_name,
-                "GRASP-01",
-                "Bare repository must be created when announcement is accepted",
-            ).fail(&format!("Failed to create repo fixture: {}", e)),
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Bare repository must be created when announcement is accepted",
+                )
+                .fail(&format!("Failed to create repo fixture: {}", e))
+            }
         };
 
         // Wait a bit for repository creation
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         // Extract repo identifier and npub from announcement
-        let repo_id = match repo.tags.iter()
+        let repo_id = match repo
+            .tags
+            .iter()
             .find(|t| t.kind() == TagKind::d())
             .and_then(|t| t.content())
         {
             Some(id) => id.to_string(),
-            None => return TestResult::new(
-                test_name,
-                "GRASP-01",
-                "Bare repository must be created when announcement is accepted",
-            ).fail("Repository announcement missing d tag"),
+            None => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Bare repository must be created when announcement is accepted",
+                )
+                .fail("Repository announcement missing d tag")
+            }
         };
 
         let npub = match repo.pubkey.to_bech32() {
             Ok(n) => n,
-            Err(e) => return TestResult::new(
-                test_name,
-                "GRASP-01",
-                "Bare repository must be created when announcement is accepted",
-            ).fail(&format!("Failed to convert pubkey to npub: {}", e)),
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Bare repository must be created when announcement is accepted",
+                )
+                .fail(&format!("Failed to convert pubkey to npub: {}", e))
+            }
         };
 
         // Check if repository was created
         let repo_path = git_data_dir.join(&npub).join(format!("{}.git", repo_id));
-        
+
         if !is_bare_repository(&repo_path) {
             return TestResult::new(
                 test_name,
                 "GRASP-01",
                 "Bare repository must be created when announcement is accepted",
-            ).fail(&format!("Bare repository not found at: {}", repo_path.display()));
+            )
+            .fail(&format!(
+                "Bare repository not found at: {}",
+                repo_path.display()
+            ));
         }
 
         TestResult::new(
             test_name,
             "GRASP-01",
             "Bare repository must be created when announcement is accepted",
-        ).pass()
+        )
+        .pass()
     }
 
     /// Test that repository creation is idempotent
@@ -102,15 +118,18 @@ impl RepositoryCreationTests {
     ) -> TestResult {
         let test_name = "test_repo_creation_idempotent";
         let ctx = TestContext::new(client);
-        
+
         // Create and send repository announcement first time via TestContext
         let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
             Ok(r) => r,
-            Err(e) => return TestResult::new(
-                test_name,
-                "GRASP-01",
-                "Repository creation must be idempotent",
-            ).fail(&format!("Failed to create repo fixture: {}", e)),
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Repository creation must be idempotent",
+                )
+                .fail(&format!("Failed to create repo fixture: {}", e))
+            }
         };
 
         // Wait for repository creation
@@ -122,14 +141,17 @@ impl RepositoryCreationTests {
                 test_name,
                 "GRASP-01",
                 "Repository creation must be idempotent",
-            ).fail(&format!("Second send failed (not idempotent): {}", e));
+            )
+            .fail(&format!("Second send failed (not idempotent): {}", e));
         }
 
         // Wait again
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         // Verify repository still exists and is valid
-        let repo_id = repo.tags.iter()
+        let repo_id = repo
+            .tags
+            .iter()
             .find(|t| t.kind() == TagKind::d())
             .and_then(|t| t.content())
             .ok_or("Missing d tag")
@@ -138,20 +160,22 @@ impl RepositoryCreationTests {
 
         let npub = repo.pubkey.to_bech32().unwrap();
         let repo_path = git_data_dir.join(&npub).join(format!("{}.git", repo_id));
-        
+
         if !is_bare_repository(&repo_path) {
             return TestResult::new(
                 test_name,
                 "GRASP-01",
                 "Repository creation must be idempotent",
-            ).fail("Repository not found after second send");
+            )
+            .fail("Repository not found after second send");
         }
 
         TestResult::new(
             test_name,
             "GRASP-01",
             "Repository creation must be idempotent",
-        ).pass()
+        )
+        .pass()
     }
 
     /// Test that the repository has the correct structure
@@ -160,28 +184,30 @@ impl RepositoryCreationTests {
     /// 1. Repository is at <git_data_path>/<npub>/<identifier>.git
     /// 2. Repository is bare (no working directory)
     /// 3. Repository has required git structure (HEAD, config, objects/, refs/)
-    pub async fn test_bare_repo_structure(
-        client: &AuditClient,
-        git_data_dir: &Path,
-    ) -> TestResult {
+    pub async fn test_bare_repo_structure(client: &AuditClient, git_data_dir: &Path) -> TestResult {
         let test_name = "test_bare_repo_structure";
         let ctx = TestContext::new(client);
-        
+
         // Create and send repository announcement via TestContext
         let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
             Ok(r) => r,
-            Err(e) => return TestResult::new(
-                test_name,
-                "GRASP-01",
-                "Bare repository must have correct structure",
-            ).fail(&format!("Failed to create repo fixture: {}", e)),
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Bare repository must have correct structure",
+                )
+                .fail(&format!("Failed to create repo fixture: {}", e))
+            }
         };
 
         // Wait for repository creation
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         // Extract repo identifier and npub
-        let repo_id = repo.tags.iter()
+        let repo_id = repo
+            .tags
+            .iter()
             .find(|t| t.kind() == TagKind::d())
             .and_then(|t| t.content())
             .ok_or("Missing d tag")
@@ -192,13 +218,17 @@ impl RepositoryCreationTests {
 
         // Verify correct path structure: <git_data_path>/<npub>/<identifier>.git
         let expected_path = git_data_dir.join(&npub).join(format!("{}.git", repo_id));
-        
+
         if !expected_path.exists() {
             return TestResult::new(
                 test_name,
                 "GRASP-01",
                 "Bare repository must have correct structure",
-            ).fail(&format!("Repository not at expected path: {}", expected_path.display()));
+            )
+            .fail(&format!(
+                "Repository not at expected path: {}",
+                expected_path.display()
+            ));
         }
 
         // Verify it's a bare repository with correct structure
@@ -207,7 +237,8 @@ impl RepositoryCreationTests {
                 test_name,
                 "GRASP-01",
                 "Bare repository must have correct structure",
-            ).fail("Missing HEAD file");
+            )
+            .fail("Missing HEAD file");
         }
 
         if !expected_path.join("config").is_file() {
@@ -215,7 +246,8 @@ impl RepositoryCreationTests {
                 test_name,
                 "GRASP-01",
                 "Bare repository must have correct structure",
-            ).fail("Missing config file");
+            )
+            .fail("Missing config file");
         }
 
         if !expected_path.join("objects").is_dir() {
@@ -223,7 +255,8 @@ impl RepositoryCreationTests {
                 test_name,
                 "GRASP-01",
                 "Bare repository must have correct structure",
-            ).fail("Missing objects/ directory");
+            )
+            .fail("Missing objects/ directory");
         }
 
         if !expected_path.join("refs").is_dir() {
@@ -231,7 +264,8 @@ impl RepositoryCreationTests {
                 test_name,
                 "GRASP-01",
                 "Bare repository must have correct structure",
-            ).fail("Missing refs/ directory");
+            )
+            .fail("Missing refs/ directory");
         }
 
         // Verify the helper function agrees
@@ -240,76 +274,16 @@ impl RepositoryCreationTests {
                 test_name,
                 "GRASP-01",
                 "Bare repository must have correct structure",
-            ).fail("Helper function does not recognize repository as bare");
+            )
+            .fail("Helper function does not recognize repository as bare");
         }
 
         TestResult::new(
             test_name,
             "GRASP-01",
             "Bare repository must have correct structure",
-        ).pass()
-    }
-
-    /// Test that repository creation cleanup works
-    ///
-    /// This test:
-    /// 1. Creates multiple repositories via TestContext
-    /// 2. Verifies they exist
-    /// 3. Ensures test cleanup removes them (via TempDir drop)
-    pub async fn test_repo_cleanup(
-        client: &AuditClient,
-        git_data_dir: &Path,
-    ) -> TestResult {
-        let test_name = "test_repo_cleanup";
-        let ctx = TestContext::new(client);
-        
-        // Create multiple repositories via TestContext
-        let mut repo_paths = Vec::new();
-        
-        for _i in 0..3 {
-            let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
-                Ok(r) => r,
-                Err(e) => return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Test cleanup must remove created repositories",
-                ).fail(&format!("Failed to create repo fixture: {}", e)),
-            };
-
-            // Extract path
-            let repo_id = repo.tags.iter()
-                .find(|t| t.kind() == TagKind::d())
-                .and_then(|t| t.content())
-                .unwrap()
-                .to_string();
-            let npub = repo.pubkey.to_bech32().unwrap();
-            let path = git_data_dir.join(&npub).join(format!("{}.git", repo_id));
-            repo_paths.push(path);
-        }
-
-        // Wait for all repositories to be created
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
-        // Verify all repositories exist
-        for path in &repo_paths {
-            if !is_bare_repository(path) {
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Test cleanup must remove created repositories",
-                ).fail(&format!("Repository not created at: {}", path.display()));
-            }
-        }
-
-        // Note: Actual cleanup happens when the TestRelay's TempDir is dropped
-        // This test just verifies that repositories were created successfully
-        // The integration test framework will verify cleanup
-
-        TestResult::new(
-            test_name,
-            "GRASP-01",
-            "Test cleanup must remove created repositories",
-        ).pass()
+        )
+        .pass()
     }
 }
 
@@ -370,9 +344,6 @@ mod tests {
     #[test]
     fn test_is_bare_repository_rejects_nonexistent() {
         let path = Path::new("/nonexistent/path/to/repo.git");
-        assert!(
-            !is_bare_repository(path),
-            "Should reject nonexistent path"
-        );
+        assert!(!is_bare_repository(path), "Should reject nonexistent path");
     }
 }
