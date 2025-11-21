@@ -11,7 +11,7 @@ use nostr::prelude::{Alphabet, SingleLetterTag};
 use nostr::{EventId, Filter, Kind, PublicKey};
 use nostr_relay_builder::prelude::*;
 
-use crate::config::Config;
+use crate::config::{Config, DatabaseBackend};
 use crate::nostr::events::{
     validate_announcement, validate_state, KIND_REPOSITORY_ANNOUNCEMENT, KIND_REPOSITORY_STATE,
 };
@@ -397,14 +397,36 @@ pub fn create_relay(config: &Config) -> Result<LocalRelay> {
     // Determine database path
     let db_path = Path::new(&config.relay_data_path);
 
-    // Create database - using in-memory for now, can switch to persistent later
-    // TODO: Add configuration for NostrDB or LMDB backends
-    let database = Arc::new(MemoryDatabase::with_opts(MemoryDatabaseOptions {
-        events: true,
-        max_events: Some(100_000),
-    }));
-
-    tracing::info!("Using in-memory database (path: {})", db_path.display());
+    // Create database based on configuration
+    let database = match config.database_backend {
+        DatabaseBackend::Memory => {
+            tracing::info!("Using in-memory database (no persistence)");
+            Arc::new(MemoryDatabase::with_opts(MemoryDatabaseOptions {
+                events: true,
+                max_events: Some(100_000),
+            }))
+        }
+        DatabaseBackend::NostrDb => {
+            tracing::info!("Using NostrDB backend at: {}", db_path.display());
+            // TODO: Implement NostrDB backend once nostr-relay-builder supports it
+            // For now, fall back to memory database
+            tracing::warn!("NostrDB backend not yet implemented, using in-memory database");
+            Arc::new(MemoryDatabase::with_opts(MemoryDatabaseOptions {
+                events: true,
+                max_events: Some(100_000),
+            }))
+        }
+        DatabaseBackend::Lmdb => {
+            tracing::info!("Using LMDB backend at: {}", db_path.display());
+            // TODO: Implement LMDB backend once nostr-relay-builder supports it
+            // For now, fall back to memory database
+            tracing::warn!("LMDB backend not yet implemented, using in-memory database");
+            Arc::new(MemoryDatabase::with_opts(MemoryDatabaseOptions {
+                events: true,
+                max_events: Some(100_000),
+            }))
+        }
+    };
 
     // Build relay with GRASP-01 validation
     // Clone Arc for the write policy so both relay and policy can access the database
