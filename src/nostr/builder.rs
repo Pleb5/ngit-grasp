@@ -75,45 +75,96 @@ impl Nip34WritePolicy {
         (addressable_refs, event_refs)
     }
 
-    /// Check if an addressable event (repository) exists in database
-    async fn is_accepted_repository(
+    /// Check if any addressable events (repositories) exist in database
+    /// Returns the first matching addressable reference found, or None if none match
+    async fn find_accepted_repository(
         database: &Arc<MemoryDatabase>,
-        addressable: &str,
-    ) -> Result<bool, String> {
-        // Parse addressable format: kind:pubkey:identifier
-        let parts: Vec<&str> = addressable.split(':').collect();
-        if parts.len() < 3 {
-            return Ok(false);
+        addressables: &[String],
+    ) -> Result<Option<String>, String> {
+        if addressables.is_empty() {
+            return Ok(None);
         }
 
-        let kind = parts[0]
-            .parse::<u16>()
-            .map_err(|e| format!("Invalid kind in addressable: {}", e))?;
-        let pubkey = PublicKey::from_hex(parts[1])
-            .map_err(|e| format!("Invalid pubkey in addressable: {}", e))?;
-        let identifier = parts[2];
+        // Parse all addressable references
+        let mut parsed_refs = Vec::new();
+        for addr in addressables {
+            let parts: Vec<&str> = addr.split(':').collect();
+            if parts.len() < 3 {
+                continue; // Skip invalid format
+            }
 
-        // Query database for this addressable event
-        let filter = Filter::new()
-            .kind(Kind::from(kind))
-            .author(pubkey)
-            .identifier(identifier);
+            let kind = match parts[0].parse::<u16>() {
+                Ok(k) => k,
+                Err(_) => continue, // Skip invalid kind
+            };
+            let pubkey = match PublicKey::from_hex(parts[1]) {
+                Ok(pk) => pk,
+                Err(_) => continue, // Skip invalid pubkey
+            };
+            let identifier = parts[2].to_string();
 
-        match database.query(filter).await {
-            Ok(events) => Ok(!events.is_empty()),
-            Err(e) => Err(format!("Database query failed: {}", e)),
+            parsed_refs.push((addr.clone(), kind, pubkey, identifier));
         }
+
+        if parsed_refs.is_empty() {
+            return Ok(None);
+        }
+
+        // Group by kind to reduce queries
+        use std::collections::HashMap;
+        let mut by_kind: HashMap<u16, Vec<_>> = HashMap::new();
+        for (addr, kind, pubkey, identifier) in parsed_refs {
+            by_kind.entry(kind).or_default().push((addr, pubkey, identifier));
+        }
+
+        // Query each kind group
+        for (kind, refs) in by_kind {
+            let authors: Vec<PublicKey> = refs.iter().map(|(_, pk, _)| *pk).collect();
+            
+            let filter = Filter::new()
+                .kind(Kind::from(kind))
+                .authors(authors);
+
+            match database.query(filter).await {
+                Ok(events) => {
+                    // Check if any event matches our identifier requirements
+                    for event in events {
+                        for (addr, _pubkey, identifier) in &refs {
+                            // Match identifier tag
+                            if event.tags.iter().any(|tag| {
+                                let tag_vec = tag.clone().to_vec();
+                                tag_vec.len() >= 2 && tag_vec[0] == "d" && tag_vec[1] == *identifier
+                            }) {
+                                return Ok(Some(addr.clone()));
+                            }
+                        }
+                    }
+                }
+                Err(e) => return Err(format!("Database query failed: {}", e)),
+            }
+        }
+
+        Ok(None)
     }
 
-    /// Check if an event exists in database  
-    async fn is_accepted_event(
+    /// Check if any events exist in database
+    /// Returns the first matching event ID found, or None if none match
+    async fn find_accepted_event(
         database: &Arc<MemoryDatabase>,
-        event_id: &EventId,
-    ) -> Result<bool, String> {
-        let filter = Filter::new().id(*event_id);
+        event_ids: &[EventId],
+    ) -> Result<Option<EventId>, String> {
+        if event_ids.is_empty() {
+            return Ok(None);
+        }
+
+        // Single query for all event IDs
+        let filter = Filter::new().ids(event_ids.iter().copied());
 
         match database.query(filter).await {
-            Ok(events) => Ok(!events.is_empty()),
+            Ok(events) => {
+                // Get first event from the iterator
+                Ok(events.into_iter().next().map(|e| e.id))
+            }
             Err(e) => Err(format!("Database query failed: {}", e)),
         }
     }
@@ -206,53 +257,49 @@ impl WritePolicy for Nip34WritePolicy {
                     // Extract all reference tags from event
                     let (addressable_refs, event_refs) = Self::extract_reference_tags(event);
 
-                    // Check 1: Does this event reference an accepted repository?
-                    for addr_ref in &addressable_refs {
-                        match Self::is_accepted_repository(&database, addr_ref).await {
-                            Ok(true) => {
-                                tracing::debug!(
-                                    "Accepted event {}: references accepted repository {}",
-                                    event_id_str,
-                                    addr_ref
-                                );
-                                return PolicyResult::Accept;
-                            }
-                            Ok(false) => {
-                                // Continue checking other references
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Database query failed for event {}, rejecting (fail-secure): {}",
-                                    event_id_str,
-                                    e
-                                );
-                                return PolicyResult::Reject(format!("Database query failed: {}", e));
-                            }
+                    // Check 1: Does this event reference an accepted repository? (batched)
+                    match Self::find_accepted_repository(&database, &addressable_refs).await {
+                        Ok(Some(addr_ref)) => {
+                            tracing::debug!(
+                                "Accepted event {}: references accepted repository {}",
+                                event_id_str,
+                                addr_ref
+                            );
+                            return PolicyResult::Accept;
+                        }
+                        Ok(None) => {
+                            // No matching repositories, continue to next check
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Database query failed for event {}, rejecting (fail-secure): {}",
+                                event_id_str,
+                                e
+                            );
+                            return PolicyResult::Reject(format!("Database query failed: {}", e));
                         }
                     }
 
-                    // Check 2: Does this event reference an accepted event? (transitive)
-                    for event_ref in &event_refs {
-                        match Self::is_accepted_event(&database, event_ref).await {
-                            Ok(true) => {
-                                tracing::debug!(
-                                    "Accepted event {}: references accepted event {}",
-                                    event_id_str,
-                                    event_ref
-                                );
-                                return PolicyResult::Accept;
-                            }
-                            Ok(false) => {
-                                // Continue checking other references
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Database query failed for event {}, rejecting (fail-secure): {}",
-                                    event_id_str,
-                                    e
-                                );
-                                return PolicyResult::Reject(format!("Database query failed: {}", e));
-                            }
+                    // Check 2: Does this event reference an accepted event? (batched, transitive)
+                    match Self::find_accepted_event(&database, &event_refs).await {
+                        Ok(Some(event_ref)) => {
+                            tracing::debug!(
+                                "Accepted event {}: references accepted event {}",
+                                event_id_str,
+                                event_ref
+                            );
+                            return PolicyResult::Accept;
+                        }
+                        Ok(None) => {
+                            // No matching events, continue to next check
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Database query failed for event {}, rejecting (fail-secure): {}",
+                                event_id_str,
+                                e
+                            );
+                            return PolicyResult::Reject(format!("Database query failed: {}", e));
                         }
                     }
 
