@@ -17,6 +17,7 @@ async fn main() -> Result<()> {
     // Load configuration
     let config = Config::from_env()?;
     info!("Configuration loaded: {}", config.bind_address);
+    info!("Git data directory: {}", config.git_data_path);
 
     // Create Nostr relay with NIP-34 validation
     if let Ok(relay) = nostr::builder::create_relay(&config) {
