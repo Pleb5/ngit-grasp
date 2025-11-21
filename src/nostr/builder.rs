@@ -169,35 +169,75 @@ impl Nip34WritePolicy {
         }
     }
 
-    /// Check if any accepted event references this event ID (forward reference)
-    /// Checks all reference tag types: e, E, q, Q (event ID references only, not addressable)
+    /// Check if any accepted event references this event (forward reference)
     ///
-    /// Note: Must check each tag type separately as custom_tag chaining creates AND not OR
+    /// For addressable events (kind >= 30000): Only checks addressable reference tags (a, A, q)
+    /// For regular events: Only checks event ID reference tags (e, E, q)
+    ///
+    /// This optimization recognizes that addressable events won't be referenced by ID,
+    /// and regular events won't be referenced by coordinate.
     async fn is_referenced_by_accepted(
         database: &Arc<MemoryDatabase>,
-        event_id: &EventId,
+        event: &Event,
     ) -> Result<bool, String> {
-        let event_id_hex = event_id.to_hex();
+        // Check if this is an addressable event (parameterized replaceable)
+        let is_addressable = event.kind.as_u16() >= 30000 && event.kind.as_u16() < 40000;
 
-        // Check each tag type that can reference event IDs
-        // Note: 'a' and 'A' tags use addressable format (kind:pubkey:d), not event IDs
-        let tag_types = [
-            SingleLetterTag::lowercase(Alphabet::E), // 'e' - standard event reference
-            SingleLetterTag::uppercase(Alphabet::E), // 'E' - NIP-22 root event reference
-            SingleLetterTag::lowercase(Alphabet::Q), // 'q' - quote reference
-            SingleLetterTag::uppercase(Alphabet::Q), // 'Q' - uppercase quote (if used)
-        ];
-
-        for tag_type in &tag_types {
-            let filter = Filter::new().custom_tag(tag_type.clone(), event_id_hex.clone());
-            
-            match database.query(filter).await {
-                Ok(events) => {
-                    if !events.is_empty() {
-                        return Ok(true);
+        if is_addressable {
+            // For addressable events, build the coordinate string (handles empty identifier)
+            let identifier = event.tags.iter()
+                .find_map(|tag| {
+                    let tag_vec = tag.clone().to_vec();
+                    if tag_vec.len() >= 2 && tag_vec[0] == "d" {
+                        Some(tag_vec[1].clone())
+                    } else {
+                        None
                     }
+                })
+                .unwrap_or_default(); // Empty string if no 'd' tag
+            
+            let address = format!("{}:{}:{}", event.kind.as_u16(), event.pubkey.to_hex(), identifier);
+            
+            // Check addressable reference tags: a, A, q (with address format)
+            let addressable_tags = [
+                SingleLetterTag::lowercase(Alphabet::A), // 'a' - addressable event reference
+                SingleLetterTag::uppercase(Alphabet::A), // 'A' - uppercase addressable reference
+                SingleLetterTag::lowercase(Alphabet::Q), // 'q' - quote (can be address or ID)
+            ];
+
+            for tag_type in &addressable_tags {
+                let filter = Filter::new().custom_tag(tag_type.clone(), address.clone());
+                
+                match database.query(filter).await {
+                    Ok(events) => {
+                        if !events.is_empty() {
+                            return Ok(true);
+                        }
+                    }
+                    Err(e) => return Err(format!("Database query failed: {}", e)),
                 }
-                Err(e) => return Err(format!("Database query failed: {}", e)),
+            }
+        } else {
+            // For regular events, check event ID reference tags: e, E, q (with hex ID)
+            let event_id_hex = event.id.to_hex();
+            
+            let event_id_tags = [
+                SingleLetterTag::lowercase(Alphabet::E), // 'e' - standard event reference
+                SingleLetterTag::uppercase(Alphabet::E), // 'E' - NIP-22 root event reference
+                SingleLetterTag::lowercase(Alphabet::Q), // 'q' - quote reference
+            ];
+
+            for tag_type in &event_id_tags {
+                let filter = Filter::new().custom_tag(tag_type.clone(), event_id_hex.clone());
+                
+                match database.query(filter).await {
+                    Ok(events) => {
+                        if !events.is_empty() {
+                            return Ok(true);
+                        }
+                    }
+                    Err(e) => return Err(format!("Database query failed: {}", e)),
+                }
             }
         }
 
@@ -304,7 +344,7 @@ impl WritePolicy for Nip34WritePolicy {
                     }
 
                     // Check 3: Is this event referenced by an accepted event? (forward reference)
-                    match Self::is_referenced_by_accepted(&database, &event.id).await {
+                    match Self::is_referenced_by_accepted(&database, event).await {
                         Ok(true) => {
                             tracing::debug!(
                                 "Accepted event {}: referenced by accepted event",
