@@ -214,6 +214,72 @@ impl<'a> TestContext<'a> {
         Ok(event)
     }
 
+    /// Get or create a ValidRepo, with mode-appropriate caching.
+    /// This is a helper method that avoids async recursion by not going
+    /// through get_fixture. It handles the repo specifically.
+    async fn get_or_create_repo(&self) -> Result<Event> {
+        // In Shared mode, check cache first
+        if self.mode == ContextMode::Shared {
+            let cache = self.cache.lock().unwrap();
+            if let Some(event) = cache.get(&FixtureKind::ValidRepo) {
+                return Ok(event.clone());
+            }
+        }
+
+        // Create a new repo
+        let test_name = format!(
+            "fixture-{:?}-{}",
+            FixtureKind::ValidRepo,
+            &uuid::Uuid::new_v4().to_string()[..8]
+        );
+        let repo = self.client.create_repo_announcement(&test_name).await?;
+
+        // Send it
+        self.client.send_event(repo.clone()).await?;
+
+        // Cache it in Shared mode
+        if self.mode == ContextMode::Shared {
+            let mut cache = self.cache.lock().unwrap();
+            cache.insert(FixtureKind::ValidRepo, repo.clone());
+        }
+
+        Ok(repo)
+    }
+
+    /// Get or create a RepoWithIssue, with mode-appropriate caching.
+    /// Returns the issue event (repo is already sent/cached via get_or_create_repo).
+    async fn get_or_create_issue(&self) -> Result<Event> {
+        // In Shared mode, check cache first
+        if self.mode == ContextMode::Shared {
+            let cache = self.cache.lock().unwrap();
+            if let Some(event) = cache.get(&FixtureKind::RepoWithIssue) {
+                return Ok(event.clone());
+            }
+        }
+
+        // Get or create repo (reuses cached in Shared mode)
+        let repo = self.get_or_create_repo().await?;
+
+        // Create the issue
+        let issue = self.client.create_issue(
+            &repo,
+            "Test Issue",
+            "Issue content for testing",
+            vec![],
+        )?;
+
+        // Send it
+        self.client.send_event(issue.clone()).await?;
+
+        // Cache it in Shared mode
+        if self.mode == ContextMode::Shared {
+            let mut cache = self.cache.lock().unwrap();
+            cache.insert(FixtureKind::RepoWithIssue, issue.clone());
+        }
+
+        Ok(issue)
+    }
+
     /// Build a fixture event (doesn't send it)
     async fn build_fixture(&self, kind: FixtureKind) -> Result<Event> {
         match kind {
@@ -227,14 +293,11 @@ impl<'a> TestContext<'a> {
             }
 
             FixtureKind::RepoWithIssue => {
-                // First create and send repo
-                let test_name = format!(
-                    "fixture-{:?}-{}",
-                    FixtureKind::ValidRepo,
-                    &uuid::Uuid::new_v4().to_string()[..8]
-                );
-                let repo = self.client.create_repo_announcement(&test_name).await?;
-                self.client.send_event(repo.clone()).await?;
+                // Reuse ValidRepo fixture - this leverages caching in Shared mode
+                // In Isolated mode: creates fresh repo
+                // In Shared mode: returns cached repo (no duplicate events!)
+                // Uses direct helper to avoid async recursion through get_fixture
+                let repo = self.get_or_create_repo().await?;
 
                 // Then create issue referencing it - this will have 'a' tag to repo
                 // Note: We build the issue but DON'T send it here - the caller will send it
@@ -251,35 +314,21 @@ impl<'a> TestContext<'a> {
             }
 
             FixtureKind::RepoWithComment => {
-                // First create repo with issue
-                let test_name = format!(
-                    "fixture-{:?}-{}",
-                    FixtureKind::ValidRepo,
-                    &uuid::Uuid::new_v4().to_string()[..8]
-                );
-                let repo = self.client.create_repo_announcement(&test_name).await?;
-                self.client.send_event(repo.clone()).await?;
-
-                let issue =
-                    self.client
-                        .create_issue(&repo, "Test Issue", "Issue content", vec![])?;
-                self.client.send_event(issue.clone()).await?;
+                // Reuse RepoWithIssue fixture - this leverages caching in Shared mode
+                // In Isolated mode: creates fresh repo + issue
+                // In Shared mode: returns cached issue (repo already cached too!)
+                let issue = self.get_or_create_issue().await?;
 
                 // Then create comment on issue
+                // Note: We build the comment but DON'T send it here - the caller will send it
                 self.client.create_comment(&issue, "Test comment", vec![])
             }
 
             FixtureKind::RepoState => {
                 use nostr_sdk::prelude::*;
 
-                // First create repo announcement
-                let test_name = format!(
-                    "fixture-{:?}-{}",
-                    FixtureKind::ValidRepo,
-                    &uuid::Uuid::new_v4().to_string()[..8]
-                );
-                let repo = self.client.create_repo_announcement(&test_name).await?;
-                self.client.send_event(repo.clone()).await?;
+                // Reuse ValidRepo fixture - this leverages caching in Shared mode
+                let repo = self.get_or_create_repo().await?;
 
                 // Extract repo_id from repo announcement
                 let repo_id = repo
@@ -292,6 +341,7 @@ impl<'a> TestContext<'a> {
 
                 // Create state announcement with deterministic commit hash
                 // Tag format: ["refs/heads/main", "<commit_hash>"]
+                // Note: We build the state but DON'T send it here - the caller will send it
                 self.client
                     .event_builder(Kind::Custom(30618), "")
                     .tag(Tag::identifier(&repo_id))
