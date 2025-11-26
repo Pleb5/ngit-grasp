@@ -129,6 +129,7 @@ pub struct AuditEventBuilder {
     content: String,
     tags: Vec<Tag>,
     config: AuditConfig,
+    custom_timestamp: Option<Timestamp>,
 }
 
 impl AuditEventBuilder {
@@ -139,6 +140,7 @@ impl AuditEventBuilder {
             content: content.into(),
             tags: Vec::new(),
             config,
+            custom_timestamp: None,
         }
     }
 
@@ -154,14 +156,49 @@ impl AuditEventBuilder {
         self
     }
 
+    /// Set a custom timestamp for the event
+    ///
+    /// By default, events use the current time. Use this method to create
+    /// events with a specific timestamp, which is useful for testing
+    /// timestamp-based prioritization logic.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use nostr_sdk::prelude::*;
+    /// use grasp_audit::{AuditConfig, AuditEventBuilder};
+    ///
+    /// let config = AuditConfig::ci();
+    /// let keys = Keys::generate();
+    ///
+    /// // Create an event with a past timestamp
+    /// let past_event = AuditEventBuilder::new(Kind::TextNote, "test", config)
+    ///     .custom_time(Timestamp::from(1700000000))
+    ///     .build(&keys)
+    ///     .unwrap();
+    ///
+    /// assert_eq!(past_event.created_at, Timestamp::from(1700000000));
+    /// ```
+    pub fn custom_time(mut self, timestamp: Timestamp) -> Self {
+        self.custom_timestamp = Some(timestamp);
+        self
+    }
+
     /// Build the event with audit tags
     pub fn build(self, keys: &Keys) -> anyhow::Result<Event> {
         let mut all_tags = self.tags;
         all_tags.extend(self.config.audit_tags());
 
-        let event = EventBuilder::new(self.kind, self.content)
-            .tags(all_tags)
-            .sign_with_keys(keys)?;
+        let builder = EventBuilder::new(self.kind, self.content).tags(all_tags);
+
+        // Apply custom timestamp if set
+        let builder = if let Some(timestamp) = self.custom_timestamp {
+            builder.custom_created_at(timestamp)
+        } else {
+            builder
+        };
+
+        let event = builder.sign_with_keys(keys)?;
 
         Ok(event)
     }
@@ -242,5 +279,40 @@ mod tests {
 
         // Verify event is valid
         assert!(event.verify().is_ok());
+    }
+
+    #[test]
+    fn test_custom_timestamp_applied() {
+        let config = AuditConfig::ci();
+        let keys = Keys::generate();
+        let custom_ts = Timestamp::from(1700000000);
+
+        // Build event with custom timestamp
+        let event = AuditEventBuilder::new(Kind::TextNote, "test with custom time", config.clone())
+            .custom_time(custom_ts)
+            .build(&keys)
+            .unwrap();
+
+        // Verify the custom timestamp was applied
+        assert_eq!(event.created_at, custom_ts);
+
+        // Verify event is still valid
+        assert!(event.verify().is_ok());
+    }
+
+    #[test]
+    fn test_default_timestamp_uses_current_time() {
+        let config = AuditConfig::ci();
+        let keys = Keys::generate();
+
+        let before = Timestamp::now();
+        let event = AuditEventBuilder::new(Kind::TextNote, "test default time", config.clone())
+            .build(&keys)
+            .unwrap();
+        let after = Timestamp::now();
+
+        // Event timestamp should be between before and after (inclusive)
+        assert!(event.created_at.as_u64() >= before.as_u64());
+        assert!(event.created_at.as_u64() <= after.as_u64());
     }
 }

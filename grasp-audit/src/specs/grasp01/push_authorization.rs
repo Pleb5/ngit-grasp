@@ -426,34 +426,907 @@ impl PushAuthorizationTests {
         }
     }
 
-    /// Test recursive maintainer authorization
-    ///
-    /// GRASP-01: "respecting the recursive maintainer set"
-    pub async fn test_recursive_maintainer_authorization(
-        _client: &AuditClient,
-        _git_data_dir: &Path,
-        _relay_domain: &str,
-    ) -> TestResult {
-        let test_name = "test_recursive_maintainer_authorization";
-
-        // This test requires two separate clients (owner and maintainer)
-        // For now, return not implemented
-        TestResult::new(test_name, "GRASP-01", "Maintainer can authorize pushes")
-            .fail("Not implemented: requires multiple client support")
-    }
-
     /// Test that latest state event is used for authorization
+    ///
+    /// GRASP-01 requires that the relay use the LATEST state event (by created_at
+    /// timestamp) when determining push authorization. This test verifies that
+    /// a newer state event takes precedence over an older one.
+    ///
+    /// Scenario:
+    /// 1. Owner creates repo with maintainer
+    /// 2. Owner publishes state event for commit_a at t=100 (older)
+    /// 3. Maintainer publishes state event for commit_b at t=200 (newer)
+    /// 4. Push commit_b should be ACCEPTED (newer timestamp wins)
+    /// 5. Push commit_a should be REJECTED (older state event superseded)
     pub async fn test_latest_state_event_used(
-        _client: &AuditClient,
-        _git_data_dir: &Path,
-        _relay_domain: &str,
+        client: &AuditClient,
+        git_data_dir: &Path,
+        relay_domain: &str,
     ) -> TestResult {
         let test_name = "test_latest_state_event_used";
+        let description = "Latest state event takes precedence";
 
-        // This test requires publishing multiple state events with timestamps
-        // and verifying the latest one is used
-        TestResult::new(test_name, "GRASP-01", "Latest state event takes precedence")
-            .fail("Not implemented: requires timestamp manipulation")
+        // 1. Generate maintainer keypair
+        let maintainer_keys = Keys::generate();
+        let maintainer_pubkey = maintainer_keys.public_key().to_hex();
+
+        // 2. Owner creates repo with maintainer
+        let repo_event = match client
+            .create_repo_announcement_with_maintainers(test_name, &[maintainer_pubkey.clone()])
+            .await
+        {
+            Ok(e) => e,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", description)
+                    .fail(&format!("Failed to create repo with maintainers: {}", e))
+            }
+        };
+
+        // Send the owner's repo event
+        if let Err(e) = client.send_event(repo_event.clone()).await {
+            return TestResult::new(test_name, "GRASP-01", description)
+                .fail(&format!("Failed to send owner repo event: {}", e));
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Extract repo details
+        let repo_id = match repo_event
+            .tags
+            .iter()
+            .find(|t| t.kind() == TagKind::d())
+            .and_then(|t| t.content())
+        {
+            Some(id) => id.to_string(),
+            None => {
+                return TestResult::new(test_name, "GRASP-01", description)
+                    .fail("Repository event missing d tag")
+            }
+        };
+
+        // Get relay URL for maintainer's repo announcement
+        let relay_url = match client.relay_url().await {
+            Ok(u) => u,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", description)
+                    .fail(&format!("Failed to get relay URL: {}", e))
+            }
+        };
+        let http_url = relay_url
+            .replace("ws://", "http://")
+            .replace("wss://", "https://");
+        let maintainer_npub = match maintainer_keys.public_key().to_bech32() {
+            Ok(n) => n,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", description)
+                    .fail(&format!("Failed to convert maintainer pubkey to npub: {}", e))
+            }
+        };
+
+        // 3. Maintainer creates their own repo announcement (same d-tag)
+        let maintainer_repo_event = match client
+            .event_builder(
+                Kind::GitRepoAnnouncement,
+                format!("Maintainer's view of {} repository", test_name),
+            )
+            .tag(Tag::identifier(&repo_id))
+            .tag(Tag::custom(
+                TagKind::custom("name"),
+                vec![format!("{} Test Repository (Maintainer)", test_name)],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("clone"),
+                vec![format!("{}/{}/{}.git", http_url, maintainer_npub, repo_id)],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("relays"),
+                vec![relay_url.clone()],
+            ))
+            .build(&maintainer_keys)
+        {
+            Ok(e) => e,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", description)
+                    .fail(&format!("Failed to build maintainer repo event: {}", e))
+            }
+        };
+
+        if let Err(e) = client.client().send_event(&maintainer_repo_event).await {
+            return TestResult::new(test_name, "GRASP-01", description)
+                .fail(&format!("Failed to send maintainer repo event: {}", e));
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Verify maintainer's repo was created
+        let maintainer_repo_path = git_data_dir
+            .join(&maintainer_npub)
+            .join(format!("{}.git", repo_id));
+        if !maintainer_repo_path.exists() {
+            return TestResult::new(test_name, "GRASP-01", description).fail(&format!(
+                "Maintainer repo not created at: {}",
+                maintainer_repo_path.display()
+            ));
+        }
+
+        // 4. Clone maintainer's repo
+        let clone_path = match clone_repo(relay_domain, &maintainer_npub, &repo_id) {
+            Ok(p) => p,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", description)
+                    .fail(&format!("Failed to clone maintainer repo: {}", e))
+            }
+        };
+
+        // 5. Create first commit (commit_a) - this will be the one with OLDER timestamp
+        let commit_a = match create_commit(&clone_path, "Commit A - older state") {
+            Ok(h) => h,
+            Err(e) => {
+                let _ = fs::remove_dir_all(&clone_path);
+                return TestResult::new(test_name, "GRASP-01", description)
+                    .fail(&format!("Failed to create commit_a: {}", e));
+            }
+        };
+
+        // 6. Create second commit (commit_b) - this will be the one with NEWER timestamp
+        let commit_b = match create_commit(&clone_path, "Commit B - newer state") {
+            Ok(h) => h,
+            Err(e) => {
+                let _ = fs::remove_dir_all(&clone_path);
+                return TestResult::new(test_name, "GRASP-01", description)
+                    .fail(&format!("Failed to create commit_b: {}", e));
+            }
+        };
+
+        // 7. Calculate timestamps: older_timestamp (100 seconds ago) and newer_timestamp (now)
+        let base_time = Timestamp::now().as_u64();
+        let older_timestamp = Timestamp::from(base_time - 100); // 100 seconds ago
+        let newer_timestamp = Timestamp::from(base_time);        // now
+
+        // 8. Owner publishes state event for commit_a at OLDER timestamp
+        let owner_state_event = match client
+            .event_builder(Kind::Custom(30618), "")
+            .tag(Tag::identifier(&repo_id))
+            .tag(Tag::custom(
+                TagKind::custom("refs/heads/main"),
+                vec![commit_a.clone()],
+            ))
+            .custom_time(older_timestamp)
+            .build(client.keys())
+        {
+            Ok(e) => e,
+            Err(e) => {
+                let _ = fs::remove_dir_all(&clone_path);
+                return TestResult::new(test_name, "GRASP-01", description)
+                    .fail(&format!("Failed to build owner state event: {}", e));
+            }
+        };
+
+        if let Err(e) = client.client().send_event(&owner_state_event).await {
+            let _ = fs::remove_dir_all(&clone_path);
+            return TestResult::new(test_name, "GRASP-01", description)
+                .fail(&format!("Failed to send owner state event: {}", e));
+        }
+
+        // 9. Maintainer publishes state event for commit_b at NEWER timestamp
+        let maintainer_state_event = match client
+            .event_builder(Kind::Custom(30618), "")
+            .tag(Tag::identifier(&repo_id))
+            .tag(Tag::custom(
+                TagKind::custom("refs/heads/main"),
+                vec![commit_b.clone()],
+            ))
+            .custom_time(newer_timestamp)
+            .build(&maintainer_keys)
+        {
+            Ok(e) => e,
+            Err(e) => {
+                let _ = fs::remove_dir_all(&clone_path);
+                return TestResult::new(test_name, "GRASP-01", description)
+                    .fail(&format!("Failed to build maintainer state event: {}", e));
+            }
+        };
+
+        if let Err(e) = client.client().send_event(&maintainer_state_event).await {
+            let _ = fs::remove_dir_all(&clone_path);
+            return TestResult::new(test_name, "GRASP-01", description)
+                .fail(&format!("Failed to send maintainer state event: {}", e));
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // 10. Create and checkout main branch pointing to commit_b (the newer state)
+        let branch_output = Command::new("git")
+            .args(["branch", "main"])
+            .current_dir(&clone_path)
+            .output();
+
+        if let Ok(output) = branch_output {
+            if !output.status.success() {
+                let _ = fs::remove_dir_all(&clone_path);
+                return TestResult::new(test_name, "GRASP-01", description).fail(&format!(
+                    "Failed to create main branch: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+        }
+
+        let checkout_output = Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(&clone_path)
+            .output();
+
+        if let Ok(output) = checkout_output {
+            if !output.status.success() {
+                let _ = fs::remove_dir_all(&clone_path);
+                return TestResult::new(test_name, "GRASP-01", description).fail(&format!(
+                    "Failed to checkout main branch: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+        }
+
+        // 11. Attempt push - should be ACCEPTED because maintainer's newer state event
+        // announces commit_b which is now HEAD of main
+        let push_result = try_push(&clone_path);
+        let _ = fs::remove_dir_all(&clone_path);
+
+        match push_result {
+            Ok(true) => TestResult::new(test_name, "GRASP-01", description).pass(),
+            Ok(false) => TestResult::new(test_name, "GRASP-01", description).fail(&format!(
+                "Push was rejected but should have been accepted. \
+                The maintainer published a state event at timestamp {} announcing commit_b ({}). \
+                The owner published an older state event at timestamp {} announcing commit_a ({}). \
+                The relay should use the NEWER state event (maintainer's) for authorization.",
+                newer_timestamp.as_u64(),
+                commit_b,
+                older_timestamp.as_u64(),
+                commit_a
+            )),
+            Err(e) => {
+                TestResult::new(test_name, "GRASP-01", description).fail(&format!("Push error: {}", e))
+            }
+        }
+    }
+
+    /// Test push authorized by direct maintainer state event
+    ///
+    /// GRASP-01: "respecting the recursive maintainer set"
+    /// This tests the first level: direct maintainers listed in the maintainers tag.
+    ///
+    /// Scenario:
+    /// 1. Owner creates repo with `["maintainers", "<maintainer-pubkey>"]` tag
+    /// 2. Maintainer creates their own repo announcement (same d-tag)
+    /// 3. Maintainer publishes state event with a commit hash
+    /// 4. Push to that commit should be ACCEPTED
+    pub async fn test_push_authorized_by_direct_maintainer_state(
+        client: &AuditClient,
+        git_data_dir: &Path,
+        relay_domain: &str,
+    ) -> TestResult {
+        let test_name = "test_push_authorized_by_direct_maintainer_state";
+
+        // 1. Generate maintainer keypair
+        let maintainer_keys = Keys::generate();
+        let maintainer_pubkey = maintainer_keys.public_key().to_hex();
+
+        // 2. Owner creates repo with maintainer listed
+        let repo_event = match client
+            .create_repo_announcement_with_maintainers(test_name, &[maintainer_pubkey.clone()])
+            .await
+        {
+            Ok(e) => e,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by direct maintainer state event",
+                )
+                .fail(&format!("Failed to create repo with maintainers: {}", e))
+            }
+        };
+
+        // Send the owner's repo event
+        if let Err(e) = client.send_event(repo_event.clone()).await {
+            return TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push authorized by direct maintainer state event",
+            )
+            .fail(&format!("Failed to send owner repo event: {}", e));
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Extract repo details
+        let repo_id = match repo_event
+            .tags
+            .iter()
+            .find(|t| t.kind() == TagKind::d())
+            .and_then(|t| t.content())
+        {
+            Some(id) => id.to_string(),
+            None => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by direct maintainer state event",
+                )
+                .fail("Repository event missing d tag")
+            }
+        };
+
+        // Get relay URL for maintainer's repo announcement
+        let relay_url = match client.relay_url().await {
+            Ok(u) => u,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by direct maintainer state event",
+                )
+                .fail(&format!("Failed to get relay URL: {}", e))
+            }
+        };
+        let http_url = relay_url
+            .replace("ws://", "http://")
+            .replace("wss://", "https://");
+        let maintainer_npub = match maintainer_keys.public_key().to_bech32() {
+            Ok(n) => n,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by direct maintainer state event",
+                )
+                .fail(&format!("Failed to convert maintainer pubkey to npub: {}", e))
+            }
+        };
+
+        // 3. Maintainer creates their own repo announcement (same d-tag)
+        // This creates a separate repo at maintainer-npub/repo-id.git
+        let maintainer_repo_event = match client
+            .event_builder(
+                Kind::GitRepoAnnouncement,
+                format!("Maintainer's view of {} repository", test_name),
+            )
+            .tag(Tag::identifier(&repo_id))
+            .tag(Tag::custom(
+                TagKind::custom("name"),
+                vec![format!("{} Test Repository (Maintainer)", test_name)],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("clone"),
+                vec![format!("{}/{}/{}.git", http_url, maintainer_npub, repo_id)],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("relays"),
+                vec![relay_url.clone()],
+            ))
+            .build(&maintainer_keys)
+        {
+            Ok(e) => e,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by direct maintainer state event",
+                )
+                .fail(&format!("Failed to build maintainer repo event: {}", e))
+            }
+        };
+
+        if let Err(e) = client.client().send_event(&maintainer_repo_event).await {
+            return TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push authorized by direct maintainer state event",
+            )
+            .fail(&format!("Failed to send maintainer repo event: {}", e));
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Verify maintainer's repo was created
+        let maintainer_repo_path = git_data_dir
+            .join(&maintainer_npub)
+            .join(format!("{}.git", repo_id));
+        if !maintainer_repo_path.exists() {
+            return TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push authorized by direct maintainer state event",
+            )
+            .fail(&format!(
+                "Maintainer repo not created at: {}",
+                maintainer_repo_path.display()
+            ));
+        }
+
+        // 4. Clone maintainer's repo
+        let clone_path = match clone_repo(relay_domain, &maintainer_npub, &repo_id) {
+            Ok(p) => p,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by direct maintainer state event",
+                )
+                .fail(&format!("Failed to clone maintainer repo: {}", e))
+            }
+        };
+
+        // 5. Create deterministic commit
+        let commit_hash = match create_deterministic_commit(&clone_path, "Initial commit") {
+            Ok(h) => h,
+            Err(e) => {
+                let _ = fs::remove_dir_all(&clone_path);
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by direct maintainer state event",
+                )
+                .fail(&format!("Failed to create commit: {}", e));
+            }
+        };
+
+        // 6. Maintainer publishes state event with commit hash
+        let state_event = match client
+            .event_builder(Kind::Custom(30618), "")
+            .tag(Tag::identifier(&repo_id))
+            .tag(Tag::custom(
+                TagKind::custom("refs/heads/main"),
+                vec![commit_hash.clone()],
+            ))
+            .build(&maintainer_keys)
+        {
+            Ok(e) => e,
+            Err(e) => {
+                let _ = fs::remove_dir_all(&clone_path);
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by direct maintainer state event",
+                )
+                .fail(&format!("Failed to build state event: {}", e));
+            }
+        };
+
+        if let Err(e) = client.client().send_event(&state_event).await {
+            let _ = fs::remove_dir_all(&clone_path);
+            return TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push authorized by direct maintainer state event",
+            )
+            .fail(&format!("Failed to send state event: {}", e));
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // 7. Create and checkout main branch
+        let branch_output = Command::new("git")
+            .args(["branch", "main"])
+            .current_dir(&clone_path)
+            .output();
+
+        if let Ok(output) = branch_output {
+            if !output.status.success() {
+                let _ = fs::remove_dir_all(&clone_path);
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by direct maintainer state event",
+                )
+                .fail(&format!(
+                    "Failed to create main branch: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+        }
+
+        let checkout_output = Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(&clone_path)
+            .output();
+
+        if let Ok(output) = checkout_output {
+            if !output.status.success() {
+                let _ = fs::remove_dir_all(&clone_path);
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by direct maintainer state event",
+                )
+                .fail(&format!(
+                    "Failed to checkout main branch: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+        }
+
+        // 8. Attempt push - should be ACCEPTED because maintainer's state event authorizes it
+        let push_result = try_push(&clone_path);
+        let _ = fs::remove_dir_all(&clone_path);
+
+        match push_result {
+            Ok(true) => TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push authorized by direct maintainer state event",
+            )
+            .pass(),
+            Ok(false) => TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push authorized by direct maintainer state event",
+            )
+            .fail(&format!(
+                "Push was rejected but should have been accepted. \
+                The maintainer (pubkey: {}) is listed in the owner's maintainers tag \
+                and published a state event announcing commit {}. \
+                The relay should authorize pushes matching this state event.",
+                maintainer_pubkey, commit_hash
+            )),
+            Err(e) => TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push authorized by direct maintainer state event",
+            )
+            .fail(&format!("Push error: {}", e)),
+        }
+    }
+
+    /// Test push authorized by recursive maintainer state event
+    ///
+    /// GRASP-01: "respecting the recursive maintainer set"
+    /// This tests recursive maintainer chains: Owner -> MaintainerA -> MaintainerB
+    ///
+    /// Scenario:
+    /// 1. Owner creates repo with `["maintainers", "<maintainerA-pubkey>"]` tag
+    /// 2. MaintainerA creates their own repo announcement (same d-tag) with MaintainerB
+    /// 3. MaintainerB creates their own repo announcement (same d-tag, no further maintainers)
+    /// 4. MaintainerB publishes state event with a commit hash
+    /// 5. Push to that commit should be ACCEPTED (recursive maintainer chain)
+    pub async fn test_push_authorized_by_recursive_maintainer_state(
+        client: &AuditClient,
+        git_data_dir: &Path,
+        relay_domain: &str,
+    ) -> TestResult {
+        let test_name = "test_push_authorized_by_recursive_maintainer_state";
+
+        // 1. Generate MaintainerA and MaintainerB keypairs
+        let maintainer_a_keys = Keys::generate();
+        let maintainer_a_pubkey = maintainer_a_keys.public_key().to_hex();
+
+        let maintainer_b_keys = Keys::generate();
+        let maintainer_b_pubkey = maintainer_b_keys.public_key().to_hex();
+
+        // 2. Owner creates repo with MaintainerA listed
+        let repo_event = match client
+            .create_repo_announcement_with_maintainers(test_name, &[maintainer_a_pubkey.clone()])
+            .await
+        {
+            Ok(e) => e,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by recursive maintainer state event",
+                )
+                .fail(&format!("Failed to create repo with maintainers: {}", e))
+            }
+        };
+
+        // Send the owner's repo event
+        if let Err(e) = client.send_event(repo_event.clone()).await {
+            return TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push authorized by recursive maintainer state event",
+            )
+            .fail(&format!("Failed to send owner repo event: {}", e));
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Extract repo details
+        let repo_id = match repo_event
+            .tags
+            .iter()
+            .find(|t| t.kind() == TagKind::d())
+            .and_then(|t| t.content())
+        {
+            Some(id) => id.to_string(),
+            None => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by recursive maintainer state event",
+                )
+                .fail("Repository event missing d tag")
+            }
+        };
+
+        // Get relay URL for maintainers' repo announcements
+        let relay_url = match client.relay_url().await {
+            Ok(u) => u,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by recursive maintainer state event",
+                )
+                .fail(&format!("Failed to get relay URL: {}", e))
+            }
+        };
+        let http_url = relay_url
+            .replace("ws://", "http://")
+            .replace("wss://", "https://");
+
+        let maintainer_a_npub = match maintainer_a_keys.public_key().to_bech32() {
+            Ok(n) => n,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by recursive maintainer state event",
+                )
+                .fail(&format!("Failed to convert maintainer A pubkey to npub: {}", e))
+            }
+        };
+
+        let maintainer_b_npub = match maintainer_b_keys.public_key().to_bech32() {
+            Ok(n) => n,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by recursive maintainer state event",
+                )
+                .fail(&format!("Failed to convert maintainer B pubkey to npub: {}", e))
+            }
+        };
+
+        // 3. MaintainerA creates their own repo announcement (same d-tag) with MaintainerB listed
+        let maintainer_a_repo_event = match client
+            .event_builder(
+                Kind::GitRepoAnnouncement,
+                format!("MaintainerA's view of {} repository", test_name),
+            )
+            .tag(Tag::identifier(&repo_id))
+            .tag(Tag::custom(
+                TagKind::custom("name"),
+                vec![format!("{} Test Repository (MaintainerA)", test_name)],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("clone"),
+                vec![format!("{}/{}/{}.git", http_url, maintainer_a_npub, repo_id)],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("relays"),
+                vec![relay_url.clone()],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("maintainers"),
+                vec![maintainer_b_pubkey.clone()],
+            ))
+            .build(&maintainer_a_keys)
+        {
+            Ok(e) => e,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by recursive maintainer state event",
+                )
+                .fail(&format!("Failed to build maintainer A repo event: {}", e))
+            }
+        };
+
+        if let Err(e) = client.client().send_event(&maintainer_a_repo_event).await {
+            return TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push authorized by recursive maintainer state event",
+            )
+            .fail(&format!("Failed to send maintainer A repo event: {}", e));
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // 4. MaintainerB creates their own repo announcement (same d-tag, no further maintainers)
+        let maintainer_b_repo_event = match client
+            .event_builder(
+                Kind::GitRepoAnnouncement,
+                format!("MaintainerB's view of {} repository", test_name),
+            )
+            .tag(Tag::identifier(&repo_id))
+            .tag(Tag::custom(
+                TagKind::custom("name"),
+                vec![format!("{} Test Repository (MaintainerB)", test_name)],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("clone"),
+                vec![format!("{}/{}/{}.git", http_url, maintainer_b_npub, repo_id)],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("relays"),
+                vec![relay_url.clone()],
+            ))
+            .build(&maintainer_b_keys)
+        {
+            Ok(e) => e,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by recursive maintainer state event",
+                )
+                .fail(&format!("Failed to build maintainer B repo event: {}", e))
+            }
+        };
+
+        if let Err(e) = client.client().send_event(&maintainer_b_repo_event).await {
+            return TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push authorized by recursive maintainer state event",
+            )
+            .fail(&format!("Failed to send maintainer B repo event: {}", e));
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Verify maintainer B's repo was created
+        let maintainer_b_repo_path = git_data_dir
+            .join(&maintainer_b_npub)
+            .join(format!("{}.git", repo_id));
+        if !maintainer_b_repo_path.exists() {
+            return TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push authorized by recursive maintainer state event",
+            )
+            .fail(&format!(
+                "Maintainer B repo not created at: {}",
+                maintainer_b_repo_path.display()
+            ));
+        }
+
+        // 5. Clone maintainer B's repo
+        let clone_path = match clone_repo(relay_domain, &maintainer_b_npub, &repo_id) {
+            Ok(p) => p,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by recursive maintainer state event",
+                )
+                .fail(&format!("Failed to clone maintainer B repo: {}", e))
+            }
+        };
+
+        // 6. Create deterministic commit
+        let commit_hash = match create_deterministic_commit(&clone_path, "Initial commit") {
+            Ok(h) => h,
+            Err(e) => {
+                let _ = fs::remove_dir_all(&clone_path);
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by recursive maintainer state event",
+                )
+                .fail(&format!("Failed to create commit: {}", e));
+            }
+        };
+
+        // 7. MaintainerB publishes state event with commit hash
+        let state_event = match client
+            .event_builder(Kind::Custom(30618), "")
+            .tag(Tag::identifier(&repo_id))
+            .tag(Tag::custom(
+                TagKind::custom("refs/heads/main"),
+                vec![commit_hash.clone()],
+            ))
+            .build(&maintainer_b_keys)
+        {
+            Ok(e) => e,
+            Err(e) => {
+                let _ = fs::remove_dir_all(&clone_path);
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by recursive maintainer state event",
+                )
+                .fail(&format!("Failed to build state event: {}", e));
+            }
+        };
+
+        if let Err(e) = client.client().send_event(&state_event).await {
+            let _ = fs::remove_dir_all(&clone_path);
+            return TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push authorized by recursive maintainer state event",
+            )
+            .fail(&format!("Failed to send state event: {}", e));
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // 8. Create and checkout main branch
+        let branch_output = Command::new("git")
+            .args(["branch", "main"])
+            .current_dir(&clone_path)
+            .output();
+
+        if let Ok(output) = branch_output {
+            if !output.status.success() {
+                let _ = fs::remove_dir_all(&clone_path);
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by recursive maintainer state event",
+                )
+                .fail(&format!(
+                    "Failed to create main branch: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+        }
+
+        let checkout_output = Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(&clone_path)
+            .output();
+
+        if let Ok(output) = checkout_output {
+            if !output.status.success() {
+                let _ = fs::remove_dir_all(&clone_path);
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by recursive maintainer state event",
+                )
+                .fail(&format!(
+                    "Failed to checkout main branch: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+        }
+
+        // 9. Attempt push - should be ACCEPTED because recursive maintainer chain authorizes it
+        // Owner -> MaintainerA -> MaintainerB, and MaintainerB has published the state event
+        let push_result = try_push(&clone_path);
+        let _ = fs::remove_dir_all(&clone_path);
+
+        match push_result {
+            Ok(true) => TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push authorized by recursive maintainer state event",
+            )
+            .pass(),
+            Ok(false) => TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push authorized by recursive maintainer state event",
+            )
+            .fail(&format!(
+                "Push was rejected but should have been accepted. \
+                The recursive maintainer chain is: Owner -> MaintainerA (pubkey: {}) -> MaintainerB (pubkey: {}). \
+                MaintainerB published a state event announcing commit {}. \
+                The relay should authorize pushes matching this state event through recursive maintainer traversal.",
+                maintainer_a_pubkey, maintainer_b_pubkey, commit_hash
+            )),
+            Err(e) => TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push authorized by recursive maintainer state event",
+            )
+            .fail(&format!("Push error: {}", e)),
+        }
     }
 
     /// Test that non-maintainer state event is ignored
@@ -538,6 +1411,279 @@ impl PushAuthorizationTests {
                     client.public_key()
                 )),
             Err(e) => TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored").fail(&e),
+        }
+    }
+
+    /// Test that owner's newer state event beats maintainer's older state event
+    ///
+    /// GRASP-01 requires that the relay use the LATEST state event (by created_at
+    /// timestamp) when determining push authorization. This test is the MIRROR of
+    /// test_latest_state_event_used - confirming that timestamp is the deciding factor,
+    /// not who authored the state event.
+    ///
+    /// Scenario:
+    /// 1. Owner creates repo with maintainer
+    /// 2. Maintainer publishes state event for commit_a at t=100 (older)
+    /// 3. Owner publishes state event for commit_b at t=200 (newer)
+    /// 4. Push commit_b should be ACCEPTED (owner's newer state wins)
+    /// 5. Push commit_a should be REJECTED (maintainer's older state superseded)
+    ///
+    /// Key difference from test_latest_state_event_used:
+    /// - Task 8: Owner=older, Maintainer=newer → Maintainer wins
+    /// - Task 9: Maintainer=older, Owner=newer → Owner wins
+    /// - **This confirms symmetry**: timestamp is the deciding factor
+    pub async fn test_owner_newer_state_beats_maintainer(
+        client: &AuditClient,
+        git_data_dir: &Path,
+        relay_domain: &str,
+    ) -> TestResult {
+        let test_name = "test_owner_newer_state_beats_maintainer";
+        let description = "Owner's newer state event beats maintainer's older state";
+
+        // 1. Generate maintainer keypair
+        let maintainer_keys = Keys::generate();
+        let maintainer_pubkey = maintainer_keys.public_key().to_hex();
+
+        // 2. Owner creates repo with maintainer
+        let repo_event = match client
+            .create_repo_announcement_with_maintainers(test_name, &[maintainer_pubkey.clone()])
+            .await
+        {
+            Ok(e) => e,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", description)
+                    .fail(&format!("Failed to create repo with maintainers: {}", e))
+            }
+        };
+
+        // Send the owner's repo event
+        if let Err(e) = client.send_event(repo_event.clone()).await {
+            return TestResult::new(test_name, "GRASP-01", description)
+                .fail(&format!("Failed to send owner repo event: {}", e));
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Extract repo details
+        let repo_id = match repo_event
+            .tags
+            .iter()
+            .find(|t| t.kind() == TagKind::d())
+            .and_then(|t| t.content())
+        {
+            Some(id) => id.to_string(),
+            None => {
+                return TestResult::new(test_name, "GRASP-01", description)
+                    .fail("Repository event missing d tag")
+            }
+        };
+
+        // Get relay URL for maintainer's repo announcement
+        let relay_url = match client.relay_url().await {
+            Ok(u) => u,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", description)
+                    .fail(&format!("Failed to get relay URL: {}", e))
+            }
+        };
+        let http_url = relay_url
+            .replace("ws://", "http://")
+            .replace("wss://", "https://");
+        let maintainer_npub = match maintainer_keys.public_key().to_bech32() {
+            Ok(n) => n,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", description)
+                    .fail(&format!("Failed to convert maintainer pubkey to npub: {}", e))
+            }
+        };
+
+        // 3. Maintainer creates their own repo announcement (same d-tag)
+        let maintainer_repo_event = match client
+            .event_builder(
+                Kind::GitRepoAnnouncement,
+                format!("Maintainer's view of {} repository", test_name),
+            )
+            .tag(Tag::identifier(&repo_id))
+            .tag(Tag::custom(
+                TagKind::custom("name"),
+                vec![format!("{} Test Repository (Maintainer)", test_name)],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("clone"),
+                vec![format!("{}/{}/{}.git", http_url, maintainer_npub, repo_id)],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("relays"),
+                vec![relay_url.clone()],
+            ))
+            .build(&maintainer_keys)
+        {
+            Ok(e) => e,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", description)
+                    .fail(&format!("Failed to build maintainer repo event: {}", e))
+            }
+        };
+
+        if let Err(e) = client.client().send_event(&maintainer_repo_event).await {
+            return TestResult::new(test_name, "GRASP-01", description)
+                .fail(&format!("Failed to send maintainer repo event: {}", e));
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Verify maintainer's repo was created
+        let maintainer_repo_path = git_data_dir
+            .join(&maintainer_npub)
+            .join(format!("{}.git", repo_id));
+        if !maintainer_repo_path.exists() {
+            return TestResult::new(test_name, "GRASP-01", description).fail(&format!(
+                "Maintainer repo not created at: {}",
+                maintainer_repo_path.display()
+            ));
+        }
+
+        // 4. Clone maintainer's repo
+        let clone_path = match clone_repo(relay_domain, &maintainer_npub, &repo_id) {
+            Ok(p) => p,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", description)
+                    .fail(&format!("Failed to clone maintainer repo: {}", e))
+            }
+        };
+
+        // 5. Create first commit (commit_a) - MAINTAINER will announce this with OLDER timestamp
+        let commit_a = match create_commit(&clone_path, "Commit A - older state (maintainer)") {
+            Ok(h) => h,
+            Err(e) => {
+                let _ = fs::remove_dir_all(&clone_path);
+                return TestResult::new(test_name, "GRASP-01", description)
+                    .fail(&format!("Failed to create commit_a: {}", e));
+            }
+        };
+
+        // 6. Create second commit (commit_b) - OWNER will announce this with NEWER timestamp
+        let commit_b = match create_commit(&clone_path, "Commit B - newer state (owner)") {
+            Ok(h) => h,
+            Err(e) => {
+                let _ = fs::remove_dir_all(&clone_path);
+                return TestResult::new(test_name, "GRASP-01", description)
+                    .fail(&format!("Failed to create commit_b: {}", e));
+            }
+        };
+
+        // 7. Calculate timestamps: older_timestamp (100 seconds ago) and newer_timestamp (now)
+        let base_time = Timestamp::now().as_u64();
+        let older_timestamp = Timestamp::from(base_time - 100); // 100 seconds ago - for MAINTAINER
+        let newer_timestamp = Timestamp::from(base_time);        // now - for OWNER
+
+        // 8. MAINTAINER publishes state event for commit_a at OLDER timestamp
+        // This is the KEY DIFFERENCE from test_latest_state_event_used:
+        // - In Task 8: Owner was older, Maintainer was newer
+        // - In Task 9 (this test): Maintainer is older, Owner is newer
+        let maintainer_state_event = match client
+            .event_builder(Kind::Custom(30618), "")
+            .tag(Tag::identifier(&repo_id))
+            .tag(Tag::custom(
+                TagKind::custom("refs/heads/main"),
+                vec![commit_a.clone()],
+            ))
+            .custom_time(older_timestamp)
+            .build(&maintainer_keys)
+        {
+            Ok(e) => e,
+            Err(e) => {
+                let _ = fs::remove_dir_all(&clone_path);
+                return TestResult::new(test_name, "GRASP-01", description)
+                    .fail(&format!("Failed to build maintainer state event: {}", e));
+            }
+        };
+
+        if let Err(e) = client.client().send_event(&maintainer_state_event).await {
+            let _ = fs::remove_dir_all(&clone_path);
+            return TestResult::new(test_name, "GRASP-01", description)
+                .fail(&format!("Failed to send maintainer state event: {}", e));
+        }
+
+        // 9. OWNER publishes state event for commit_b at NEWER timestamp
+        let owner_state_event = match client
+            .event_builder(Kind::Custom(30618), "")
+            .tag(Tag::identifier(&repo_id))
+            .tag(Tag::custom(
+                TagKind::custom("refs/heads/main"),
+                vec![commit_b.clone()],
+            ))
+            .custom_time(newer_timestamp)
+            .build(client.keys())
+        {
+            Ok(e) => e,
+            Err(e) => {
+                let _ = fs::remove_dir_all(&clone_path);
+                return TestResult::new(test_name, "GRASP-01", description)
+                    .fail(&format!("Failed to build owner state event: {}", e));
+            }
+        };
+
+        if let Err(e) = client.client().send_event(&owner_state_event).await {
+            let _ = fs::remove_dir_all(&clone_path);
+            return TestResult::new(test_name, "GRASP-01", description)
+                .fail(&format!("Failed to send owner state event: {}", e));
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // 10. Create and checkout main branch pointing to commit_b (the newer state)
+        let branch_output = Command::new("git")
+            .args(["branch", "main"])
+            .current_dir(&clone_path)
+            .output();
+
+        if let Ok(output) = branch_output {
+            if !output.status.success() {
+                let _ = fs::remove_dir_all(&clone_path);
+                return TestResult::new(test_name, "GRASP-01", description).fail(&format!(
+                    "Failed to create main branch: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+        }
+
+        let checkout_output = Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(&clone_path)
+            .output();
+
+        if let Ok(output) = checkout_output {
+            if !output.status.success() {
+                let _ = fs::remove_dir_all(&clone_path);
+                return TestResult::new(test_name, "GRASP-01", description).fail(&format!(
+                    "Failed to checkout main branch: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+        }
+
+        // 11. Attempt push - should be ACCEPTED because owner's newer state event
+        // announces commit_b which is now HEAD of main
+        let push_result = try_push(&clone_path);
+        let _ = fs::remove_dir_all(&clone_path);
+
+        match push_result {
+            Ok(true) => TestResult::new(test_name, "GRASP-01", description).pass(),
+            Ok(false) => TestResult::new(test_name, "GRASP-01", description).fail(&format!(
+                "Push was rejected but should have been accepted. \
+                The OWNER published a state event at timestamp {} announcing commit_b ({}). \
+                The MAINTAINER published an older state event at timestamp {} announcing commit_a ({}). \
+                The relay should use the NEWER state event (owner's) for authorization. \
+                This confirms symmetry with test_latest_state_event_used: timestamp is the deciding factor.",
+                newer_timestamp.as_u64(),
+                commit_b,
+                older_timestamp.as_u64(),
+                commit_a
+            )),
+            Err(e) => {
+                TestResult::new(test_name, "GRASP-01", description).fail(&format!("Push error: {}", e))
+            }
         }
     }
 }

@@ -105,14 +105,19 @@ impl RepositoryAnnouncement {
             })
             .collect();
 
-        // Extract maintainers (other-user tags)
+        // Extract maintainers from "maintainers" tag per NIP-34
+        // Format: ["maintainers", "<pubkey1-hex>", "<pubkey2-hex>", ...]
         let maintainers = event
             .tags
             .iter()
-            .filter(|t| t.kind() == TagKind::p())
-            .filter_map(|t| t.content())
-            .map(|s| s.to_string())
-            .collect();
+            .find(|tag| tag.as_slice().first().map(|s| s.as_str()) == Some("maintainers"))
+            .map(|tag| {
+                tag.as_slice()[1..] // Skip the "maintainers" tag name
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
 
         Ok(RepositoryAnnouncement {
             event,
@@ -546,8 +551,12 @@ mod tests {
             ),
         ];
 
-        // Add maintainer
-        tags.push(Tag::public_key(maintainer_keys.public_key()));
+        // Add maintainer using NIP-34 "maintainers" tag format
+        // Format: ["maintainers", "<pubkey1-hex>", "<pubkey2-hex>", ...]
+        tags.push(Tag::custom(
+            nostr_sdk::TagKind::Custom("maintainers".into()),
+            vec![maintainer_keys.public_key().to_hex()],
+        ));
 
         let event = EventBuilder::new(Kind::from(KIND_REPOSITORY_ANNOUNCEMENT), "Test repository")
             .tags(tags)
@@ -556,6 +565,7 @@ mod tests {
 
         let announcement = RepositoryAnnouncement::from_event(event).unwrap();
         assert_eq!(announcement.maintainers.len(), 1);
+        assert_eq!(announcement.maintainers[0], maintainer_keys.public_key().to_hex());
     }
 
     #[test]

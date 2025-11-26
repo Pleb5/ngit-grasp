@@ -286,6 +286,80 @@ impl AuditClient {
         Ok(event)
     }
 
+    /// Create a NIP-34 repository announcement event with maintainers
+    ///
+    /// This helper creates a properly formatted NIP-34 announcement that will be
+    /// accepted by GRASP relays (which require events to list the relay in clone/relays tags).
+    /// This variant also includes a maintainers tag for push authorization testing.
+    ///
+    /// # Arguments
+    /// * `test_name` - Name of the test (used to create unique repo identifier)
+    /// * `maintainer_pubkeys` - Hex pubkeys of maintainers who can push to the repository
+    ///
+    /// # Returns
+    /// A built and signed Event ready to be sent to the relay
+    pub async fn create_repo_announcement_with_maintainers(
+        &self,
+        test_name: &str,
+        maintainer_pubkeys: &[String],
+    ) -> Result<Event> {
+        // Get relay URL from client
+        let relay_url = self
+            .client
+            .relays()
+            .await
+            .keys()
+            .next()
+            .ok_or_else(|| anyhow!("No relay connected"))?
+            .to_string();
+
+        // Convert WebSocket URL to HTTP URL for clone tag
+        let http_url = relay_url
+            .replace("ws://", "http://")
+            .replace("wss://", "https://");
+
+        // Create unique repository identifier using UUID for consistency
+        let repo_id = format!("{}-{}", test_name, &uuid::Uuid::new_v4().to_string()[..8]);
+
+        // Get npub for clone URL
+        let npub = self
+            .public_key()
+            .to_bech32()
+            .map_err(|e| anyhow!("Failed to convert public key to bech32 npub format: {}", e))?;
+
+        // Build kind 30617 repository announcement with maintainers tag
+        let event = self
+            .event_builder(
+                Kind::GitRepoAnnouncement,
+                format!("Test repository for {}", test_name),
+            )
+            .tag(Tag::identifier(&repo_id))
+            .tag(Tag::custom(
+                TagKind::custom("name"),
+                vec![format!("{} Test Repository", test_name)],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("description"),
+                vec![format!("Repository for {} testing", test_name)],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("clone"),
+                vec![format!("{}/{}/{}.git", http_url, npub, repo_id)],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("relays"),
+                vec![relay_url.clone()],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("maintainers"),
+                maintainer_pubkeys.to_vec(),
+            ))
+            .build(self.keys())
+            .map_err(|e| anyhow!("Failed to build repository announcement event: {}", e))?;
+
+        Ok(event)
+    }
+
     /// Create an issue (kind 1621) that references a repository
     ///
     /// # Arguments
@@ -455,5 +529,56 @@ mod tests {
             tag_contents.contains(&"value".to_string()),
             "Missing custom tag value"
         );
+    }
+
+    #[tokio::test]
+    async fn test_create_repo_announcement_with_maintainers() {
+        let config = AuditConfig::ci();
+        let client = AuditClient::new_test(config);
+
+        // Create test maintainer pubkeys (hex format)
+        let maintainer_pubkeys = vec![
+            "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2".to_string(),
+            "b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3".to_string(),
+        ];
+
+        // Note: We can't test create_repo_announcement_with_maintainers directly in unit tests
+        // because it requires a connected relay. Instead, we test the underlying event building
+        // with maintainers tag to verify the tag format is correct.
+        
+        // Build an event with maintainers tag directly to test the tag format
+        let event = client
+            .event_builder(
+                Kind::GitRepoAnnouncement,
+                "Test repository",
+            )
+            .tag(Tag::identifier("test-repo"))
+            .tag(Tag::custom(
+                TagKind::custom("maintainers"),
+                maintainer_pubkeys.clone(),
+            ))
+            .build(client.keys())
+            .unwrap();
+
+        // Verify the maintainers tag is present and correctly formatted
+        let maintainers_tag = event
+            .tags
+            .iter()
+            .find(|t| t.kind() == TagKind::custom("maintainers"));
+
+        assert!(
+            maintainers_tag.is_some(),
+            "Missing 'maintainers' tag in event"
+        );
+
+        // Verify the tag contains the maintainer pubkeys
+        let tag = maintainers_tag.unwrap();
+        let tag_vec: Vec<String> = tag.clone().to_vec();
+        
+        // First element is "maintainers", rest are the pubkeys
+        assert_eq!(tag_vec[0], "maintainers");
+        assert_eq!(tag_vec.len(), 3, "Expected 3 elements: tag name + 2 pubkeys");
+        assert_eq!(tag_vec[1], maintainer_pubkeys[0]);
+        assert_eq!(tag_vec[2], maintainer_pubkeys[1]);
     }
 }

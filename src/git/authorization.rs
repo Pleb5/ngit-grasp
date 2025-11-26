@@ -444,11 +444,16 @@ mod tests {
     ) -> Event {
         let mut tags = vec![Tag::custom(TagKind::d(), vec![identifier.to_string()])];
 
-        // Add maintainers as p tags
-        for maintainer_keys in maintainers {
+        // Add maintainers as a single "maintainers" tag per NIP-34
+        // Format: ["maintainers", "<pubkey1-hex>", "<pubkey2-hex>", ...]
+        if !maintainers.is_empty() {
+            let maintainer_pubkeys: Vec<String> = maintainers
+                .iter()
+                .map(|k| k.public_key().to_hex())
+                .collect();
             tags.push(Tag::custom(
-                TagKind::p(),
-                vec![maintainer_keys.public_key().to_hex()],
+                TagKind::Custom("maintainers".into()),
+                maintainer_pubkeys,
             ));
         }
 
