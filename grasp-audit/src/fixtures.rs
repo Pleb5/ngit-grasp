@@ -28,7 +28,7 @@ use nostr_sdk::prelude::Event;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// Deterministic commit hash used in RepoState fixtures
+/// Deterministic commit hash used in RepoState fixtures (Owner variant)
 /// This is the hash produced by creating a commit with:
 /// - Message: "Initial commit"
 /// - File: test.txt containing "Initial commit"
@@ -39,20 +39,101 @@ use std::sync::{Arc, Mutex};
 /// - Parent: Initial empty commit (09cc37de80f3434fa98864a86730b8d7777bd6ae)
 pub const DETERMINISTIC_COMMIT_HASH: &str = "64ea71d79a57a7acb334cd9651f8aec067c0ce5d";
 
+/// Deterministic commit hash for maintainer fixtures (Maintainer variant)
+/// This is the hash produced by creating a commit with:
+/// - Message: "Maintainer initial commit"
+/// - File: test.txt containing "Maintainer initial commit"
+/// - Author date: 2024-01-01T00:00:00Z
+/// - Committer date: 2024-01-01T00:00:00Z
+/// - GPG signing: disabled
+/// - User: "GRASP Audit Test <test@grasp-audit.local>"
+/// - Parent: none (root commit)
+/// NOTE: This value is different from DETERMINISTIC_COMMIT_HASH due to different content
+pub const MAINTAINER_DETERMINISTIC_COMMIT_HASH: &str = "1c2d472c9b71ed51968a66500281a3c4a6840464";
+
+/// Deterministic commit hash for recursive maintainer fixtures (RecursiveMaintainer variant)
+/// This is the hash produced by creating a commit with:
+/// - Message: "Recursive maintainer initial commit"
+/// - File: test.txt containing "Recursive maintainer initial commit"
+/// - Author date: 2024-01-01T00:00:00Z
+/// - Committer date: 2024-01-01T00:00:00Z
+/// - GPG signing: disabled
+/// - User: "GRASP Audit Test <test@grasp-audit.local>"
+/// - Parent: none (root commit)
+/// NOTE: This value is different from DETERMINISTIC_COMMIT_HASH due to different content
+pub const RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH: &str = "05939b82de66fbdb9c077d0a64fc68522f3cb8e0";
+
 /// Types of test fixtures available
+///
+/// ## Fixture Dependencies
+///
+/// Several fixtures depend on `ValidRepo` - they all use the SAME repo_id
+/// within a single TestContext instance to ensure proper fixture relationships:
+/// - `RepoState` → uses ValidRepo's repo_id
+/// - `MaintainerAnnouncement` + `MaintainerState` → uses ValidRepo's repo_id
+/// - `RecursiveMaintainerRepoAndState` → uses ValidRepo's repo_id
+///
+/// This enables testing recursive maintainer authorization chains where multiple
+/// parties publish announcements and state events for the same repository.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FixtureKind {
     /// Basic repository announcement (kind 30617)
+    /// - Signed by owner keys (`client.keys()`)
+    /// - Lists `client.maintainer_pubkey_hex()` in maintainers tag
     ValidRepo,
 
     /// Repository with one issue (kind 1621)
+    /// - Requires ValidRepo (reuses same repo_id)
     RepoWithIssue,
 
     /// Repository with issue and comment (kind 1111)
+    /// - Requires RepoWithIssue (reuses same repo_id)
     RepoWithComment,
 
-    /// Repository state announcement (kind 30618)
+    /// Repository state announcement (kind 30618) for owner
+    /// - Requires ValidRepo (uses same repo_id)
+    /// - Signed by owner keys (`client.keys()`)
+    /// - Points to DETERMINISTIC_COMMIT_HASH
+    /// - Timestamp: 10 seconds in the past
     RepoState,
+
+    /// Maintainer's repo announcement only for the SAME repo_id as ValidRepo
+    /// - Requires ValidRepo (uses same repo_id for maintainer chain)
+    /// - Announcement signed by `client.maintainer_keys()`
+    /// - Lists `client.recursive_maintainer_pubkey_hex()` in maintainers tag
+    /// - Does NOT include state event (use MaintainerState for that)
+    MaintainerAnnouncement,
+
+    /// Maintainer's state event only for the SAME repo_id as ValidRepo
+    /// - Requires ValidRepo (uses same repo_id for maintainer chain)
+    /// - State event signed by `client.maintainer_keys()`
+    /// - Points to MAINTAINER_DETERMINISTIC_COMMIT_HASH
+    /// - Timestamp: 5 seconds in the past (more recent than owner's state)
+    /// - Does NOT include announcement (use MaintainerAnnouncement for that)
+    MaintainerState,
+
+    /// Recursive maintainer's announcement only for the SAME repo_id as ValidRepo
+    /// - Requires ValidRepo (uses same repo_id for recursive chain)
+    /// - Announcement signed by `client.recursive_maintainer_keys()`
+    /// - Lists owner and maintainer in maintainers tag
+    /// - Does NOT include state event (use RecursiveMaintainerState for that)
+    RecursiveMaintainerAnnouncement,
+
+    /// Recursive maintainer's state event only for the SAME repo_id as ValidRepo
+    /// - Requires ValidRepo (uses same repo_id for recursive chain)
+    /// - State event signed by `client.recursive_maintainer_keys()`
+    /// - Points to RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH
+    /// - Timestamp: 2 seconds in the past (most recent)
+    /// - Does NOT include announcement (use RecursiveMaintainerAnnouncement for that)
+    RecursiveMaintainerState,
+
+    /// Recursive maintainer's announcement + state for the SAME repo_id as ValidRepo
+    /// - Requires ValidRepo (uses same repo_id for recursive chain)
+    /// - Announcement signed by `client.recursive_maintainer_keys()`
+    /// - Lists owner and maintainer in maintainers tag
+    /// - State event points to RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH
+    /// - Timestamp: 2 seconds in the past (most recent)
+    RecursiveMaintainerRepoAndState,
 }
 
 /// Context mode for fixture management
@@ -214,12 +295,17 @@ impl<'a> TestContext<'a> {
         Ok(event)
     }
 
-    /// Get or create a ValidRepo, with mode-appropriate caching.
+    /// Get or create a ValidRepo, with caching within the TestContext.
     /// This is a helper method that avoids async recursion by not going
     /// through get_fixture. It handles the repo specifically.
+    ///
+    /// IMPORTANT: We always cache within a TestContext instance to ensure
+    /// fixture dependencies work correctly. The isolation between tests
+    /// comes from each test having its own TestContext with a fresh cache.
     async fn get_or_create_repo(&self) -> Result<Event> {
-        // In Shared mode, check cache first
-        if self.mode == ContextMode::Shared {
+        // Always check cache first - this ensures fixture dependencies work
+        // (e.g., MaintainerRepoAndState needs the SAME repo_id as RepoState)
+        {
             let cache = self.cache.lock().unwrap();
             if let Some(event) = cache.get(&FixtureKind::ValidRepo) {
                 return Ok(event.clone());
@@ -237,8 +323,8 @@ impl<'a> TestContext<'a> {
         // Send it
         self.client.send_event(repo.clone()).await?;
 
-        // Cache it in Shared mode
-        if self.mode == ContextMode::Shared {
+        // Always cache it - isolation comes from each test having its own TestContext
+        {
             let mut cache = self.cache.lock().unwrap();
             cache.insert(FixtureKind::ValidRepo, repo.clone());
         }
@@ -246,18 +332,18 @@ impl<'a> TestContext<'a> {
         Ok(repo)
     }
 
-    /// Get or create a RepoWithIssue, with mode-appropriate caching.
+    /// Get or create a RepoWithIssue, with caching within the TestContext.
     /// Returns the issue event (repo is already sent/cached via get_or_create_repo).
     async fn get_or_create_issue(&self) -> Result<Event> {
-        // In Shared mode, check cache first
-        if self.mode == ContextMode::Shared {
+        // Always check cache first - ensures fixture dependencies work
+        {
             let cache = self.cache.lock().unwrap();
             if let Some(event) = cache.get(&FixtureKind::RepoWithIssue) {
                 return Ok(event.clone());
             }
         }
 
-        // Get or create repo (reuses cached in Shared mode)
+        // Get or create repo (reuses cached within this TestContext)
         let repo = self.get_or_create_repo().await?;
 
         // Create the issue
@@ -271,8 +357,8 @@ impl<'a> TestContext<'a> {
         // Send it
         self.client.send_event(issue.clone()).await?;
 
-        // Cache it in Shared mode
-        if self.mode == ContextMode::Shared {
+        // Always cache it - isolation comes from each test having its own TestContext
+        {
             let mut cache = self.cache.lock().unwrap();
             cache.insert(FixtureKind::RepoWithIssue, issue.clone());
         }
@@ -284,12 +370,8 @@ impl<'a> TestContext<'a> {
     async fn build_fixture(&self, kind: FixtureKind) -> Result<Event> {
         match kind {
             FixtureKind::ValidRepo => {
-                let test_name = format!(
-                    "fixture-{:?}-{}",
-                    kind,
-                    &uuid::Uuid::new_v4().to_string()[..8]
-                );
-                self.client.create_repo_announcement(&test_name).await
+                // Delegate to get_or_create_repo() which handles caching properly.
+                self.get_or_create_repo().await
             }
 
             FixtureKind::RepoWithIssue => {
@@ -340,6 +422,9 @@ impl<'a> TestContext<'a> {
                     .to_string();
 
                 // Create state announcement with deterministic commit hash
+                let base_time = Timestamp::now().as_u64();
+                let older_timestamp = Timestamp::from(base_time - 10); // 10 seconds ago
+
                 // Tag format: ["refs/heads/main", "<commit_hash>"]
                 // Note: We build the state but DON'T send it here - the caller will send it
                 self.client
@@ -353,10 +438,265 @@ impl<'a> TestContext<'a> {
                         TagKind::custom("HEAD"),
                         vec!["ref: refs/heads/main".to_string()],
                     ))
+                    .custom_time(older_timestamp)
                     .build(self.client.keys())
                     .map_err(|e| anyhow::anyhow!("Failed to build state announcement: {}", e))
             }
+
+            FixtureKind::MaintainerAnnouncement => {
+                use nostr_sdk::prelude::*;
+
+                // Get the owner's repo to use the SAME repo_id
+                let owner_repo = self.get_or_create_repo().await?;
+                
+                // Extract repo_id from owner's repo announcement
+                let repo_id = owner_repo
+                    .tags
+                    .iter()
+                    .find(|t| t.kind() == TagKind::d())
+                    .and_then(|t| t.content())
+                    .ok_or_else(|| anyhow::anyhow!("Missing d tag in owner repo announcement"))?
+                    .to_string();
+
+                self.build_maintainer_announcement(&repo_id).await
+            }
+
+            FixtureKind::MaintainerState => {
+                use nostr_sdk::prelude::*;
+
+                // Get the owner's repo to use the SAME repo_id
+                let owner_repo = self.get_or_create_repo().await?;
+                
+                // Extract repo_id from owner's repo announcement
+                let repo_id = owner_repo
+                    .tags
+                    .iter()
+                    .find(|t| t.kind() == TagKind::d())
+                    .and_then(|t| t.content())
+                    .ok_or_else(|| anyhow::anyhow!("Missing d tag in owner repo announcement"))?
+                    .to_string();
+
+                // Build state event ONLY - does NOT send announcement
+                // This allows testing state-only scenarios
+                self.build_maintainer_state(&repo_id)
+            }
+
+            FixtureKind::RecursiveMaintainerAnnouncement => {
+                use nostr_sdk::prelude::*;
+
+                // Get the owner's repo to use the SAME repo_id
+                let owner_repo = self.get_or_create_repo().await?;
+                
+                // Extract repo_id from owner's repo announcement
+                let repo_id = owner_repo
+                    .tags
+                    .iter()
+                    .find(|t| t.kind() == TagKind::d())
+                    .and_then(|t| t.content())
+                    .ok_or_else(|| anyhow::anyhow!("Missing d tag in owner repo announcement"))?
+                    .to_string();
+
+                self.build_recursive_maintainer_announcement(&repo_id).await
+            }
+
+            FixtureKind::RecursiveMaintainerState => {
+                use nostr_sdk::prelude::*;
+
+                // Get the owner's repo to use the SAME repo_id
+                let owner_repo = self.get_or_create_repo().await?;
+                
+                // Extract repo_id from owner's repo announcement
+                let repo_id = owner_repo
+                    .tags
+                    .iter()
+                    .find(|t| t.kind() == TagKind::d())
+                    .and_then(|t| t.content())
+                    .ok_or_else(|| anyhow::anyhow!("Missing d tag in owner repo announcement"))?
+                    .to_string();
+
+                // Build state event ONLY - does NOT send announcement
+                self.build_recursive_maintainer_state(&repo_id)
+            }
+
+            FixtureKind::RecursiveMaintainerRepoAndState => {
+                use nostr_sdk::prelude::*;
+
+                // Get the owner's repo to use the SAME repo_id
+                let owner_repo = self.get_or_create_repo().await?;
+                
+                // Extract repo_id from owner's repo announcement
+                let repo_id = owner_repo
+                    .tags
+                    .iter()
+                    .find(|t| t.kind() == TagKind::d())
+                    .and_then(|t| t.content())
+                    .ok_or_else(|| anyhow::anyhow!("Missing d tag in owner repo announcement"))?
+                    .to_string();
+
+                // Build and send the recursive maintainer's repo announcement
+                let recursive_maintainer_announcement = self.build_recursive_maintainer_announcement(&repo_id).await?;
+                self.client.send_event(recursive_maintainer_announcement).await?;
+
+                // Return the state event (caller will send it)
+                self.build_recursive_maintainer_state(&repo_id)
+            }
         }
+    }
+
+    /// Build maintainer announcement event for the given repo_id
+    async fn build_maintainer_announcement(&self, repo_id: &str) -> Result<Event> {
+        use nostr_sdk::prelude::*;
+
+        // Get relay URL for clone tag
+        let relay_url = self.client
+            .client()
+            .relays()
+            .await
+            .keys()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("No relay connected"))?
+            .to_string();
+        let http_url = relay_url
+            .replace("ws://", "http://")
+            .replace("wss://", "https://");
+
+        // Create maintainer's repo announcement for the SAME repo_id
+        let maintainer_npub = self.client
+            .maintainer_keys()
+            .public_key()
+            .to_bech32()
+            .map_err(|e| anyhow::anyhow!("Failed to convert maintainer pubkey: {}", e))?;
+
+        self.client
+            .event_builder(
+                Kind::GitRepoAnnouncement,
+                format!("Maintainer announcement for {}", repo_id),
+            )
+            .tag(Tag::identifier(repo_id))
+            .tag(Tag::custom(
+                TagKind::custom("name"),
+                vec![format!("{} (maintainer)", repo_id)],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("clone"),
+                vec![format!("{}/{}/{}.git", http_url, maintainer_npub, repo_id)],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("relays"),
+                vec![relay_url],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("maintainers"),
+                vec![self.client.recursive_maintainer_pubkey_hex()],
+            ))
+            .build(self.client.maintainer_keys())
+            .map_err(|e| anyhow::anyhow!("Failed to build maintainer repo announcement: {}", e))
+    }
+
+    /// Build maintainer state event for the given repo_id
+    fn build_maintainer_state(&self, repo_id: &str) -> Result<Event> {
+        use nostr_sdk::prelude::*;
+
+        // Create state announcement 5 seconds in the past, signed by maintainer
+        let base_time = Timestamp::now().as_u64();
+        let older_timestamp = Timestamp::from(base_time - 5); // 5 seconds ago
+
+        self.client
+            .event_builder(Kind::Custom(30618), "")
+            .tag(Tag::identifier(repo_id))
+            .tag(Tag::custom(
+                TagKind::custom("refs/heads/main"),
+                vec![MAINTAINER_DETERMINISTIC_COMMIT_HASH.to_string()],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("HEAD"),
+                vec!["ref: refs/heads/main".to_string()],
+            ))
+            .custom_time(older_timestamp)
+            .build(self.client.maintainer_keys())
+            .map_err(|e| anyhow::anyhow!("Failed to build maintainer state announcement: {}", e))
+    }
+
+    /// Build recursive maintainer announcement event for the given repo_id
+    async fn build_recursive_maintainer_announcement(&self, repo_id: &str) -> Result<Event> {
+        use nostr_sdk::prelude::*;
+
+        // Get relay URL for clone tag
+        let relay_url = self.client
+            .client()
+            .relays()
+            .await
+            .keys()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("No relay connected"))?
+            .to_string();
+        let http_url = relay_url
+            .replace("ws://", "http://")
+            .replace("wss://", "https://");
+
+        // Create recursive maintainer's repo announcement for the SAME repo_id
+        let recursive_maintainer_npub = self.client
+            .recursive_maintainer_keys()
+            .public_key()
+            .to_bech32()
+            .map_err(|e| anyhow::anyhow!("Failed to convert recursive maintainer pubkey: {}", e))?;
+
+        self.client
+            .event_builder(
+                Kind::GitRepoAnnouncement,
+                format!("Recursive maintainer announcement for {}", repo_id),
+            )
+            .tag(Tag::identifier(repo_id))
+            .tag(Tag::custom(
+                TagKind::custom("name"),
+                vec![format!("{} (recursive maintainer)", repo_id)],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("clone"),
+                vec![format!("{}/{}/{}.git", http_url, recursive_maintainer_npub, repo_id)],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("relays"),
+                vec![relay_url],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("maintainers"),
+                vec![
+                    self.client.public_key().to_hex(),
+                    self.client.maintainer_pubkey_hex(),
+                ],
+            ))
+            .build(self.client.recursive_maintainer_keys())
+            .map_err(|e| anyhow::anyhow!("Failed to build recursive maintainer repo announcement: {}", e))
+    }
+
+    /// Build recursive maintainer state event for the given repo_id
+    fn build_recursive_maintainer_state(&self, repo_id: &str) -> Result<Event> {
+        use nostr_sdk::prelude::*;
+
+        // Create state announcement 2 seconds in the past, signed by recursive maintainer
+        let base_time = Timestamp::now().as_u64();
+        let older_timestamp = Timestamp::from(base_time - 2); // 2 seconds ago
+
+        self.client
+            .event_builder(Kind::Custom(30618), "")
+            .tag(Tag::identifier(repo_id))
+            .tag(Tag::custom(
+                TagKind::custom("refs/heads/main"),
+                vec![RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH.to_string()],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("HEAD"),
+                vec!["ref: refs/heads/main".to_string()],
+            ))
+            .custom_time(older_timestamp)
+            .build(self.client.recursive_maintainer_keys())
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to build recursive maintainer state announcement: {}",
+                    e
+                )
+            })
     }
 
     /// Clear the fixture cache

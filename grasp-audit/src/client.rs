@@ -10,6 +10,10 @@ pub struct AuditClient {
     client: Client,
     pub config: AuditConfig,
     keys: Keys,
+    /// Maintainer keys for testing push authorization scenarios
+    maintainer_keys: Keys,
+    /// Recursive maintainer keys for testing recursive authorization scenarios
+    recursive_maintainer_keys: Keys,
 }
 
 impl AuditClient {
@@ -17,17 +21,23 @@ impl AuditClient {
     #[cfg(test)]
     pub fn new_test(config: AuditConfig) -> Self {
         let keys = Keys::generate();
+        let maintainer_keys = Keys::generate();
+        let recursive_maintainer_keys = Keys::generate();
         let client = Client::new(keys.clone());
         Self {
             client,
             config,
             keys,
+            maintainer_keys,
+            recursive_maintainer_keys,
         }
     }
 
     /// Create a new audit client
     pub async fn new(relay_url: &str, config: AuditConfig) -> Result<Self> {
         let keys = Keys::generate();
+        let maintainer_keys = Keys::generate();
+        let recursive_maintainer_keys = Keys::generate();
         let client = Client::new(keys.clone());
 
         // Add relay and connect
@@ -76,6 +86,8 @@ impl AuditClient {
             client,
             config,
             keys,
+            maintainer_keys,
+            recursive_maintainer_keys,
         })
     }
 
@@ -222,17 +234,45 @@ impl AuditClient {
         &self.keys
     }
 
-    /// Create a NIP-34 repository announcement event
+    /// Get the maintainer keys (for push authorization testing)
+    pub fn maintainer_keys(&self) -> &Keys {
+        &self.maintainer_keys
+    }
+
+    /// Get the maintainer public key as a hex string
+    pub fn maintainer_pubkey_hex(&self) -> String {
+        self.maintainer_keys.public_key().to_hex()
+    }
+
+    /// Get the recursive maintainer keys (for recursive authorization testing)
+    pub fn recursive_maintainer_keys(&self) -> &Keys {
+        &self.recursive_maintainer_keys
+    }
+
+    /// Get the recursive maintainer public key as a hex string
+    pub fn recursive_maintainer_pubkey_hex(&self) -> String {
+        self.recursive_maintainer_keys.public_key().to_hex()
+    }
+
+    /// Create a NIP-34 repository announcement event with full customization
     ///
-    /// This helper creates a properly formatted NIP-34 announcement that will be
-    /// accepted by GRASP relays (which require events to list the relay in clone/relays tags).
+    /// This is the core method for creating repository announcements. It allows
+    /// specifying the signing keys and maintainers, making it suitable for all
+    /// repo creation scenarios including maintainer and recursive maintainer testing.
     ///
     /// # Arguments
     /// * `test_name` - Name of the test (used to create unique repo identifier)
+    /// * `signing_keys` - The keys to sign the event with (also used for clone URL)
+    /// * `maintainer_pubkeys` - Hex pubkeys of maintainers who can push to the repository
     ///
     /// # Returns
-    /// A built and signed Event ready to be sent to the relay
-    pub async fn create_repo_announcement(&self, test_name: &str) -> Result<Event> {
+    /// A tuple of (Event, repo_id) - the built event and the repository identifier
+    pub async fn create_repo_announcement_custom(
+        &self,
+        test_name: &str,
+        signing_keys: &Keys,
+        maintainer_pubkeys: &[String],
+    ) -> Result<(Event, String)> {
         // Get relay URL from client
         let relay_url = self
             .client
@@ -251,8 +291,8 @@ impl AuditClient {
         // Create unique repository identifier using UUID for consistency
         let repo_id = format!("{}-{}", test_name, &uuid::Uuid::new_v4().to_string()[..8]);
 
-        // Get npub for clone URL
-        let npub = self
+        // Get npub for clone URL from signing keys
+        let npub = signing_keys
             .public_key()
             .to_bech32()
             .map_err(|e| anyhow!("Failed to convert public key to bech32 npub format: {}", e))?;
@@ -280,9 +320,35 @@ impl AuditClient {
                 TagKind::custom("relays"),
                 vec![relay_url.clone()],
             ))
-            .build(self.keys())
+            .tag(Tag::custom(
+                TagKind::custom("maintainers"),
+                maintainer_pubkeys.to_vec(),
+            ))
+            .build(signing_keys)
             .map_err(|e| anyhow!("Failed to build repository announcement event: {}", e))?;
 
+        Ok((event, repo_id))
+    }
+
+    /// Create a NIP-34 repository announcement event with the client's maintainer
+    ///
+    /// This helper creates a properly formatted NIP-34 announcement that will be
+    /// accepted by GRASP relays (which require events to list the relay in clone/relays tags).
+    /// The client's maintainer key is automatically added to the maintainers tag.
+    ///
+    /// # Arguments
+    /// * `test_name` - Name of the test (used to create unique repo identifier)
+    ///
+    /// # Returns
+    /// A built and signed Event ready to be sent to the relay
+    pub async fn create_repo_announcement(&self, test_name: &str) -> Result<Event> {
+        let (event, _repo_id) = self
+            .create_repo_announcement_custom(
+                test_name,
+                self.keys(),
+                &[self.maintainer_pubkey_hex()],
+            )
+            .await?;
         Ok(event)
     }
 
@@ -303,60 +369,9 @@ impl AuditClient {
         test_name: &str,
         maintainer_pubkeys: &[String],
     ) -> Result<Event> {
-        // Get relay URL from client
-        let relay_url = self
-            .client
-            .relays()
-            .await
-            .keys()
-            .next()
-            .ok_or_else(|| anyhow!("No relay connected"))?
-            .to_string();
-
-        // Convert WebSocket URL to HTTP URL for clone tag
-        let http_url = relay_url
-            .replace("ws://", "http://")
-            .replace("wss://", "https://");
-
-        // Create unique repository identifier using UUID for consistency
-        let repo_id = format!("{}-{}", test_name, &uuid::Uuid::new_v4().to_string()[..8]);
-
-        // Get npub for clone URL
-        let npub = self
-            .public_key()
-            .to_bech32()
-            .map_err(|e| anyhow!("Failed to convert public key to bech32 npub format: {}", e))?;
-
-        // Build kind 30617 repository announcement with maintainers tag
-        let event = self
-            .event_builder(
-                Kind::GitRepoAnnouncement,
-                format!("Test repository for {}", test_name),
-            )
-            .tag(Tag::identifier(&repo_id))
-            .tag(Tag::custom(
-                TagKind::custom("name"),
-                vec![format!("{} Test Repository", test_name)],
-            ))
-            .tag(Tag::custom(
-                TagKind::custom("description"),
-                vec![format!("Repository for {} testing", test_name)],
-            ))
-            .tag(Tag::custom(
-                TagKind::custom("clone"),
-                vec![format!("{}/{}/{}.git", http_url, npub, repo_id)],
-            ))
-            .tag(Tag::custom(
-                TagKind::custom("relays"),
-                vec![relay_url.clone()],
-            ))
-            .tag(Tag::custom(
-                TagKind::custom("maintainers"),
-                maintainer_pubkeys.to_vec(),
-            ))
-            .build(self.keys())
-            .map_err(|e| anyhow!("Failed to build repository announcement event: {}", e))?;
-
+        let (event, _repo_id) = self
+            .create_repo_announcement_custom(test_name, self.keys(), maintainer_pubkeys)
+            .await?;
         Ok(event)
     }
 
@@ -465,10 +480,14 @@ mod tests {
     fn test_event_builder() {
         let config = AuditConfig::ci();
         let keys = Keys::generate();
+        let maintainer_keys = Keys::generate();
+        let recursive_maintainer_keys = Keys::generate();
         let client = AuditClient {
             client: Client::new(keys.clone()),
             config: config.clone(),
             keys: keys.clone(),
+            maintainer_keys,
+            recursive_maintainer_keys,
         };
 
         let _builder = client.event_builder(Kind::TextNote, "test content");
@@ -481,10 +500,14 @@ mod tests {
     fn test_audit_tags_automatically_added() {
         let config = AuditConfig::ci();
         let keys = Keys::generate();
+        let maintainer_keys = Keys::generate();
+        let recursive_maintainer_keys = Keys::generate();
         let client = AuditClient {
             client: Client::new(keys.clone()),
             config: config.clone(),
             keys: keys.clone(),
+            maintainer_keys,
+            recursive_maintainer_keys,
         };
 
         // Create an event with a custom tag

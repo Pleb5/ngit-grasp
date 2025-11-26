@@ -37,7 +37,10 @@ pub mod specs;
 
 pub use audit::{AuditConfig, AuditMode};
 pub use client::AuditClient;
-pub use fixtures::{ContextMode, FixtureKind, TestContext, DETERMINISTIC_COMMIT_HASH};
+pub use fixtures::{
+    ContextMode, FixtureKind, TestContext, DETERMINISTIC_COMMIT_HASH,
+    MAINTAINER_DETERMINISTIC_COMMIT_HASH, RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH,
+};
 pub use result::{AuditResult, TestResult};
 
 // Re-export commonly used types
