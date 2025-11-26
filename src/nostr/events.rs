@@ -199,23 +199,25 @@ impl RepositoryState {
             .to_string();
 
         // Extract branches (refs/heads/*)
+        // Tag format: ["refs/heads/main", "commit_hash"]
         let branches = event
             .tags
             .iter()
-            .filter(|t| {
-                if let TagKind::Custom(s) = t.kind() {
-                    s.as_ref() == "ref"
-                } else {
-                    false
-                }
-            })
             .filter_map(|t| {
-                let parts = t.clone().to_vec();
-                if parts.len() >= 3 && parts[1].starts_with("refs/heads/") {
-                    Some(BranchState {
-                        name: parts[1].strip_prefix("refs/heads/").unwrap().to_string(),
-                        commit: parts[2].clone(),
-                    })
+                if let TagKind::Custom(s) = t.kind() {
+                    if s.as_ref().starts_with("refs/heads/") {
+                        let parts = t.clone().to_vec();
+                        if parts.len() >= 2 {
+                            Some(BranchState {
+                                name: s.as_ref().strip_prefix("refs/heads/").unwrap().to_string(),
+                                commit: parts[1].clone(),
+                            })
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
@@ -223,23 +225,25 @@ impl RepositoryState {
             .collect();
 
         // Extract tags (refs/tags/*)
+        // Tag format: ["refs/tags/v1.0", "commit_hash"]
         let tags = event
             .tags
             .iter()
-            .filter(|t| {
-                if let TagKind::Custom(s) = t.kind() {
-                    s.as_ref() == "ref"
-                } else {
-                    false
-                }
-            })
             .filter_map(|t| {
-                let parts = t.clone().to_vec();
-                if parts.len() >= 3 && parts[1].starts_with("refs/tags/") {
-                    Some(TagState {
-                        name: parts[1].strip_prefix("refs/tags/").unwrap().to_string(),
-                        commit: parts[2].clone(),
-                    })
+                if let TagKind::Custom(s) = t.kind() {
+                    if s.as_ref().starts_with("refs/tags/") {
+                        let parts = t.clone().to_vec();
+                        if parts.len() >= 2 {
+                            Some(TagState {
+                                name: s.as_ref().strip_prefix("refs/tags/").unwrap().to_string(),
+                                commit: parts[1].clone(),
+                            })
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
@@ -384,8 +388,8 @@ mod tests {
 
         for (branch, commit) in branches {
             tags.push(Tag::custom(
-                nostr_sdk::TagKind::Custom("ref".into()),
-                vec![format!("refs/heads/{}", branch), commit.to_string()],
+                nostr_sdk::TagKind::Custom(format!("refs/heads/{}", branch).into()),
+                vec![commit.to_string()],
             ));
         }
 
@@ -566,14 +570,14 @@ mod tests {
 
         // Add branch
         tags.push(Tag::custom(
-            nostr_sdk::TagKind::Custom("ref".into()),
-            vec!["refs/heads/main".to_string(), "a1b2c3d4".to_string()],
+            nostr_sdk::TagKind::Custom("refs/heads/main".into()),
+            vec!["a1b2c3d4".to_string()],
         ));
 
         // Add tag
         tags.push(Tag::custom(
-            nostr_sdk::TagKind::Custom("ref".into()),
-            vec!["refs/tags/v1.0.0".to_string(), "e5f6g7h8".to_string()],
+            nostr_sdk::TagKind::Custom("refs/tags/v1.0.0".into()),
+            vec!["e5f6g7h8".to_string()],
         ));
 
         let event = EventBuilder::new(Kind::from(KIND_REPOSITORY_STATE), "")

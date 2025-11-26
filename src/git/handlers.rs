@@ -6,8 +6,11 @@ use std::path::PathBuf;
 use hyper::{body::Bytes, Response, StatusCode};
 use http_body_util::Full;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
+use super::authorization::{
+    AuthorizationContext, AuthorizationResult, npub_to_pubkey, parse_pushed_refs, validate_push_refs,
+};
 use super::protocol::{GitService, PktLine};
 use super::subprocess::GitSubprocess;
 
@@ -144,12 +147,26 @@ pub async fn handle_upload_pack(
         .unwrap())
 }
 
+/// Authorization parameters for push operations
+#[derive(Debug, Clone)]
+pub struct PushAuthParams {
+    /// The relay URL for fetching events (e.g., "ws://localhost:8080")
+    pub relay_url: String,
+    /// The npub of the repository owner
+    pub owner_npub: String,
+    /// The repository identifier (d tag)
+    pub identifier: String,
+}
+
 /// Handle POST /git-receive-pack (push)
 ///
-/// This includes an authorization hook point where GRASP validation will be added.
+/// This includes GRASP authorization validation according to GRASP-01:
+/// "MUST accept pushes via this service that match the latest repo state announcement
+/// on the relay, respecting the recursive maintainer set."
 pub async fn handle_receive_pack(
     repo_path: PathBuf,
     request_body: Bytes,
+    auth_params: Option<PushAuthParams>,
 ) -> Result<Response<Full<Bytes>>, GitError> {
     debug!("Handling receive-pack for {:?}", repo_path);
 
@@ -157,9 +174,40 @@ pub async fn handle_receive_pack(
         return Err(GitError::RepositoryNotFound);
     }
 
-    // TODO: Add GRASP authorization here
-    // For now, we'll accept all pushes to enable testing
-    debug!("Authorization check would go here (currently accepting all pushes)");
+    // GRASP Authorization Check
+    if let Some(params) = auth_params {
+        info!(
+            "Authorizing push for {}/{} via {}",
+            params.owner_npub, params.identifier, params.relay_url
+        );
+
+        match authorize_push(&params, &request_body).await {
+            Ok(auth_result) => {
+                if !auth_result.authorized {
+                    warn!(
+                        "Push rejected for {}/{}: {}",
+                        params.owner_npub, params.identifier, auth_result.reason
+                    );
+                    return Err(GitError::Unauthorized);
+                }
+                info!(
+                    "Push authorized for {}/{} - {} maintainers",
+                    params.owner_npub,
+                    params.identifier,
+                    auth_result.maintainers.len()
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "Authorization check failed for {}/{}: {}",
+                    params.owner_npub, params.identifier, e
+                );
+                return Err(GitError::Unauthorized);
+            }
+        }
+    } else {
+        debug!("No authorization parameters provided - accepting push");
+    }
 
     // Spawn git receive-pack
     let mut git = GitSubprocess::spawn(GitService::ReceivePack, &repo_path, false)
@@ -204,6 +252,95 @@ pub async fn handle_receive_pack(
         .header("cache-control", "no-cache")
         .body(Full::new(Bytes::from(output)))
         .unwrap())
+}
+
+/// Perform GRASP authorization for a push operation
+///
+/// This function:
+/// 1. Fetches announcement and state events from the relay
+/// 2. Calculates the recursive maintainer set
+/// 3. Gets the latest authorized state
+/// 4. Validates that pushed refs match the state
+async fn authorize_push(
+    params: &PushAuthParams,
+    request_body: &Bytes,
+) -> anyhow::Result<AuthorizationResult> {
+    use nostr_sdk::ClientBuilder;
+    use std::time::Duration;
+
+    // Convert npub to hex pubkey
+    let owner_pubkey = npub_to_pubkey(&params.owner_npub)?;
+
+    debug!(
+        "Fetching events for identifier {} from relay {}",
+        params.identifier, params.relay_url
+    );
+
+    // Create a Nostr client to fetch events
+    let client = ClientBuilder::default().build();
+    client.add_relay(&params.relay_url).await?;
+    client.connect().await;
+
+    // Create filter for repository events
+    let filter = AuthorizationContext::create_filter(&params.identifier);
+
+    // Fetch events with timeout
+    let events = client.fetch_events(filter, Duration::from_secs(5))
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to fetch events: {}", e))?;
+
+    let events: Vec<_> = events.into_iter().collect();
+    debug!("Fetched {} events from relay", events.len());
+
+    if events.is_empty() {
+        return Ok(AuthorizationResult::denied(
+            "No repository announcement or state events found on relay",
+        ));
+    }
+
+    // Create authorization context
+    let ctx = AuthorizationContext::new(events);
+
+    // Get the authorized state
+    let auth_result = ctx.get_authorized_state(&owner_pubkey, &params.identifier)?;
+
+    if !auth_result.authorized {
+        return Ok(auth_result);
+    }
+
+    // Parse refs from the push request
+    let pushed_refs = parse_pushed_refs(request_body);
+    debug!("Parsed {} refs from push request", pushed_refs.len());
+    for (old_oid, new_oid, ref_name) in &pushed_refs {
+        debug!("  {} {} -> {}", ref_name, old_oid, new_oid);
+    }
+
+    // Validate refs against state
+    if let Some(ref state) = auth_result.state {
+        debug!("Validating against state with {} branches", state.branches.len());
+        
+        // If we have a state event but couldn't parse any refs, reject the push.
+        // This protects against parsing failures allowing unauthorized pushes.
+        if pushed_refs.is_empty() && !state.branches.is_empty() {
+            warn!("No refs parsed from push request but state event has branches - rejecting");
+            return Ok(AuthorizationResult::denied(
+                "Failed to parse refs from push request - cannot validate against state"
+            ));
+        }
+        
+        if let Err(e) = validate_push_refs(state, &pushed_refs) {
+            warn!("Ref validation failed: {}", e);
+            return Ok(AuthorizationResult::denied(format!(
+                "Ref validation failed: {}",
+                e
+            )));
+        }
+        debug!("Ref validation passed");
+    } else {
+        warn!("No state in auth_result - cannot validate refs");
+    }
+
+    Ok(auth_result)
 }
 
 /// Errors that can occur in Git handlers

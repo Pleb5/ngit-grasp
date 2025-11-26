@@ -65,6 +65,7 @@ impl Service<Request<Incoming>> for HttpService {
         let query = req.uri().query().map(|s| s.to_string());
         let method = req.method().clone();
         let git_data_path = self.config.git_data_path.clone();
+        let relay_domain = self.config.domain.clone();
 
         // Handle OPTIONS preflight requests (CORS)
         // GRASP-01 spec line 47: Respond to OPTIONS with 204 No Content
@@ -117,9 +118,17 @@ impl Service<Request<Incoming>> for HttpService {
                         git::handlers::handle_upload_pack(repo_path, body_bytes).await
                     }
                     
-                    // POST /git-receive-pack (push)
+                    // POST /git-receive-pack (push) - with GRASP authorization
                     (m, "git-receive-pack") if m == Method::POST => {
-                        git::handlers::handle_receive_pack(repo_path, body_bytes.clone()).await
+                        // Build authorization parameters for GRASP validation
+                        // Use ws:// protocol for relay since we're connecting internally
+                        let relay_url = format!("ws://{}", relay_domain);
+                        let auth_params = git::handlers::PushAuthParams {
+                            relay_url,
+                            owner_npub: npub.clone(),
+                            identifier: identifier.clone(),
+                        };
+                        git::handlers::handle_receive_pack(repo_path, body_bytes.clone(), Some(auth_params)).await
                     }
                     
                     _ => {

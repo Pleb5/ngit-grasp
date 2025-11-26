@@ -28,6 +28,17 @@ use nostr_sdk::prelude::Event;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+/// Deterministic commit hash used in RepoState fixtures
+/// This is the hash produced by creating a commit with:
+/// - Message: "Initial commit"
+/// - File: test.txt containing "Initial commit"
+/// - Author date: 2024-01-01T00:00:00Z
+/// - Committer date: 2024-01-01T00:00:00Z
+/// - GPG signing: disabled
+/// - User: "GRASP Audit Test <test@grasp-audit.local>"
+/// - Parent: Initial empty commit (09cc37de80f3434fa98864a86730b8d7777bd6ae)
+pub const DETERMINISTIC_COMMIT_HASH: &str = "64ea71d79a57a7acb334cd9651f8aec067c0ce5d";
+
 /// Types of test fixtures available
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FixtureKind {
@@ -279,17 +290,18 @@ impl<'a> TestContext<'a> {
                     .ok_or_else(|| anyhow::anyhow!("Missing d tag in repo announcement"))?
                     .to_string();
 
-                // Create state announcement
+                // Create state announcement with deterministic commit hash
+                // Tag format: ["refs/heads/main", "<commit_hash>"]
                 self.client
                     .event_builder(Kind::Custom(30618), "")
                     .tag(Tag::identifier(&repo_id))
                     .tag(Tag::custom(
                         TagKind::custom("refs/heads/main"),
-                        vec!["abc123def456789012345678901234567890abcd"],
+                        vec![DETERMINISTIC_COMMIT_HASH.to_string()],
                     ))
                     .tag(Tag::custom(
                         TagKind::custom("HEAD"),
-                        vec!["ref: refs/heads/main"],
+                        vec!["ref: refs/heads/main".to_string()],
                     ))
                     .build(self.client.keys())
                     .map_err(|e| anyhow::anyhow!("Failed to build state announcement: {}", e))

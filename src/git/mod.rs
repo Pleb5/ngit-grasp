@@ -17,6 +17,7 @@
 //! - `POST /<npub>/<identifier>.git/git-upload-pack` - Clone/fetch operation
 //! - `POST /<npub>/<identifier>.git/git-receive-pack` - Push operation
 
+pub mod authorization;
 pub mod handlers;
 pub mod protocol;
 pub mod subprocess;
