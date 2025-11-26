@@ -24,6 +24,19 @@ use base64::Engine;
 use crate::config::Config;
 use crate::git;
 
+/// CORS headers required by GRASP-01 specification (lines 40-47)
+const CORS_ALLOW_ORIGIN: &str = "*";
+const CORS_ALLOW_METHODS: &str = "GET, POST";
+const CORS_ALLOW_HEADERS: &str = "Content-Type";
+
+/// Add CORS headers to a response builder
+fn add_cors_headers(builder: hyper::http::response::Builder) -> hyper::http::response::Builder {
+    builder
+        .header("Access-Control-Allow-Origin", CORS_ALLOW_ORIGIN)
+        .header("Access-Control-Allow-Methods", CORS_ALLOW_METHODS)
+        .header("Access-Control-Allow-Headers", CORS_ALLOW_HEADERS)
+}
+
 /// HTTP Service that serves both WebSocket (relay) and HTML landing page
 struct HttpService {
     relay: LocalRelay,
@@ -47,11 +60,22 @@ impl Service<Request<Incoming>> for HttpService {
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
     fn call(&self, req: Request<Incoming>) -> Self::Future {
-        let base = Response::builder().header("server", "ngit-grasp");
+        let base = add_cors_headers(Response::builder().header("server", "ngit-grasp"));
         let path = req.uri().path().to_string();
         let query = req.uri().query().map(|s| s.to_string());
         let method = req.method().clone();
         let git_data_path = self.config.git_data_path.clone();
+
+        // Handle OPTIONS preflight requests (CORS)
+        // GRASP-01 spec line 47: Respond to OPTIONS with 204 No Content
+        if method == Method::OPTIONS {
+            return Box::pin(async move {
+                Ok(add_cors_headers(Response::builder().header("server", "ngit-grasp"))
+                    .status(204)
+                    .body(Full::new(Bytes::new()))
+                    .unwrap())
+            });
+        }
 
         // Check for Git HTTP requests first
         if let Some((npub, identifier, subpath)) = git::parse_git_url(&path) {
@@ -104,11 +128,24 @@ impl Service<Request<Incoming>> for HttpService {
                 };
 
                 match result {
-                    Ok(response) => Ok(response),
+                    Ok(response) => {
+                        // Add CORS headers to successful Git responses
+                        let (parts, body) = response.into_parts();
+                        Ok(add_cors_headers(Response::builder()
+                            .status(parts.status))
+                            .header("content-type", parts.headers.get("content-type")
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("application/octet-stream"))
+                            .header("cache-control", parts.headers.get("cache-control")
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("no-cache"))
+                            .body(body)
+                            .unwrap())
+                    }
                     Err(e) => {
                         tracing::error!("Git handler error: {}", e);
                         let error_msg = format!("Git error: {}", e);
-                        Ok(Response::builder()
+                        Ok(add_cors_headers(Response::builder())
                             .status(e.status_code())
                             .body(Full::new(Bytes::from(error_msg)))
                             .unwrap())
@@ -133,10 +170,9 @@ impl Service<Request<Incoming>> for HttpService {
                 tracing::debug!("Serving NIP-11 relay information document to {}", self.remote);
                 
                 return Box::pin(async move {
-                    Ok(base
+                    Ok(add_cors_headers(Response::builder().header("server", "ngit-grasp"))
                         .status(200)
                         .header("content-type", "application/nostr+json")
-                        .header("access-control-allow-origin", "*")
                         .body(Full::new(Bytes::from(json)))
                         .unwrap())
                 });
