@@ -9,7 +9,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, info, warn};
 
 use super::authorization::{
-    AuthorizationContext, AuthorizationResult, npub_to_pubkey, parse_pushed_refs, validate_push_refs,
+    AuthorizationContext, AuthorizationResult, parse_pushed_refs, validate_push_refs,
 };
 use super::protocol::{GitService, PktLine};
 use super::subprocess::GitSubprocess;
@@ -258,7 +258,7 @@ pub async fn handle_receive_pack(
 ///
 /// This function:
 /// 1. Fetches announcement and state events from the relay
-/// 2. Calculates the recursive maintainer set
+/// 2. Collects all authorized publishers from announcements
 /// 3. Gets the latest authorized state
 /// 4. Validates that pushed refs match the state
 async fn authorize_push(
@@ -267,9 +267,6 @@ async fn authorize_push(
 ) -> anyhow::Result<AuthorizationResult> {
     use nostr_sdk::ClientBuilder;
     use std::time::Duration;
-
-    // Convert npub to hex pubkey
-    let owner_pubkey = npub_to_pubkey(&params.owner_npub)?;
 
     debug!(
         "Fetching events for identifier {} from relay {}",
@@ -301,8 +298,8 @@ async fn authorize_push(
     // Create authorization context
     let ctx = AuthorizationContext::new(events);
 
-    // Get the authorized state
-    let auth_result = ctx.get_authorized_state(&owner_pubkey, &params.identifier)?;
+    // Get the authorized state (no owner_pubkey needed - self-contained check)
+    let auth_result = ctx.get_authorized_state(&params.identifier)?;
 
     if !auth_result.authorized {
         return Ok(auth_result);

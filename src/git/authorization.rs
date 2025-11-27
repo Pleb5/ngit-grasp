@@ -5,17 +5,24 @@
 //! ## GRASP-01 Requirement
 //!
 //! "MUST accept pushes via this service that match the latest repo state announcement
-//! on the relay, respecting the recursive maintainer set."
+//! on the relay, respecting the maintainer set."
 //!
-//! ## Authorization Flow
+//! ## Authorization Flow (Efficient Single-Query Approach)
 //!
 //! 1. Fetch announcement and state events for the repository from the relay
-//! 2. Calculate the recursive maintainer set (owner + listed maintainers recursively)
-//! 3. Find the latest state event authored by any maintainer
+//! 2. Collect all authorized publishers: announcement authors + listed maintainers
+//! 3. Find the latest state event authored by any authorized publisher
 //! 4. Validate that the pushed refs match the state event
+//!
+//! ## Authorization Logic
+//!
+//! A pubkey is authorized to publish state events if, for ANY announcement with the
+//! same identifier:
+//! - They are the author of that announcement, OR
+//! - They are listed in the "maintainers" tag of that announcement
 
 use anyhow::{anyhow, Result};
-use nostr_sdk::{Event, Filter, Kind, PublicKey, SingleLetterTag, Timestamp, ToBech32, Alphabet};
+use nostr_sdk::{Alphabet, Event, Filter, Kind, PublicKey, SingleLetterTag, Timestamp, ToBech32};
 use std::collections::HashSet;
 use tracing::debug;
 
@@ -32,7 +39,7 @@ pub struct AuthorizationResult {
     pub reason: String,
     /// The authorized state if available
     pub state: Option<RepositoryState>,
-    /// The set of valid maintainers
+    /// The set of valid maintainers (authorized publishers)
     pub maintainers: Vec<String>,
 }
 
@@ -79,149 +86,37 @@ impl AuthorizationContext {
                 Kind::from(KIND_REPOSITORY_ANNOUNCEMENT),
                 Kind::from(KIND_REPOSITORY_STATE),
             ])
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::D), identifier.to_string())
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::D),
+                identifier.to_string(),
+            )
     }
 
     /// Get the latest authorized state for a repository
     ///
-    /// This implements the GRASP-01 requirement:
-    /// "respecting the recursive maintainer set"
-    pub fn get_authorized_state(
-        &self,
-        owner_pubkey: &str,
-        identifier: &str,
-    ) -> Result<AuthorizationResult> {
-        // Calculate recursive maintainer set
-        let maintainers = self.get_maintainers(owner_pubkey, identifier);
+    /// This implements the GRASP-01 requirement using an efficient single-query approach:
+    /// - Collect all authorized publishers from announcements
+    /// - Find the latest state event from any authorized publisher
+    ///
+    /// No owner_pubkey needed - authorization is determined by announcements themselves.
+    pub fn get_authorized_state(&self, identifier: &str) -> Result<AuthorizationResult> {
+        // Collect all authorized publishers (single pass through announcements)
+        let authorized_publishers = self.get_authorized_publishers(identifier);
 
-        if maintainers.is_empty() {
+        if authorized_publishers.is_empty() {
             return Ok(AuthorizationResult::denied(
-                "No repository announcement found for owner",
+                "No repository announcement found",
             ));
         }
 
         debug!(
-            "Found {} maintainers for repository {}: {:?}",
-            maintainers.len(),
+            "Found {} authorized publishers for repository {}: {:?}",
+            authorized_publishers.len(),
             identifier,
-            maintainers
+            authorized_publishers
         );
 
-        // Get the latest state event from any maintainer
-        match self.get_state_from_maintainers(&maintainers, identifier) {
-            Some(state) => Ok(AuthorizationResult::authorized(state, maintainers)),
-            None => Ok(AuthorizationResult::denied(
-                "No state event found from maintainers",
-            )),
-        }
-    }
-
-    /// Recursively find all maintainers for a repository
-    ///
-    /// This implements the recursive maintainer logic from the reference:
-    /// - Start with the owner's announcement
-    /// - Extract all `p` tags (listed maintainers)
-    /// - Recursively find maintainers listed by those maintainers
-    /// - Return the full set of unique maintainers
-    ///
-    /// Example: if alice lists bob, and bob lists charlie:
-    /// - getMaintainers(alice) -> [alice, bob, charlie]
-    /// - getMaintainers(bob) -> [bob, charlie] (bob doesn't have alice's trust)
-    pub fn get_maintainers(&self, pubkey: &str, identifier: &str) -> Vec<String> {
-        let mut visited: HashSet<String> = HashSet::new();
-        let mut maintainers: HashSet<String> = HashSet::new();
-        self.get_maintainers_recursive(pubkey, identifier, &mut visited, &mut maintainers);
-
-        maintainers.into_iter().collect()
-    }
-
-    /// Recursive helper for get_maintainers
-    ///
-    /// The key insight is that a pubkey is a valid maintainer if:
-    /// 1. They have their own accepted announcement for this repo, OR
-    /// 2. They are listed in the "maintainers" tag of an accepted announcement
-    ///
-    /// This allows maintainers to publish state events without needing their own
-    /// announcement - they're authorized by being listed in the owner's announcement.
-    ///
-    /// We use separate sets:
-    /// - `visited`: Tracks which pubkeys we've already processed (cycle prevention)
-    /// - `maintainers`: The result set of valid maintainers
-    fn get_maintainers_recursive(
-        &self,
-        pubkey: &str,
-        identifier: &str,
-        visited: &mut HashSet<String>,
-        maintainers: &mut HashSet<String>,
-    ) {
-        // Skip if already visited (prevents infinite loops)
-        if visited.contains(pubkey) {
-            return;
-        }
-        visited.insert(pubkey.to_string());
-
-        // Find the announcement event for this pubkey
-        let announcement = self.find_announcement_by_pubkey(pubkey, identifier);
-
-        if let Some(announcement) = announcement {
-            // This pubkey has an announcement - they are a valid maintainer
-            maintainers.insert(pubkey.to_string());
-
-            // Get maintainers listed in this announcement (maintainers tag)
-            // These are ALSO valid maintainers, even without their own announcement
-            for maintainer_pubkey in &announcement.maintainers {
-                // Add them to the maintainer set immediately - they're authorized
-                // by being listed in an accepted announcement
-                maintainers.insert(maintainer_pubkey.clone());
-
-                // Recursively check if they have their own announcement
-                // to get any maintainers THEY list (recursive maintainer chain)
-                self.get_maintainers_recursive(maintainer_pubkey, identifier, visited, maintainers);
-            }
-        }
-        // If no announcement found, they can still be valid if they were
-        // added to maintainers by their parent caller
-    }
-
-    /// Find a repository announcement event by pubkey and identifier
-    fn find_announcement_by_pubkey(
-        &self,
-        pubkey: &str,
-        identifier: &str,
-    ) -> Option<RepositoryAnnouncement> {
-        for event in &self.events {
-            // Check if it's a repository announcement
-            if event.kind != Kind::from(KIND_REPOSITORY_ANNOUNCEMENT) {
-                continue;
-            }
-
-            // Check if pubkey matches
-            if event.pubkey.to_hex() != pubkey {
-                continue;
-            }
-
-            // Try to parse and check identifier
-            if let Ok(announcement) = RepositoryAnnouncement::from_event(event.clone()) {
-                if announcement.identifier == identifier {
-                    return Some(announcement);
-                }
-            }
-        }
-        None
-    }
-
-    /// Get the latest state event from any of the provided maintainers
-    ///
-    /// This implements the reference's GetStateFromMaintainers logic:
-    /// - Find all state events from maintainers
-    /// - Return the one with the latest timestamp
-    fn get_state_from_maintainers(
-        &self,
-        maintainers: &[String],
-        identifier: &str,
-    ) -> Option<RepositoryState> {
-        let maintainer_set: HashSet<&str> = maintainers.iter().map(|s| s.as_str()).collect();
-
+        // Find the latest state event from any authorized publisher
         let mut latest_state: Option<RepositoryState> = None;
         let mut latest_timestamp = Timestamp::from(0);
 
@@ -231,9 +126,13 @@ impl AuthorizationContext {
                 continue;
             }
 
-            // Check if from a maintainer
+            // Check if from an authorized publisher
             let pubkey_hex = event.pubkey.to_hex();
-            if !maintainer_set.contains(pubkey_hex.as_str()) {
+            if !authorized_publishers.contains(&pubkey_hex) {
+                debug!(
+                    "Skipping state event from unauthorized publisher: {}",
+                    pubkey_hex
+                );
                 continue;
             }
 
@@ -252,7 +151,83 @@ impl AuthorizationContext {
             }
         }
 
-        latest_state
+        match latest_state {
+            Some(state) => Ok(AuthorizationResult::authorized(
+                state,
+                authorized_publishers.into_iter().collect(),
+            )),
+            None => Ok(AuthorizationResult::denied(
+                "No state event found from authorized publishers",
+            )),
+        }
+    }
+
+    /// Get all pubkeys authorized to publish state for an identifier
+    ///
+    /// A pubkey is authorized if for ANY announcement with the same identifier:
+    /// - They are the author of that announcement, OR
+    /// - They are listed in the "maintainers" tag of that announcement
+    ///
+    /// This is a simple O(n) single pass - no recursion needed.
+    fn get_authorized_publishers(&self, identifier: &str) -> HashSet<String> {
+        let mut authorized = HashSet::new();
+
+        for event in &self.events {
+            // Only look at announcements
+            if event.kind != Kind::from(KIND_REPOSITORY_ANNOUNCEMENT) {
+                continue;
+            }
+
+            // Try to parse and check identifier
+            if let Ok(announcement) = RepositoryAnnouncement::from_event(event.clone()) {
+                if announcement.identifier != identifier {
+                    continue;
+                }
+
+                // Announcement author is authorized
+                authorized.insert(event.pubkey.to_hex());
+
+                // All listed maintainers are also authorized
+                for maintainer in &announcement.maintainers {
+                    authorized.insert(maintainer.clone());
+                }
+            }
+        }
+
+        authorized
+    }
+
+    /// Check if a specific pubkey is authorized to publish state for an identifier
+    ///
+    /// A pubkey is authorized if for ANY announcement with the same identifier:
+    /// - They are the author of that announcement, OR
+    /// - They are listed in the "maintainers" tag of that announcement
+    #[allow(dead_code)]
+    pub fn is_state_authorized(&self, state_pubkey: &str, identifier: &str) -> bool {
+        for event in &self.events {
+            // Only look at announcements
+            if event.kind != Kind::from(KIND_REPOSITORY_ANNOUNCEMENT) {
+                continue;
+            }
+
+            // Try to parse and check identifier
+            if let Ok(announcement) = RepositoryAnnouncement::from_event(event.clone()) {
+                if announcement.identifier != identifier {
+                    continue;
+                }
+
+                // Check 1: Is state author the announcement author?
+                if event.pubkey.to_hex() == state_pubkey {
+                    return true;
+                }
+
+                // Check 2: Is state author in this announcement's maintainers?
+                if announcement.maintainers.contains(&state_pubkey.to_string()) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
 
@@ -282,7 +257,10 @@ pub fn validate_push_refs(
                     ));
                 }
                 // Commit matches state - authorized
-                debug!("Branch {} push authorized: {} matches state", branch_name, new_oid);
+                debug!(
+                    "Branch {} push authorized: {} matches state",
+                    branch_name, new_oid
+                );
             } else {
                 // Branch not in state - REJECT (GRASP-01 requirement)
                 return Err(anyhow!(
@@ -340,7 +318,7 @@ pub fn parse_pushed_refs(data: &[u8]) -> Vec<(String, String, String)> {
             }
         }
     }
-    
+
     // Fall back to simple text format (for tests)
     parse_text_refs(data)
 }
@@ -348,40 +326,40 @@ pub fn parse_pushed_refs(data: &[u8]) -> Vec<(String, String, String)> {
 /// Parse refs from pkt-line format data
 fn parse_pktline_refs(mut data: &[u8]) -> Vec<(String, String, String)> {
     let mut refs = Vec::new();
-    
+
     while data.len() >= 4 {
         // Parse pkt-line length prefix
         let len_str = match std::str::from_utf8(&data[0..4]) {
             Ok(s) => s,
             Err(_) => break,
         };
-        
+
         let len = match u16::from_str_radix(len_str, 16) {
             Ok(l) => l as usize,
             Err(_) => break,
         };
-        
+
         // Flush packet (0000) ends the ref list
         if len == 0 {
             break;
         }
-        
+
         if len < 4 || data.len() < len {
             break;
         }
-        
+
         // Extract payload (without the 4-byte length prefix)
         let payload = &data[4..len];
-        
+
         // Parse the payload: "old_oid new_oid ref_name\0capabilities\n"
         if let Some(ref_update) = parse_ref_line(payload) {
             refs.push(ref_update);
         }
-        
+
         // Move to next pkt-line
         data = &data[len..];
     }
-    
+
     debug!("Parsed {} refs from pkt-line format", refs.len());
     refs
 }
@@ -409,29 +387,34 @@ fn parse_text_refs(data: &[u8]) -> Vec<(String, String, String)> {
 fn parse_ref_line(payload: &[u8]) -> Option<(String, String, String)> {
     // Convert to string, handling potential invalid UTF-8
     let line = String::from_utf8_lossy(payload);
-    
+
     // Strip trailing newline if present
     let line = line.trim_end_matches('\n');
-    
+
     // Split at null byte to separate command from capabilities
     let command_part = line.split('\0').next().unwrap_or("");
-    
+
     // Parse "old_oid new_oid ref_name"
     let parts: Vec<&str> = command_part.split_whitespace().collect();
     if parts.len() >= 3 {
         let old_oid = parts[0];
         let new_oid = parts[1];
         let ref_name = parts[2];
-        
+
         // Validate OID format (40 hex chars)
-        if old_oid.len() == 40 && new_oid.len() == 40
+        if old_oid.len() == 40
+            && new_oid.len() == 40
             && old_oid.chars().all(|c| c.is_ascii_hexdigit())
             && new_oid.chars().all(|c| c.is_ascii_hexdigit())
         {
-            return Some((old_oid.to_string(), new_oid.to_string(), ref_name.to_string()));
+            return Some((
+                old_oid.to_string(),
+                new_oid.to_string(),
+                ref_name.to_string(),
+            ));
         }
     }
-    
+
     None
 }
 
@@ -456,11 +439,7 @@ mod tests {
         Keys::generate()
     }
 
-    fn create_announcement_event(
-        keys: &Keys,
-        identifier: &str,
-        maintainers: &[&Keys],
-    ) -> Event {
+    fn create_announcement_event(keys: &Keys, identifier: &str, maintainers: &[&Keys]) -> Event {
         let mut tags = vec![Tag::custom(TagKind::d(), vec![identifier.to_string()])];
 
         // Add maintainers as a single "maintainers" tag per NIP-34
@@ -509,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_maintainers_single_owner() {
+    fn test_authorized_publishers_single_owner() {
         let alice = create_test_keys();
         let identifier = "test-repo";
 
@@ -517,34 +496,30 @@ mod tests {
         let events = vec![announcement];
 
         let ctx = AuthorizationContext::new(events);
-        let maintainers = ctx.get_maintainers(&alice.public_key().to_hex(), identifier);
 
-        assert_eq!(maintainers.len(), 1);
-        assert!(maintainers.contains(&alice.public_key().to_hex()));
+        // Alice should be authorized
+        assert!(ctx.is_state_authorized(&alice.public_key().to_hex(), identifier));
     }
 
     #[test]
-    fn test_get_maintainers_with_listed_maintainer() {
+    fn test_authorized_publishers_with_listed_maintainer() {
         let alice = create_test_keys();
         let bob = create_test_keys();
         let identifier = "test-repo";
 
         // Alice lists Bob as maintainer
         let alice_announcement = create_announcement_event(&alice, identifier, &[&bob]);
-        // Bob also has an announcement
-        let bob_announcement = create_announcement_event(&bob, identifier, &[]);
 
-        let events = vec![alice_announcement, bob_announcement];
+        let events = vec![alice_announcement];
         let ctx = AuthorizationContext::new(events);
-        let maintainers = ctx.get_maintainers(&alice.public_key().to_hex(), identifier);
 
-        assert_eq!(maintainers.len(), 2);
-        assert!(maintainers.contains(&alice.public_key().to_hex()));
-        assert!(maintainers.contains(&bob.public_key().to_hex()));
+        // Both Alice and Bob should be authorized
+        assert!(ctx.is_state_authorized(&alice.public_key().to_hex(), identifier));
+        assert!(ctx.is_state_authorized(&bob.public_key().to_hex(), identifier));
     }
 
     #[test]
-    fn test_get_maintainers_recursive() {
+    fn test_authorized_publishers_multiple_announcements() {
         let alice = create_test_keys();
         let bob = create_test_keys();
         let charlie = create_test_keys();
@@ -553,65 +528,85 @@ mod tests {
         // Alice lists Bob, Bob lists Charlie
         let alice_announcement = create_announcement_event(&alice, identifier, &[&bob]);
         let bob_announcement = create_announcement_event(&bob, identifier, &[&charlie]);
-        let charlie_announcement = create_announcement_event(&charlie, identifier, &[]);
-
-        let events = vec![alice_announcement, bob_announcement, charlie_announcement];
-        let ctx = AuthorizationContext::new(events);
-        let maintainers = ctx.get_maintainers(&alice.public_key().to_hex(), identifier);
-
-        assert_eq!(maintainers.len(), 3);
-        assert!(maintainers.contains(&alice.public_key().to_hex()));
-        assert!(maintainers.contains(&bob.public_key().to_hex()));
-        assert!(maintainers.contains(&charlie.public_key().to_hex()));
-    }
-
-    #[test]
-    fn test_get_maintainers_not_symmetric() {
-        let alice = create_test_keys();
-        let bob = create_test_keys();
-        let identifier = "test-repo";
-
-        // Alice lists Bob, but Bob doesn't list Alice
-        let alice_announcement = create_announcement_event(&alice, identifier, &[&bob]);
-        let bob_announcement = create_announcement_event(&bob, identifier, &[]);
 
         let events = vec![alice_announcement, bob_announcement];
         let ctx = AuthorizationContext::new(events);
 
-        // From Alice's perspective, both are maintainers
-        let alice_maintainers = ctx.get_maintainers(&alice.public_key().to_hex(), identifier);
-        assert_eq!(alice_maintainers.len(), 2);
-
-        // From Bob's perspective, only Bob is maintainer
-        let bob_maintainers = ctx.get_maintainers(&bob.public_key().to_hex(), identifier);
-        assert_eq!(bob_maintainers.len(), 1);
-        assert!(bob_maintainers.contains(&bob.public_key().to_hex()));
-        assert!(!bob_maintainers.contains(&alice.public_key().to_hex()));
+        // All three should be authorized (Alice, Bob from announcements; Bob, Charlie from maintainers)
+        assert!(ctx.is_state_authorized(&alice.public_key().to_hex(), identifier));
+        assert!(ctx.is_state_authorized(&bob.public_key().to_hex(), identifier));
+        assert!(ctx.is_state_authorized(&charlie.public_key().to_hex(), identifier));
     }
 
     #[test]
-    fn test_get_state_from_maintainers() {
+    fn test_unauthorized_pubkey() {
+        let alice = create_test_keys();
+        let bob = create_test_keys();
+        let eve = create_test_keys(); // Not authorized
+        let identifier = "test-repo";
+
+        // Alice lists Bob as maintainer  
+        let alice_announcement = create_announcement_event(&alice, identifier, &[&bob]);
+
+        let events = vec![alice_announcement];
+        let ctx = AuthorizationContext::new(events);
+
+        // Eve should NOT be authorized
+        assert!(!ctx.is_state_authorized(&eve.public_key().to_hex(), identifier));
+    }
+
+    #[test]
+    fn test_get_authorized_state_with_maintainer() {
         let alice = create_test_keys();
         let bob = create_test_keys();
         let identifier = "test-repo";
 
         let announcement = create_announcement_event(&alice, identifier, &[&bob]);
-        let bob_announcement = create_announcement_event(&bob, identifier, &[]);
 
         // Bob publishes a state event
         let state = create_state_event(&bob, identifier, &[("main", "abc123")]);
 
-        let events = vec![announcement, bob_announcement, state];
+        let events = vec![announcement, state];
         let ctx = AuthorizationContext::new(events);
 
-        let result = ctx
-            .get_authorized_state(&alice.public_key().to_hex(), identifier)
-            .unwrap();
+        let result = ctx.get_authorized_state(identifier).unwrap();
 
         assert!(result.authorized);
         assert!(result.state.is_some());
         let state = result.state.unwrap();
         assert_eq!(state.get_branch_commit("main"), Some("abc123"));
+    }
+
+    #[test]
+    fn test_get_authorized_state_no_announcement() {
+        let identifier = "test-repo";
+
+        let events = vec![];
+        let ctx = AuthorizationContext::new(events);
+
+        let result = ctx.get_authorized_state(identifier).unwrap();
+
+        assert!(!result.authorized);
+        assert_eq!(result.reason, "No repository announcement found");
+    }
+
+    #[test]
+    fn test_get_authorized_state_no_state_event() {
+        let alice = create_test_keys();
+        let identifier = "test-repo";
+
+        let announcement = create_announcement_event(&alice, identifier, &[]);
+
+        let events = vec![announcement];
+        let ctx = AuthorizationContext::new(events);
+
+        let result = ctx.get_authorized_state(identifier).unwrap();
+
+        assert!(!result.authorized);
+        assert_eq!(
+            result.reason,
+            "No state event found from authorized publishers"
+        );
     }
 
     #[test]
@@ -657,19 +652,19 @@ mod tests {
         let new = "a".repeat(40);
         let ref_name = "refs/heads/main";
         let capabilities = " report-status side-band-64k";
-        
+
         // Build the pkt-line payload
         let payload = format!("{} {} {}\0{}\n", old, new, ref_name, capabilities);
-        
+
         // Calculate length (4-byte prefix + payload)
         let len = 4 + payload.len();
         let pktline = format!("{:04x}{}", len, payload);
-        
+
         // Add flush packet to end
         let data = format!("{}0000", pktline);
-        
+
         let refs = parse_pushed_refs(data.as_bytes());
-        
+
         assert_eq!(refs.len(), 1, "Expected 1 ref, got {}", refs.len());
         assert_eq!(refs[0].0, old);
         assert_eq!(refs[0].1, new);
@@ -683,21 +678,21 @@ mod tests {
         let new1 = "a".repeat(40);
         let old2 = "b".repeat(40);
         let new2 = "c".repeat(40);
-        
+
         // First ref with capabilities
         let payload1 = format!("{} {} refs/heads/main\0report-status\n", old1, new1);
         let len1 = 4 + payload1.len();
         let pktline1 = format!("{:04x}{}", len1, payload1);
-        
+
         // Second ref without capabilities (subsequent refs don't have them)
         let payload2 = format!("{} {} refs/heads/feature\n", old2, new2);
         let len2 = 4 + payload2.len();
         let pktline2 = format!("{:04x}{}", len2, payload2);
-        
+
         let data = format!("{}{}0000", pktline1, pktline2);
-        
+
         let refs = parse_pushed_refs(data.as_bytes());
-        
+
         assert_eq!(refs.len(), 2, "Expected 2 refs, got {}", refs.len());
         assert_eq!(refs[0].2, "refs/heads/main");
         assert_eq!(refs[1].2, "refs/heads/feature");
