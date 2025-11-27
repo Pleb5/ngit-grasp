@@ -17,7 +17,7 @@
 use anyhow::{anyhow, Result};
 use nostr_sdk::{Event, Filter, Kind, PublicKey, SingleLetterTag, Timestamp, ToBech32, Alphabet};
 use std::collections::HashSet;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::nostr::events::{
     RepositoryAnnouncement, RepositoryState, KIND_REPOSITORY_ANNOUNCEMENT, KIND_REPOSITORY_STATE,
@@ -128,40 +128,59 @@ impl AuthorizationContext {
     /// - getMaintainers(alice) -> [alice, bob, charlie]
     /// - getMaintainers(bob) -> [bob, charlie] (bob doesn't have alice's trust)
     pub fn get_maintainers(&self, pubkey: &str, identifier: &str) -> Vec<String> {
-        let mut checked: HashSet<String> = HashSet::new();
-        self.get_maintainers_recursive(pubkey, identifier, &mut checked);
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut maintainers: HashSet<String> = HashSet::new();
+        self.get_maintainers_recursive(pubkey, identifier, &mut visited, &mut maintainers);
 
-        checked.into_iter().collect()
+        maintainers.into_iter().collect()
     }
 
     /// Recursive helper for get_maintainers
+    ///
+    /// The key insight is that a pubkey is a valid maintainer if:
+    /// 1. They have their own accepted announcement for this repo, OR
+    /// 2. They are listed in the "maintainers" tag of an accepted announcement
+    ///
+    /// This allows maintainers to publish state events without needing their own
+    /// announcement - they're authorized by being listed in the owner's announcement.
+    ///
+    /// We use separate sets:
+    /// - `visited`: Tracks which pubkeys we've already processed (cycle prevention)
+    /// - `maintainers`: The result set of valid maintainers
     fn get_maintainers_recursive(
         &self,
         pubkey: &str,
         identifier: &str,
-        checked: &mut HashSet<String>,
+        visited: &mut HashSet<String>,
+        maintainers: &mut HashSet<String>,
     ) {
-        // Skip if already processed
-        if checked.contains(pubkey) {
+        // Skip if already visited (prevents infinite loops)
+        if visited.contains(pubkey) {
             return;
         }
+        visited.insert(pubkey.to_string());
 
         // Find the announcement event for this pubkey
         let announcement = self.find_announcement_by_pubkey(pubkey, identifier);
-        if announcement.is_none() {
-            return;
+
+        if let Some(announcement) = announcement {
+            // This pubkey has an announcement - they are a valid maintainer
+            maintainers.insert(pubkey.to_string());
+
+            // Get maintainers listed in this announcement (maintainers tag)
+            // These are ALSO valid maintainers, even without their own announcement
+            for maintainer_pubkey in &announcement.maintainers {
+                // Add them to the maintainer set immediately - they're authorized
+                // by being listed in an accepted announcement
+                maintainers.insert(maintainer_pubkey.clone());
+
+                // Recursively check if they have their own announcement
+                // to get any maintainers THEY list (recursive maintainer chain)
+                self.get_maintainers_recursive(maintainer_pubkey, identifier, visited, maintainers);
+            }
         }
-
-        // Mark this pubkey as checked (they have a valid announcement)
-        checked.insert(pubkey.to_string());
-
-        let announcement = announcement.unwrap();
-
-        // Get maintainers listed in this announcement (p tags)
-        for maintainer_pubkey in &announcement.maintainers {
-            // Recursively process each listed maintainer
-            self.get_maintainers_recursive(maintainer_pubkey, identifier, checked);
-        }
+        // If no announcement found, they can still be valid if they were
+        // added to maintainers by their parent caller
     }
 
     /// Find a repository announcement event by pubkey and identifier

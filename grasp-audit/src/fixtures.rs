@@ -533,6 +533,12 @@ impl<'a> TestContext<'a> {
                     .ok_or_else(|| anyhow::anyhow!("Missing d tag in owner repo announcement"))?
                     .to_string();
 
+                // Build and send the maintainer's repo announcement first
+                // This establishes the chain: Owner -> Maintainer -> RecursiveMaintainer
+                // The maintainer's announcement lists the recursive maintainer in its maintainers tag
+                let maintainer_announcement = self.build_maintainer_announcement(&repo_id).await?;
+                self.client.send_event(maintainer_announcement).await?;
+
                 // Build and send the recursive maintainer's repo announcement
                 let recursive_maintainer_announcement = self.build_recursive_maintainer_announcement(&repo_id).await?;
                 self.client.send_event(recursive_maintainer_announcement).await?;
