@@ -38,10 +38,16 @@ pub mod specs;
 pub use audit::{AuditConfig, AuditMode};
 pub use client::AuditClient;
 pub use fixtures::{
+    // Git operation helpers
     clone_repo, create_commit, create_deterministic_commit, create_deterministic_commit_with_variant,
-    CommitVariant, ContextMode, FixtureKind, RepoSetup, TestContext,
+    try_push,
+    // Verification helpers
+    send_and_verify_accepted, send_and_verify_rejected,
+    // Repo setup helpers
     setup_repo_for_maintainer, setup_repo_for_recursive_maintainer, setup_repo_with_deterministic_commit,
-    try_push, DETERMINISTIC_COMMIT_HASH, MAINTAINER_DETERMINISTIC_COMMIT_HASH,
+    // Types and constants
+    CommitVariant, ContextMode, FixtureKind, RepoSetup, TestContext,
+    DETERMINISTIC_COMMIT_HASH, MAINTAINER_DETERMINISTIC_COMMIT_HASH,
     RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH,
 };
 pub use result::{AuditResult, TestResult};
