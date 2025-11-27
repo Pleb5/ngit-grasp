@@ -199,6 +199,126 @@ RELAY_URL="ws://localhost:18081" cargo test --lib test_grasp01_nostr_relay_again
 
 </details>
 
+## Test Design Pattern: Fixture-First
+
+To prevent rate-limiting from production relays during testing, we use a **fixture-first** approach that minimizes relay interactions.
+
+### Quick Start for New Tests
+
+1. Create TestContext at test start
+2. Get prerequisites via `ctx.get_fixture(FixtureKind::...)`
+3. Build test-specific events using fixtures as base
+4. Verify outcomes via `send_and_verify_accepted/rejected`
+
+### Pattern Template
+
+```rust
+pub async fn test_something(client: &AuditClient) -> TestResult {
+    TestResult::new(...)
+        .run(|| async {
+            // 1. Context
+            let ctx = TestContext::new(client);
+            
+            // 2. Prerequisites (cached per-TestContext)
+            let repo = ctx.get_fixture(FixtureKind::ValidRepo).await?;
+            
+            // 3. Test-specific event
+            let my_event = client.create_issue(&repo, "Title", "Content", vec![])?;
+            
+            // 4. Verify
+            send_and_verify_accepted(client, my_event, "description").await?;
+            
+            Ok(())
+        })
+        .await
+}
+```
+
+### Three-Layer Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Layer 3: Test Functions                       │
+│  Create TestContext, get fixtures, build scenarios, verify       │
+├─────────────────────────────────────────────────────────────────┤
+│           Layer 2: FixtureKind + TestContext                     │
+│  ValidRepo, RepoState, MaintainerState, etc.                     │
+│  Mode-aware caching within TestContext                           │
+├─────────────────────────────────────────────────────────────────┤
+│               Layer 1: AuditClient                               │
+│  event_builder, create_repo_announcement, send_event             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Available Fixtures
+
+| FixtureKind | Provides | Use When |
+|-------------|----------|----------|
+| `ValidRepo` | Accepted repo announcement (kind 30617) | Need a repo as prerequisite |
+| `RepoState` | Repo + state event (kind 30618) | Testing owner push authorization |
+| `MaintainerAnnouncement` | Maintainer's repo announcement | Testing maintainer chain setup |
+| `MaintainerState` | Maintainer's state event | Testing maintainer push authorization |
+| `RepoWithIssue` | Repo + accepted issue (kind 1621) | Testing issue-dependent events |
+| `RepoWithComment` | Repo + issue + comment | Testing comment-dependent events |
+
+### Fixture Lifecycle: Generate → Send → Verify
+
+Every fixture follows a 3-step lifecycle:
+
+1. **GENERATE**: Build event via `AuditClient.event_builder()` (in memory only)
+2. **SEND**: `client.send_event(event)` transmits to relay (rate-limited operation)
+3. **VERIFY**: Query relay to confirm acceptance/rejection
+
+Caching happens after SEND succeeds - same fixture request returns cached Event.
+
+### How TestContext Correlates Events
+
+Each TestContext shares a `run_id` with all events:
+
+```rust
+// All events in a TestContext get these tags automatically:
+["t", "grasp-audit-test-event"]     // Identifies test events
+["t", "audit-{run_id}"]             // Unique ID for this run
+["t", "audit-cleanup-after-{ts}"]   // Cleanup timestamp
+```
+
+This enables:
+- Event correlation within a test run
+- Production relay cleanup scripts
+- Test isolation between runs
+
+### When NOT to Use Fixtures
+
+Use direct event building (NOT fixtures) when:
+
+- **Testing event REJECTION** - Build invalid events directly
+- **Testing signature/ID validation** - Need malformed events
+- **One-off connectivity tests** - No prerequisites needed
+
+```rust
+// Example: Testing rejection (build invalid event directly)
+let invalid_event = client.event_builder(Kind::GitRepoAnnouncement, "")
+    .tag(Tag::identifier("test"))
+    // Missing required 'clone' tag - should be rejected
+    .build(client.keys())?;
+
+send_and_verify_rejected(client, invalid_event, "missing clone tag").await?;
+```
+
+### Anti-Patterns to Avoid
+
+❌ **Creating TestContext inside helper functions** - Tests lose cache control
+
+❌ **Monolithic setup functions** - Mix fixture retrieval with git operations
+
+❌ **Direct event creation when fixture exists** - Misses caching opportunity
+
+✅ **Each test creates own TestContext** - Isolation guaranteed
+
+✅ **Use fixtures for prerequisites** - Caching minimizes relay calls
+
+✅ **Build invalid events directly** - Only for rejection tests
+
 ## Architecture
 
 ```
@@ -207,6 +327,7 @@ grasp-audit/
 │   ├── lib.rs              # Public API
 │   ├── audit.rs            # Audit config and event tagging
 │   ├── client.rs           # Audit client
+│   ├── fixtures.rs         # TestContext and FixtureKind
 │   ├── result.rs           # Test result types
 │   ├── isolation.rs        # Test isolation utilities
 │   └── specs/
