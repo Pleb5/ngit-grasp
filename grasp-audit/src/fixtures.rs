@@ -1270,6 +1270,32 @@ pub async fn setup_repo_with_deterministic_commit(
 
 /// Set up a maintainer repository with deterministic commit (state only)
 ///
+/// # Deprecated
+///
+/// This function is deprecated in favor of the fixture-first pattern.
+/// Tests should create their own TestContext and use `FixtureKind::MaintainerState`
+/// directly, following the Generate → Send → Verify pattern.
+///
+/// See `test_push_authorized_by_maintainer_state_only` in `push_authorization.rs` for
+/// an example of the fixture-first pattern.
+///
+/// ## Migration Guide
+///
+/// Instead of:
+/// ```ignore
+/// let setup = setup_repo_for_maintainer(client, git_data_dir, relay_domain).await?;
+/// ```
+///
+/// Use:
+/// ```ignore
+/// let ctx = TestContext::new(client);
+/// let _state_event = ctx.get_fixture(FixtureKind::RepoState).await?;
+/// let _maintainer_state = ctx.get_fixture(FixtureKind::MaintainerState).await?;
+/// // Then clone, create maintainer deterministic commit, and push inline
+/// ```
+///
+/// ---
+///
 /// This performs all the common setup steps needed for maintainer push authorization tests:
 /// 1. Gets RepoState fixture (owner's repo announcement + state event with owner's deterministic commit)
 /// 2. Gets MaintainerState fixture (maintainer's state event ONLY - no announcement)
@@ -1286,6 +1312,10 @@ pub async fn setup_repo_with_deterministic_commit(
 /// which publishes MaintainerAnnouncement separately.
 ///
 /// Returns RepoSetup which auto-cleans up the clone_path on drop
+#[deprecated(
+    since = "0.1.0",
+    note = "Use fixture-first pattern with TestContext and FixtureKind::MaintainerState instead. See test_push_authorized_by_maintainer_state_only for example."
+)]
 pub async fn setup_repo_for_maintainer(
     client: &crate::AuditClient,
     git_data_dir: &Path,
