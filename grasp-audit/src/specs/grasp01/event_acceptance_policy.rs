@@ -88,6 +88,7 @@
 //! - Forward reference tests verify out-of-order event acceptance
 //! - Transitive tests verify multi-hop acceptance chains
 
+use crate::fixtures::{send_and_verify_accepted, send_and_verify_rejected};
 use crate::{AuditClient, AuditResult, FixtureKind, TestContext, TestResult};
 use nostr_sdk::{Event, Filter, Kind, Tag, TagKind, Timestamp};
 use std::time::Duration;
@@ -515,87 +516,6 @@ impl EventAcceptancePolicyTests {
             .map_err(|e| format!("Test setup failed: could not create test comment: {}", e))
     }
 
-    /// Send event and verify it was accepted (stored by relay)
-    async fn send_and_verify_accepted(
-        client: &AuditClient,
-        event: Event,
-        description: &str,
-    ) -> Result<(), String> {
-        let event_id = event.id;
-
-        client
-            .send_event(event)
-            .await
-            .map_err(|e| format!("Failed to send event to relay: {}", e))?;
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        let filter = Filter::new().id(event_id);
-        let events = client
-            .query(filter)
-            .await
-            .map_err(|e| format!("Failed to query relay for verification: {}", e))?;
-
-        if events.is_empty() {
-            return Err(format!("Event should be accepted: {}", description));
-        }
-
-        Ok(())
-    }
-
-    /// Send event and verify it was rejected (NOT stored by relay)
-    async fn send_and_verify_rejected(
-        client: &AuditClient,
-        event: Event,
-        description: &str,
-    ) -> Result<(), String> {
-        let event_id = event.id;
-
-        // Try to send event - rejection may cause send_event to fail with an error
-        let send_result = client.send_event(event).await;
-        
-        // If send succeeded, the relay might have accepted it (we'll verify below)
-        // If send failed, check if it's a rejection error (expected)
-        if let Err(e) = send_result {
-            let err_msg = e.to_string().to_lowercase();
-            // Check if error message indicates rejection (not network/other errors)
-            if err_msg.contains("rejected") || err_msg.contains("blocked") {
-                // Expected rejection - verify event is NOT in database
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                
-                let filter = Filter::new().id(event_id);
-                let events = client
-                    .query(filter)
-                    .await
-                    .map_err(|e| format!("Failed to query relay for verification: {}", e))?;
-
-                if !events.is_empty() {
-                    return Err(format!("Event was rejected but still stored: {}", description));
-                }
-                
-                return Ok(()); // Rejected as expected
-            } else {
-                // Unexpected error (network, etc.)
-                return Err(format!("Failed to send event to relay: {}", e));
-            }
-        }
-
-        // Send succeeded, verify event was NOT stored (relay should have rejected)
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        let filter = Filter::new().id(event_id);
-        let events = client
-            .query(filter)
-            .await
-            .map_err(|e| format!("Failed to query relay for verification: {}", e))?;
-
-        if !events.is_empty() {
-            return Err(format!("Event should be rejected: {}", description));
-        }
-
-        Ok(())
-    }
-
     // ============================================================
     // Group 1: Accept Events Tagging Accepted Repositories (3 tests)
     // ============================================================
@@ -626,7 +546,7 @@ impl EventAcceptancePolicyTests {
             let issue = Self::create_issue_for_repo(client, &repo, "Test Issue 1")?;
 
             // 3. Send issue and verify it's accepted
-            Self::send_and_verify_accepted(client, issue, "issue referencing repo via 'a' tag")
+            send_and_verify_accepted(client, issue, "issue referencing repo via 'a' tag")
                 .await?;
 
             Ok(())
@@ -679,7 +599,7 @@ impl EventAcceptancePolicyTests {
                 .map_err(|e| format!("Failed to build comment: {}", e))?;
 
             // Send comment and verify it's accepted
-            Self::send_and_verify_accepted(client, comment, "comment with 'A' tag to repo").await?;
+            send_and_verify_accepted(client, comment, "comment with 'A' tag to repo").await?;
 
             Ok(())
         })
@@ -724,7 +644,7 @@ impl EventAcceptancePolicyTests {
                 .map_err(|e| format!("Failed to build note: {}", e))?;
 
             // Send note and verify it's accepted
-            Self::send_and_verify_accepted(client, note, "kind 1 with 'q' tag to repo").await?;
+            send_and_verify_accepted(client, note, "kind 1 with 'q' tag to repo").await?;
 
             Ok(())
         })
@@ -773,7 +693,7 @@ impl EventAcceptancePolicyTests {
                 .map_err(|e| format!("Failed to build issue B: {}", e))?;
 
             // Send Issue B and verify it's ACCEPTED (via transitive quote to Issue A)
-            Self::send_and_verify_accepted(client, issue_b, "issue B quoting accepted issue A")
+            send_and_verify_accepted(client, issue_b, "issue B quoting accepted issue A")
                 .await?;
 
             Ok(())
@@ -811,7 +731,7 @@ impl EventAcceptancePolicyTests {
             let comment = Self::create_comment_for_event(client, &issue, "Comment content")?;
 
             // Send comment and verify it's accepted (via E tag to accepted issue)
-            Self::send_and_verify_accepted(client, comment, "comment with E tag to accepted issue")
+            send_and_verify_accepted(client, comment, "comment with E tag to accepted issue")
                 .await?;
 
             Ok(())
@@ -852,7 +772,7 @@ impl EventAcceptancePolicyTests {
                 .build(client.keys())
                 .map_err(|e| format!("Failed to build kind1 A: {}", e))?;
 
-            Self::send_and_verify_accepted(client, kind1_a.clone(), "kind 1 A quoting repo")
+            send_and_verify_accepted(client, kind1_a.clone(), "kind 1 A quoting repo")
                 .await?;
 
             // Create Kind 1 B that replies to Kind 1 A via 'e' tag
@@ -863,7 +783,7 @@ impl EventAcceptancePolicyTests {
                 .map_err(|e| format!("Failed to build kind1 B: {}", e))?;
 
             // Send Kind 1 B and verify it's accepted (via 'e' tag to accepted kind 1 A)
-            Self::send_and_verify_accepted(
+            send_and_verify_accepted(
                 client,
                 kind1_b,
                 "kind 1 B replying to accepted kind 1 A",
@@ -953,10 +873,10 @@ impl EventAcceptancePolicyTests {
                 .build(client.keys())
                 .map_err(|e| format!("Failed to build issue: {}", e))?;
 
-            Self::send_and_verify_accepted(client, issue, "issue quoting unsent kind1").await?;
+            send_and_verify_accepted(client, issue, "issue quoting unsent kind1").await?;
 
             // NOW send the Kind 1 note - should be accepted because accepted issue quotes it
-            Self::send_and_verify_accepted(
+            send_and_verify_accepted(
                 client,
                 kind1_note,
                 "kind1 note referenced by accepted issue",
@@ -1017,11 +937,11 @@ impl EventAcceptancePolicyTests {
                 .build(client.keys())
                 .map_err(|e| format!("Failed to build comment B: {}", e))?;
 
-            Self::send_and_verify_accepted(client, comment_b, "comment B quoting unsent comment A")
+            send_and_verify_accepted(client, comment_b, "comment B quoting unsent comment A")
                 .await?;
 
             // NOW send Comment A - should be accepted because accepted Comment B quotes it
-            Self::send_and_verify_accepted(
+            send_and_verify_accepted(
                 client,
                 comment_a,
                 "comment A referenced by accepted comment B",
@@ -1077,11 +997,11 @@ impl EventAcceptancePolicyTests {
                 .build(client.keys())
                 .map_err(|e| format!("Failed to build kind1 B: {}", e))?;
 
-            Self::send_and_verify_accepted(client, kind1_b, "kind1 B mentioning unsent kind1 A")
+            send_and_verify_accepted(client, kind1_b, "kind1 B mentioning unsent kind1 A")
                 .await?;
 
             // NOW send Kind 1 A - should be accepted because accepted Kind 1 B mentions it
-            Self::send_and_verify_accepted(
+            send_and_verify_accepted(
                 client,
                 kind1_a,
                 "kind1 A referenced by accepted kind1 B",
@@ -1113,7 +1033,7 @@ impl EventAcceptancePolicyTests {
                 Self::create_issue_for_repo(client, &unaccepted_repo, "Orphan Issue")?;
 
             // 3. Send issue and verify it's REJECTED
-            Self::send_and_verify_rejected(
+            send_and_verify_rejected(
                 client,
                 orphan_issue,
                 "issue referencing unaccepted repo",
@@ -1140,7 +1060,7 @@ impl EventAcceptancePolicyTests {
                 .map_err(|e| format!("Failed to build note: {}", e))?;
 
             // 2. Send note and verify it's REJECTED
-            Self::send_and_verify_rejected(client, orphan_note, "kind 1 with no repo references")
+            send_and_verify_rejected(client, orphan_note, "kind 1 with no repo references")
                 .await?;
 
             Ok(())
@@ -1196,7 +1116,7 @@ impl EventAcceptancePolicyTests {
                 .map_err(|e| format!("Failed to build comment: {}", e))?;
 
             // Send comment and verify it's REJECTED (only references unaccepted repo B)
-            Self::send_and_verify_rejected(client, comment, "comment quoting only unaccepted repo")
+            send_and_verify_rejected(client, comment, "comment quoting only unaccepted repo")
                 .await?;
 
             Ok(())
