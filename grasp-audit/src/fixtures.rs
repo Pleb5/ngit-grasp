@@ -1108,6 +1108,31 @@ impl Drop for RepoSetup {
 
 /// Set up a repository with deterministic commit for testing
 ///
+/// # Deprecated
+///
+/// This function is deprecated in favor of the fixture-first pattern.
+/// Tests should create their own TestContext and use `FixtureKind::RepoState`
+/// directly, following the Generate → Send → Verify pattern.
+///
+/// See `test_push_authorized_by_owner_state` in `push_authorization.rs` for
+/// an example of the fixture-first pattern.
+///
+/// ## Migration Guide
+///
+/// Instead of:
+/// ```ignore
+/// let setup = setup_repo_with_deterministic_commit(client, git_data_dir, relay_domain).await?;
+/// ```
+///
+/// Use:
+/// ```ignore
+/// let ctx = TestContext::new(client);
+/// let state_event = ctx.get_fixture(FixtureKind::RepoState).await?;
+/// // Then clone, create deterministic commit, and push inline
+/// ```
+///
+/// ---
+///
 /// This performs all the common setup steps needed for push authorization tests:
 /// 1. Gets RepoState fixture (repo announcement + state event with deterministic commit)
 /// 2. Extracts repo_id and npub
@@ -1128,6 +1153,10 @@ impl Drop for RepoSetup {
 /// # Returns
 /// * `Ok(RepoSetup)` - The setup data
 /// * `Err(String)` - Error message if setup failed
+#[deprecated(
+    since = "0.1.0",
+    note = "Use fixture-first pattern with TestContext and FixtureKind::RepoState instead. See test_push_authorized_by_owner_state for example."
+)]
 pub async fn setup_repo_with_deterministic_commit(
     client: &crate::AuditClient,
     git_data_dir: &Path,
