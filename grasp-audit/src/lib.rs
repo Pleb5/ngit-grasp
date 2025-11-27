@@ -43,10 +43,8 @@ pub use fixtures::{
     try_push,
     // Verification helpers
     send_and_verify_accepted, send_and_verify_rejected,
-    // Repo setup helpers
-    setup_repo_for_maintainer, setup_repo_for_recursive_maintainer, setup_repo_with_deterministic_commit,
     // Types and constants
-    CommitVariant, ContextMode, FixtureKind, RepoSetup, TestContext,
+    CommitVariant, ContextMode, FixtureKind, TestContext,
     DETERMINISTIC_COMMIT_HASH, MAINTAINER_DETERMINISTIC_COMMIT_HASH,
     RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH,
 };

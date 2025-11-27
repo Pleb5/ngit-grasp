@@ -18,9 +18,9 @@
 
 use crate::{
     clone_repo, create_commit, create_deterministic_commit, create_deterministic_commit_with_variant,
-    setup_repo_with_deterministic_commit, try_push,
-    AuditClient, CommitVariant, FixtureKind, TestContext, TestResult, DETERMINISTIC_COMMIT_HASH,
-    MAINTAINER_DETERMINISTIC_COMMIT_HASH, RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH,
+    try_push, AuditClient, CommitVariant, FixtureKind, TestContext, TestResult,
+    DETERMINISTIC_COMMIT_HASH, MAINTAINER_DETERMINISTIC_COMMIT_HASH,
+    RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH,
 };
 use nostr_sdk::prelude::*;
 use std::fs;
@@ -258,50 +258,202 @@ impl PushAuthorizationTests {
 
     /// Test that push is rejected when commit doesn't match state event
     ///
-    /// This test verifies that the relay enforces state event authorization.
-    /// The state event (from fixture) points to the deterministic commit which is
-    /// already on the server. We create a new commit locally and try to push it.
-    /// The push should be rejected because the new commit doesn't match what the
-    /// state event announces.
+    /// GRASP-01: "MUST accept pushes via this service that match the latest repo state announcement"
+    /// (Conversely, MUST reject pushes that don't match)
+    ///
+    /// ## Fixture-First Pattern
+    ///
+    /// 1. **Generate**: Create TestContext and get RepoState fixture
+    ///    (repo announcement + state event pointing to deterministic commit)
+    /// 2. **Send**: Clone repo, create deterministic commit, push (establishes state on relay)
+    /// 3. **Test**: Create a NEW commit locally, try to push
+    /// 4. **Verify**: Push should be rejected because new commit doesn't match state event
     pub async fn test_push_rejected_wrong_commit(
         client: &AuditClient,
         git_data_dir: &Path,
         relay_domain: &str,
     ) -> TestResult {
+        use std::process::Command;
+
         let test_name = "test_push_rejected_wrong_commit";
 
-        // Set up repository with deterministic commit
-        // This creates a state event pointing to DETERMINISTIC_COMMIT_HASH and pushes that commit
-        let setup = match setup_repo_with_deterministic_commit(client, git_data_dir, relay_domain).await {
-            Ok(s) => s,
+        // ============================================================
+        // Step 1: GENERATE - Create TestContext and get RepoState fixture
+        // ============================================================
+        let ctx = TestContext::new(client);
+
+        let state_event = match ctx.get_fixture(FixtureKind::RepoState).await {
+            Ok(e) => e,
             Err(e) => {
                 return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
-                    .fail(&format!("Setup failed: {}", e))
+                    .fail(&format!("Failed to create RepoState fixture: {}", e));
             }
         };
 
-        // Create a new commit locally - this is NOT announced in any state event
-        let new_commit = match create_commit(&setup.clone_path, "Unauthorized commit") {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Extract repo_id and npub from state event
+        let repo_id = match state_event
+            .tags
+            .iter()
+            .find(|t| t.kind() == TagKind::d())
+            .and_then(|t| t.content())
+        {
+            Some(id) => id.to_string(),
+            None => {
+                return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
+                    .fail("Missing repo_id in state event");
+            }
+        };
+
+        let npub = match state_event.pubkey.to_bech32() {
+            Ok(n) => n,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
+                    .fail(&format!("Failed to convert pubkey to bech32: {}", e));
+            }
+        };
+
+        // Verify repo exists on disk
+        let repo_path = git_data_dir.join(&npub).join(format!("{}.git", repo_id));
+        if !repo_path.exists() {
+            return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
+                .fail(&format!("Repo not found: {}", repo_path.display()));
+        }
+
+        // ============================================================
+        // Step 2: SEND - Clone repo, create deterministic commit, push
+        // (establishes the state on the relay)
+        // ============================================================
+        let clone_path = match clone_repo(relay_domain, &npub, &repo_id) {
+            Ok(p) => p,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
+                    .fail(&format!("Failed to clone repo: {}", e));
+            }
+        };
+
+        // Cleanup helper
+        let cleanup = || {
+            let _ = fs::remove_dir_all(&clone_path);
+        };
+
+        // Create deterministic commit locally
+        let commit_hash = match create_deterministic_commit(&clone_path, "Initial commit") {
             Ok(h) => h,
             Err(e) => {
+                cleanup();
                 return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
-                    .fail(&format!("Failed to create commit: {}", e))
+                    .fail(&format!("Failed to create deterministic commit: {}", e));
             }
         };
 
-        // Try to push the new commit
-        // This should be REJECTED because:
-        // - The state event still points to the deterministic commit (setup.commit_hash)
-        // - We're trying to push new_commit which is different
-        // - The relay MUST reject pushes that don't match the announced state
-        let push_result = try_push(&setup.clone_path);
+        // Verify commit hash matches expected
+        if commit_hash != DETERMINISTIC_COMMIT_HASH {
+            cleanup();
+            return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
+                .fail(&format!(
+                    "Commit hash mismatch: got {}, expected {}",
+                    commit_hash, DETERMINISTIC_COMMIT_HASH
+                ));
+        }
+
+        // Create main branch pointing to our deterministic commit
+        let branch_output = Command::new("git")
+            .args(["branch", "main"])
+            .current_dir(&clone_path)
+            .output();
+
+        match branch_output {
+            Err(e) => {
+                cleanup();
+                return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
+                    .fail(&format!("Failed to create main branch: {}", e));
+            }
+            Ok(output) if !output.status.success() => {
+                cleanup();
+                return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
+                    .fail(&format!(
+                        "Failed to create main branch: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+            }
+            _ => {}
+        }
+
+        // Checkout main branch
+        let checkout_output = Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(&clone_path)
+            .output();
+
+        match checkout_output {
+            Err(e) => {
+                cleanup();
+                return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
+                    .fail(&format!("Failed to checkout main branch: {}", e));
+            }
+            Ok(output) if !output.status.success() => {
+                cleanup();
+                return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
+                    .fail(&format!(
+                        "Failed to checkout main branch: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+            }
+            _ => {}
+        }
+
+        // Push the deterministic commit to establish state on relay
+        let push_output = Command::new("git")
+            .args(["push", "origin", "main"])
+            .current_dir(&clone_path)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output();
+
+        match push_output {
+            Err(e) => {
+                cleanup();
+                return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
+                    .fail(&format!("Failed to push initial commit: {}", e));
+            }
+            Ok(output) if !output.status.success() => {
+                cleanup();
+                return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
+                    .fail(&format!(
+                        "Failed to push initial commit: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+            }
+            _ => {}
+        }
+
+        // ============================================================
+        // Step 3: TEST - Create a NEW commit that is NOT announced
+        // in any state event
+        // ============================================================
+        let new_commit = match create_commit(&clone_path, "Unauthorized commit") {
+            Ok(h) => h,
+            Err(e) => {
+                cleanup();
+                return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
+                    .fail(&format!("Failed to create commit: {}", e));
+            }
+        };
+
+        // ============================================================
+        // Step 4: VERIFY - Push should be rejected because new commit
+        // doesn't match state event
+        // ============================================================
+        let push_result = try_push(&clone_path);
+        cleanup();
 
         match push_result {
             Ok(false) => TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event").pass(),
             Ok(true) => TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
                 .fail(&format!(
                     "Push accepted but should be rejected. State event points to {}, but pushed {}",
-                    setup.commit_hash, new_commit
+                    DETERMINISTIC_COMMIT_HASH, new_commit
                 )),
             Err(e) => TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event").fail(&e),
         }
@@ -826,32 +978,187 @@ impl PushAuthorizationTests {
 
     /// Test that non-maintainer state event is ignored
     ///
-    /// This test verifies that the relay ignores state events from non-maintainers.
-    /// We set up a valid repo, then create a rogue state event signed by a different
-    /// keypair (not the repo maintainer) that announces a different commit. The push
-    /// should be rejected because the rogue state event is not authorized.
+    /// GRASP-01: "respecting the recursive maintainer set"
+    /// (Conversely, state events from non-maintainers MUST be ignored)
+    ///
+    /// ## Fixture-First Pattern
+    ///
+    /// 1. **Generate**: Create TestContext and get RepoState fixture
+    ///    (repo announcement + state event pointing to deterministic commit)
+    /// 2. **Send**: Clone repo, create deterministic commit, push (establishes state on relay)
+    /// 3. **Attack**: Create a rogue state event signed by a non-maintainer
+    /// 4. **Test**: Create a new commit and try to push
+    /// 5. **Verify**: Push should be rejected because rogue state event is ignored
     pub async fn test_non_maintainer_state_rejected(
         client: &AuditClient,
         git_data_dir: &Path,
         relay_domain: &str,
     ) -> TestResult {
+        use std::process::Command;
+
         let test_name = "test_non_maintainer_state_rejected";
 
-        // Set up repository with deterministic commit (signed by maintainer)
-        let setup = match setup_repo_with_deterministic_commit(client, git_data_dir, relay_domain).await {
-            Ok(s) => s,
+        // ============================================================
+        // Step 1: GENERATE - Create TestContext and get RepoState fixture
+        // ============================================================
+        let ctx = TestContext::new(client);
+
+        let state_event = match ctx.get_fixture(FixtureKind::RepoState).await {
+            Ok(e) => e,
             Err(e) => {
                 return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
-                    .fail(&format!("Setup failed: {}", e))
+                    .fail(&format!("Failed to create RepoState fixture: {}", e));
             }
         };
 
-        // Create a new commit locally that we want to push
-        let new_commit = match create_commit(&setup.clone_path, "New commit to push") {
-            Ok(h) => h,
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Extract repo_id and npub from state event
+        let repo_id = match state_event
+            .tags
+            .iter()
+            .find(|t| t.kind() == TagKind::d())
+            .and_then(|t| t.content())
+        {
+            Some(id) => id.to_string(),
+            None => {
+                return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
+                    .fail("Missing repo_id in state event");
+            }
+        };
+
+        let npub = match state_event.pubkey.to_bech32() {
+            Ok(n) => n,
             Err(e) => {
                 return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
-                    .fail(&format!("Failed to create commit: {}", e))
+                    .fail(&format!("Failed to convert pubkey to bech32: {}", e));
+            }
+        };
+
+        // Verify repo exists on disk
+        let repo_path = git_data_dir.join(&npub).join(format!("{}.git", repo_id));
+        if !repo_path.exists() {
+            return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
+                .fail(&format!("Repo not found: {}", repo_path.display()));
+        }
+
+        // ============================================================
+        // Step 2: SEND - Clone repo, create deterministic commit, push
+        // (establishes the state on the relay)
+        // ============================================================
+        let clone_path = match clone_repo(relay_domain, &npub, &repo_id) {
+            Ok(p) => p,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
+                    .fail(&format!("Failed to clone repo: {}", e));
+            }
+        };
+
+        // Cleanup helper
+        let cleanup = || {
+            let _ = fs::remove_dir_all(&clone_path);
+        };
+
+        // Create deterministic commit locally
+        let commit_hash = match create_deterministic_commit(&clone_path, "Initial commit") {
+            Ok(h) => h,
+            Err(e) => {
+                cleanup();
+                return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
+                    .fail(&format!("Failed to create deterministic commit: {}", e));
+            }
+        };
+
+        // Verify commit hash matches expected
+        if commit_hash != DETERMINISTIC_COMMIT_HASH {
+            cleanup();
+            return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
+                .fail(&format!(
+                    "Commit hash mismatch: got {}, expected {}",
+                    commit_hash, DETERMINISTIC_COMMIT_HASH
+                ));
+        }
+
+        // Create main branch pointing to our deterministic commit
+        let branch_output = Command::new("git")
+            .args(["branch", "main"])
+            .current_dir(&clone_path)
+            .output();
+
+        match branch_output {
+            Err(e) => {
+                cleanup();
+                return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
+                    .fail(&format!("Failed to create main branch: {}", e));
+            }
+            Ok(output) if !output.status.success() => {
+                cleanup();
+                return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
+                    .fail(&format!(
+                        "Failed to create main branch: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+            }
+            _ => {}
+        }
+
+        // Checkout main branch
+        let checkout_output = Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(&clone_path)
+            .output();
+
+        match checkout_output {
+            Err(e) => {
+                cleanup();
+                return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
+                    .fail(&format!("Failed to checkout main branch: {}", e));
+            }
+            Ok(output) if !output.status.success() => {
+                cleanup();
+                return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
+                    .fail(&format!(
+                        "Failed to checkout main branch: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+            }
+            _ => {}
+        }
+
+        // Push the deterministic commit to establish state on relay
+        let push_output = Command::new("git")
+            .args(["push", "origin", "main"])
+            .current_dir(&clone_path)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output();
+
+        match push_output {
+            Err(e) => {
+                cleanup();
+                return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
+                    .fail(&format!("Failed to push initial commit: {}", e));
+            }
+            Ok(output) if !output.status.success() => {
+                cleanup();
+                return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
+                    .fail(&format!(
+                        "Failed to push initial commit: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+            }
+            _ => {}
+        }
+
+        // ============================================================
+        // Step 3: ATTACK - Create a new commit and a rogue state event
+        // from a non-maintainer
+        // ============================================================
+        let new_commit = match create_commit(&clone_path, "New commit to push") {
+            Ok(h) => h,
+            Err(e) => {
+                cleanup();
+                return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
+                    .fail(&format!("Failed to create commit: {}", e));
             }
         };
 
@@ -862,7 +1169,7 @@ impl PushAuthorizationTests {
         // This event has the correct repo_id but is signed by a non-maintainer
         let rogue_state = match client
             .event_builder(Kind::Custom(30618), "")
-            .tag(Tag::identifier(&setup.repo_id))
+            .tag(Tag::identifier(&repo_id))
             .tag(Tag::custom(
                 TagKind::custom("refs/heads/main"),
                 vec![new_commit.clone()],
@@ -871,13 +1178,15 @@ impl PushAuthorizationTests {
         {
             Ok(e) => e,
             Err(e) => {
+                cleanup();
                 return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
-                    .fail(&format!("Failed to build rogue state event: {}", e))
+                    .fail(&format!("Failed to build rogue state event: {}", e));
             }
         };
 
         // Send the rogue state event using the raw client to bypass AuditClient's key check
         if let Err(e) = client.client().send_event(&rogue_state).await {
+            cleanup();
             return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
                 .fail(&format!("Failed to send rogue state event: {}", e));
         }
@@ -885,14 +1194,12 @@ impl PushAuthorizationTests {
         // Wait for event to propagate
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-        // Try to push the new commit
-        // This should be REJECTED because:
-        // - The rogue state event announces new_commit
-        // - But the rogue state event is NOT signed by the maintainer
-        // - The relay should ignore the rogue state event
-        // - The valid state event (from setup) still points to the deterministic commit
-        // - Therefore pushing new_commit should fail
-        let push_result = try_push(&setup.clone_path);
+        // ============================================================
+        // Step 4 & 5: VERIFY - Push should be rejected because rogue
+        // state event is ignored
+        // ============================================================
+        let push_result = try_push(&clone_path);
+        cleanup();
 
         match push_result {
             Ok(false) => TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored").pass(),
