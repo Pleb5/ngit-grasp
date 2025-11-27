@@ -4,7 +4,7 @@
 //! We don't comprehensively test NIP-01 because rust-nostr already has 1000+ tests.
 //! These are just smoke tests to ensure the relay is working at all.
 
-use crate::{AuditClient, AuditResult, TestResult};
+use crate::{AuditClient, AuditResult, FixtureKind, TestContext, TestResult};
 use nostr_sdk::prelude::*;
 
 pub struct Nip01SmokeTests;
@@ -52,6 +52,12 @@ impl Nip01SmokeTests {
     ///
     /// For GRASP servers, we send a NIP-34 repository announcement that lists
     /// the GRASP server in clone and relays tags (required for acceptance).
+    ///
+    /// ## Fixture-First Pattern
+    ///
+    /// 1. **Generate**: Create TestContext and get ValidRepo fixture
+    /// 2. **Send**: Fixture already sends the event to relay
+    /// 3. **Verify**: Query event back and verify it was stored correctly
     pub async fn test_send_receive_event(client: &AuditClient) -> TestResult {
         TestResult::new(
             "send_receive_event",
@@ -59,30 +65,19 @@ impl Nip01SmokeTests {
             "Can send EVENT and receive OK response",
         )
         .run(|| async {
-            // Create a NIP-34 announcement event
-            let event = client
-                .create_repo_announcement("send_receive_event")
+            // Step 1: GENERATE - Create TestContext and get ValidRepo fixture
+            let ctx = TestContext::new(client);
+            let event = ctx
+                .get_fixture(FixtureKind::ValidRepo)
                 .await
-                .map_err(|e| format!("Failed to create announcement: {}", e))?;
+                .map_err(|e| format!("Failed to create ValidRepo fixture: {}", e))?;
 
-            // Send event
-            let event_id = client
-                .send_event(event.clone())
-                .await
-                .map_err(|e| format!("Failed to send event: {}", e))?;
-
-            // Verify we got an event ID back
-            if event_id != event.id {
-                return Err(format!(
-                    "Event ID mismatch: sent {}, got {}",
-                    event.id, event_id
-                ));
-            }
+            let event_id = event.id;
 
             // Wait a bit for event to be indexed
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-            // Try to query it back
+            // Step 2: VERIFY - Query event back
             let filter = Filter::new().kind(Kind::Custom(30617)).id(event_id);
 
             let events = client
@@ -123,6 +118,12 @@ impl Nip01SmokeTests {
     ///
     /// Spec: NIP-01 REQ message
     /// Requirement: Relay MUST support REQ subscriptions
+    ///
+    /// ## Fixture-First Pattern
+    ///
+    /// 1. **Generate**: Create TestContext and get ValidRepo fixture
+    /// 2. **Send**: Fixture already sends the event to relay
+    /// 3. **Verify**: Subscribe and verify we receive the event
     pub async fn test_create_subscription(client: &AuditClient) -> TestResult {
         TestResult::new(
             "create_subscription",
@@ -130,18 +131,14 @@ impl Nip01SmokeTests {
             "Can create subscription with REQ and receive EOSE",
         )
         .run(|| async {
-            // Create a NIP-34 announcement event (accepted by GRASP relays)
-            let event = client
-                .create_repo_announcement("create_subscription")
+            // Step 1: GENERATE - Create TestContext and get ValidRepo fixture
+            let ctx = TestContext::new(client);
+            let _event = ctx
+                .get_fixture(FixtureKind::ValidRepo)
                 .await
-                .map_err(|e| format!("Failed to create announcement: {}", e))?;
+                .map_err(|e| format!("Failed to create ValidRepo fixture: {}", e))?;
 
-            let _event_id = client
-                .send_event(event.clone())
-                .await
-                .map_err(|e| format!("Failed to send event: {}", e))?;
-
-            // Subscribe to NIP-34 announcements from this author
+            // Step 2: VERIFY - Subscribe to NIP-34 announcements from this author
             let filter = Filter::new()
                 .kind(Kind::Custom(30617))
                 .author(client.public_key());
