@@ -709,6 +709,841 @@ impl<'a> TestContext<'a> {
     }
 }
 
+// ============================================================
+// Verification Helpers
+// ============================================================
+
+/// Send event and verify it was accepted (stored by relay)
+///
+/// This is a common test pattern helper that:
+/// 1. Sends an event to the relay via the client
+/// 2. Waits for propagation (100ms)
+/// 3. Queries the relay to verify the event was stored
+///
+/// # Arguments
+/// * `client` - The AuditClient to use for sending and querying
+/// * `event` - The event to send
+/// * `description` - Human-readable description for error messages
+///
+/// # Returns
+/// * `Ok(())` if the event was accepted and stored
+/// * `Err(String)` with descriptive error if event was not stored
+///
+/// # Example
+/// ```no_run
+/// # use grasp_audit::*;
+/// # async fn example(client: &AuditClient, event: nostr_sdk::Event) -> Result<(), String> {
+/// send_and_verify_accepted(client, event, "issue referencing repo via 'a' tag").await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn send_and_verify_accepted(
+    client: &crate::AuditClient,
+    event: Event,
+    description: &str,
+) -> Result<(), String> {
+    use nostr_sdk::prelude::Filter;
+    use std::time::Duration;
+    
+    let event_id = event.id;
+
+    client
+        .send_event(event)
+        .await
+        .map_err(|e| format!("Failed to send event to relay: {}", e))?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let filter = Filter::new().id(event_id);
+    let events = client
+        .query(filter)
+        .await
+        .map_err(|e| format!("Failed to query relay for verification: {}", e))?;
+
+    if events.is_empty() {
+        return Err(format!("Event should be accepted: {}", description));
+    }
+
+    Ok(())
+}
+
+/// Send event and verify it was rejected (NOT stored by relay)
+///
+/// This is a common test pattern helper that:
+/// 1. Sends an event to the relay via the client
+/// 2. Handles both explicit rejection errors and silent rejection
+/// 3. Verifies the event was NOT stored in the relay
+///
+/// # Arguments
+/// * `client` - The AuditClient to use for sending and querying
+/// * `event` - The event to send (expected to be rejected)
+/// * `description` - Human-readable description for error messages
+///
+/// # Returns
+/// * `Ok(())` if the event was rejected (not stored)
+/// * `Err(String)` if the event was unexpectedly accepted
+///
+/// # Example
+/// ```no_run
+/// # use grasp_audit::*;
+/// # async fn example(client: &AuditClient, event: nostr_sdk::Event) -> Result<(), String> {
+/// send_and_verify_rejected(client, event, "orphan issue with no repo connection").await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn send_and_verify_rejected(
+    client: &crate::AuditClient,
+    event: Event,
+    description: &str,
+) -> Result<(), String> {
+    use nostr_sdk::prelude::Filter;
+    use std::time::Duration;
+    
+    let event_id = event.id;
+
+    // Try to send event - rejection may cause send_event to fail with an error
+    let send_result = client.send_event(event).await;
+    
+    // If send succeeded, the relay might have accepted it (we'll verify below)
+    // If send failed, check if it's a rejection error (expected)
+    if let Err(e) = send_result {
+        let err_msg = e.to_string().to_lowercase();
+        // Check if error message indicates rejection (not network/other errors)
+        if err_msg.contains("rejected") || err_msg.contains("blocked") {
+            // Expected rejection - verify event is NOT in database
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            
+            let filter = Filter::new().id(event_id);
+            let events = client
+                .query(filter)
+                .await
+                .map_err(|e| format!("Failed to query relay for verification: {}", e))?;
+
+            if !events.is_empty() {
+                return Err(format!("Event was rejected but still stored: {}", description));
+            }
+            
+            return Ok(()); // Rejected as expected
+        } else {
+            // Unexpected error (network, etc.)
+            return Err(format!("Failed to send event to relay: {}", e));
+        }
+    }
+
+    // Send succeeded, verify event was NOT stored (relay should have rejected)
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let filter = Filter::new().id(event_id);
+    let events = client
+        .query(filter)
+        .await
+        .map_err(|e| format!("Failed to query relay for verification: {}", e))?;
+
+    if !events.is_empty() {
+        return Err(format!("Event should be rejected: {}", description));
+    }
+
+    Ok(())
+}
+
+// ============================================================
+// Git Operation Helpers
+// ============================================================
+
+use nostr_sdk::ToBech32;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// Clone a repository from the relay and return the path
+///
+/// # Arguments
+/// * `relay_domain` - The domain of the relay (e.g., "localhost:7000")
+/// * `npub` - The bech32 public key of the repository owner
+/// * `repo_id` - The repository identifier (d-tag value)
+///
+/// # Returns
+/// * `Ok(PathBuf)` - Path to the cloned repository
+/// * `Err(String)` - Error message if clone failed
+///
+/// # Example
+/// ```no_run
+/// # use grasp_audit::*;
+/// # fn example() -> Result<(), String> {
+/// let clone_path = clone_repo("localhost:7000", "npub1...", "my-repo")?;
+/// // Use the cloned repo...
+/// std::fs::remove_dir_all(&clone_path).ok(); // Cleanup
+/// # Ok(())
+/// # }
+/// ```
+pub fn clone_repo(
+    relay_domain: &str,
+    npub: &str,
+    repo_id: &str,
+) -> Result<PathBuf, String> {
+    let temp_base = std::env::temp_dir();
+    let clone_dir_name = format!("grasp-push-test-{}", uuid::Uuid::new_v4());
+    let clone_path = temp_base.join(&clone_dir_name);
+    let _ = fs::remove_dir_all(&clone_path);
+
+    let clone_url = format!("http://{}/{}/{}.git", relay_domain, npub, repo_id);
+    let output = Command::new("git")
+        .args(["clone", &clone_url, clone_path.to_str().unwrap()])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|e| format!("Failed to execute git clone: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Git clone failed: {}", stderr));
+    }
+
+    // Configure git user
+    let _ = Command::new("git")
+        .args(["config", "user.email", "test@grasp-audit.local"])
+        .current_dir(&clone_path)
+        .output();
+    let _ = Command::new("git")
+        .args(["config", "user.name", "GRASP Audit Test"])
+        .current_dir(&clone_path)
+        .output();
+
+    Ok(clone_path)
+}
+
+/// Create a commit with a unique file and return the commit hash
+///
+/// # Arguments
+/// * `clone_path` - Path to the git repository
+/// * `message` - Commit message
+///
+/// # Returns
+/// * `Ok(String)` - The commit hash
+/// * `Err(String)` - Error message if commit failed
+///
+/// # Example
+/// ```no_run
+/// # use grasp_audit::*;
+/// # use std::path::Path;
+/// # fn example() -> Result<(), String> {
+/// let commit_hash = create_commit(Path::new("/tmp/my-repo"), "My commit message")?;
+/// println!("Created commit: {}", commit_hash);
+/// # Ok(())
+/// # }
+/// ```
+pub fn create_commit(clone_path: &Path, message: &str) -> Result<String, String> {
+    let test_file = clone_path.join(format!("test-{}.txt", uuid::Uuid::new_v4()));
+    fs::write(&test_file, message).map_err(|e| format!("Failed to write file: {}", e))?;
+
+    let filename = test_file.file_name().unwrap().to_str().unwrap();
+    let output = Command::new("git")
+        .args(["add", filename])
+        .current_dir(clone_path)
+        .output()
+        .map_err(|e| format!("Git add failed: {}", e))?;
+
+    if !output.status.success() {
+        return Err("Git add failed".to_string());
+    }
+
+    let output = Command::new("git")
+        .args(["commit", "-m", message])
+        .current_dir(clone_path)
+        .output()
+        .map_err(|e| format!("Git commit failed: {}", e))?;
+
+    if !output.status.success() {
+        return Err("Git commit failed".to_string());
+    }
+
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(clone_path)
+        .output()
+        .map_err(|e| format!("Git rev-parse failed: {}", e))?;
+
+    if !output.status.success() {
+        return Err("Failed to get commit hash".to_string());
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Variant of deterministic commit for different pubkey types
+/// Each variant produces a different but reproducible commit hash
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitVariant {
+    /// Main pubkey variant - uses "Initial commit" content
+    Owner,
+    /// Maintainer pubkey variant - uses "Maintainer initial commit" content
+    Maintainer,
+    /// Recursive maintainer pubkey variant - uses "Recursive maintainer initial commit" content
+    RecursiveMaintainer,
+}
+
+impl CommitVariant {
+    /// Get the file content for this variant
+    pub fn file_content(&self) -> &'static str {
+        match self {
+            CommitVariant::Owner => "Initial commit",
+            CommitVariant::Maintainer => "Maintainer initial commit",
+            CommitVariant::RecursiveMaintainer => "Recursive maintainer initial commit",
+        }
+    }
+    
+    /// Get the commit message for this variant
+    pub fn commit_message(&self) -> &'static str {
+        match self {
+            CommitVariant::Owner => "Initial commit",
+            CommitVariant::Maintainer => "Maintainer initial commit",
+            CommitVariant::RecursiveMaintainer => "Recursive maintainer initial commit",
+        }
+    }
+}
+
+/// Create a deterministic commit with fixed dates and GPG disabled
+///
+/// The variant parameter allows different commit hashes for different pubkey types:
+/// - Owner: uses DETERMINISTIC_COMMIT_HASH
+/// - Maintainer: uses MAINTAINER_DETERMINISTIC_COMMIT_HASH
+/// - RecursiveMaintainer: uses RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH
+///
+/// # Arguments
+/// * `clone_path` - Path to the git repository
+/// * `variant` - The commit variant to create
+///
+/// # Returns
+/// * `Ok(String)` - The deterministic commit hash
+/// * `Err(String)` - Error message if commit failed
+pub fn create_deterministic_commit_with_variant(clone_path: &Path, variant: CommitVariant) -> Result<String, String> {
+    let test_file = clone_path.join("test.txt");
+    let content = variant.file_content();
+    let message = variant.commit_message();
+    
+    fs::write(&test_file, content).map_err(|e| format!("Failed to write file: {}", e))?;
+
+    let output = Command::new("git")
+        .args(["add", "test.txt"])
+        .current_dir(clone_path)
+        .output()
+        .map_err(|e| format!("Git add failed: {}", e))?;
+
+    if !output.status.success() {
+        return Err("Git add failed".to_string());
+    }
+
+    // Create deterministic commit with fixed dates and GPG disabled
+    let output = Command::new("git")
+        .args([
+            "-c", "commit.gpgsign=false",
+            "commit",
+            "-m", message,
+        ])
+        .env("GIT_AUTHOR_DATE", "2024-01-01T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2024-01-01T00:00:00Z")
+        .current_dir(clone_path)
+        .output()
+        .map_err(|e| format!("Git commit failed: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Git commit failed: {}", stderr));
+    }
+
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(clone_path)
+        .output()
+        .map_err(|e| format!("Git rev-parse failed: {}", e))?;
+
+    if !output.status.success() {
+        return Err("Failed to get commit hash".to_string());
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Create a deterministic commit (Owner variant)
+///
+/// This is a convenience wrapper around `create_deterministic_commit_with_variant`
+/// that uses the Owner variant for backwards compatibility.
+///
+/// # Arguments
+/// * `clone_path` - Path to the git repository
+/// * `_message` - Ignored for compatibility (Owner variant always uses "Initial commit")
+///
+/// # Returns
+/// * `Ok(String)` - The deterministic commit hash
+/// * `Err(String)` - Error message if commit failed
+pub fn create_deterministic_commit(clone_path: &Path, _message: &str) -> Result<String, String> {
+    // Note: message parameter is ignored for backwards compatibility
+    // The Owner variant always uses "Initial commit"
+    create_deterministic_commit_with_variant(clone_path, CommitVariant::Owner)
+}
+
+/// Repository setup with deterministic commit
+/// This struct holds all the data needed for push authorization tests
+pub struct RepoSetup {
+    /// Path to the cloned repository (auto-cleaned on drop)
+    pub clone_path: PathBuf,
+    /// Repository identifier (d-tag value)
+    pub repo_id: String,
+    /// Owner's bech32 public key
+    pub npub: String,
+    /// The deterministic commit hash
+    pub commit_hash: String,
+}
+
+impl Drop for RepoSetup {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.clone_path);
+    }
+}
+
+/// Set up a repository with deterministic commit for testing
+///
+/// This performs all the common setup steps needed for push authorization tests:
+/// 1. Gets RepoState fixture (repo announcement + state event with deterministic commit)
+/// 2. Extracts repo_id and npub
+/// 3. Verifies repo exists on disk
+/// 4. Clones the repository
+/// 5. Creates deterministic commit locally
+/// 6. Verifies commit hash matches expected
+/// 7. Creates and checks out main branch
+/// 8. Pushes the commit so the grasp server has the state in the state event
+///
+/// Returns RepoSetup which auto-cleans up the clone_path on drop
+///
+/// # Arguments
+/// * `client` - The AuditClient to use for fixtures
+/// * `git_data_dir` - Path to the git data directory
+/// * `relay_domain` - The domain of the relay (e.g., "localhost:7000")
+///
+/// # Returns
+/// * `Ok(RepoSetup)` - The setup data
+/// * `Err(String)` - Error message if setup failed
+pub async fn setup_repo_with_deterministic_commit(
+    client: &crate::AuditClient,
+    git_data_dir: &Path,
+    relay_domain: &str,
+) -> Result<RepoSetup, String> {
+    use nostr_sdk::prelude::TagKind;
+    
+    let ctx = TestContext::new(client);
+
+    // Get RepoState fixture (includes repo announcement and state event with deterministic commit)
+    let state_event = ctx.get_fixture(FixtureKind::RepoState).await
+        .map_err(|e| format!("Failed to create repo state fixture: {}", e))?;
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // Extract repo_id from state event
+    let repo_id = state_event.tags.iter().find(|t| t.kind() == TagKind::d())
+        .and_then(|t| t.content())
+        .ok_or("Missing repo_id")?
+        .to_string();
+    let npub = state_event.pubkey.to_bech32()
+        .map_err(|e| format!("Failed to convert pubkey to bech32: {}", e))?;
+
+    // Verify repo exists
+    let repo_path = git_data_dir.join(&npub).join(format!("{}.git", repo_id));
+    if !repo_path.exists() {
+        return Err(format!("Repo not found: {}", repo_path.display()));
+    }
+
+    // Clone repo
+    let clone_path = clone_repo(relay_domain, &npub, &repo_id)?;
+
+    // Create deterministic commit locally (this will be the root commit with no parent)
+    let commit_hash = create_deterministic_commit(&clone_path, "Initial commit")
+        .map_err(|e| {
+            let _ = fs::remove_dir_all(&clone_path);
+            e
+        })?;
+
+    // Verify commit hash matches expected deterministic hash
+    if commit_hash != DETERMINISTIC_COMMIT_HASH {
+        let _ = fs::remove_dir_all(&clone_path);
+        return Err(format!(
+            "Commit hash mismatch: got {}, expected {}",
+            commit_hash, DETERMINISTIC_COMMIT_HASH
+        ));
+    }
+
+    // Create main branch pointing to our deterministic commit
+    let branch_output = Command::new("git")
+        .args(["branch", "main"])
+        .current_dir(&clone_path)
+        .output()
+        .map_err(|e| {
+            let _ = fs::remove_dir_all(&clone_path);
+            format!("Failed to create main branch: {}", e)
+        })?;
+    
+    if !branch_output.status.success() {
+        let _ = fs::remove_dir_all(&clone_path);
+        return Err(format!(
+            "Failed to create main branch: {}",
+            String::from_utf8_lossy(&branch_output.stderr)
+        ));
+    }
+
+    // Checkout main branch
+    let checkout_output = Command::new("git")
+        .args(["checkout", "main"])
+        .current_dir(&clone_path)
+        .output()
+        .map_err(|e| {
+            let _ = fs::remove_dir_all(&clone_path);
+            format!("Failed to checkout main branch: {}", e)
+        })?;
+    
+    if !checkout_output.status.success() {
+        let _ = fs::remove_dir_all(&clone_path);
+        return Err(format!(
+            "Failed to checkout main branch: {}",
+            String::from_utf8_lossy(&checkout_output.stderr)
+        ));
+    }
+
+    // Push the commit to the server so the bare repo matches the state event
+    let push_output = Command::new("git")
+        .args(["push", "origin", "main"])
+        .current_dir(&clone_path)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|e| {
+            let _ = fs::remove_dir_all(&clone_path);
+            format!("Failed to push to server: {}", e)
+        })?;
+    
+    if !push_output.status.success() {
+        let _ = fs::remove_dir_all(&clone_path);
+        return Err(format!(
+            "Failed to push to server: {}",
+            String::from_utf8_lossy(&push_output.stderr)
+        ));
+    }
+
+    Ok(RepoSetup {
+        clone_path,
+        repo_id,
+        npub,
+        commit_hash,
+    })
+}
+
+/// Set up a maintainer repository with deterministic commit (state only)
+///
+/// This performs all the common setup steps needed for maintainer push authorization tests:
+/// 1. Gets RepoState fixture (owner's repo announcement + state event with owner's deterministic commit)
+/// 2. Gets MaintainerState fixture (maintainer's state event ONLY - no announcement)
+/// 3. Extracts repo_id and owner npub
+/// 4. Verifies repo exists on disk
+/// 5. Clones the repository using owner's npub
+/// 6. Creates maintainer deterministic commit locally
+/// 7. Verifies commit hash matches expected
+/// 8. Creates and checks out main branch
+/// 9. Pushes the commit so the grasp server has the state in the state event
+///
+/// Note: This does NOT publish a maintainer announcement. For tests that need the
+/// maintainer announcement (like recursive maintainer tests), use setup_repo_for_recursive_maintainer
+/// which publishes MaintainerAnnouncement separately.
+///
+/// Returns RepoSetup which auto-cleans up the clone_path on drop
+pub async fn setup_repo_for_maintainer(
+    client: &crate::AuditClient,
+    git_data_dir: &Path,
+    relay_domain: &str,
+) -> Result<RepoSetup, String> {
+    use nostr_sdk::prelude::TagKind;
+    
+    let ctx = TestContext::new(client);
+
+    // Get RepoState fixture (includes owner's repo announcement and state event with owner's deterministic commit)
+    let state_event = ctx.get_fixture(FixtureKind::RepoState).await
+        .map_err(|e| format!("Failed to create repo state fixture: {}", e))?;
+
+    // Get MaintainerState fixture ONLY (no announcement - tests state-only authorization)
+    let _maintainer_state = ctx.get_fixture(FixtureKind::MaintainerState).await
+        .map_err(|e| format!("Failed to create maintainer state fixture: {}", e))?;
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // Extract repo_id from state event
+    let repo_id = state_event.tags.iter().find(|t| t.kind() == TagKind::d())
+        .and_then(|t| t.content())
+        .ok_or("Missing repo_id")?
+        .to_string();
+    
+    // The npub is from the owner keys (the signer of the state event)
+    let npub = state_event.pubkey.to_bech32()
+        .map_err(|e| format!("Failed to convert owner pubkey to bech32: {}", e))?;
+
+    // Verify repo exists
+    let repo_path = git_data_dir.join(&npub).join(format!("{}.git", repo_id));
+    if !repo_path.exists() {
+        return Err(format!("Owner repo not found: {}", repo_path.display()));
+    }
+
+    // Clone repo using owner's npub
+    let clone_path = clone_repo(relay_domain, &npub, &repo_id)?;
+
+    // Create maintainer deterministic commit locally (this will be the root commit with no parent)
+    let commit_hash = create_deterministic_commit_with_variant(&clone_path, CommitVariant::Maintainer)
+        .map_err(|e| {
+            let _ = fs::remove_dir_all(&clone_path);
+            e
+        })?;
+
+    // Verify commit hash matches expected maintainer deterministic hash
+    if commit_hash != MAINTAINER_DETERMINISTIC_COMMIT_HASH {
+        let _ = fs::remove_dir_all(&clone_path);
+        return Err(format!(
+            "Maintainer commit hash mismatch: got {}, expected {}",
+            commit_hash, MAINTAINER_DETERMINISTIC_COMMIT_HASH
+        ));
+    }
+
+    // Create main branch pointing to our deterministic commit
+    let branch_output = Command::new("git")
+        .args(["branch", "main"])
+        .current_dir(&clone_path)
+        .output()
+        .map_err(|e| {
+            let _ = fs::remove_dir_all(&clone_path);
+            format!("Failed to create main branch: {}", e)
+        })?;
+    
+    if !branch_output.status.success() {
+        let _ = fs::remove_dir_all(&clone_path);
+        return Err(format!(
+            "Failed to create main branch: {}",
+            String::from_utf8_lossy(&branch_output.stderr)
+        ));
+    }
+
+    // Checkout main branch
+    let checkout_output = Command::new("git")
+        .args(["checkout", "main"])
+        .current_dir(&clone_path)
+        .output()
+        .map_err(|e| {
+            let _ = fs::remove_dir_all(&clone_path);
+            format!("Failed to checkout main branch: {}", e)
+        })?;
+    
+    if !checkout_output.status.success() {
+        let _ = fs::remove_dir_all(&clone_path);
+        return Err(format!(
+            "Failed to checkout main branch: {}",
+            String::from_utf8_lossy(&checkout_output.stderr)
+        ));
+    }
+
+    // Push the commit to the server so the bare repo matches the state event
+    let push_output = Command::new("git")
+        .args(["push", "origin", "main"])
+        .current_dir(&clone_path)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|e| {
+            let _ = fs::remove_dir_all(&clone_path);
+            format!("Failed to push to server: {}", e)
+        })?;
+    
+    if !push_output.status.success() {
+        let _ = fs::remove_dir_all(&clone_path);
+        return Err(format!(
+            "Failed to push to server: {}",
+            String::from_utf8_lossy(&push_output.stderr)
+        ));
+    }
+
+    Ok(RepoSetup {
+        clone_path,
+        repo_id,
+        npub,
+        commit_hash,
+    })
+}
+
+/// Set up a recursive maintainer repository with deterministic commit
+///
+/// This performs all the common setup steps needed for recursive maintainer push authorization tests:
+/// 1. Gets RepoState fixture (owner's repo announcement + state event with owner's deterministic commit)
+/// 2. Gets MaintainerAnnouncement fixture (maintainer's repo announcement with recursive maintainer in maintainers tag)
+/// 3. Gets MaintainerState fixture (maintainer's state event)
+/// 4. Gets RecursiveMaintainerRepoAndState fixture (recursive maintainer's repo - completes 3-level chain)
+/// 5. Extracts repo_id and owner npub
+/// 6. Verifies repo exists on disk
+/// 7. Clones the repository using owner's npub
+/// 8. Creates recursive maintainer deterministic commit locally
+/// 9. Verifies commit hash matches expected
+/// 10. Creates and checks out main branch
+/// 11. Pushes the commit so the grasp server has the state in the state event
+///
+/// Returns RepoSetup which auto-cleans up the clone_path on drop
+pub async fn setup_repo_for_recursive_maintainer(
+    client: &crate::AuditClient,
+    git_data_dir: &Path,
+    relay_domain: &str,
+) -> Result<RepoSetup, String> {
+    use nostr_sdk::prelude::TagKind;
+    
+    let ctx = TestContext::new(client);
+
+    // Get RepoState fixture (includes owner's repo announcement and state event)
+    let state_event = ctx.get_fixture(FixtureKind::RepoState).await
+        .map_err(|e| format!("Failed to create repo state fixture: {}", e))?;
+
+    // Get MaintainerAnnouncement fixture (maintainer's repo announcement with recursive maintainer in maintainers tag)
+    let _maintainer_announcement = ctx.get_fixture(FixtureKind::MaintainerAnnouncement).await
+        .map_err(|e| format!("Failed to create maintainer announcement fixture: {}", e))?;
+
+    // Get MaintainerState fixture (maintainer's state event)
+    let _maintainer_state = ctx.get_fixture(FixtureKind::MaintainerState).await
+        .map_err(|e| format!("Failed to create maintainer state fixture: {}", e))?;
+
+    // Get RecursiveMaintainerRepoAndState fixture (completes 3-level delegation chain)
+    let _recursive_maintainer_state = ctx.get_fixture(FixtureKind::RecursiveMaintainerRepoAndState).await
+        .map_err(|e| format!("Failed to create recursive maintainer repo state fixture: {}", e))?;
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // Extract repo_id from owner's state event
+    let repo_id = state_event.tags.iter().find(|t| t.kind() == TagKind::d())
+        .and_then(|t| t.content())
+        .ok_or("Missing repo_id")?
+        .to_string();
+    
+    // The npub is from the owner keys (the signer of the state event)
+    let npub = state_event.pubkey.to_bech32()
+        .map_err(|e| format!("Failed to convert owner pubkey to bech32: {}", e))?;
+
+    // Verify repo exists
+    let repo_path = git_data_dir.join(&npub).join(format!("{}.git", repo_id));
+    if !repo_path.exists() {
+        return Err(format!("Owner repo not found: {}", repo_path.display()));
+    }
+
+    // Clone repo using owner's npub
+    let clone_path = clone_repo(relay_domain, &npub, &repo_id)?;
+
+    // Create recursive maintainer deterministic commit locally (this will be the root commit with no parent)
+    let commit_hash = create_deterministic_commit_with_variant(&clone_path, CommitVariant::RecursiveMaintainer)
+        .map_err(|e| {
+            let _ = fs::remove_dir_all(&clone_path);
+            e
+        })?;
+
+    // Verify commit hash matches expected recursive maintainer deterministic hash
+    if commit_hash != RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH {
+        let _ = fs::remove_dir_all(&clone_path);
+        return Err(format!(
+            "Recursive maintainer commit hash mismatch: got {}, expected {}",
+            commit_hash, RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH
+        ));
+    }
+
+    // Create main branch pointing to our deterministic commit
+    let branch_output = Command::new("git")
+        .args(["branch", "main"])
+        .current_dir(&clone_path)
+        .output()
+        .map_err(|e| {
+            let _ = fs::remove_dir_all(&clone_path);
+            format!("Failed to create main branch: {}", e)
+        })?;
+    
+    if !branch_output.status.success() {
+        let _ = fs::remove_dir_all(&clone_path);
+        return Err(format!(
+            "Failed to create main branch: {}",
+            String::from_utf8_lossy(&branch_output.stderr)
+        ));
+    }
+
+    // Checkout main branch
+    let checkout_output = Command::new("git")
+        .args(["checkout", "main"])
+        .current_dir(&clone_path)
+        .output()
+        .map_err(|e| {
+            let _ = fs::remove_dir_all(&clone_path);
+            format!("Failed to checkout main branch: {}", e)
+        })?;
+    
+    if !checkout_output.status.success() {
+        let _ = fs::remove_dir_all(&clone_path);
+        return Err(format!(
+            "Failed to checkout main branch: {}",
+            String::from_utf8_lossy(&checkout_output.stderr)
+        ));
+    }
+
+    // Push the commit to the server so the bare repo matches the state event
+    let push_output = Command::new("git")
+        .args(["push", "origin", "main"])
+        .current_dir(&clone_path)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|e| {
+            let _ = fs::remove_dir_all(&clone_path);
+            format!("Failed to push to server: {}", e)
+        })?;
+    
+    if !push_output.status.success() {
+        let _ = fs::remove_dir_all(&clone_path);
+        return Err(format!(
+            "Failed to push to server: {}",
+            String::from_utf8_lossy(&push_output.stderr)
+        ));
+    }
+
+    Ok(RepoSetup {
+        clone_path,
+        repo_id,
+        npub,
+        commit_hash,
+    })
+}
+
+/// Attempt a git push and return success/failure
+///
+/// # Arguments
+/// * `clone_path` - Path to the git repository
+///
+/// # Returns
+/// * `Ok(true)` - Push succeeded
+/// * `Ok(false)` - Push was rejected
+/// * `Err(String)` - Error executing git push
+///
+/// # Example
+/// ```no_run
+/// # use grasp_audit::*;
+/// # use std::path::Path;
+/// # fn example() -> Result<(), String> {
+/// let success = try_push(Path::new("/tmp/my-repo"))?;
+/// if success {
+///     println!("Push succeeded");
+/// } else {
+///     println!("Push was rejected");
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub fn try_push(clone_path: &Path) -> Result<bool, String> {
+    let output = Command::new("git")
+        .args(["push", "origin", "main"])
+        .current_dir(clone_path)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|e| format!("Failed to execute git push: {}", e))?;
+
+    Ok(output.status.success())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

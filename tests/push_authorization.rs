@@ -65,6 +65,6 @@ macro_rules! isolated_push_test {
 isolated_push_test!(test_push_authorized_by_owner_state);
 isolated_push_test!(test_push_rejected_without_state_event);
 isolated_push_test!(test_push_rejected_wrong_commit);
-isolated_push_test!(test_push_authorized_by_direct_maintainer_state);
+isolated_push_test!(test_push_authorized_by_maintainer_state_only);
 isolated_push_test!(test_push_authorized_by_recursive_maintainer_state);
 isolated_push_test!(test_non_maintainer_state_rejected);
