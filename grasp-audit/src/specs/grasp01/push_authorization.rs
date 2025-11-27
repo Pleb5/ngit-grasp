@@ -18,9 +18,9 @@
 
 use crate::{
     clone_repo, create_commit, create_deterministic_commit, create_deterministic_commit_with_variant,
-    setup_repo_for_recursive_maintainer, setup_repo_with_deterministic_commit, try_push,
+    setup_repo_with_deterministic_commit, try_push,
     AuditClient, CommitVariant, FixtureKind, TestContext, TestResult, DETERMINISTIC_COMMIT_HASH,
-    MAINTAINER_DETERMINISTIC_COMMIT_HASH,
+    MAINTAINER_DETERMINISTIC_COMMIT_HASH, RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH,
 };
 use nostr_sdk::prelude::*;
 use std::fs;
@@ -559,65 +559,268 @@ impl PushAuthorizationTests {
     /// GRASP-01: "respecting the recursive maintainer set"
     /// This tests recursive maintainer chains: Owner -> MaintainerA -> MaintainerB
     ///
-    /// Scenario:
-    /// 1. RecursiveMaintainerRepoAndState fixture creates:
-    ///    - Repo announcement signed by recursive_maintainer keys
-    ///    - Lists main pubkey and maintainer pubkey in maintainers tag
-    ///    - State event with RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH (2s in past)
-    /// 2. setup_repo_for_recursive_maintainer() clones, creates recursive maintainer commit, verifies hash, pushes
-    /// 3. The push should be ACCEPTED because recursive maintainer's state event authorizes it
+    /// ## Fixture-First Pattern
+    ///
+    /// 1. **Generate**: Create TestContext and get fixture chain:
+    ///    - RepoState (owner's repo announcement + state event)
+    ///    - MaintainerAnnouncement (maintainer lists recursive-maintainer)
+    ///    - MaintainerState (maintainer's state event)
+    ///    - RecursiveMaintainerRepoAndState (recursive maintainer's announcement + state)
+    /// 2. **Send**: Clone repo, create recursive maintainer deterministic commit, push
+    /// 3. **Verify**: Push should succeed because recursive maintainer's state event authorizes it
+    ///
+    /// The fixture chain establishes: Owner -> Maintainer -> RecursiveMaintainer
+    /// Each level publishes announcements that authorize the next level.
     pub async fn test_push_authorized_by_recursive_maintainer_state(
         client: &AuditClient,
         git_data_dir: &Path,
         relay_domain: &str,
     ) -> TestResult {
+        use std::process::Command;
+
         let test_name = "test_push_authorized_by_recursive_maintainer_state";
 
-        // Use setup_repo_for_recursive_maintainer which leverages RecursiveMaintainerRepoAndState fixture
-        // This does all the heavy lifting:
-        // 1. Creates repo announcement signed by recursive maintainer keys
-        // 2. Creates state event pointing to RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH
-        // 3. Clones the repo
-        // 4. Creates the recursive maintainer deterministic commit locally
-        // 5. Verifies commit hash matches expected
-        // 6. Creates main branch, checks it out, and pushes
-        match setup_repo_for_recursive_maintainer(client, git_data_dir, relay_domain).await {
-            Ok(_setup) => {
-                // Push succeeded in setup - this means the relay accepted the push
-                // authorized by the recursive maintainer's state event
-                TestResult::new(
+        // ============================================================
+        // Step 1: GENERATE - Create TestContext and get fixture chain
+        // ============================================================
+        let ctx = TestContext::new(client);
+
+        // Get RepoState fixture (owner's repo announcement + state event)
+        let state_event = match ctx.get_fixture(FixtureKind::RepoState).await {
+            Ok(e) => e,
+            Err(e) => {
+                return TestResult::new(
                     test_name,
                     "GRASP-01",
                     "Push authorized by recursive maintainer state event",
                 )
-                .pass()
+                .fail(&format!("Failed to create RepoState fixture: {}", e));
             }
+        };
+
+        // Get MaintainerAnnouncement fixture (maintainer's repo announcement listing recursive maintainer)
+        match ctx.get_fixture(FixtureKind::MaintainerAnnouncement).await {
+            Ok(_) => {}
             Err(e) => {
-                // Check if this was specifically a push rejection
-                if e.contains("Failed to push") {
-                    TestResult::new(
-                        test_name,
-                        "GRASP-01",
-                        "Push authorized by recursive maintainer state event",
-                    )
-                    .fail(&format!(
-                        "Push was rejected but should have been accepted. \
-                        The recursive maintainer published a state event with a commit hash, \
-                        and the relay should authorize pushes matching this state event \
-                        through recursive maintainer traversal. \
-                        Error: {}",
-                        e
-                    ))
-                } else {
-                    // Some other error during setup
-                    TestResult::new(
-                        test_name,
-                        "GRASP-01",
-                        "Push authorized by recursive maintainer state event",
-                    )
-                    .fail(&format!("Setup failed: {}", e))
-                }
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by recursive maintainer state event",
+                )
+                .fail(&format!("Failed to create MaintainerAnnouncement fixture: {}", e));
             }
+        };
+
+        // Get MaintainerState fixture (maintainer's state event)
+        match ctx.get_fixture(FixtureKind::MaintainerState).await {
+            Ok(_) => {}
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by recursive maintainer state event",
+                )
+                .fail(&format!("Failed to create MaintainerState fixture: {}", e));
+            }
+        };
+
+        // Get RecursiveMaintainerRepoAndState fixture (completes 3-level delegation chain)
+        match ctx.get_fixture(FixtureKind::RecursiveMaintainerRepoAndState).await {
+            Ok(_) => {}
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by recursive maintainer state event",
+                )
+                .fail(&format!("Failed to create RecursiveMaintainerRepoAndState fixture: {}", e));
+            }
+        };
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Extract repo_id and npub from owner's state event
+        let repo_id = match state_event
+            .tags
+            .iter()
+            .find(|t| t.kind() == TagKind::d())
+            .and_then(|t| t.content())
+        {
+            Some(id) => id.to_string(),
+            None => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by recursive maintainer state event",
+                )
+                .fail("Missing repo_id in state event");
+            }
+        };
+
+        let npub = match state_event.pubkey.to_bech32() {
+            Ok(n) => n,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by recursive maintainer state event",
+                )
+                .fail(&format!("Failed to convert pubkey to bech32: {}", e));
+            }
+        };
+
+        // Verify repo exists on disk
+        let repo_path = git_data_dir.join(&npub).join(format!("{}.git", repo_id));
+        if !repo_path.exists() {
+            return TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push authorized by recursive maintainer state event",
+            )
+            .fail(&format!("Repo not found: {}", repo_path.display()));
+        }
+
+        // ============================================================
+        // Step 2: SEND - Clone, create recursive maintainer commit, push
+        // ============================================================
+        let clone_path = match clone_repo(relay_domain, &npub, &repo_id) {
+            Ok(p) => p,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by recursive maintainer state event",
+                )
+                .fail(&e);
+            }
+        };
+        let cleanup = || {
+            let _ = fs::remove_dir_all(&clone_path);
+        };
+
+        // Create recursive maintainer deterministic commit
+        let commit_hash =
+            match create_deterministic_commit_with_variant(&clone_path, CommitVariant::RecursiveMaintainer) {
+                Ok(h) => h,
+                Err(e) => {
+                    cleanup();
+                    return TestResult::new(
+                        test_name,
+                        "GRASP-01",
+                        "Push authorized by recursive maintainer state event",
+                    )
+                    .fail(&format!("Failed to create recursive maintainer commit: {}", e));
+                }
+            };
+
+        // Verify commit hash matches expected
+        if commit_hash != RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH {
+            cleanup();
+            return TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push authorized by recursive maintainer state event",
+            )
+            .fail(&format!(
+                "Recursive maintainer commit hash mismatch: got {}, expected {}",
+                commit_hash, RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH
+            ));
+        }
+
+        // Create main branch
+        let branch_output = Command::new("git")
+            .args(["branch", "main"])
+            .current_dir(&clone_path)
+            .output();
+
+        match branch_output {
+            Err(e) => {
+                cleanup();
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by recursive maintainer state event",
+                )
+                .fail(&format!("Failed to create main branch: {}", e));
+            }
+            Ok(output) if !output.status.success() => {
+                cleanup();
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by recursive maintainer state event",
+                )
+                .fail(&format!(
+                    "Failed to create main branch: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+            _ => {}
+        }
+
+        // Checkout main branch
+        let checkout_output = Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(&clone_path)
+            .output();
+
+        match checkout_output {
+            Err(e) => {
+                cleanup();
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by recursive maintainer state event",
+                )
+                .fail(&format!("Failed to checkout main branch: {}", e));
+            }
+            Ok(output) if !output.status.success() => {
+                cleanup();
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by recursive maintainer state event",
+                )
+                .fail(&format!(
+                    "Failed to checkout main branch: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+            _ => {}
+        }
+
+        // ============================================================
+        // Step 3: VERIFY - Push should succeed because recursive
+        // maintainer's state event authorizes this commit
+        // ============================================================
+        let push_result = try_push(&clone_path);
+        cleanup();
+
+        match push_result {
+            Ok(true) => TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push authorized by recursive maintainer state event",
+            )
+            .pass(),
+            Ok(false) => TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push authorized by recursive maintainer state event",
+            )
+            .fail(&format!(
+                "Push was rejected but should have been accepted. \
+                The recursive maintainer published a state event with commit {}, \
+                and the relay should authorize pushes matching this state event \
+                through recursive maintainer traversal (Owner -> Maintainer -> RecursiveMaintainer).",
+                RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH
+            )),
+            Err(e) => TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push authorized by recursive maintainer state event",
+            )
+            .fail(&format!("Push error: {}", e)),
         }
     }
 

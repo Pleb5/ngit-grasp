@@ -1435,6 +1435,34 @@ pub async fn setup_repo_for_maintainer(
 
 /// Set up a recursive maintainer repository with deterministic commit
 ///
+/// # Deprecated
+///
+/// This function is deprecated in favor of the fixture-first pattern.
+/// Tests should create their own TestContext and use the fixture chain directly,
+/// following the Generate → Send → Verify pattern.
+///
+/// See `test_push_authorized_by_recursive_maintainer_state` in `push_authorization.rs` for
+/// an example of the fixture-first pattern with recursive maintainers.
+///
+/// ## Migration Guide
+///
+/// Instead of:
+/// ```ignore
+/// let setup = setup_repo_for_recursive_maintainer(client, git_data_dir, relay_domain).await?;
+/// ```
+///
+/// Use:
+/// ```ignore
+/// let ctx = TestContext::new(client);
+/// let state_event = ctx.get_fixture(FixtureKind::RepoState).await?;
+/// ctx.get_fixture(FixtureKind::MaintainerAnnouncement).await?;
+/// ctx.get_fixture(FixtureKind::MaintainerState).await?;
+/// ctx.get_fixture(FixtureKind::RecursiveMaintainerRepoAndState).await?;
+/// // Then clone, create deterministic commit with RecursiveMaintainer variant, and push inline
+/// ```
+///
+/// ---
+///
 /// This performs all the common setup steps needed for recursive maintainer push authorization tests:
 /// 1. Gets RepoState fixture (owner's repo announcement + state event with owner's deterministic commit)
 /// 2. Gets MaintainerAnnouncement fixture (maintainer's repo announcement with recursive maintainer in maintainers tag)
@@ -1449,6 +1477,10 @@ pub async fn setup_repo_for_maintainer(
 /// 11. Pushes the commit so the grasp server has the state in the state event
 ///
 /// Returns RepoSetup which auto-cleans up the clone_path on drop
+#[deprecated(
+    since = "0.1.0",
+    note = "Use fixture-first pattern with TestContext and fixture chain instead. See test_push_authorized_by_recursive_maintainer_state for example."
+)]
 pub async fn setup_repo_for_recursive_maintainer(
     client: &crate::AuditClient,
     git_data_dir: &Path,
