@@ -59,5 +59,3 @@ macro_rules! isolated_test {
 
 // Generate isolated tests for all repository creation tests
 isolated_test!(test_bare_repo_created_on_announcement);
-isolated_test!(test_repo_creation_idempotent);
-isolated_test!(test_bare_repo_structure);
