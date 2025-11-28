@@ -5,10 +5,9 @@
 //!
 //! ## Test Coverage
 //!
-//! - Repository creation on valid announcement
+//! - Repository creation on valid announcement (verified via HTTP)
 //! - Idempotent creation (no error if repo already exists)
-//! - Proper directory structure (<npub>/<identifier>.git)
-//! - Bare repository validation (has HEAD, config, objects, refs)
+//! - Repository accessibility via Smart HTTP service
 //!
 //! ## Running Tests
 //!
@@ -18,7 +17,6 @@
 
 use crate::{AuditClient, FixtureKind, TestContext, TestResult};
 use nostr_sdk::prelude::*;
-use std::path::Path;
 
 /// Test suite for repository creation
 pub struct RepositoryCreationTests;
@@ -27,13 +25,13 @@ impl RepositoryCreationTests {
     /// Run all repository creation tests
     pub async fn run_all(
         client: &AuditClient,
-        git_data_dir: &Path,
+        relay_domain: &str,
     ) -> crate::AuditResult {
         let mut results = crate::AuditResult::new("GRASP-01 Repository Creation Tests");
 
-        results.add(Self::test_bare_repo_created_on_announcement(client, git_data_dir).await);
-        results.add(Self::test_repo_creation_idempotent(client, git_data_dir).await);
-        results.add(Self::test_bare_repo_structure(client, git_data_dir).await);
+        results.add(Self::test_bare_repo_created_on_announcement(client, relay_domain).await);
+        results.add(Self::test_repo_creation_idempotent(client, relay_domain).await);
+        results.add(Self::test_repo_accessible_via_http(client, relay_domain).await);
 
         results
     }
@@ -43,10 +41,10 @@ impl RepositoryCreationTests {
     /// This test:
     /// 1. Sends a valid repository announcement via TestContext
     /// 2. Verifies the announcement was accepted
-    /// 3. Checks that a bare git repository was created at the expected path
+    /// 3. Verifies the repository is accessible via Smart HTTP service
     pub async fn test_bare_repo_created_on_announcement(
         client: &AuditClient,
-        git_data_dir: &Path,
+        relay_domain: &str,
     ) -> TestResult {
         let test_name = "test_bare_repo_created_on_announcement";
         let ctx = TestContext::new(client);
@@ -97,19 +95,14 @@ impl RepositoryCreationTests {
             }
         };
 
-        // Check if repository was created
-        let repo_path = git_data_dir.join(&npub).join(format!("{}.git", repo_id));
-
-        if !is_bare_repository(&repo_path) {
+        // Verify repository exists via HTTP (info/refs endpoint)
+        if let Err(e) = check_repo_accessible_via_http(relay_domain, &npub, &repo_id).await {
             return TestResult::new(
                 test_name,
                 "GRASP-01",
                 "Bare repository must be created when announcement is accepted",
             )
-            .fail(&format!(
-                "Bare repository not found at: {}",
-                repo_path.display()
-            ));
+            .fail(&format!("Repository not accessible via HTTP: {}", e));
         }
 
         TestResult::new(
@@ -128,7 +121,7 @@ impl RepositoryCreationTests {
     /// 3. Verifies no error occurs and repo still exists
     pub async fn test_repo_creation_idempotent(
         client: &AuditClient,
-        git_data_dir: &Path,
+        relay_domain: &str,
     ) -> TestResult {
         let test_name = "test_repo_creation_idempotent";
         let ctx = TestContext::new(client);
@@ -162,7 +155,7 @@ impl RepositoryCreationTests {
         // Wait again
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-        // Verify repository still exists and is valid
+        // Verify repository still exists and is accessible via HTTP
         let repo_id = repo
             .tags
             .iter()
@@ -173,15 +166,14 @@ impl RepositoryCreationTests {
             .to_string();
 
         let npub = repo.pubkey.to_bech32().unwrap();
-        let repo_path = git_data_dir.join(&npub).join(format!("{}.git", repo_id));
 
-        if !is_bare_repository(&repo_path) {
+        if let Err(e) = check_repo_accessible_via_http(relay_domain, &npub, &repo_id).await {
             return TestResult::new(
                 test_name,
                 "GRASP-01",
                 "Repository creation must be idempotent",
             )
-            .fail("Repository not found after second send");
+            .fail(&format!("Repository not accessible after second send: {}", e));
         }
 
         TestResult::new(
@@ -192,14 +184,16 @@ impl RepositoryCreationTests {
         .pass()
     }
 
-    /// Test that the repository has the correct structure
+    /// Test that the repository is accessible via Smart HTTP service
     ///
     /// This test verifies:
-    /// 1. Repository is at <git_data_path>/<npub>/<identifier>.git
-    /// 2. Repository is bare (no working directory)
-    /// 3. Repository has required git structure (HEAD, config, objects/, refs/)
-    pub async fn test_bare_repo_structure(client: &AuditClient, git_data_dir: &Path) -> TestResult {
-        let test_name = "test_bare_repo_structure";
+    /// 1. Repository responds to git-upload-pack service discovery
+    /// 2. URL format follows http://domain/npub/identifier.git pattern
+    pub async fn test_repo_accessible_via_http(
+        client: &AuditClient,
+        relay_domain: &str,
+    ) -> TestResult {
+        let test_name = "test_repo_accessible_via_http";
         let ctx = TestContext::new(client);
 
         // Create and send repository announcement via TestContext
@@ -209,7 +203,7 @@ impl RepositoryCreationTests {
                 return TestResult::new(
                     test_name,
                     "GRASP-01",
-                    "Bare repository must have correct structure",
+                    "Repository must be accessible via Smart HTTP service",
                 )
                 .fail(&format!("Failed to create repo fixture: {}", e))
             }
@@ -230,134 +224,76 @@ impl RepositoryCreationTests {
 
         let npub = repo.pubkey.to_bech32().unwrap();
 
-        // Verify correct path structure: <git_data_path>/<npub>/<identifier>.git
-        let expected_path = git_data_dir.join(&npub).join(format!("{}.git", repo_id));
-
-        if !expected_path.exists() {
+        // Verify repository is accessible via HTTP
+        if let Err(e) = check_repo_accessible_via_http(relay_domain, &npub, &repo_id).await {
             return TestResult::new(
                 test_name,
                 "GRASP-01",
-                "Bare repository must have correct structure",
+                "Repository must be accessible via Smart HTTP service",
             )
-            .fail(&format!(
-                "Repository not at expected path: {}",
-                expected_path.display()
-            ));
-        }
-
-        // Verify it's a bare repository with correct structure
-        if !expected_path.join("HEAD").is_file() {
-            return TestResult::new(
-                test_name,
-                "GRASP-01",
-                "Bare repository must have correct structure",
-            )
-            .fail("Missing HEAD file");
-        }
-
-        if !expected_path.join("config").is_file() {
-            return TestResult::new(
-                test_name,
-                "GRASP-01",
-                "Bare repository must have correct structure",
-            )
-            .fail("Missing config file");
-        }
-
-        if !expected_path.join("objects").is_dir() {
-            return TestResult::new(
-                test_name,
-                "GRASP-01",
-                "Bare repository must have correct structure",
-            )
-            .fail("Missing objects/ directory");
-        }
-
-        if !expected_path.join("refs").is_dir() {
-            return TestResult::new(
-                test_name,
-                "GRASP-01",
-                "Bare repository must have correct structure",
-            )
-            .fail("Missing refs/ directory");
-        }
-
-        // Verify the helper function agrees
-        if !is_bare_repository(&expected_path) {
-            return TestResult::new(
-                test_name,
-                "GRASP-01",
-                "Bare repository must have correct structure",
-            )
-            .fail("Helper function does not recognize repository as bare");
+            .fail(&e);
         }
 
         TestResult::new(
             test_name,
             "GRASP-01",
-            "Bare repository must have correct structure",
+            "Repository must be accessible via Smart HTTP service",
         )
         .pass()
     }
 }
 
-/// Helper function to check if a path is a valid bare git repository
+/// Helper function to check if a repository is accessible via Smart HTTP service
 ///
-/// A bare repository must have:
-/// - HEAD file
-/// - config file
-/// - objects/ directory
-/// - refs/ directory
-pub fn is_bare_repository(path: &Path) -> bool {
-    if !path.exists() {
-        return false;
+/// Verifies that the repository responds correctly to git-upload-pack service discovery
+/// at the URL: http://domain/npub/identifier.git/info/refs?service=git-upload-pack
+async fn check_repo_accessible_via_http(
+    relay_domain: &str,
+    npub: &str,
+    repo_id: &str,
+) -> Result<(), String> {
+    let info_refs_url = format!(
+        "http://{}/{}/{}.git/info/refs?service=git-upload-pack",
+        relay_domain, npub, repo_id
+    );
+
+    let http_client = reqwest::Client::new();
+    let response = http_client
+        .get(&info_refs_url)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "info/refs returned status {} for URL: {}",
+            response.status(),
+            info_refs_url
+        ));
     }
 
-    // Check for required bare repository components
-    let has_head = path.join("HEAD").is_file();
-    let has_config = path.join("config").is_file();
-    let has_objects = path.join("objects").is_dir();
-    let has_refs = path.join("refs").is_dir();
+    // Verify Content-Type indicates git-upload-pack service
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
 
-    has_head && has_config && has_objects && has_refs
+    if !content_type.contains("application/x-git-upload-pack-advertisement") {
+        return Err(format!(
+            "Expected Content-Type: application/x-git-upload-pack-advertisement, got: {}",
+            content_type
+        ));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::process::Command;
-
     #[test]
-    fn test_is_bare_repository_detects_valid_repo() {
-        // Create a temporary bare repository for testing
-        let temp_dir = tempfile::tempdir().unwrap();
-        let repo_path = temp_dir.path().join("test.git");
-
-        // Initialize a bare repository
-        Command::new("git")
-            .args(&["init", "--bare", repo_path.to_str().unwrap()])
-            .output()
-            .expect("Failed to create test repository");
-
-        // Verify our helper function detects it
-        assert!(
-            is_bare_repository(&repo_path),
-            "Should detect valid bare repository"
-        );
-    }
-
-    #[test]
-    fn test_is_bare_repository_rejects_non_repo() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        assert!(
-            !is_bare_repository(temp_dir.path()),
-            "Should reject non-repository directory"
-        );
-    }
-
-    #[test]
-    fn test_is_bare_repository_rejects_nonexistent() {
-        let path = Path::new("/nonexistent/path/to/repo.git");
-        assert!(!is_bare_repository(path), "Should reject nonexistent path");
+    fn test_module_exists() {
+        // Simple compilation test
+        assert!(true);
     }
 }

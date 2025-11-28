@@ -18,7 +18,6 @@
 use crate::{AuditClient, FixtureKind, TestContext, TestResult};
 use nostr_sdk::prelude::*;
 use std::fs;
-use std::path::Path;
 use std::process::Command;
 
 /// Test suite for Git clone operations
@@ -28,14 +27,13 @@ impl GitCloneTests {
     /// Run all Git clone tests
     pub async fn run_all(
         client: &AuditClient,
-        git_data_dir: &Path,
         relay_domain: &str,
     ) -> crate::AuditResult {
         let mut results = crate::AuditResult::new("GRASP-01 Git Clone Tests");
 
-        results.add(Self::test_basic_git_clone(client, git_data_dir, relay_domain).await);
-        results.add(Self::test_clone_url_format(client, git_data_dir, relay_domain).await);
-        results.add(Self::test_sha1_capabilities_advertised(client, git_data_dir, relay_domain).await);
+        results.add(Self::test_basic_git_clone(client, relay_domain).await);
+        results.add(Self::test_clone_url_format(client, relay_domain).await);
+        results.add(Self::test_sha1_capabilities_advertised(client, relay_domain).await);
 
         results
     }
@@ -49,7 +47,6 @@ impl GitCloneTests {
     /// 4. Verifies the clone succeeded
     pub async fn test_basic_git_clone(
         client: &AuditClient,
-        git_data_dir: &Path,
         relay_domain: &str,
     ) -> TestResult {
         let test_name = "test_basic_git_clone";
@@ -101,20 +98,6 @@ impl GitCloneTests {
             }
         };
 
-        // Verify repository exists
-        let repo_path = git_data_dir.join(&npub).join(format!("{}.git", repo_id));
-        if !repo_path.exists() {
-            return TestResult::new(
-                test_name,
-                "GRASP-01",
-                "Repository must be cloneable via Git HTTP backend",
-            )
-            .fail(&format!(
-                "Repository not found at: {}",
-                repo_path.display()
-            ));
-        }
-
         // Create a test clone directory using standard library
         let temp_base = std::env::temp_dir();
         let clone_dir_name = format!("grasp-test-clone-{}", uuid::Uuid::new_v4());
@@ -128,7 +111,7 @@ impl GitCloneTests {
 
         // Attempt to clone the repository
         let output = Command::new("git")
-            .args(&["clone", &clone_url, clone_path.to_str().unwrap()])
+            .args(["clone", &clone_url, clone_path.to_str().unwrap()])
             .env("GIT_TERMINAL_PROMPT", "0") // Disable password prompts
             .output();
         
@@ -188,7 +171,6 @@ impl GitCloneTests {
     /// 2. Invalid URLs are rejected properly
     pub async fn test_clone_url_format(
         client: &AuditClient,
-        _git_data_dir: &Path,
         relay_domain: &str,
     ) -> TestResult {
         let test_name = "test_clone_url_format";
@@ -254,7 +236,7 @@ impl GitCloneTests {
         let invalid_url = format!("http://{}/invalid/path", relay_domain);
 
         let output = Command::new("git")
-            .args(&["clone", &invalid_url, clone_path.to_str().unwrap()])
+            .args(["clone", &invalid_url, clone_path.to_str().unwrap()])
             .env("GIT_TERMINAL_PROMPT", "0")
             .output()
             .unwrap();
@@ -291,7 +273,6 @@ impl GitCloneTests {
     /// 2. Both allow-reachable-sha1-in-want and allow-tip-sha1-in-want are present
     pub async fn test_sha1_capabilities_advertised(
         client: &AuditClient,
-        git_data_dir: &Path,
         relay_domain: &str,
     ) -> TestResult {
         let test_name = "test_sha1_capabilities_advertised";
@@ -342,20 +323,6 @@ impl GitCloneTests {
                 .fail(&format!("Failed to convert pubkey to npub: {}", e))
             }
         };
-
-        // Verify repository exists
-        let repo_path = git_data_dir.join(&npub).join(format!("{}.git", repo_id));
-        if !repo_path.exists() {
-            return TestResult::new(
-                test_name,
-                "GRASP-01",
-                "MUST include allow-reachable-sha1-in-want and allow-tip-sha1-in-want in advertisement",
-            )
-            .fail(&format!(
-                "Repository not found at: {}",
-                repo_path.display()
-            ));
-        }
 
         // Build info/refs URL for git-upload-pack service
         let info_refs_url = format!(
@@ -435,8 +402,6 @@ impl GitCloneTests {
 
 #[cfg(test)]
 mod tests {
-    
-
     #[test]
     fn test_module_exists() {
         // Simple compilation test

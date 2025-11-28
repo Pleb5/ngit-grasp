@@ -91,5 +91,4 @@ isolated_cors_test!(test_cors_allow_methods);
 isolated_cors_test!(test_cors_allow_headers);
 isolated_cors_test!(test_cors_options_preflight);
 
-// Integration test that creates a real repository and tests CORS on it
-isolated_cors_test_with_repo!(test_cors_on_real_repo);
+isolated_cors_test!(test_cors_on_real_repo);

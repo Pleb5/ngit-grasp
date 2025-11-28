@@ -48,21 +48,6 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Audit { relay, mode, spec, git_data_dir } => {
-            // Early validation: check if --git-data-dir is required for the spec
-            let specs_requiring_git_dir = ["all", "git-clone", "push-auth", "repo-creation"];
-            if specs_requiring_git_dir.contains(&spec.as_str()) && git_data_dir.is_none() {
-                return Err(anyhow!(
-                    "The '{}' spec requires --git-data-dir to be specified.\n\
-                    \n\
-                    This directory should point to the relay's git data storage.\n\
-                    Example: --git-data-dir /path/to/relay/repos\n\
-                    \n\
-                    If using Docker, mount a volume and pass that path:\n\
-                      docker run -v /tmp/repos:/srv/ngit-relay/repos ...\n\
-                      cargo run -- audit --relay ws://localhost:8080 --git-data-dir /tmp/repos",
-                    spec
-                ));
-            }
 
             let mut config = match mode.as_str() {
                 "ci" => AuditConfig::ci(),
@@ -103,16 +88,6 @@ async fn main() -> Result<()> {
 
             println!("✓ Connected\n");
 
-            // Helper to check if git_data_dir is required for individual specs
-            let require_git_data_dir = |spec_name: &str| -> Result<PathBuf> {
-                git_data_dir.clone().ok_or_else(|| {
-                    anyhow!(
-                        "The '{}' spec requires --git-data-dir to be specified",
-                        spec_name
-                    )
-                })
-            };
-
             let results = match spec.as_str() {
                 "nip01-smoke" => {
                     println!("Running NIP-01 smoke tests...\n");
@@ -131,24 +106,18 @@ async fn main() -> Result<()> {
                     specs::CorsTests::run_all(&client, &relay_domain).await
                 }
                 "git-clone" => {
-                    let dir = require_git_data_dir("git-clone")?;
                     println!("Running Git clone tests...\n");
-                    specs::GitCloneTests::run_all(&client, &dir, &relay_domain).await
+                    specs::GitCloneTests::run_all(&client, &relay_domain).await
                 }
                 "push-auth" => {
-                    let dir = require_git_data_dir("push-auth")?;
                     println!("Running push authorization tests...\n");
-                    specs::PushAuthorizationTests::run_all(&client, &dir, &relay_domain).await
+                    specs::PushAuthorizationTests::run_all(&client, &relay_domain).await
                 }
                 "repo-creation" => {
-                    let dir = require_git_data_dir("repo-creation")?;
                     println!("Running repository creation tests...\n");
-                    specs::RepositoryCreationTests::run_all(&client, &dir).await
+                    specs::RepositoryCreationTests::run_all(&client, &relay_domain).await
                 }
                 "all" => {
-                    // git_data_dir is guaranteed by early validation
-                    let dir = git_data_dir.clone().expect("git_data_dir validated earlier");
-
                     println!("Running all tests...\n");
                     let mut all_results = AuditResult::new("All GRASP-01 Tests");
                     
@@ -174,17 +143,17 @@ async fn main() -> Result<()> {
 
                     // Git clone tests
                     println!("  → Git clone tests...");
-                    let clone_results = specs::GitCloneTests::run_all(&client, &dir, &relay_domain).await;
+                    let clone_results = specs::GitCloneTests::run_all(&client, &relay_domain).await;
                     all_results.merge(clone_results);
 
                     // Push authorization tests
                     println!("  → Push authorization tests...");
-                    let push_results = specs::PushAuthorizationTests::run_all(&client, &dir, &relay_domain).await;
+                    let push_results = specs::PushAuthorizationTests::run_all(&client, &relay_domain).await;
                     all_results.merge(push_results);
 
                     // Repository creation tests
                     println!("  → Repository creation tests...");
-                    let repo_results = specs::RepositoryCreationTests::run_all(&client, &dir).await;
+                    let repo_results = specs::RepositoryCreationTests::run_all(&client, &relay_domain).await;
                     all_results.merge(repo_results);
                     
                     println!();

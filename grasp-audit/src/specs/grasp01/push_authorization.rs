@@ -33,15 +33,14 @@ impl PushAuthorizationTests {
     /// Run all push authorization tests
     pub async fn run_all(
         client: &AuditClient,
-        git_data_dir: &Path,
         relay_domain: &str,
     ) -> crate::AuditResult {
         let mut results = crate::AuditResult::new("GRASP-01 Push Authorization Tests");
 
-        results.add(Self::test_push_authorized_by_owner_state(client, git_data_dir, relay_domain).await);
-        results.add(Self::test_push_rejected_without_state_event(client, git_data_dir, relay_domain).await);
-        results.add(Self::test_push_rejected_wrong_commit(client, git_data_dir, relay_domain).await);
-        results.add(Self::test_push_authorized_by_maintainer_state_only(client, git_data_dir, relay_domain).await);
+        results.add(Self::test_push_authorized_by_owner_state(client, relay_domain).await);
+        results.add(Self::test_push_rejected_without_state_event(client, relay_domain).await);
+        results.add(Self::test_push_rejected_wrong_commit(client, relay_domain).await);
+        results.add(Self::test_push_authorized_by_maintainer_state_only(client, relay_domain).await);
 
         results
     }
@@ -59,7 +58,6 @@ impl PushAuthorizationTests {
     /// 3. **Verify**: Push should succeed because state event authorizes this commit
     pub async fn test_push_authorized_by_owner_state(
         client: &AuditClient,
-        git_data_dir: &Path,
         relay_domain: &str,
     ) -> TestResult {
         use std::process::Command;
@@ -102,13 +100,6 @@ impl PushAuthorizationTests {
                     .fail(&format!("Failed to convert pubkey to bech32: {}", e));
             }
         };
-
-        // Verify repo exists on disk
-        let repo_path = git_data_dir.join(&npub).join(format!("{}.git", repo_id));
-        if !repo_path.exists() {
-            return TestResult::new(test_name, "GRASP-01", "Push authorized with matching state")
-                .fail(&format!("Repo not found: {}", repo_path.display()));
-        }
 
         // ============================================================
         // Step 2: SEND - Clone repo, create deterministic commit, push
@@ -222,7 +213,6 @@ impl PushAuthorizationTests {
     /// Test that push is rejected when no state event exists
     pub async fn test_push_rejected_without_state_event(
         client: &AuditClient,
-        git_data_dir: &Path,
         relay_domain: &str,
     ) -> TestResult {
         let test_name = "test_push_rejected_without_state_event";
@@ -242,12 +232,6 @@ impl PushAuthorizationTests {
         let repo_id = repo.tags.iter().find(|t| t.kind() == TagKind::d())
             .and_then(|t| t.content()).unwrap().to_string();
         let npub = repo.pubkey.to_bech32().unwrap();
-
-        let repo_path = git_data_dir.join(&npub).join(format!("{}.git", repo_id));
-        if !repo_path.exists() {
-            return TestResult::new(test_name, "GRASP-01", "Push rejected without state event")
-                .fail(&format!("Repo not found: {}", repo_path.display()));
-        }
 
         // Clone and create commit
         let clone_path = match clone_repo(relay_domain, &npub, &repo_id) {
@@ -286,7 +270,6 @@ impl PushAuthorizationTests {
     /// 4. **Verify**: Push should be rejected because new commit doesn't match state event
     pub async fn test_push_rejected_wrong_commit(
         client: &AuditClient,
-        git_data_dir: &Path,
         relay_domain: &str,
     ) -> TestResult {
         use std::process::Command;
@@ -329,13 +312,6 @@ impl PushAuthorizationTests {
                     .fail(&format!("Failed to convert pubkey to bech32: {}", e));
             }
         };
-
-        // Verify repo exists on disk
-        let repo_path = git_data_dir.join(&npub).join(format!("{}.git", repo_id));
-        if !repo_path.exists() {
-            return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
-                .fail(&format!("Repo not found: {}", repo_path.display()));
-        }
 
         // ============================================================
         // Step 2: SEND - Clone repo, create deterministic commit, push
@@ -495,7 +471,6 @@ impl PushAuthorizationTests {
     /// 4. The push should be ACCEPTED because maintainer's state event authorizes it
     pub async fn test_push_authorized_by_maintainer_state_only(
         client: &AuditClient,
-        git_data_dir: &Path,
         relay_domain: &str,
     ) -> TestResult {
         use std::process::Command;
@@ -565,17 +540,6 @@ impl PushAuthorizationTests {
                 .fail(&format!("Failed to convert pubkey to bech32: {}", e));
             }
         };
-
-        // Verify repo exists on disk
-        let repo_path = git_data_dir.join(&npub).join(format!("{}.git", repo_id));
-        if !repo_path.exists() {
-            return TestResult::new(
-                test_name,
-                "GRASP-01",
-                "Push authorized by maintainer state event only (no announcement)",
-            )
-            .fail(&format!("Repo not found: {}", repo_path.display()));
-        }
 
         // ============================================================
         // Step 2: SEND - Clone, create maintainer commit, push
@@ -741,7 +705,6 @@ impl PushAuthorizationTests {
     /// Each level publishes announcements that authorize the next level.
     pub async fn test_push_authorized_by_recursive_maintainer_state(
         client: &AuditClient,
-        git_data_dir: &Path,
         relay_domain: &str,
     ) -> TestResult {
         use std::process::Command;
@@ -836,17 +799,6 @@ impl PushAuthorizationTests {
                 .fail(&format!("Failed to convert pubkey to bech32: {}", e));
             }
         };
-
-        // Verify repo exists on disk
-        let repo_path = git_data_dir.join(&npub).join(format!("{}.git", repo_id));
-        if !repo_path.exists() {
-            return TestResult::new(
-                test_name,
-                "GRASP-01",
-                "Push authorized by recursive maintainer state event",
-            )
-            .fail(&format!("Repo not found: {}", repo_path.display()));
-        }
 
         // ============================================================
         // Step 2: SEND - Clone, create recursive maintainer commit, push
@@ -1007,7 +959,6 @@ impl PushAuthorizationTests {
     /// 5. **Verify**: Push should be rejected because rogue state event is ignored
     pub async fn test_non_maintainer_state_rejected(
         client: &AuditClient,
-        git_data_dir: &Path,
         relay_domain: &str,
     ) -> TestResult {
         use std::process::Command;
@@ -1050,13 +1001,6 @@ impl PushAuthorizationTests {
                     .fail(&format!("Failed to convert pubkey to bech32: {}", e));
             }
         };
-
-        // Verify repo exists on disk
-        let repo_path = git_data_dir.join(&npub).join(format!("{}.git", repo_id));
-        if !repo_path.exists() {
-            return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
-                .fail(&format!("Repo not found: {}", repo_path.display()));
-        }
 
         // ============================================================
         // Step 2: SEND - Clone repo, create deterministic commit, push

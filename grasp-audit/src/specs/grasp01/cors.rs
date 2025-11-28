@@ -257,7 +257,6 @@ impl CorsTests {
     /// For integration tests that want to test against real repositories
     pub async fn test_cors_on_real_repo(
         client: &AuditClient,
-        _git_data_dir: &Path,
         relay_domain: &str,
     ) -> TestResult {
         let test_name = "test_cors_on_real_repo";
