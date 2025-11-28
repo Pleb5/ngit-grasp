@@ -48,11 +48,14 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Audit { relay, mode, spec, git_data_dir } => {
-            let config = match mode.as_str() {
+            let mut config = match mode.as_str() {
                 "ci" => AuditConfig::ci(),
                 "production" => AuditConfig::production(),
                 _ => return Err(anyhow!("Invalid mode: {}. Use 'ci' or 'production'", mode)),
             };
+            
+            // Audit needs to create events to test the relay, so disable read-only mode
+            config.read_only = false;
 
             // Derive relay_domain from relay URL (e.g., "ws://localhost:8081" -> "localhost:8081")
             let relay_domain = relay

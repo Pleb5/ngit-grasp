@@ -32,7 +32,7 @@ impl Nip01SmokeTests {
     pub async fn test_websocket_connection(client: &AuditClient) -> TestResult {
         TestResult::new(
             "websocket_connection",
-            "NIP-01:basic",
+            "NIP-01",
             "Can establish WebSocket connection to /",
         )
         .run(|| async {
@@ -61,7 +61,7 @@ impl Nip01SmokeTests {
     pub async fn test_send_receive_event(client: &AuditClient) -> TestResult {
         TestResult::new(
             "send_receive_event",
-            "NIP-01:event-message",
+            "NIP-01",
             "Can send EVENT and receive OK response",
         )
         .run(|| async {
@@ -127,7 +127,7 @@ impl Nip01SmokeTests {
     pub async fn test_create_subscription(client: &AuditClient) -> TestResult {
         TestResult::new(
             "create_subscription",
-            "NIP-01:req-message",
+            "NIP-01",
             "Can create subscription with REQ and receive EOSE",
         )
         .run(|| async {
@@ -165,7 +165,7 @@ impl Nip01SmokeTests {
     pub async fn test_close_subscription(client: &AuditClient) -> TestResult {
         TestResult::new(
             "close_subscription",
-            "NIP-01:close-message",
+            "NIP-01",
             "Can close subscriptions",
         )
         .run(|| async {
@@ -193,7 +193,7 @@ impl Nip01SmokeTests {
     pub async fn test_reject_invalid_signature(client: &AuditClient) -> TestResult {
         TestResult::new(
             "reject_invalid_signature",
-            "NIP-01:validation",
+            "NIP-01",
             "Rejects events with invalid signatures",
         )
         .run(|| async {
@@ -247,7 +247,7 @@ impl Nip01SmokeTests {
     pub async fn test_reject_invalid_event_id(client: &AuditClient) -> TestResult {
         TestResult::new(
             "reject_invalid_event_id",
-            "NIP-01:validation",
+            "NIP-01",
             "Rejects events with invalid event IDs",
         )
         .run(|| async {
