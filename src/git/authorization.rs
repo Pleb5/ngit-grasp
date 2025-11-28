@@ -29,7 +29,7 @@
 
 use anyhow::{anyhow, Result};
 use nostr_relay_builder::prelude::*;
-use nostr_sdk::ToBech32;
+use nostr_sdk::{EventId, ToBech32};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::debug;
@@ -647,7 +647,21 @@ pub fn validate_push_refs(
 
         // refs/nostr/* is handled separately per GRASP-01
         if ref_name.starts_with("refs/nostr/") {
-            debug!("refs/nostr/ push will be validated separately");
+            // Extract event_id from "refs/nostr/<event-id>"
+            if let Some(event_id_str) = ref_name.strip_prefix("refs/nostr/") {
+                // Validate it parses as a valid EventId
+                if EventId::parse(event_id_str).is_err() {
+                    return Err(anyhow!(
+                        "Invalid event ID format in ref: {}. Expected valid nostr event ID.",
+                        ref_name
+                    ));
+                }
+                // Valid EventId format - allow push (skip state event check)
+                debug!("refs/nostr/{} push authorized (valid EventId)", event_id_str);
+                continue; // Skip the rest of ref validation for this ref
+            } else {
+                return Err(anyhow!("Invalid refs/nostr/ format: {}", ref_name));
+            }
         }
     }
 

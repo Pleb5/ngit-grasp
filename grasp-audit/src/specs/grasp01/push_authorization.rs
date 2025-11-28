@@ -18,7 +18,7 @@
 
 use crate::{
     clone_repo, create_commit, create_deterministic_commit, create_deterministic_commit_with_variant,
-    try_push, AuditClient, CommitVariant, FixtureKind, TestContext, TestResult,
+    try_push, try_push_to_ref, AuditClient, CommitVariant, FixtureKind, TestContext, TestResult,
     DETERMINISTIC_COMMIT_HASH, MAINTAINER_DETERMINISTIC_COMMIT_HASH,
     RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH,
 };
@@ -41,6 +41,8 @@ impl PushAuthorizationTests {
         results.add(Self::test_push_rejected_wrong_commit(client, relay_domain).await);
         results.add(Self::test_push_authorized_by_maintainer_state_only(client, relay_domain).await);
         results.add(Self::test_push_authorized_by_recursive_maintainer_state(client, relay_domain).await);
+        results.add(Self::test_push_to_refs_nostr_valid_event_id(client, relay_domain).await);
+        results.add(Self::test_push_to_refs_nostr_invalid_event_id(client, relay_domain).await);
 
         results
     }
@@ -1027,6 +1029,244 @@ impl PushAuthorizationTests {
                     client.public_key()
                 )),
             Err(e) => TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored").fail(&e),
+        }
+    }
+
+    /// Test that push to refs/nostr/<event-id> succeeds with valid EventId format
+    ///
+    /// GRASP-01: "MUST accept pushes via this service to `refs/nostr/<event-id>`"
+    /// The event_id must parse as a valid rust-nostr EventId (64-char hex string).
+    /// This does NOT require the ref to be listed in any state event - it's purely format validation.
+    ///
+    /// ## Fixture-First Pattern
+    ///
+    /// 1. **Generate**: Create repo with ValidRepo fixture (no state event needed)
+    /// 2. **Send**: Clone repo, create commit, push to refs/nostr/<valid-event-id>
+    /// 3. **Verify**: Push should succeed because event-id format is valid
+    pub async fn test_push_to_refs_nostr_valid_event_id(
+        client: &AuditClient,
+        relay_domain: &str,
+    ) -> TestResult {
+        let test_name = "test_push_to_refs_nostr_valid_event_id";
+
+        // ============================================================
+        // Step 1: GENERATE - Create repo (no state event needed for refs/nostr/)
+        // ============================================================
+        let ctx = TestContext::new(client);
+
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+            Ok(r) => r,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push to refs/nostr/<valid-event-id> accepted",
+                )
+                .fail(&format!("Failed to create repo: {}", e));
+            }
+        };
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let repo_id = repo
+            .tags
+            .iter()
+            .find(|t| t.kind() == TagKind::d())
+            .and_then(|t| t.content())
+            .unwrap()
+            .to_string();
+        let npub = repo.pubkey.to_bech32().unwrap();
+
+        // ============================================================
+        // Step 2: SEND - Clone repo, create commit, push to refs/nostr/<event-id>
+        // ============================================================
+        let clone_path = match clone_repo(relay_domain, &npub, &repo_id) {
+            Ok(p) => p,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push to refs/nostr/<valid-event-id> accepted",
+                )
+                .fail(&e);
+            }
+        };
+        let cleanup = || {
+            let _ = fs::remove_dir_all(&clone_path);
+        };
+
+        // Create a unique commit
+        if let Err(e) = create_commit(&clone_path, "Test commit for refs/nostr push") {
+            cleanup();
+            return TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push to refs/nostr/<valid-event-id> accepted",
+            )
+            .fail(&e);
+        }
+
+        // Generate a random event to get a valid EventId
+        let keys = Keys::generate();
+        let event = match EventBuilder::text_note("test")
+            .sign(&keys)
+            .await
+        {
+            Ok(e) => e,
+            Err(e) => {
+                cleanup();
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push to refs/nostr/<valid-event-id> accepted",
+                )
+                .fail(&format!("Failed to create test event: {}", e));
+            }
+        };
+
+        // Use the event id as the refs/nostr/ target
+        let ref_name = format!("refs/nostr/{}", event.id);
+
+        // ============================================================
+        // Step 3: VERIFY - Push should succeed with valid event-id format
+        // ============================================================
+        let push_result = try_push_to_ref(&clone_path, &ref_name);
+        cleanup();
+
+        match push_result {
+            Ok(true) => TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push to refs/nostr/<valid-event-id> accepted",
+            )
+            .pass(),
+            Ok(false) => TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push to refs/nostr/<valid-event-id> accepted",
+            )
+            .fail(&format!(
+                "Push to {} was rejected but should be accepted. \
+                The event-id '{}' is a valid 64-character hex string (EventId format).",
+                ref_name, event.id
+            )),
+            Err(e) => TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push to refs/nostr/<valid-event-id> accepted",
+            )
+            .fail(&format!("Push error: {}", e)),
+        }
+    }
+
+    /// Test that push to refs/nostr/<invalid> is rejected with invalid EventId format
+    ///
+    /// GRASP-01: "MUST accept pushes via this service to `refs/nostr/<event-id>`"
+    /// The event_id must parse as a valid rust-nostr EventId (64-char hex string).
+    /// Invalid formats (too short, non-hex, etc.) should be rejected.
+    ///
+    /// ## Fixture-First Pattern
+    ///
+    /// 1. **Generate**: Create repo with ValidRepo fixture (no state event needed)
+    /// 2. **Send**: Clone repo, create commit, try to push to refs/nostr/123 (invalid)
+    /// 3. **Verify**: Push should be rejected because event-id format is invalid
+    pub async fn test_push_to_refs_nostr_invalid_event_id(
+        client: &AuditClient,
+        relay_domain: &str,
+    ) -> TestResult {
+        let test_name = "test_push_to_refs_nostr_invalid_event_id";
+
+        // ============================================================
+        // Step 1: GENERATE - Create repo (no state event needed for refs/nostr/)
+        // ============================================================
+        let ctx = TestContext::new(client);
+
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+            Ok(r) => r,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push to refs/nostr/<invalid-event-id> rejected",
+                )
+                .fail(&format!("Failed to create repo: {}", e));
+            }
+        };
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let repo_id = repo
+            .tags
+            .iter()
+            .find(|t| t.kind() == TagKind::d())
+            .and_then(|t| t.content())
+            .unwrap()
+            .to_string();
+        let npub = repo.pubkey.to_bech32().unwrap();
+
+        // ============================================================
+        // Step 2: SEND - Clone repo, create commit, try push to invalid ref
+        // ============================================================
+        let clone_path = match clone_repo(relay_domain, &npub, &repo_id) {
+            Ok(p) => p,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push to refs/nostr/<invalid-event-id> rejected",
+                )
+                .fail(&e);
+            }
+        };
+        let cleanup = || {
+            let _ = fs::remove_dir_all(&clone_path);
+        };
+
+        // Create a unique commit
+        if let Err(e) = create_commit(&clone_path, "Test commit for invalid refs/nostr push") {
+            cleanup();
+            return TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push to refs/nostr/<invalid-event-id> rejected",
+            )
+            .fail(&e);
+        }
+
+        // Use an invalid event-id (too short, not a valid 64-char hex)
+        let invalid_event_id = "123";
+        let ref_name = format!("refs/nostr/{}", invalid_event_id);
+
+        // ============================================================
+        // Step 3: VERIFY - Push should be rejected with invalid event-id format
+        // ============================================================
+        let push_result = try_push_to_ref(&clone_path, &ref_name);
+        cleanup();
+
+        match push_result {
+            Ok(false) => TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push to refs/nostr/<invalid-event-id> rejected",
+            )
+            .pass(),
+            Ok(true) => TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push to refs/nostr/<invalid-event-id> rejected",
+            )
+            .fail(&format!(
+                "Push to {} was accepted but should be rejected. \
+                The event-id '{}' is NOT a valid 64-character hex string (EventId format). \
+                The relay should reject pushes to refs/nostr/ with invalid event-id format.",
+                ref_name, invalid_event_id
+            )),
+            Err(e) => TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push to refs/nostr/<invalid-event-id> rejected",
+            )
+            .fail(&format!("Push error: {}", e)),
         }
     }
 }

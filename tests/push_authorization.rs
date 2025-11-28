@@ -67,3 +67,5 @@ isolated_push_test!(test_push_rejected_wrong_commit);
 isolated_push_test!(test_push_authorized_by_maintainer_state_only);
 isolated_push_test!(test_push_authorized_by_recursive_maintainer_state);
 isolated_push_test!(test_non_maintainer_state_rejected);
+isolated_push_test!(test_push_to_refs_nostr_valid_event_id);
+isolated_push_test!(test_push_to_refs_nostr_invalid_event_id);

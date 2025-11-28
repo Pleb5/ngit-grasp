@@ -7,6 +7,7 @@ use std::sync::Arc;
 use hyper::{body::Bytes, Response, StatusCode};
 use http_body_util::Full;
 use nostr_relay_builder::prelude::MemoryDatabase;
+use nostr_sdk::EventId;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, info, warn};
 
@@ -315,7 +316,39 @@ async fn authorize_push(
         identifier, owner_pubkey
     );
 
-    // Get authorization result from database, scoped to specific owner
+    // Parse refs from the push request FIRST to check if this is a refs/nostr/ push
+    let pushed_refs = parse_pushed_refs(request_body);
+    debug!("Parsed {} refs from push request", pushed_refs.len());
+    for (old_oid, new_oid, ref_name) in &pushed_refs {
+        debug!("  {} {} -> {}", ref_name, old_oid, new_oid);
+    }
+
+    // Check if ALL pushed refs are to refs/nostr/ with valid EventId format
+    // Per GRASP-01: "MUST accept pushes via this service to `refs/nostr/<event-id>`"
+    // These pushes only require EventId format validation, not state validation
+    let all_refs_nostr_valid = !pushed_refs.is_empty()
+        && pushed_refs.iter().all(|(_, _, ref_name)| {
+            if let Some(event_id_str) = ref_name.strip_prefix("refs/nostr/") {
+                // Validate it parses as a valid EventId
+                EventId::parse(event_id_str).is_ok()
+            } else {
+                false
+            }
+        });
+    
+    if all_refs_nostr_valid {
+        debug!("All refs are refs/nostr/ with valid EventId format - authorized without state check");
+        // Return success for refs/nostr/ pushes without requiring state
+        return Ok(AuthorizationResult {
+            authorized: true,
+            reason: "Push to refs/nostr/ with valid EventId format".to_string(),
+            state: None,
+            maintainers: vec![],
+        });
+    }
+
+    // For non-refs/nostr/ pushes, require state validation as normal
+    debug!("Non-refs/nostr/ push detected - checking state authorization");
     let auth_result = get_authorization_for_owner(database, identifier, owner_pubkey).await?;
 
     if !auth_result.authorized {

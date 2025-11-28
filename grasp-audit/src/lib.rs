@@ -40,7 +40,7 @@ pub use client::AuditClient;
 pub use fixtures::{
     // Git operation helpers
     clone_repo, create_commit, create_deterministic_commit, create_deterministic_commit_with_variant,
-    try_push,
+    try_push, try_push_to_ref,
     // Verification helpers
     send_and_verify_accepted, send_and_verify_rejected,
     // Types and constants

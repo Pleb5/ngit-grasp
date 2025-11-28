@@ -1208,6 +1208,44 @@ pub fn try_push(clone_path: &Path) -> Result<bool, String> {
     Ok(output.status.success())
 }
 
+/// Attempt a git push to a specific ref and return success/failure
+///
+/// This is used for testing refs/nostr/<event-id> push validation.
+///
+/// # Arguments
+/// * `clone_path` - Path to the git repository
+/// * `ref_name` - The ref to push to (e.g., "refs/nostr/<event-id>")
+///
+/// # Returns
+/// * `Ok(true)` - Push succeeded
+/// * `Ok(false)` - Push was rejected
+/// * `Err(String)` - Error executing git push
+///
+/// # Example
+/// ```no_run
+/// # use grasp_audit::*;
+/// # use std::path::Path;
+/// # fn example() -> Result<(), String> {
+/// let success = try_push_to_ref(Path::new("/tmp/my-repo"), "refs/nostr/abc123")?;
+/// if success {
+///     println!("Push to refs/nostr/abc123 succeeded");
+/// } else {
+///     println!("Push was rejected");
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub fn try_push_to_ref(clone_path: &Path, ref_name: &str) -> Result<bool, String> {
+    let output = Command::new("git")
+        .args(["push", "origin", &format!("HEAD:{}", ref_name)])
+        .current_dir(clone_path)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|e| format!("Failed to execute git push: {}", e))?;
+
+    Ok(output.status.success())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
