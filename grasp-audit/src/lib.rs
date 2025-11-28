@@ -19,11 +19,11 @@
 //!     // Create audit client for CI testing
 //!     let config = AuditConfig::ci();
 //!     let client = AuditClient::new("ws://localhost:7000", config).await?;
-//!     
+//!
 //!     // Run smoke tests
-//!     let results = specs::nip01_smoke::Nip01SmokeTests::run_all(&client).await;
+//!     let results = specs::Nip01SmokeTests::run_all(&client).await;
 //!     results.print_report();
-//!     
+//!
 //!     Ok(())
 //! }
 //! ```
@@ -35,7 +35,7 @@ pub mod isolation;
 pub mod result;
 pub mod specs;
 
-pub use audit::{AuditConfig, AuditMode};
+pub use audit::{AuditConfig, AuditEventBuilder, AuditMode};
 pub use client::AuditClient;
 pub use fixtures::{
     // Git operation helpers
