@@ -20,15 +20,16 @@ async fn main() -> Result<()> {
     info!("Git data directory: {}", config.git_data_path);
 
     // Create Nostr relay with NIP-34 validation
-    if let Ok(relay) = nostr::builder::create_relay(&config) {
+    // Returns both the relay and database for direct queries in handlers
+    if let Ok(relay_with_db) = nostr::builder::create_relay(&config) {
         info!(
             "Relay created with NIP-34 validation for domain: {}",
             config.domain
         );
 
-        // Start HTTP server with integrated relay
+        // Start HTTP server with integrated relay and database
         info!("Starting HTTP server on {}", config.bind_address);
-        http::run_server(config, relay).await?;
+        http::run_server(config, relay_with_db.relay, relay_with_db.database).await?;
     }
 
     Ok(())

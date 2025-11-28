@@ -717,8 +717,20 @@ impl WritePolicy for Nip34WritePolicy {
     }
 }
 
+/// Result of creating a relay - includes both the relay and database
+pub struct RelayWithDatabase {
+    /// The local relay instance
+    pub relay: LocalRelay,
+    /// The database Arc that can be used for direct queries
+    pub database: Arc<MemoryDatabase>,
+}
+
 /// Create a configured LocalRelay with full GRASP-01 validation
-pub fn create_relay(config: &Config) -> Result<LocalRelay> {
+///
+/// Returns a `RelayWithDatabase` struct containing:
+/// - The `LocalRelay` for handling WebSocket connections
+/// - The `Arc<MemoryDatabase>` for direct database queries (e.g., push authorization)
+pub fn create_relay(config: &Config) -> Result<RelayWithDatabase> {
     tracing::info!("Configuring nostr relay with GRASP-01 validation...");
 
     // Determine database path
@@ -770,5 +782,8 @@ pub fn create_relay(config: &Config) -> Result<LocalRelay> {
         config.domain
     );
 
-    Ok(LocalRelay::new(builder))
+    Ok(RelayWithDatabase {
+        relay: LocalRelay::new(builder),
+        database,
+    })
 }

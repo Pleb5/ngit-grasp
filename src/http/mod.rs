@@ -7,6 +7,7 @@ pub mod nip11;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use hyper::body::{Bytes, Incoming};
 use hyper::header::{CONNECTION, SEC_WEBSOCKET_ACCEPT, UPGRADE};
@@ -17,6 +18,8 @@ use hyper_util::rt::TokioIo;
 use http_body_util::{BodyExt, Full};
 use nostr_sdk::hashes::sha1::Hash as Sha1Hash;
 use nostr_sdk::hashes::{Hash, HashEngine};
+use nostr_sdk::PublicKey;
+use nostr_relay_builder::prelude::MemoryDatabase;
 use nostr_relay_builder::LocalRelay;
 use tokio::net::TcpListener;
 use base64::Engine;
@@ -42,14 +45,17 @@ struct HttpService {
     relay: LocalRelay,
     config: Config,
     remote: SocketAddr,
+    /// Database reference for direct queries (e.g., push authorization)
+    database: Arc<MemoryDatabase>,
 }
 
 impl HttpService {
-    fn new(relay: LocalRelay, config: Config, remote: SocketAddr) -> Self {
+    fn new(relay: LocalRelay, config: Config, remote: SocketAddr, database: Arc<MemoryDatabase>) -> Self {
         Self {
             relay,
             config,
             remote,
+            database,
         }
     }
 }
@@ -65,7 +71,7 @@ impl Service<Request<Incoming>> for HttpService {
         let query = req.uri().query().map(|s| s.to_string());
         let method = req.method().clone();
         let git_data_path = self.config.git_data_path.clone();
-        let relay_domain = self.config.domain.clone();
+        let database = self.database.clone();
 
         // Handle OPTIONS preflight requests (CORS)
         // GRASP-01 spec line 47: Respond to OPTIONS with 204 No Content
@@ -118,17 +124,27 @@ impl Service<Request<Incoming>> for HttpService {
                         git::handlers::handle_upload_pack(repo_path, body_bytes).await
                     }
                     
-                    // POST /git-receive-pack (push) - with GRASP authorization
+                    // POST /git-receive-pack (push) - with GRASP authorization via database
                     (m, "git-receive-pack") if m == Method::POST => {
-                        // Build authorization parameters for GRASP validation
-                        // Use ws:// protocol for relay since we're connecting internally
-                        let relay_url = format!("ws://{}", relay_domain);
-                        let auth_params = git::handlers::PushAuthParams {
-                            relay_url,
-                            owner_npub: npub.clone(),
-                            identifier: identifier.clone(),
+                        // Convert npub (bech32) to hex pubkey for authorization
+                        let owner_pubkey_hex = match PublicKey::parse(&npub) {
+                            Ok(pk) => pk.to_hex(),
+                            Err(e) => {
+                                tracing::warn!("Invalid npub in URL {}: {}", npub, e);
+                                return Ok(add_cors_headers(Response::builder())
+                                    .status(hyper::StatusCode::BAD_REQUEST)
+                                    .body(Full::new(Bytes::from(format!("Invalid npub: {}", e))))
+                                    .unwrap());
+                            }
                         };
-                        git::handlers::handle_receive_pack(repo_path, body_bytes.clone(), Some(auth_params)).await
+                        
+                        git::handlers::handle_receive_pack(
+                            repo_path,
+                            body_bytes.clone(),
+                            Some(database.clone()),
+                            &identifier,
+                            &owner_pubkey_hex,
+                        ).await
                     }
                     
                     _ => {
@@ -255,7 +271,16 @@ fn derive_accept_key(request_key: &[u8]) -> String {
 }
 
 /// Start the HTTP server with integrated Nostr relay
-pub async fn run_server(config: Config, relay: LocalRelay) -> anyhow::Result<()> {
+///
+/// # Arguments
+/// * `config` - Server configuration
+/// * `relay` - The LocalRelay for WebSocket connections
+/// * `database` - The database for direct queries (e.g., push authorization)
+pub async fn run_server(
+    config: Config,
+    relay: LocalRelay,
+    database: Arc<MemoryDatabase>,
+) -> anyhow::Result<()> {
     let bind_addr: SocketAddr = config.bind_address.parse()?;
 
     tracing::info!("Starting HTTP server on {}", bind_addr);
@@ -267,7 +292,7 @@ pub async fn run_server(config: Config, relay: LocalRelay) -> anyhow::Result<()>
     loop {
         let (socket, addr) = listener.accept().await?;
         let io = TokioIo::new(socket);
-        let service = HttpService::new(relay.clone(), config.clone(), addr);
+        let service = HttpService::new(relay.clone(), config.clone(), addr, database.clone());
         
         tokio::spawn(async move {
             if let Err(e) = http1::Builder::new()

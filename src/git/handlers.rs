@@ -3,17 +3,19 @@
 //! This module implements the HTTP handlers for Git Smart HTTP protocol.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use hyper::{body::Bytes, Response, StatusCode};
 use http_body_util::Full;
+use nostr_relay_builder::prelude::MemoryDatabase;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, info, warn};
 
 use super::authorization::{
-    AuthorizationContext, AuthorizationResult, parse_pushed_refs, validate_push_refs,
+    get_authorization_for_owner, parse_pushed_refs, validate_push_refs, AuthorizationResult,
 };
 use super::protocol::{GitService, PktLine};
 use super::subprocess::GitSubprocess;
-use super::{try_set_head_if_available};
+use super::try_set_head_if_available;
 
 use crate::nostr::events::RepositoryState;
 
@@ -150,17 +152,6 @@ pub async fn handle_upload_pack(
         .unwrap())
 }
 
-/// Authorization parameters for push operations
-#[derive(Debug, Clone)]
-pub struct PushAuthParams {
-    /// The relay URL for fetching events (e.g., "ws://localhost:8080")
-    pub relay_url: String,
-    /// The npub of the repository owner
-    pub owner_npub: String,
-    /// The repository identifier (d tag)
-    pub identifier: String,
-}
-
 /// Handle POST /git-receive-pack (push)
 ///
 /// This includes GRASP authorization validation according to GRASP-01:
@@ -169,10 +160,19 @@ pub struct PushAuthParams {
 ///
 /// Also per GRASP-01: "MUST set repository HEAD per repository state announcement
 /// as soon as the git data related to that branch has been received."
+///
+/// # Arguments
+/// * `repo_path` - Path to the bare git repository
+/// * `request_body` - The git pack data from the client
+/// * `database` - Optional database reference for authorization queries
+/// * `identifier` - The repository identifier (d tag) for authorization lookup
+/// * `owner_pubkey` - The owner's public key (hex) from the URL path, scoping authorization
 pub async fn handle_receive_pack(
     repo_path: PathBuf,
     request_body: Bytes,
-    auth_params: Option<PushAuthParams>,
+    database: Option<Arc<MemoryDatabase>>,
+    identifier: &str,
+    owner_pubkey: &str,
 ) -> Result<Response<Full<Bytes>>, GitError> {
     debug!("Handling receive-pack for {:?}", repo_path);
 
@@ -183,26 +183,25 @@ pub async fn handle_receive_pack(
     // Keep track of state for HEAD setting after push
     let mut authorized_state: Option<RepositoryState> = None;
 
-    // GRASP Authorization Check
-    if let Some(ref params) = auth_params {
+    // GRASP Authorization Check (if database is provided)
+    if let Some(ref db) = database {
         info!(
-            "Authorizing push for {}/{} via {}",
-            params.owner_npub, params.identifier, params.relay_url
+            "Authorizing push for {} owned by {} via database query",
+            identifier, owner_pubkey
         );
 
-        match authorize_push(params, &request_body).await {
+        match authorize_push(db, identifier, owner_pubkey, &request_body).await {
             Ok(auth_result) => {
                 if !auth_result.authorized {
                     warn!(
-                        "Push rejected for {}/{}: {}",
-                        params.owner_npub, params.identifier, auth_result.reason
+                        "Push rejected for {}: {}",
+                        identifier, auth_result.reason
                     );
                     return Err(GitError::Unauthorized);
                 }
                 info!(
-                    "Push authorized for {}/{} - {} maintainers",
-                    params.owner_npub,
-                    params.identifier,
+                    "Push authorized for {} - {} maintainers",
+                    identifier,
                     auth_result.maintainers.len()
                 );
                 // Save the state for HEAD setting after push
@@ -210,14 +209,14 @@ pub async fn handle_receive_pack(
             }
             Err(e) => {
                 warn!(
-                    "Authorization check failed for {}/{}: {}",
-                    params.owner_npub, params.identifier, e
+                    "Authorization check failed for {}: {}",
+                    identifier, e
                 );
                 return Err(GitError::Unauthorized);
             }
         }
     } else {
-        debug!("No authorization parameters provided - accepting push");
+        debug!("No database provided - accepting push without authorization");
     }
 
     // Spawn git receive-pack
@@ -299,50 +298,25 @@ pub async fn handle_receive_pack(
 
 /// Perform GRASP authorization for a push operation
 ///
-/// This function:
-/// 1. Fetches announcement and state events from the relay
-/// 2. Collects all authorized publishers from announcements
-/// 3. Gets the latest authorized state
-/// 4. Validates that pushed refs match the state
+/// This function queries the database directly (not via WebSocket):
+/// 1. Fetches announcement and state events for the identifier
+/// 2. Filters to the specific owner's announcement
+/// 3. Collects authorized publishers from that announcement (owner + maintainers)
+/// 4. Gets the latest authorized state from those publishers
+/// 5. Validates that pushed refs match the state
 async fn authorize_push(
-    params: &PushAuthParams,
+    database: &Arc<MemoryDatabase>,
+    identifier: &str,
+    owner_pubkey: &str,
     request_body: &Bytes,
 ) -> anyhow::Result<AuthorizationResult> {
-    use nostr_sdk::ClientBuilder;
-    use std::time::Duration;
-
     debug!(
-        "Fetching events for identifier {} from relay {}",
-        params.identifier, params.relay_url
+        "Authorizing push for {} owned by {} via database query",
+        identifier, owner_pubkey
     );
 
-    // Create a Nostr client to fetch events
-    let client = ClientBuilder::default().build();
-    client.add_relay(&params.relay_url).await?;
-    client.connect().await;
-
-    // Create filter for repository events
-    let filter = AuthorizationContext::create_filter(&params.identifier);
-
-    // Fetch events with timeout
-    let events = client.fetch_events(filter, Duration::from_secs(5))
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to fetch events: {}", e))?;
-
-    let events: Vec<_> = events.into_iter().collect();
-    debug!("Fetched {} events from relay", events.len());
-
-    if events.is_empty() {
-        return Ok(AuthorizationResult::denied(
-            "No repository announcement or state events found on relay",
-        ));
-    }
-
-    // Create authorization context
-    let ctx = AuthorizationContext::new(events);
-
-    // Get the authorized state (no owner_pubkey needed - self-contained check)
-    let auth_result = ctx.get_authorized_state(&params.identifier)?;
+    // Get authorization result from database, scoped to specific owner
+    let auth_result = get_authorization_for_owner(database, identifier, owner_pubkey).await?;
 
     if !auth_result.authorized {
         return Ok(auth_result);

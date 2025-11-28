@@ -9,7 +9,7 @@
 //!
 //! ## Authorization Flow (Efficient Single-Query Approach)
 //!
-//! 1. Fetch announcement and state events for the repository from the relay
+//! 1. Fetch announcement and state events for the repository from the relay database
 //! 2. Collect all authorized publishers: announcement authors + listed maintainers
 //! 3. Find the latest state event authored by any authorized publisher
 //! 4. Validate that the pushed refs match the state event
@@ -20,15 +20,376 @@
 //! same identifier:
 //! - They are the author of that announcement, OR
 //! - They are listed in the "maintainers" tag of that announcement
+//!
+//! ## Shared Helper Functions
+//!
+//! This module provides helper functions that can be used by both:
+//! - Git push authorization in handlers.rs
+//! - HEAD updates triggered by state events in builder.rs (event policy)
 
 use anyhow::{anyhow, Result};
-use nostr_sdk::{Alphabet, Event, Filter, Kind, PublicKey, SingleLetterTag, Timestamp, ToBech32};
-use std::collections::HashSet;
+use nostr_relay_builder::prelude::*;
+use nostr_sdk::ToBech32;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use tracing::debug;
 
 use crate::nostr::events::{
     RepositoryAnnouncement, RepositoryState, KIND_REPOSITORY_ANNOUNCEMENT, KIND_REPOSITORY_STATE,
 };
+
+/// Repository data fetched from the database
+///
+/// Contains all announcements and states for a given identifier,
+/// fetched with a single filter query.
+#[derive(Debug)]
+pub struct RepositoryData {
+    /// All repository announcements with this identifier
+    pub announcements: Vec<RepositoryAnnouncement>,
+    /// All repository state events with this identifier
+    pub states: Vec<RepositoryState>,
+}
+
+/// Fetch all repository data (announcements + states) for a given identifier
+///
+/// This performs a single database query to fetch both announcement and state events,
+/// which is more efficient than separate queries.
+pub async fn fetch_repository_data(
+    database: &Arc<MemoryDatabase>,
+    identifier: &str,
+) -> Result<RepositoryData> {
+    let filter = Filter::new()
+        .kinds([
+            Kind::from(KIND_REPOSITORY_ANNOUNCEMENT),
+            Kind::from(KIND_REPOSITORY_STATE),
+        ])
+        .custom_tag(
+            SingleLetterTag::lowercase(Alphabet::D),
+            identifier.to_string(),
+        );
+
+    let events: Vec<Event> = database
+        .query(filter)
+        .await
+        .map_err(|e| anyhow!("Database query failed: {}", e))?
+        .into_iter()
+        .collect();
+
+    debug!(
+        "Fetched {} events for identifier {} from database",
+        events.len(),
+        identifier
+    );
+
+    // Separate into announcements and states
+    let mut announcements = Vec::new();
+    let mut states = Vec::new();
+
+    for event in events {
+        if event.kind == Kind::from(KIND_REPOSITORY_ANNOUNCEMENT) {
+            if let Ok(announcement) = RepositoryAnnouncement::from_event(event) {
+                announcements.push(announcement);
+            }
+        } else if event.kind == Kind::from(KIND_REPOSITORY_STATE) {
+            if let Ok(state) = RepositoryState::from_event(event) {
+                states.push(state);
+            }
+        }
+    }
+
+    debug!(
+        "Parsed {} announcements and {} states for identifier {}",
+        announcements.len(),
+        states.len(),
+        identifier
+    );
+
+    Ok(RepositoryData {
+        announcements,
+        states,
+    })
+}
+
+/// Collect authorized maintainers grouped by owner from a set of announcements
+///
+/// For each announcement, returns a map from owner pubkey to authorized maintainers:
+/// - The owner is always included in their own list
+/// - All pubkeys listed in the "maintainers" tag are also included
+/// - **Recursively**: if a maintainer also has an announcement for the same identifier,
+///   their maintainers are included too (transitive closure)
+///
+/// This allows looking up who can publish state events for a specific owner's
+/// version of the repository.
+///
+/// ## Example
+///
+/// If Alice's announcement lists Bob as maintainer, and Bob's announcement (for the
+/// same identifier) lists Charlie as maintainer, then Alice's authorized set will
+/// be {Alice, Bob, Charlie}.
+pub fn collect_authorized_maintainers(
+    announcements: &[RepositoryAnnouncement],
+) -> HashMap<String, Vec<String>> {
+    let mut by_owner: HashMap<String, Vec<String>> = HashMap::new();
+
+    for announcement in announcements {
+        let owner = announcement.event.pubkey.to_hex();
+        let identifier = &announcement.identifier;
+
+        // Use recursive helper to get all maintainers
+        let mut checked: HashSet<String> = HashSet::new();
+        get_maintainers_recursive(announcements, &owner, identifier, &mut checked);
+
+        by_owner.insert(owner, checked.into_iter().collect());
+    }
+
+    debug!(
+        "Collected maintainers for {} owners from {} announcements (with recursive expansion)",
+        by_owner.len(),
+        announcements.len()
+    );
+
+    by_owner
+}
+
+/// Recursively find all maintainers starting from a pubkey
+///
+/// This follows the pattern from ngit-relay's GetMaintainers function:
+/// - If pubkey already checked, return early (cycle prevention)
+/// - Mark pubkey as checked
+/// - Find the announcement for this pubkey+identifier
+/// - Recursively call for each maintainer listed in that announcement
+/// - The `checked` set accumulates all visited pubkeys
+fn get_maintainers_recursive(
+    announcements: &[RepositoryAnnouncement],
+    pubkey: &str,
+    identifier: &str,
+    checked: &mut HashSet<String>,
+) {
+    // Check if this pubkey has already been processed
+    if checked.contains(pubkey) {
+        return; // Already checked - avoid cycles
+    }
+    checked.insert(pubkey.to_string()); // Mark as checked
+
+    // Find the announcement event for this pubkey+identifier
+    let announcement = announcements.iter().find(|a| {
+        a.event.pubkey.to_hex() == pubkey && a.identifier == identifier
+    });
+
+    let Some(announcement) = announcement else {
+        return; // No announcement found for this pubkey
+    };
+
+    // Recursively find maintainers for each listed maintainer
+    for maintainer_pubkey in &announcement.maintainers {
+        get_maintainers_recursive(announcements, maintainer_pubkey, identifier, checked);
+    }
+}
+
+/// Collect all authorized maintainers as a flat set from all announcements
+///
+/// This is a convenience function that flattens the per-owner maintainer lists
+/// into a single set. Use this when you don't need owner-specific authorization.
+pub fn collect_all_authorized_maintainers(
+    announcements: &[RepositoryAnnouncement],
+) -> HashSet<String> {
+    let by_owner = collect_authorized_maintainers(announcements);
+    let mut all_authorized = HashSet::new();
+    
+    for maintainers in by_owner.values() {
+        for maintainer in maintainers {
+            all_authorized.insert(maintainer.clone());
+        }
+    }
+    
+    debug!(
+        "Collected {} total authorized maintainers from {} owners",
+        all_authorized.len(),
+        by_owner.len()
+    );
+    
+    all_authorized
+}
+
+/// Find the latest state event authored by an authorized maintainer
+///
+/// Returns the state with the highest created_at timestamp among those
+/// authored by pubkeys in the authorized set.
+pub fn find_latest_authorized_state<'a>(
+    states: &'a [RepositoryState],
+    authorized_pubkeys: &HashSet<String>,
+) -> Option<&'a RepositoryState> {
+    states
+        .iter()
+        .filter(|s| {
+            let pubkey_hex = s.event.pubkey.to_hex();
+            authorized_pubkeys.contains(&pubkey_hex)
+        })
+        .max_by_key(|s| s.event.created_at)
+}
+
+/// Find the latest authorized state for a specific announcement context
+///
+/// This is similar to `find_latest_authorized_state` but considers only
+/// the maintainers authorized for a specific announcement (owner + maintainers),
+/// not the global set across all announcements.
+pub fn find_latest_state_for_announcement<'a>(
+    states: &'a [RepositoryState],
+    announcement: &RepositoryAnnouncement,
+) -> Option<&'a RepositoryState> {
+    // Build the authorized set for this specific announcement
+    let mut authorized = HashSet::new();
+    authorized.insert(announcement.event.pubkey.to_hex());
+    for maintainer in &announcement.maintainers {
+        authorized.insert(maintainer.clone());
+    }
+
+    find_latest_authorized_state(states, &authorized)
+}
+
+/// Check if a state event is the latest for its identifier among given authorized authors
+///
+/// A state is considered "latest" if no other state in the provided list
+/// from an authorized author has a newer timestamp.
+pub fn is_latest_state(
+    state: &RepositoryState,
+    all_states: &[RepositoryState],
+    authorized_pubkeys: &HashSet<String>,
+) -> bool {
+    for other in all_states {
+        // Skip self
+        if other.event.id == state.event.id {
+            continue;
+        }
+        // Only compare against authorized authors
+        if !authorized_pubkeys.contains(&other.event.pubkey.to_hex()) {
+            continue;
+        }
+        // If any authorized state is newer, this is not the latest
+        if other.event.created_at > state.event.created_at {
+            return false;
+        }
+    }
+    true
+}
+
+/// Get the authorization result for a repository from the database
+///
+/// This is the main entry point for authorization that queries the database directly.
+/// It:
+/// 1. Fetches all announcements and states for the identifier with a single query
+/// 2. Collects all authorized maintainers from announcements
+/// 3. Finds the latest state event from an authorized maintainer
+///
+/// Returns an `AuthorizationResult` that indicates whether a push is authorized.
+pub async fn get_authorization_from_db(
+    database: &Arc<MemoryDatabase>,
+    identifier: &str,
+) -> Result<AuthorizationResult> {
+    // Fetch all repository data with a single query
+    let repo_data = fetch_repository_data(database, identifier).await?;
+
+    if repo_data.announcements.is_empty() {
+        return Ok(AuthorizationResult::denied(
+            "No repository announcement found",
+        ));
+    }
+
+    // Collect all authorized maintainers (flattened across all owners)
+    let authorized = collect_all_authorized_maintainers(&repo_data.announcements);
+
+    if authorized.is_empty() {
+        return Ok(AuthorizationResult::denied(
+            "No authorized maintainers found",
+        ));
+    }
+
+    debug!(
+        "Found {} authorized maintainers for repository {}",
+        authorized.len(),
+        identifier
+    );
+
+    // Find the latest authorized state
+    match find_latest_authorized_state(&repo_data.states, &authorized) {
+        Some(state) => Ok(AuthorizationResult::authorized(
+            state.clone(),
+            authorized.into_iter().collect(),
+        )),
+        None => Ok(AuthorizationResult::denied(
+            "No state event found from authorized publishers",
+        )),
+    }
+}
+
+/// Get the authorization result for a repository scoped to a specific owner
+///
+/// Unlike `get_authorization_from_db`, this function scopes the authorization
+/// to a specific owner's announcement. This is the correct approach for Git push
+/// authorization where the URL path specifies the owner.
+///
+/// A push to `alice/my-repo` should only consider authorization from alice's
+/// announcement, not bob's announcement for the same identifier.
+///
+/// It:
+/// 1. Fetches all announcements and states for the identifier
+/// 2. Collects authorized maintainers from all announcements (grouped by owner)
+/// 3. Looks up the authorized set for the specific owner
+/// 4. Finds the latest state event from an authorized maintainer
+///
+/// Returns an `AuthorizationResult` that indicates whether a push is authorized.
+pub async fn get_authorization_for_owner(
+    database: &Arc<MemoryDatabase>,
+    identifier: &str,
+    owner_pubkey: &str,
+) -> Result<AuthorizationResult> {
+    // Fetch all repository data with a single query
+    let repo_data = fetch_repository_data(database, identifier).await?;
+
+    if repo_data.announcements.is_empty() {
+        return Ok(AuthorizationResult::denied(
+            "No repository announcement found",
+        ));
+    }
+
+    // Collect authorized maintainers grouped by owner from all announcements
+    let by_owner = collect_authorized_maintainers(&repo_data.announcements);
+
+    // Look up the authorized set for this specific owner
+    let authorized: HashSet<String> = match by_owner.get(owner_pubkey) {
+        Some(maintainers) => maintainers.iter().cloned().collect(),
+        None => {
+            return Ok(AuthorizationResult::denied(format!(
+                "No repository announcement found for owner {}",
+                owner_pubkey
+            )));
+        }
+    };
+
+    if authorized.is_empty() {
+        return Ok(AuthorizationResult::denied(
+            "No authorized maintainers found",
+        ));
+    }
+
+    debug!(
+        "Found {} authorized maintainers for repository {} (owner: {})",
+        authorized.len(),
+        identifier,
+        owner_pubkey
+    );
+
+    // Find the latest authorized state from owner's maintainer set
+    match find_latest_authorized_state(&repo_data.states, &authorized) {
+        Some(state) => Ok(AuthorizationResult::authorized(
+            state.clone(),
+            authorized.into_iter().collect(),
+        )),
+        None => Ok(AuthorizationResult::denied(
+            "No state event found from authorized publishers",
+        )),
+    }
+}
 
 /// Result of authorization check
 #[derive(Debug)]
