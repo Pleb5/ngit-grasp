@@ -167,6 +167,8 @@ pub struct RepositoryState {
     pub identifier: String,
     pub branches: Vec<BranchState>,
     pub tags: Vec<TagState>,
+    /// HEAD reference (e.g., "refs/heads/main") if specified
+    pub head: Option<String>,
 }
 
 /// Branch state (ref with commit hash)
@@ -255,11 +257,39 @@ impl RepositoryState {
             })
             .collect();
 
+        // Extract HEAD reference per NIP-34
+        // Tag format: ["HEAD", "ref: refs/heads/main"] or ["HEAD", "refs/heads/main"]
+        let head = event
+            .tags
+            .iter()
+            .find(|t| {
+                if let TagKind::Custom(s) = t.kind() {
+                    s.as_ref() == "HEAD"
+                } else {
+                    false
+                }
+            })
+            .and_then(|t| {
+                let parts = t.clone().to_vec();
+                if parts.len() >= 2 {
+                    let head_value = &parts[1];
+                    // Handle both "ref: refs/heads/main" and "refs/heads/main" formats
+                    if let Some(stripped) = head_value.strip_prefix("ref: ") {
+                        Some(stripped.to_string())
+                    } else {
+                        Some(head_value.clone())
+                    }
+                } else {
+                    None
+                }
+            });
+
         Ok(RepositoryState {
             event,
             identifier,
             branches,
             tags,
+            head,
         })
     }
 
@@ -282,6 +312,23 @@ impl RepositoryState {
     /// Get the owner npub
     pub fn owner_npub(&self) -> String {
         self.event.pubkey.to_bech32().unwrap_or_default()
+    }
+
+    /// Get the HEAD branch name (without refs/heads/ prefix)
+    pub fn get_head_branch(&self) -> Option<&str> {
+        self.head.as_ref().and_then(|h| {
+            h.strip_prefix("refs/heads/")
+        })
+    }
+
+    /// Check if the HEAD commit is available in the git repository
+    /// Returns true if we have the git data for the HEAD branch
+    pub fn head_commit_available(&self) -> bool {
+        if let Some(head_branch) = self.get_head_branch() {
+            self.get_branch_commit(head_branch).is_some()
+        } else {
+            false
+        }
     }
 }
 
@@ -600,5 +647,132 @@ mod tests {
         assert_eq!(state.tags.len(), 1);
         assert_eq!(state.get_branch_commit("main"), Some("a1b2c3d4"));
         assert_eq!(state.get_tag_commit("v1.0.0"), Some("e5f6g7h8"));
+    }
+
+    #[test]
+    fn test_state_with_head_ref_prefix() {
+        use nostr_sdk::Tag;
+
+        let keys = create_test_keys();
+        let mut tags = vec![Tag::custom(
+            nostr_sdk::TagKind::d(),
+            vec!["test-repo".to_string()],
+        )];
+
+        // Add branch
+        tags.push(Tag::custom(
+            nostr_sdk::TagKind::Custom("refs/heads/main".into()),
+            vec!["a1b2c3d4e5f6g7h8".to_string()],
+        ));
+
+        // Add HEAD with "ref: " prefix (common NIP-34 format)
+        tags.push(Tag::custom(
+            nostr_sdk::TagKind::Custom("HEAD".into()),
+            vec!["ref: refs/heads/main".to_string()],
+        ));
+
+        let event = EventBuilder::new(Kind::from(KIND_REPOSITORY_STATE), "")
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        let state = RepositoryState::from_event(event).unwrap();
+        assert_eq!(state.head, Some("refs/heads/main".to_string()));
+        assert_eq!(state.get_head_branch(), Some("main"));
+        assert!(state.head_commit_available());
+    }
+
+    #[test]
+    fn test_state_with_head_no_prefix() {
+        use nostr_sdk::Tag;
+
+        let keys = create_test_keys();
+        let mut tags = vec![Tag::custom(
+            nostr_sdk::TagKind::d(),
+            vec!["test-repo".to_string()],
+        )];
+
+        // Add branch
+        tags.push(Tag::custom(
+            nostr_sdk::TagKind::Custom("refs/heads/develop".into()),
+            vec!["deadbeefcafe".to_string()],
+        ));
+
+        // Add HEAD without "ref: " prefix (also valid)
+        tags.push(Tag::custom(
+            nostr_sdk::TagKind::Custom("HEAD".into()),
+            vec!["refs/heads/develop".to_string()],
+        ));
+
+        let event = EventBuilder::new(Kind::from(KIND_REPOSITORY_STATE), "")
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        let state = RepositoryState::from_event(event).unwrap();
+        assert_eq!(state.head, Some("refs/heads/develop".to_string()));
+        assert_eq!(state.get_head_branch(), Some("develop"));
+        assert!(state.head_commit_available());
+    }
+
+    #[test]
+    fn test_state_without_head() {
+        use nostr_sdk::Tag;
+
+        let keys = create_test_keys();
+        let tags = vec![
+            Tag::custom(
+                nostr_sdk::TagKind::d(),
+                vec!["test-repo".to_string()],
+            ),
+            Tag::custom(
+                nostr_sdk::TagKind::Custom("refs/heads/main".into()),
+                vec!["a1b2c3d4".to_string()],
+            ),
+        ];
+
+        let event = EventBuilder::new(Kind::from(KIND_REPOSITORY_STATE), "")
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        let state = RepositoryState::from_event(event).unwrap();
+        assert_eq!(state.head, None);
+        assert_eq!(state.get_head_branch(), None);
+        assert!(!state.head_commit_available());
+    }
+
+    #[test]
+    fn test_state_head_commit_not_available() {
+        use nostr_sdk::Tag;
+
+        let keys = create_test_keys();
+        let mut tags = vec![Tag::custom(
+            nostr_sdk::TagKind::d(),
+            vec!["test-repo".to_string()],
+        )];
+
+        // Add branch for "main"
+        tags.push(Tag::custom(
+            nostr_sdk::TagKind::Custom("refs/heads/main".into()),
+            vec!["a1b2c3d4".to_string()],
+        ));
+
+        // HEAD points to "develop" which doesn't exist in branches
+        tags.push(Tag::custom(
+            nostr_sdk::TagKind::Custom("HEAD".into()),
+            vec!["refs/heads/develop".to_string()],
+        ));
+
+        let event = EventBuilder::new(Kind::from(KIND_REPOSITORY_STATE), "")
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        let state = RepositoryState::from_event(event).unwrap();
+        assert_eq!(state.head, Some("refs/heads/develop".to_string()));
+        assert_eq!(state.get_head_branch(), Some("develop"));
+        // HEAD points to develop but only main branch exists in state
+        assert!(!state.head_commit_available());
     }
 }

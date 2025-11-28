@@ -13,6 +13,9 @@ use super::authorization::{
 };
 use super::protocol::{GitService, PktLine};
 use super::subprocess::GitSubprocess;
+use super::{try_set_head_if_available};
+
+use crate::nostr::events::RepositoryState;
 
 /// Handle GET /info/refs?service=git-{upload,receive}-pack
 ///
@@ -163,6 +166,9 @@ pub struct PushAuthParams {
 /// This includes GRASP authorization validation according to GRASP-01:
 /// "MUST accept pushes via this service that match the latest repo state announcement
 /// on the relay, respecting the recursive maintainer set."
+///
+/// Also per GRASP-01: "MUST set repository HEAD per repository state announcement
+/// as soon as the git data related to that branch has been received."
 pub async fn handle_receive_pack(
     repo_path: PathBuf,
     request_body: Bytes,
@@ -174,14 +180,17 @@ pub async fn handle_receive_pack(
         return Err(GitError::RepositoryNotFound);
     }
 
+    // Keep track of state for HEAD setting after push
+    let mut authorized_state: Option<RepositoryState> = None;
+
     // GRASP Authorization Check
-    if let Some(params) = auth_params {
+    if let Some(ref params) = auth_params {
         info!(
             "Authorizing push for {}/{} via {}",
             params.owner_npub, params.identifier, params.relay_url
         );
 
-        match authorize_push(&params, &request_body).await {
+        match authorize_push(params, &request_body).await {
             Ok(auth_result) => {
                 if !auth_result.authorized {
                     warn!(
@@ -196,6 +205,8 @@ pub async fn handle_receive_pack(
                     params.identifier,
                     auth_result.maintainers.len()
                 );
+                // Save the state for HEAD setting after push
+                authorized_state = auth_result.state;
             }
             Err(e) => {
                 warn!(
@@ -244,6 +255,38 @@ pub async fn handle_receive_pack(
         let stderr_str = String::from_utf8_lossy(&stderr_output);
         error!("Git receive-pack failed: {}", stderr_str);
         return Err(GitError::GitFailed(status.code()));
+    }
+
+    // GRASP-01: Set HEAD after git data is received
+    // "MUST set repository HEAD per repository state announcement
+    // as soon as the git data related to that branch has been received."
+    if let Some(state) = authorized_state {
+        if let Some(head_ref) = &state.head {
+            if let Some(branch_name) = state.get_head_branch() {
+                if let Some(commit) = state.get_branch_commit(branch_name) {
+                    match try_set_head_if_available(&repo_path, head_ref, commit) {
+                        Ok(true) => {
+                            info!(
+                                "Set HEAD to {} after push to {:?}",
+                                head_ref, repo_path
+                            );
+                        }
+                        Ok(false) => {
+                            debug!(
+                                "HEAD commit {} not found after push, HEAD not updated",
+                                commit
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Failed to set HEAD after push: {}",
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     Ok(Response::builder()

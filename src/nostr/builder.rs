@@ -12,8 +12,10 @@ use nostr::{EventId, Filter, Kind, PublicKey};
 use nostr_relay_builder::prelude::*;
 
 use crate::config::{Config, DatabaseBackend};
+use crate::git;
 use crate::nostr::events::{
-    validate_announcement, validate_state, RepositoryAnnouncement, KIND_REPOSITORY_ANNOUNCEMENT, KIND_REPOSITORY_STATE,
+    validate_announcement, validate_state, RepositoryAnnouncement, RepositoryState,
+    KIND_REPOSITORY_ANNOUNCEMENT, KIND_REPOSITORY_STATE,
 };
 
 /// NIP-34 Write Policy with Full GRASP-01 Event Validation
@@ -75,6 +77,230 @@ impl Nip34WritePolicy {
 
         tracing::info!("Created bare repository at {}", repo_path.display());
         Ok(())
+    }
+
+    /// Check if this state event is the latest for its identifier among authorized authors
+    ///
+    /// A state is considered "latest" if no other state event in the database
+    /// from an authorized author has a newer timestamp. This handles out-of-order
+    /// delivery where an older event arrives after a newer one.
+    ///
+    /// The authorized_pubkeys should be the owner and maintainers of a specific
+    /// announcement, so different owners with the same identifier don't interfere.
+    async fn is_latest_state_for_identifier(
+        database: &Arc<MemoryDatabase>,
+        state: &RepositoryState,
+        authorized_pubkeys: &[PublicKey],
+    ) -> Result<bool, String> {
+        let filter = Filter::new()
+            .kind(Kind::from(KIND_REPOSITORY_STATE))
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::D),
+                state.identifier.clone(),
+            );
+
+        match database.query(filter).await {
+            Ok(events) => {
+                for event in events {
+                    // Skip comparing to self (same event ID)
+                    if event.id == state.event.id {
+                        continue;
+                    }
+                    // Only consider events from authorized authors for this announcement
+                    if !authorized_pubkeys.contains(&event.pubkey) {
+                        continue;
+                    }
+                    // If any existing event from an authorized author is newer, this is not the latest
+                    if event.created_at > state.event.created_at {
+                        tracing::debug!(
+                            "State {} is not latest: found newer state {} from {} (ts {} > {})",
+                            state.event.id.to_hex(),
+                            event.id.to_hex(),
+                            event.pubkey.to_hex(),
+                            event.created_at.as_secs(),
+                            state.event.created_at.as_secs()
+                        );
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            Err(e) => Err(format!("Database query failed: {}", e)),
+        }
+    }
+
+    /// Find all repository announcements where the given pubkey is authorized
+    ///
+    /// A pubkey is authorized for an announcement if:
+    /// - They are the owner (pubkey of the announcement event), OR
+    /// - They are listed in the "maintainers" tag
+    ///
+    /// This is needed because a maintainer can publish a state event that
+    /// should update HEAD in the repository of the announcement owner,
+    /// not in the maintainer's own (possibly non-existent) repository.
+    async fn find_authorized_announcements(
+        database: &Arc<MemoryDatabase>,
+        identifier: &str,
+        state_author: &PublicKey,
+    ) -> Result<Vec<RepositoryAnnouncement>, String> {
+        let filter = Filter::new()
+            .kind(Kind::from(KIND_REPOSITORY_ANNOUNCEMENT))
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::D),
+                identifier.to_string(),
+            );
+
+        match database.query(filter).await {
+            Ok(events) => {
+                let mut authorized = Vec::new();
+                let state_author_hex = state_author.to_hex();
+
+                for event in events {
+                    if let Ok(announcement) = RepositoryAnnouncement::from_event(event.clone()) {
+                        // Check if state author is authorized for this announcement
+                        let is_owner = event.pubkey == *state_author;
+                        let is_maintainer = announcement.maintainers.contains(&state_author_hex);
+
+                        if is_owner || is_maintainer {
+                            tracing::debug!(
+                                "Found authorized announcement for {}: owner={}, maintainer={}",
+                                identifier,
+                                if is_owner { event.pubkey.to_hex() } else { "n/a".to_string() },
+                                is_maintainer
+                            );
+                            authorized.push(announcement);
+                        }
+                    }
+                }
+                Ok(authorized)
+            }
+            Err(e) => Err(format!("Database query failed: {}", e)),
+        }
+    }
+
+    /// Try to set repository HEAD for all authorized announcement owners
+    ///
+    /// Per GRASP-01: "MUST set repository HEAD per repository state announcement
+    /// as soon as the git data related to that branch has been received."
+    ///
+    /// This function:
+    /// 1. Checks if this state event is the latest for the identifier
+    /// 2. Finds all announcements where the state author is authorized
+    /// 3. Updates HEAD in each relevant repository
+    ///
+    /// Returns Ok(count) with the number of repositories updated.
+    async fn try_set_head_for_authorized_repos(
+        &self,
+        database: &Arc<MemoryDatabase>,
+        state: &RepositoryState,
+    ) -> Result<usize, String> {
+        // Check if state has a HEAD reference
+        let head_ref = match &state.head {
+            Some(h) => h,
+            None => {
+                tracing::debug!(
+                    "State event for {} has no HEAD reference",
+                    state.identifier
+                );
+                return Ok(0);
+            }
+        };
+
+        // Get the branch name and commit
+        let branch_name = match state.get_head_branch() {
+            Some(b) => b,
+            None => {
+                tracing::debug!(
+                    "State event for {} has invalid HEAD format: {}",
+                    state.identifier,
+                    head_ref
+                );
+                return Ok(0);
+            }
+        };
+
+        let head_commit = match state.get_branch_commit(branch_name) {
+            Some(c) => c,
+            None => {
+                tracing::debug!(
+                    "State event for {} HEAD branch {} has no commit in state",
+                    state.identifier,
+                    branch_name
+                );
+                return Ok(0);
+            }
+        };
+
+        // Find all announcements where state author is authorized
+        let announcements = Self::find_authorized_announcements(
+            database,
+            &state.identifier,
+            &state.event.pubkey,
+        ).await?;
+
+        if announcements.is_empty() {
+            tracing::debug!(
+                "No authorized announcements found for state {} by {}",
+                state.identifier,
+                state.event.pubkey.to_hex()
+            );
+            return Ok(0);
+        }
+
+        // Update HEAD in each authorized announcement's repository
+        let mut updated_count = 0;
+        for announcement in &announcements {
+            // Build the list of authorized pubkeys for this specific announcement
+            // (owner + maintainers)
+            let mut authorized_pubkeys = vec![announcement.event.pubkey];
+            for maintainer_hex in &announcement.maintainers {
+                if let Ok(pk) = PublicKey::from_hex(maintainer_hex) {
+                    authorized_pubkeys.push(pk);
+                }
+            }
+
+            // Check if this is the latest state event for THIS announcement's context
+            // Different owners with the same identifier should not interfere
+            if !Self::is_latest_state_for_identifier(database, state, &authorized_pubkeys).await? {
+                tracing::debug!(
+                    "Skipping HEAD update for {} in {}'s repo - not the latest state event for this context",
+                    state.identifier,
+                    announcement.event.pubkey.to_hex()
+                );
+                continue;
+            }
+
+            // Build repository path: <git_data_path>/<owner_npub>/<identifier>.git
+            let repo_path = self.git_data_path.join(&announcement.repo_path());
+
+            match git::try_set_head_if_available(&repo_path, head_ref, head_commit) {
+                Ok(true) => {
+                    tracing::info!(
+                        "Set HEAD to {} in repository {} (from state by {})",
+                        head_ref,
+                        repo_path.display(),
+                        state.event.pubkey.to_hex()
+                    );
+                    updated_count += 1;
+                }
+                Ok(false) => {
+                    tracing::debug!(
+                        "HEAD commit {} not available yet in {}",
+                        head_commit,
+                        repo_path.display()
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to set HEAD in {}: {}",
+                        repo_path.display(),
+                        e
+                    );
+                }
+            }
+        }
+
+        Ok(updated_count)
     }
 
     /// Extract all reference tags from an event (a, A, q, e, E)
@@ -345,13 +571,53 @@ impl WritePolicy for Nip34WritePolicy {
                         PolicyResult::Reject(e.to_string())
                     }
                 },
-                KIND_REPOSITORY_STATE =>match validate_state(event) {
+                KIND_REPOSITORY_STATE => match validate_state(event) {
                     Ok(_) => {
-                        tracing::debug!(
-                            "Accepted repository state: {}",
-                            event_id_str
-                        );
-                        PolicyResult::Accept
+                        // Parse state to get HEAD and branch info
+                        match RepositoryState::from_event(event.clone()) {
+                            Ok(state) => {
+                                // Try to set HEAD for all authorized repos if this is the latest state
+                                match self.try_set_head_for_authorized_repos(&database, &state).await {
+                                    Ok(count) if count > 0 => {
+                                        tracing::info!(
+                                            "Set HEAD from state event {} for {} repo(s) with identifier {}",
+                                            event_id_str,
+                                            count,
+                                            state.identifier
+                                        );
+                                    }
+                                    Ok(_) => {
+                                        tracing::debug!(
+                                            "HEAD not set from state {} - git data not available yet or not latest",
+                                            event_id_str
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "Failed to process HEAD from state {}: {}",
+                                            event_id_str,
+                                            e
+                                        );
+                                    }
+                                }
+                                
+                                tracing::debug!(
+                                    "Accepted repository state: {}",
+                                    event_id_str
+                                );
+                                PolicyResult::Accept
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to parse repository state {}: {}",
+                                    event_id_str,
+                                    e
+                                );
+                                // Still accept the event even if we can't parse it
+                                // The validation passed, so it's structurally valid
+                                PolicyResult::Accept
+                            }
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(
