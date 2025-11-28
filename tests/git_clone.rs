@@ -64,3 +64,4 @@ macro_rules! isolated_test {
 // Generate isolated tests for all git clone tests
 isolated_test!(test_basic_git_clone);
 isolated_test!(test_clone_url_format);
+isolated_test!(test_sha1_capabilities_advertised);

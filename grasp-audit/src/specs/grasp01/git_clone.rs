@@ -7,6 +7,7 @@
 //! - Basic clone operation via HTTP
 //! - Cloned repository structure validation
 //! - Clone URL format verification
+//! - SHA1 capability advertisement verification
 //!
 //! ## Running Tests
 //!
@@ -34,6 +35,7 @@ impl GitCloneTests {
 
         results.add(Self::test_basic_git_clone(client, git_data_dir, relay_domain).await);
         results.add(Self::test_clone_url_format(client, git_data_dir, relay_domain).await);
+        results.add(Self::test_sha1_capabilities_advertised(client, git_data_dir, relay_domain).await);
 
         results
     }
@@ -274,6 +276,158 @@ impl GitCloneTests {
             test_name,
             "GRASP-01",
             "Clone URL must follow correct format",
+        )
+        .pass()
+    }
+
+    /// Test that SHA1 capabilities are advertised in git-upload-pack
+    ///
+    /// GRASP-01 requires:
+    /// "MUST include `allow-reachable-sha1-in-want` and `allow-tip-sha1-in-want`
+    /// in advertisement and serve available oids."
+    ///
+    /// This test verifies:
+    /// 1. The info/refs endpoint returns the capabilities
+    /// 2. Both allow-reachable-sha1-in-want and allow-tip-sha1-in-want are present
+    pub async fn test_sha1_capabilities_advertised(
+        client: &AuditClient,
+        git_data_dir: &Path,
+        relay_domain: &str,
+    ) -> TestResult {
+        let test_name = "test_sha1_capabilities_advertised";
+        let ctx = TestContext::new(client);
+
+        // Create repository announcement
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+            Ok(r) => r,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "MUST include allow-reachable-sha1-in-want and allow-tip-sha1-in-want in advertisement",
+                )
+                .fail(&format!("Failed to create repo fixture: {}", e))
+            }
+        };
+
+        // Wait for repository creation
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Extract repo identifier and npub
+        let repo_id = match repo
+            .tags
+            .iter()
+            .find(|t| t.kind() == TagKind::d())
+            .and_then(|t| t.content())
+        {
+            Some(id) => id.to_string(),
+            None => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "MUST include allow-reachable-sha1-in-want and allow-tip-sha1-in-want in advertisement",
+                )
+                .fail("Repository announcement missing d tag")
+            }
+        };
+
+        let npub = match repo.pubkey.to_bech32() {
+            Ok(n) => n,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "MUST include allow-reachable-sha1-in-want and allow-tip-sha1-in-want in advertisement",
+                )
+                .fail(&format!("Failed to convert pubkey to npub: {}", e))
+            }
+        };
+
+        // Verify repository exists
+        let repo_path = git_data_dir.join(&npub).join(format!("{}.git", repo_id));
+        if !repo_path.exists() {
+            return TestResult::new(
+                test_name,
+                "GRASP-01",
+                "MUST include allow-reachable-sha1-in-want and allow-tip-sha1-in-want in advertisement",
+            )
+            .fail(&format!(
+                "Repository not found at: {}",
+                repo_path.display()
+            ));
+        }
+
+        // Build info/refs URL for git-upload-pack service
+        let info_refs_url = format!(
+            "http://{}/{}/{}.git/info/refs?service=git-upload-pack",
+            relay_domain, npub, repo_id
+        );
+
+        // Make HTTP request to get the advertisement
+        let http_client = reqwest::Client::new();
+        let response = match http_client.get(&info_refs_url).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "MUST include allow-reachable-sha1-in-want and allow-tip-sha1-in-want in advertisement",
+                )
+                .fail(&format!("HTTP request failed: {}", e))
+            }
+        };
+
+        if !response.status().is_success() {
+            return TestResult::new(
+                test_name,
+                "GRASP-01",
+                "MUST include allow-reachable-sha1-in-want and allow-tip-sha1-in-want in advertisement",
+            )
+            .fail(&format!(
+                "info/refs request failed with status: {}",
+                response.status()
+            ));
+        }
+
+        // Get response body
+        let body = match response.text().await {
+            Ok(b) => b,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "MUST include allow-reachable-sha1-in-want and allow-tip-sha1-in-want in advertisement",
+                )
+                .fail(&format!("Failed to read response body: {}", e))
+            }
+        };
+
+        // Check for required capabilities
+        let has_allow_reachable = body.contains("allow-reachable-sha1-in-want");
+        let has_allow_tip = body.contains("allow-tip-sha1-in-want");
+
+        if !has_allow_reachable {
+            return TestResult::new(
+                test_name,
+                "GRASP-01",
+                "MUST include allow-reachable-sha1-in-want and allow-tip-sha1-in-want in advertisement",
+            )
+            .fail("Missing capability: allow-reachable-sha1-in-want");
+        }
+
+        if !has_allow_tip {
+            return TestResult::new(
+                test_name,
+                "GRASP-01",
+                "MUST include allow-reachable-sha1-in-want and allow-tip-sha1-in-want in advertisement",
+            )
+            .fail("Missing capability: allow-tip-sha1-in-want");
+        }
+
+        TestResult::new(
+            test_name,
+            "GRASP-01",
+            "MUST include allow-reachable-sha1-in-want and allow-tip-sha1-in-want in advertisement",
         )
         .pass()
     }
