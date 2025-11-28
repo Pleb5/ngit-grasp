@@ -1,6 +1,11 @@
 #!/bin/bash
 set -e
 
+# Change to script's directory to ensure cargo finds grasp-audit/Cargo.toml
+# This allows the script to be run from any directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
 # =============================================================================
 # Script: test-ngit-relay.sh
 # Purpose: Test ngit-relay against GRASP specifications
