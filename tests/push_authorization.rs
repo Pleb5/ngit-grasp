@@ -45,7 +45,6 @@ macro_rules! isolated_push_test {
 
             let result = PushAuthorizationTests::$test_name(
                 &client,
-                relay.git_data_dir(),
                 &relay.domain()
             ).await;
 

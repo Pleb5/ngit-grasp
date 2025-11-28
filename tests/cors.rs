@@ -68,7 +68,6 @@ macro_rules! isolated_cors_test_with_repo {
 
             let result = CorsTests::$test_name(
                 &client,
-                relay.git_data_dir(),
                 &relay.domain(),
             )
             .await;

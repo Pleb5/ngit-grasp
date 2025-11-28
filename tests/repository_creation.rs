@@ -43,7 +43,7 @@ macro_rules! isolated_test {
                 .await
                 .expect("Failed to create audit client");
 
-            let result = RepositoryCreationTests::$test_name(&client, relay.git_data_dir()).await;
+            let result = RepositoryCreationTests::$test_name(&client, &relay.domain()).await;
 
             relay.stop().await;
 

@@ -44,7 +44,6 @@ macro_rules! isolated_test {
 
             let result = GitCloneTests::$test_name(
                 &client,
-                relay.git_data_dir(),
                 &relay.domain(),
             )
             .await;
