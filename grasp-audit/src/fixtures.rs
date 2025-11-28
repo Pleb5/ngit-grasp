@@ -319,18 +319,20 @@ impl<'a> TestContext<'a> {
         Ok(event)
     }
 
-    /// Get or create a ValidRepo, with caching.
+    /// Get or create a ValidRepo, with mode-aware caching.
     /// This is a helper method that avoids async recursion by not going
     /// through get_fixture. It handles the repo specifically.
     ///
     /// Uses client's fixture_cache for caching - in Shared mode this enables
     /// cross-test reuse when the same client is used.
+    /// In Isolated mode, the cache is bypassed to ensure fresh fixtures.
     async fn get_or_create_repo(&self) -> Result<Event> {
-        // Check client's cache first (shared across all TestContext instances using same client)
-        {
+        // Only check client's cache in Shared mode
+        // In Isolated mode, we always create fresh fixtures
+        if self.mode == ContextMode::Shared {
             let cache = self.client.fixture_cache().lock().unwrap();
             if let Some(event) = cache.get(&FixtureKind::ValidRepo) {
-                tracing::debug!("get_or_create_repo() found in client cache");
+                tracing::debug!("get_or_create_repo() found in client cache (Shared mode)");
                 return Ok(event.clone());
             }
         }
@@ -357,8 +359,9 @@ impl<'a> TestContext<'a> {
         self.client.send_event(repo.clone()).await
             .with_context(|| "Failed to send repo announcement to relay")?;
 
-        // Store in client's cache (shared across all TestContext instances using same client)
-        {
+        // Store in client's cache only in Shared mode
+        // In Isolated mode, we don't cache to ensure test isolation
+        if self.mode == ContextMode::Shared {
             let mut cache = self.client.fixture_cache().lock().unwrap();
             cache.insert(FixtureKind::ValidRepo, repo.clone());
             tracing::debug!("get_or_create_repo() stored in client cache ({} entries)", cache.len());
@@ -367,11 +370,11 @@ impl<'a> TestContext<'a> {
         Ok(repo)
     }
 
-    /// Get or create a RepoWithIssue, with caching via the client.
+    /// Get or create a RepoWithIssue, with mode-aware caching via the client.
     /// Returns the issue event (repo is already sent/cached via get_or_create_repo).
     async fn get_or_create_issue(&self) -> Result<Event> {
-        // Check client's cache first
-        {
+        // Only check client's cache in Shared mode
+        if self.mode == ContextMode::Shared {
             let cache = self.client.fixture_cache().lock().unwrap();
             if let Some(event) = cache.get(&FixtureKind::RepoWithIssue) {
                 return Ok(event.clone());
@@ -392,8 +395,8 @@ impl<'a> TestContext<'a> {
         // Send it
         self.client.send_event(issue.clone()).await?;
 
-        // Store in client's cache
-        {
+        // Store in client's cache only in Shared mode
+        if self.mode == ContextMode::Shared {
             let mut cache = self.client.fixture_cache().lock().unwrap();
             cache.insert(FixtureKind::RepoWithIssue, issue.clone());
         }
