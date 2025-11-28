@@ -16,6 +16,21 @@
 //! cd grasp-audit && nix develop -c bash test-ngit-relay.sh --mode test
 //! ```
 
+/// Expected hash for PR test deterministic commit
+///
+/// This hash is produced by creating a commit with:
+/// - File: test.txt containing "PR test deterministic commit"
+/// - Message: "PR test deterministic commit"
+/// - Author: "PR Test Author <pr-test@example.com>"
+/// - Author date: 2024-01-01T00:00:00Z
+/// - Committer date: 2024-01-01T00:00:00Z
+/// - GPG signing: disabled
+/// - Parent: none (root commit)
+///
+/// Run `test_pr_test_commit_hash_discovery` to discover/verify this value.
+#[allow(dead_code)]
+const PR_TEST_COMMIT_HASH: &str = "8935183ff722bf04e861928c6a7e50868c6ca4a6";
+
 use crate::{
     clone_repo, create_commit, create_deterministic_commit, create_deterministic_commit_with_variant,
     try_push, try_push_to_ref, AuditClient, CommitVariant, FixtureKind, TestContext, TestResult,
@@ -24,6 +39,268 @@ use crate::{
 };
 use nostr_sdk::prelude::*;
 use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+// ============================================================
+// PR Event Test Helper Functions
+// ============================================================
+
+/// Creates a deterministic PR test commit in the specified repository.
+/// Returns the commit hash which should match PR_TEST_COMMIT_HASH.
+///
+/// This function handles:
+/// 1. Creating an orphan branch (removes all history)
+/// 2. Clearing staged files
+/// 3. Creating deterministic commit using PRTestCommit variant
+/// 4. Replacing main branch with the orphan branch
+/// 5. Verifying the commit hash matches expected value
+///
+/// # Arguments
+/// * `clone_path` - Path to the cloned repository
+///
+/// # Returns
+/// * `Ok(String)` - The commit hash (should match PR_TEST_COMMIT_HASH)
+/// * `Err(String)` - Error message if commit creation failed
+fn create_pr_test_commit(clone_path: &Path) -> Result<String, String> {
+    // Step 1: Create orphan branch (removes all history)
+    let _ = Command::new("git")
+        .args(["checkout", "--orphan", "pr-test-branch"])
+        .current_dir(clone_path)
+        .output();
+
+    // Step 2: Clear staged files (orphan keeps files staged from previous branch)
+    let _ = Command::new("git")
+        .args(["rm", "-rf", "--cached", "."])
+        .current_dir(clone_path)
+        .output();
+
+    // Step 3: Create deterministic commit using existing function
+    let commit_hash = create_deterministic_commit_with_variant(clone_path, CommitVariant::PRTestCommit)?;
+
+    // Step 4: Replace main branch with our new orphan branch
+    let _ = Command::new("git")
+        .args(["branch", "-D", "main"])
+        .current_dir(clone_path)
+        .output();
+
+    let _ = Command::new("git")
+        .args(["branch", "-m", "main"])
+        .current_dir(clone_path)
+        .output();
+
+    // Verify commit hash matches expected
+    if commit_hash != PR_TEST_COMMIT_HASH {
+        return Err(format!(
+            "PR test commit hash mismatch: got {}, expected {}",
+            commit_hash, PR_TEST_COMMIT_HASH
+        ));
+    }
+
+    Ok(commit_hash)
+}
+
+/// Sets up a complete PR test repository with deterministic commit.
+/// Returns: (clone_path, pr_event_id, repo_id, owner_npub)
+///
+/// This function handles the complete setup for PR event tests:
+/// 1. Gets RepoAnnouncement and PREvent fixtures
+/// 2. Extracts repo details (repo_id, owner_npub, pr_event_id)
+/// 3. Clones the repository
+/// 4. Creates the deterministic PR test commit
+///
+/// # Arguments
+/// * `ctx` - The TestContext for fixture management
+/// * `relay_url` - The relay URL for cloning (e.g., "localhost:7000")
+///
+/// # Returns
+/// * `Ok((PathBuf, String, String, String))` - (clone_path, pr_event_id, repo_id, owner_npub)
+/// * `Err(String)` - Error message if setup failed
+#[allow(dead_code)]
+async fn setup_pr_test_repo(
+    ctx: &TestContext<'_>,
+    relay_url: &str,
+) -> Result<(PathBuf, String, String, String), String> {
+    // Get fixtures
+    let repo_event = ctx
+        .get_fixture(FixtureKind::ValidRepo)
+        .await
+        .map_err(|e| format!("Failed to get repo announcement: {}", e))?;
+
+    let pr_event = ctx
+        .get_fixture(FixtureKind::PREvent)
+        .await
+        .map_err(|e| format!("Failed to get PR event: {}", e))?;
+
+    // Extract repo details using nostr-sdk 0.43 API (field access)
+    let repo_id = repo_event
+        .tags
+        .iter()
+        .find(|t| t.kind() == TagKind::d())
+        .and_then(|t| t.content())
+        .ok_or("No repo identifier in announcement")?
+        .to_string();
+
+    let owner_npub = repo_event.pubkey.to_bech32().map_err(|e| e.to_string())?;
+    let pr_event_id = pr_event.id.to_hex();
+
+    // Clone the repository
+    let clone_path = clone_repo(relay_url, &owner_npub, &repo_id)?;
+
+    // Create the PR test commit
+    create_pr_test_commit(&clone_path)?;
+
+    Ok((clone_path, pr_event_id, repo_id, owner_npub))
+}
+
+// ============================================================
+// PR Ref Push Test Setup Helpers - Minimize Test Duplication
+// ============================================================
+
+/// Result of setting up a repo with a wrong commit pushed before PR event exists.
+/// Used as shared setup for tests 3, 4, 5 which all depend on this scenario.
+#[allow(dead_code)]
+struct PrRefTestSetup {
+    clone_path: PathBuf,
+    pr_event_id: String,
+    repo_id: String,
+    owner_npub: String,
+    wrong_commit_hash: String,
+}
+
+impl PrRefTestSetup {
+    fn cleanup(&self) {
+        let _ = std::fs::remove_dir_all(&self.clone_path);
+    }
+}
+
+/// Sets up a repo and pushes a WRONG commit to refs/nostr/<pr-event-id> BEFORE PR event exists.
+///
+/// This is the shared setup for PR ref lifecycle tests:
+/// - Creates repo (gets PREvent fixture for event-id but doesn't publish yet)
+/// - Clones repo
+/// - Creates a commit that does NOT match PR_TEST_COMMIT_HASH
+/// - Pushes to refs/nostr/<pr-event-id> (should succeed - no event to validate against)
+///
+/// Tests using this setup:
+/// - test_pr_push_to_nostr_ref_with_wrong_commit_accepted_before_event_received: verify initial push accepted
+/// - test_pr_event_published_removes_nostr_ref_at_incorrect_commit: publish event, verify cleanup
+/// - test_push_to_nostr_ref_with_wrong_commit_after_event_received_rejected: publish event, try push wrong commit
+/// - test_push_to_nostr_ref_with_correct_commit_after_event_received_accepted: publish event, push correct commit
+#[allow(dead_code)]
+async fn setup_repo_with_wrong_commit_pushed(
+    ctx: &TestContext<'_>,
+    relay_domain: &str,
+) -> Result<PrRefTestSetup, String> {
+    // Get fixtures (PREvent fixture creates the event but doesn't publish until we call get_fixture)
+    let repo_event = ctx
+        .get_fixture(FixtureKind::ValidRepo)
+        .await
+        .map_err(|e| format!("Failed to get repo announcement: {}", e))?;
+
+    // Get PR event fixture (creates event object but doesn't publish to relay yet)
+    let pr_event = ctx
+        .get_fixture(FixtureKind::PREvent)
+        .await
+        .map_err(|e| format!("Failed to get PR event fixture: {}", e))?;
+
+    let repo_id = repo_event
+        .tags
+        .iter()
+        .find(|t| t.kind() == TagKind::d())
+        .and_then(|t| t.content())
+        .ok_or("No repo identifier in announcement")?
+        .to_string();
+
+    let owner_npub = repo_event.pubkey.to_bech32().map_err(|e| e.to_string())?;
+    let pr_event_id = pr_event.id.to_hex();
+
+    // Clone the repository
+    let clone_path = clone_repo(relay_domain, &owner_npub, &repo_id)?;
+
+    // Create a WRONG commit (not the one expected by PR event)
+    let wrong_commit_hash = create_deterministic_commit_with_variant(&clone_path, CommitVariant::Owner)?;
+
+    // Verify it's actually different from expected
+    if wrong_commit_hash == PR_TEST_COMMIT_HASH {
+        let _ = std::fs::remove_dir_all(&clone_path);
+        return Err("Test setup error: wrong_commit_hash equals PR_TEST_COMMIT_HASH".to_string());
+    }
+
+    // Push to refs/nostr/<pr-event-id> (no event published yet, should succeed)
+    let push_output = Command::new("git")
+        .args(["push", "origin", &format!("main:refs/nostr/{}", pr_event_id)])
+        .current_dir(&clone_path)
+        .output()
+        .map_err(|e| format!("Failed to execute git push: {}", e))?;
+
+    if !push_output.status.success() {
+        let stderr = String::from_utf8_lossy(&push_output.stderr);
+        let _ = std::fs::remove_dir_all(&clone_path);
+        return Err(format!(
+            "Initial push failed (expected success before PR event): {}",
+            stderr
+        ));
+    }
+
+    Ok(PrRefTestSetup {
+        clone_path,
+        pr_event_id,
+        repo_id,
+        owner_npub,
+        wrong_commit_hash,
+    })
+}
+
+/// Publishes the PR event fixture and waits for relay to process it.
+/// Call this after setup_repo_with_wrong_commit_pushed to test post-event behavior.
+#[allow(dead_code)]
+async fn publish_pr_event_and_wait(ctx: &TestContext<'_>) -> Result<Event, String> {
+    // Publishing the PR event - get_fixture publishes if not already published
+    let pr_event = ctx
+        .get_fixture(FixtureKind::PREvent)
+        .await
+        .map_err(|e| format!("Failed to publish PR event: {}", e))?;
+
+    // Wait for relay to process
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    Ok(pr_event)
+}
+
+/// Creates the correct PR test commit (matching PR_TEST_COMMIT_HASH) in an existing clone.
+/// Used after wrong commit was pushed to test pushing the correct commit.
+#[allow(dead_code)]
+fn reset_to_correct_pr_commit(clone_path: &Path) -> Result<String, String> {
+    // Create the correct PR test commit (replaces current state)
+    create_pr_test_commit(clone_path)
+}
+
+/// Attempts to push current HEAD to refs/nostr/<pr-event-id>.
+/// Returns Ok(true) if push succeeded, Ok(false) if rejected, Err on git error.
+#[allow(dead_code)]
+fn push_to_pr_ref(clone_path: &Path, pr_event_id: &str) -> Result<bool, String> {
+    let push_output = Command::new("git")
+        .args(["push", "--force", "origin", &format!("main:refs/nostr/{}", pr_event_id)])
+        .current_dir(clone_path)
+        .output()
+        .map_err(|e| format!("Failed to execute git push: {}", e))?;
+
+    Ok(push_output.status.success())
+}
+
+/// Checks if a ref exists on the remote.
+#[allow(dead_code)]
+fn ref_exists_on_remote(clone_path: &Path, ref_name: &str) -> Result<bool, String> {
+    let output = Command::new("git")
+        .args(["ls-remote", "origin", ref_name])
+        .current_dir(clone_path)
+        .output()
+        .map_err(|e| format!("Failed to execute git ls-remote: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(!stdout.trim().is_empty())
+}
 
 /// Test suite for Push Authorization operations
 pub struct PushAuthorizationTests;
@@ -41,8 +318,11 @@ impl PushAuthorizationTests {
         results.add(Self::test_push_rejected_wrong_commit(client, relay_domain).await);
         results.add(Self::test_push_authorized_by_maintainer_state_only(client, relay_domain).await);
         results.add(Self::test_push_authorized_by_recursive_maintainer_state(client, relay_domain).await);
-        results.add(Self::test_push_to_refs_nostr_valid_event_id(client, relay_domain).await);
-        results.add(Self::test_push_to_refs_nostr_invalid_event_id(client, relay_domain).await);
+        results.add(Self::test_push_to_nostr_ref_with_invalid_event_id_rejected(client, relay_domain).await);
+        results.add(Self::test_pr_push_to_nostr_ref_with_wrong_commit_accepted_before_event_received(client, relay_domain).await);
+        results.add(Self::test_pr_event_published_removes_nostr_ref_at_incorrect_commit(client, relay_domain).await);
+        results.add(Self::test_push_to_nostr_ref_with_wrong_commit_after_event_received_rejected(client, relay_domain).await);
+        results.add(Self::test_push_to_nostr_ref_with_correct_commit_after_event_received_accepted(client, relay_domain).await);
 
         results
     }
@@ -1032,133 +1312,6 @@ impl PushAuthorizationTests {
         }
     }
 
-    /// Test that push to refs/nostr/<event-id> succeeds with valid EventId format
-    ///
-    /// GRASP-01: "MUST accept pushes via this service to `refs/nostr/<event-id>`"
-    /// The event_id must parse as a valid rust-nostr EventId (64-char hex string).
-    /// This does NOT require the ref to be listed in any state event - it's purely format validation.
-    ///
-    /// ## Fixture-First Pattern
-    ///
-    /// 1. **Generate**: Create repo with ValidRepo fixture (no state event needed)
-    /// 2. **Send**: Clone repo, create commit, push to refs/nostr/<valid-event-id>
-    /// 3. **Verify**: Push should succeed because event-id format is valid
-    pub async fn test_push_to_refs_nostr_valid_event_id(
-        client: &AuditClient,
-        relay_domain: &str,
-    ) -> TestResult {
-        let test_name = "test_push_to_refs_nostr_valid_event_id";
-
-        // ============================================================
-        // Step 1: GENERATE - Create repo (no state event needed for refs/nostr/)
-        // ============================================================
-        let ctx = TestContext::new(client);
-
-        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
-            Ok(r) => r,
-            Err(e) => {
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push to refs/nostr/<valid-event-id> accepted",
-                )
-                .fail(&format!("Failed to create repo: {}", e));
-            }
-        };
-
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-        let repo_id = repo
-            .tags
-            .iter()
-            .find(|t| t.kind() == TagKind::d())
-            .and_then(|t| t.content())
-            .unwrap()
-            .to_string();
-        let npub = repo.pubkey.to_bech32().unwrap();
-
-        // ============================================================
-        // Step 2: SEND - Clone repo, create commit, push to refs/nostr/<event-id>
-        // ============================================================
-        let clone_path = match clone_repo(relay_domain, &npub, &repo_id) {
-            Ok(p) => p,
-            Err(e) => {
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push to refs/nostr/<valid-event-id> accepted",
-                )
-                .fail(&e);
-            }
-        };
-        let cleanup = || {
-            let _ = fs::remove_dir_all(&clone_path);
-        };
-
-        // Create a unique commit
-        if let Err(e) = create_commit(&clone_path, "Test commit for refs/nostr push") {
-            cleanup();
-            return TestResult::new(
-                test_name,
-                "GRASP-01",
-                "Push to refs/nostr/<valid-event-id> accepted",
-            )
-            .fail(&e);
-        }
-
-        // Generate a random event to get a valid EventId
-        let keys = Keys::generate();
-        let event = match EventBuilder::text_note("test")
-            .sign(&keys)
-            .await
-        {
-            Ok(e) => e,
-            Err(e) => {
-                cleanup();
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push to refs/nostr/<valid-event-id> accepted",
-                )
-                .fail(&format!("Failed to create test event: {}", e));
-            }
-        };
-
-        // Use the event id as the refs/nostr/ target
-        let ref_name = format!("refs/nostr/{}", event.id);
-
-        // ============================================================
-        // Step 3: VERIFY - Push should succeed with valid event-id format
-        // ============================================================
-        let push_result = try_push_to_ref(&clone_path, &ref_name);
-        cleanup();
-
-        match push_result {
-            Ok(true) => TestResult::new(
-                test_name,
-                "GRASP-01",
-                "Push to refs/nostr/<valid-event-id> accepted",
-            )
-            .pass(),
-            Ok(false) => TestResult::new(
-                test_name,
-                "GRASP-01",
-                "Push to refs/nostr/<valid-event-id> accepted",
-            )
-            .fail(&format!(
-                "Push to {} was rejected but should be accepted. \
-                The event-id '{}' is a valid 64-character hex string (EventId format).",
-                ref_name, event.id
-            )),
-            Err(e) => TestResult::new(
-                test_name,
-                "GRASP-01",
-                "Push to refs/nostr/<valid-event-id> accepted",
-            )
-            .fail(&format!("Push error: {}", e)),
-        }
-    }
-
     /// Test that push to refs/nostr/<invalid> is rejected with invalid EventId format
     ///
     /// GRASP-01: "MUST accept pushes via this service to `refs/nostr/<event-id>`"
@@ -1170,11 +1323,11 @@ impl PushAuthorizationTests {
     /// 1. **Generate**: Create repo with ValidRepo fixture (no state event needed)
     /// 2. **Send**: Clone repo, create commit, try to push to refs/nostr/123 (invalid)
     /// 3. **Verify**: Push should be rejected because event-id format is invalid
-    pub async fn test_push_to_refs_nostr_invalid_event_id(
+    pub async fn test_push_to_nostr_ref_with_invalid_event_id_rejected(
         client: &AuditClient,
         relay_domain: &str,
     ) -> TestResult {
-        let test_name = "test_push_to_refs_nostr_invalid_event_id";
+        let test_name = "test_push_to_nostr_ref_with_invalid_event_id_rejected";
 
         // ============================================================
         // Step 1: GENERATE - Create repo (no state event needed for refs/nostr/)
@@ -1269,12 +1422,291 @@ impl PushAuthorizationTests {
             .fail(&format!("Push error: {}", e)),
         }
     }
+
+    /// Test 1: Push wrong commit to refs/nostr/<pr-event-id> BEFORE PR event is published
+    ///
+    /// This test verifies that the relay accepts pushes to refs/nostr/<event-id>
+    /// when no corresponding event exists yet. This is expected behavior because
+    /// there's no validation event to check against.
+    ///
+    /// Uses `setup_repo_with_wrong_commit_pushed` helper which handles all setup.
+    pub async fn test_pr_push_to_nostr_ref_with_wrong_commit_accepted_before_event_received(
+        client: &AuditClient,
+        relay_domain: &str,
+    ) -> TestResult {
+        let test_name = "test_pr_push_to_nostr_ref_with_wrong_commit_accepted_before_event_received";
+        let desc = "Push wrong commit to refs/nostr/<pr-event-id> before PR event (should accept)";
+        let ctx = TestContext::new(client);
+
+        // Setup includes: create repo, clone, create wrong commit, push to refs/nostr/<event-id>
+        // The push happens BEFORE PR event is published, so should succeed
+        let setup = match setup_repo_with_wrong_commit_pushed(&ctx, relay_domain).await {
+            Ok(s) => s,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", desc).fail(&e);
+            }
+        };
+
+        // Setup already pushed and verified success - just cleanup and report pass
+        setup.cleanup();
+
+        TestResult::new(test_name, "GRASP-01", desc).pass()
+    }
+
+    /// Test 2: After publishing PR event, verify that incorrect refs get cleaned up
+    ///
+    /// This test verifies the expected behavior: when a PR event is published,
+    /// the relay should validate any existing refs/nostr/<event-id> refs and
+    /// delete those that don't match the commit in the PR event's `c` tag.
+    ///
+    /// Currently NOT_IMPLEMENTED - the relay doesn't have this cleanup logic yet.
+    ///
+    /// Depends on: `setup_repo_with_wrong_commit_pushed` (wrong commit already pushed)
+    pub async fn test_pr_event_published_removes_nostr_ref_at_incorrect_commit(
+        client: &AuditClient,
+        relay_domain: &str,
+    ) -> TestResult {
+        let test_name = "test_pr_event_published_removes_nostr_ref_at_incorrect_commit";
+        let desc = "Publishing PR event should trigger cleanup of incorrect refs (NOT_IMPLEMENTED)";
+        let ctx = TestContext::new(client);
+
+        // Setup: wrong commit already pushed to refs/nostr/<pr-event-id>
+        let setup = match setup_repo_with_wrong_commit_pushed(&ctx, relay_domain).await {
+            Ok(s) => s,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", desc).fail(&e);
+            }
+        };
+
+        // NOW publish the PR event - this should trigger cleanup validation
+        if let Err(e) = publish_pr_event_and_wait(&ctx).await {
+            setup.cleanup();
+            return TestResult::new(test_name, "GRASP-01", desc).fail(&e);
+        }
+
+        // Check if the incorrect ref was deleted
+        let ref_name = format!("refs/nostr/{}", setup.pr_event_id);
+        let refs_exist = match ref_exists_on_remote(&setup.clone_path, &ref_name) {
+            Ok(exists) => exists,
+            Err(e) => {
+                setup.cleanup();
+                return TestResult::new(test_name, "GRASP-01", desc).fail(&e);
+            }
+        };
+
+        setup.cleanup();
+
+        // Document current behavior: relay doesn't implement automatic cleanup yet
+        TestResult::new(test_name, "GRASP-01", desc).fail(&format!(
+            "NOT_IMPLEMENTED: Relay should delete refs/nostr/<event-id> when PR event is published \
+             with non-matching commit. Currently ref still exists: {}. This requires relay-side validation logic.",
+            refs_exist
+        ))
+    }
+
+    /// Test 3: Push wrong commit to refs/nostr/<pr-event-id> AFTER PR event exists
+    ///
+    /// This test verifies that the relay rejects pushes to refs/nostr/<event-id>
+    /// when a corresponding event exists but the pushed commit doesn't match
+    /// the commit in the PR event's `c` tag.
+    ///
+    /// Depends on: `setup_repo_with_wrong_commit_pushed` for repo/clone setup, then publishes PR event
+    pub async fn test_push_to_nostr_ref_with_wrong_commit_after_event_received_rejected(
+        client: &AuditClient,
+        relay_domain: &str,
+    ) -> TestResult {
+        let test_name = "test_push_to_nostr_ref_with_wrong_commit_after_event_received_rejected";
+        let desc = "Push wrong commit to refs/nostr/<pr-event-id> after PR event (should reject)";
+        let ctx = TestContext::new(client);
+
+        // Setup: wrong commit already pushed (we'll use the same setup, but publish PR first)
+        let setup = match setup_repo_with_wrong_commit_pushed(&ctx, relay_domain).await {
+            Ok(s) => s,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", desc).fail(&e);
+            }
+        };
+
+        // Publish PR event FIRST (before our test push)
+        if let Err(e) = publish_pr_event_and_wait(&ctx).await {
+            setup.cleanup();
+            return TestResult::new(test_name, "GRASP-01", desc).fail(&e);
+        }
+
+        // Try to push again with wrong commit (should be rejected now that PR event exists)
+        let push_succeeded = match push_to_pr_ref(&setup.clone_path, &setup.pr_event_id) {
+            Ok(success) => success,
+            Err(e) => {
+                setup.cleanup();
+                return TestResult::new(test_name, "GRASP-01", desc).fail(&e);
+            }
+        };
+
+        setup.cleanup();
+
+        // Should REJECT - PR event exists with different commit hash
+        if push_succeeded {
+            return TestResult::new(test_name, "GRASP-01", desc)
+                .fail("Push accepted (expected rejection due to commit hash mismatch)");
+        }
+
+        TestResult::new(test_name, "GRASP-01", desc).pass()
+    }
+
+    /// Test 4: Push correct commit to refs/nostr/<pr-event-id> AFTER PR event exists
+    ///
+    /// This test verifies that the relay accepts pushes to refs/nostr/<event-id>
+    /// when a corresponding event exists AND the pushed commit matches
+    /// the commit in the PR event's `c` tag.
+    ///
+    /// Depends on: `setup_repo_with_wrong_commit_pushed` for setup, then resets to correct commit
+    pub async fn test_push_to_nostr_ref_with_correct_commit_after_event_received_accepted(
+        client: &AuditClient,
+        relay_domain: &str,
+    ) -> TestResult {
+        let test_name = "test_push_to_nostr_ref_with_correct_commit_after_event_received_accepted";
+        let desc = "Push correct commit to refs/nostr/<pr-event-id> after PR event (should accept)";
+        let ctx = TestContext::new(client);
+
+        // Setup: wrong commit already pushed
+        let setup = match setup_repo_with_wrong_commit_pushed(&ctx, relay_domain).await {
+            Ok(s) => s,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", desc).fail(&e);
+            }
+        };
+
+        // Publish PR event FIRST
+        if let Err(e) = publish_pr_event_and_wait(&ctx).await {
+            setup.cleanup();
+            return TestResult::new(test_name, "GRASP-01", desc).fail(&e);
+        }
+
+        // Reset to CORRECT commit (the one expected by PR event)
+        if let Err(e) = reset_to_correct_pr_commit(&setup.clone_path) {
+            setup.cleanup();
+            return TestResult::new(test_name, "GRASP-01", desc).fail(&e);
+        }
+
+        // Push correct commit (should succeed)
+        let push_succeeded = match push_to_pr_ref(&setup.clone_path, &setup.pr_event_id) {
+            Ok(success) => success,
+            Err(e) => {
+                setup.cleanup();
+                return TestResult::new(test_name, "GRASP-01", desc).fail(&e);
+            }
+        };
+
+        setup.cleanup();
+
+        // Should ACCEPT - commit matches PR event's c tag
+        if !push_succeeded {
+            return TestResult::new(test_name, "GRASP-01", desc)
+                .fail("Push rejected (expected acceptance since commit matches PR event)");
+        }
+
+        TestResult::new(test_name, "GRASP-01", desc).pass()
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn test_module_exists() {
         assert!(true);
+    }
+
+    /// Test to discover the PR test commit hash
+    ///
+    /// This test creates a deterministic commit with PR-specific parameters
+    /// and prints out the hash value. Once discovered, update PR_TEST_COMMIT_HASH.
+    ///
+    /// Run with: cd grasp-audit && nix develop -c cargo test --lib test_pr_test_commit_hash_discovery -- --nocapture
+    #[test]
+    fn test_pr_test_commit_hash_discovery() {
+        use std::process::Command;
+        use tempfile::TempDir;
+        use std::fs;
+
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let path = temp_dir.path();
+
+        // Initialize git repo
+        let output = Command::new("git")
+            .args(["init"])
+            .current_dir(path)
+            .output()
+            .expect("Failed to init git");
+        assert!(output.status.success(), "git init failed: {:?}", String::from_utf8_lossy(&output.stderr));
+
+        // Configure git user - use PR Test Author identity
+        let output = Command::new("git")
+            .args(["config", "user.email", "pr-test@example.com"])
+            .current_dir(path)
+            .output()
+            .expect("git config email failed");
+        assert!(output.status.success(), "git config email failed");
+
+        let output = Command::new("git")
+            .args(["config", "user.name", "PR Test Author"])
+            .current_dir(path)
+            .output()
+            .expect("git config name failed");
+        assert!(output.status.success(), "git config name failed");
+
+        // Create the deterministic file content
+        let test_file = path.join("test.txt");
+        fs::write(&test_file, "PR test deterministic commit").expect("Failed to write test file");
+
+        // Add the file
+        let output = Command::new("git")
+            .args(["add", "test.txt"])
+            .current_dir(path)
+            .output()
+            .expect("git add failed");
+        assert!(output.status.success(), "git add failed: {:?}", String::from_utf8_lossy(&output.stderr));
+
+        // Create deterministic commit with fixed dates and GPG disabled
+        let output = Command::new("git")
+            .args([
+                "-c", "commit.gpgsign=false",
+                "commit",
+                "-m", "PR test deterministic commit",
+            ])
+            .env("GIT_AUTHOR_DATE", "2024-01-01T00:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2024-01-01T00:00:00Z")
+            .current_dir(path)
+            .output()
+            .expect("git commit failed");
+        assert!(output.status.success(), "git commit failed: {:?}", String::from_utf8_lossy(&output.stderr));
+
+        // Get the commit hash
+        let output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(path)
+            .output()
+            .expect("git rev-parse failed");
+        assert!(output.status.success(), "git rev-parse failed: {:?}", String::from_utf8_lossy(&output.stderr));
+
+        let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+        println!("\n========================================");
+        println!("PR_TEST_COMMIT_HASH should be: {}", hash);
+        println!("========================================\n");
+
+        // Verify we got a valid 40-character hex hash
+        assert_eq!(hash.len(), 40, "Hash should be 40 hex chars, got: {}", hash);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()), "Hash should be hex chars only");
+
+        // If the constant is not PLACEHOLDER, verify it matches
+        if PR_TEST_COMMIT_HASH != "PLACEHOLDER" {
+            assert_eq!(
+                hash, PR_TEST_COMMIT_HASH,
+                "Commit hash mismatch! Expected {}, got {}. Update PR_TEST_COMMIT_HASH if commit parameters changed.",
+                PR_TEST_COMMIT_HASH, hash
+            );
+        }
     }
 }

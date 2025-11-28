@@ -25,6 +25,8 @@ pub struct AuditClient {
     maintainer_keys: Keys,
     /// Recursive maintainer keys for testing recursive authorization scenarios
     recursive_maintainer_keys: Keys,
+    /// PR author keys for testing PR event scenarios
+    pr_author_keys: Keys,
     /// Fixture cache for TestContext instances - shared across all contexts using this client
     fixture_cache: FixtureCache,
 }
@@ -36,6 +38,7 @@ impl AuditClient {
         let keys = Keys::generate();
         let maintainer_keys = Keys::generate();
         let recursive_maintainer_keys = Keys::generate();
+        let pr_author_keys = Keys::generate();
         let client = Client::new(keys.clone());
         Self {
             client,
@@ -43,6 +46,7 @@ impl AuditClient {
             keys,
             maintainer_keys,
             recursive_maintainer_keys,
+            pr_author_keys,
             fixture_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -52,6 +56,7 @@ impl AuditClient {
         let keys = Keys::generate();
         let maintainer_keys = Keys::generate();
         let recursive_maintainer_keys = Keys::generate();
+        let pr_author_keys = Keys::generate();
         let client = Client::new(keys.clone());
 
         // Add relay and connect
@@ -102,6 +107,7 @@ impl AuditClient {
             keys,
             maintainer_keys,
             recursive_maintainer_keys,
+            pr_author_keys,
             fixture_cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -276,6 +282,16 @@ impl AuditClient {
     /// Get the recursive maintainer public key as a hex string
     pub fn recursive_maintainer_pubkey_hex(&self) -> String {
         self.recursive_maintainer_keys.public_key().to_hex()
+    }
+
+    /// Get the PR author keys (for PR event testing)
+    pub fn pr_author_keys(&self) -> &Keys {
+        &self.pr_author_keys
+    }
+
+    /// Get the PR author public key as a hex string
+    pub fn pr_author_pubkey_hex(&self) -> String {
+        self.pr_author_keys.public_key().to_hex()
     }
 
     /// Create a NIP-34 repository announcement event with full customization

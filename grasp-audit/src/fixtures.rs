@@ -74,6 +74,17 @@ pub const MAINTAINER_DETERMINISTIC_COMMIT_HASH: &str = "1c2d472c9b71ed51968a6650
 /// NOTE: This value is different from DETERMINISTIC_COMMIT_HASH due to different content
 pub const RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH: &str = "05939b82de66fbdb9c077d0a64fc68522f3cb8e0";
 
+/// Deterministic commit hash for PR test fixtures (PRTestCommit variant)
+/// This is the hash produced by creating a commit with:
+/// - Message: "PR test deterministic commit"
+/// - File: test.txt containing "PR test deterministic commit"
+/// - Author date: 2024-01-01T00:00:00Z
+/// - Committer date: 2024-01-01T00:00:00Z
+/// - GPG signing: disabled
+/// - User: "GRASP Audit Test <test@grasp-audit.local>"
+/// - Parent: none (root commit)
+pub const PR_TEST_COMMIT_HASH: &str = "8935183ff722bf04e861928c6a7e50868c6ca4a6";
+
 /// Types of test fixtures available
 ///
 /// ## Fixture Dependencies
@@ -145,6 +156,15 @@ pub enum FixtureKind {
     /// - State event points to RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH
     /// - Timestamp: 2 seconds in the past (most recent)
     RecursiveMaintainerRepoAndState,
+
+    /// PR (Patch/Pull Request) event for the SAME repo_id as ValidRepo
+    /// - Requires ValidRepo (uses same repo_id)
+    /// - Signed by `client.pr_author_keys()`
+    /// - Kind 1617 (NIP-34 patch)
+    /// - Includes `a` tag referencing the repo
+    /// - Includes `c` tag pointing to PR_TEST_COMMIT_HASH
+    /// - Timestamp: 1 second in the past
+    PREvent,
 }
 
 /// Context mode for fixture management
@@ -633,6 +653,47 @@ impl<'a> TestContext<'a> {
                 // Return the state event (caller will send it)
                 self.build_recursive_maintainer_state(&repo_id)
             }
+
+            FixtureKind::PREvent => {
+                use nostr_sdk::prelude::*;
+
+                // Reuse ValidRepo fixture to get repo_id and owner pubkey
+                let repo = self.get_or_create_repo().await?;
+
+                let repo_id = repo
+                    .tags
+                    .iter()
+                    .find(|t| t.kind() == TagKind::d())
+                    .and_then(|t| t.content())
+                    .ok_or_else(|| anyhow::anyhow!("Missing repo_id in ValidRepo fixture"))?
+                    .to_string();
+
+                // Create PR event 1 second in the past
+                let base_time = Timestamp::now().as_u64();
+                let pr_timestamp = Timestamp::from(base_time - 1);
+
+                // Build NIP-34 patch event (kind 1617)
+                self.client
+                    .event_builder(
+                        Kind::Custom(1617), // NIP-34 patch/PR kind
+                        "Test PR for GRASP validation",
+                    )
+                    .tag(Tag::custom(
+                        TagKind::custom("a"),
+                        vec![format!(
+                            "30617:{}:{}",
+                            self.client.public_key().to_hex(), // Owner pubkey
+                            repo_id
+                        )],
+                    ))
+                    .tag(Tag::custom(
+                        TagKind::custom("c"),
+                        vec![PR_TEST_COMMIT_HASH.to_string()],
+                    ))
+                    .custom_time(pr_timestamp)
+                    .build(self.client.pr_author_keys())
+                    .map_err(|e| anyhow::anyhow!("Failed to build PR event: {}", e))
+            }
         }
     }
 
@@ -1071,6 +1132,8 @@ pub enum CommitVariant {
     Maintainer,
     /// Recursive maintainer pubkey variant - uses "Recursive maintainer initial commit" content
     RecursiveMaintainer,
+    /// PR test commit variant - for PR event tests
+    PRTestCommit,
 }
 
 impl CommitVariant {
@@ -1080,6 +1143,7 @@ impl CommitVariant {
             CommitVariant::Owner => "Initial commit",
             CommitVariant::Maintainer => "Maintainer initial commit",
             CommitVariant::RecursiveMaintainer => "Recursive maintainer initial commit",
+            CommitVariant::PRTestCommit => "PR test deterministic commit",
         }
     }
     
@@ -1089,6 +1153,7 @@ impl CommitVariant {
             CommitVariant::Owner => "Initial commit",
             CommitVariant::Maintainer => "Maintainer initial commit",
             CommitVariant::RecursiveMaintainer => "Recursive maintainer initial commit",
+            CommitVariant::PRTestCommit => "PR test deterministic commit",
         }
     }
 }

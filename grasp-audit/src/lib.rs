@@ -46,7 +46,7 @@ pub use fixtures::{
     // Types and constants
     CommitVariant, ContextMode, FixtureKind, TestContext,
     DETERMINISTIC_COMMIT_HASH, MAINTAINER_DETERMINISTIC_COMMIT_HASH,
-    RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH,
+    PR_TEST_COMMIT_HASH, RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH,
 };
 pub use result::{AuditResult, TestResult};
 
