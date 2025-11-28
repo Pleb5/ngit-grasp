@@ -21,13 +21,13 @@ nix develop -c bash test-ngit-relay.sh --mode test
 ```
 
 This automatically:
+
 - ✅ Starts ngit-relay in an isolated Docker container
 - ✅ Runs all GRASP-01 compliance tests
 - ✅ Cleans up resources when finished
 
-**Currently Passing:** 4/18 tests (14 tests stubbed with "Not implemented yet")
-
 For more options:
+
 ```bash
 ./test-ngit-relay.sh --help
 ```
@@ -218,16 +218,16 @@ pub async fn test_something(client: &AuditClient) -> TestResult {
         .run(|| async {
             // 1. Context
             let ctx = TestContext::new(client);
-            
+
             // 2. Prerequisites (cached per-TestContext)
             let repo = ctx.get_fixture(FixtureKind::ValidRepo).await?;
-            
+
             // 3. Test-specific event
             let my_event = client.create_issue(&repo, "Title", "Content", vec![])?;
-            
+
             // 4. Verify
             send_and_verify_accepted(client, my_event, "description").await?;
-            
+
             Ok(())
         })
         .await
@@ -252,14 +252,14 @@ pub async fn test_something(client: &AuditClient) -> TestResult {
 
 ### Available Fixtures
 
-| FixtureKind | Provides | Use When |
-|-------------|----------|----------|
-| `ValidRepo` | Accepted repo announcement (kind 30617) | Need a repo as prerequisite |
-| `RepoState` | Repo + state event (kind 30618) | Testing owner push authorization |
-| `MaintainerAnnouncement` | Maintainer's repo announcement | Testing maintainer chain setup |
-| `MaintainerState` | Maintainer's state event | Testing maintainer push authorization |
-| `RepoWithIssue` | Repo + accepted issue (kind 1621) | Testing issue-dependent events |
-| `RepoWithComment` | Repo + issue + comment | Testing comment-dependent events |
+| FixtureKind              | Provides                                | Use When                              |
+| ------------------------ | --------------------------------------- | ------------------------------------- |
+| `ValidRepo`              | Accepted repo announcement (kind 30617) | Need a repo as prerequisite           |
+| `RepoState`              | Repo + state event (kind 30618)         | Testing owner push authorization      |
+| `MaintainerAnnouncement` | Maintainer's repo announcement          | Testing maintainer chain setup        |
+| `MaintainerState`        | Maintainer's state event                | Testing maintainer push authorization |
+| `RepoWithIssue`          | Repo + accepted issue (kind 1621)       | Testing issue-dependent events        |
+| `RepoWithComment`        | Repo + issue + comment                  | Testing comment-dependent events      |
 
 ### Fixture Lifecycle: Generate → Send → Verify
 
@@ -283,6 +283,7 @@ Each TestContext shares a `run_id` with all events:
 ```
 
 This enables:
+
 - Event correlation within a test run
 - Production relay cleanup scripts
 - Test isolation between runs

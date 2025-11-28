@@ -1,6 +1,31 @@
 //! Test result types
 
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
+
+// ANSI color codes
+const GREEN: &str = "\x1b[32m";
+const RED: &str = "\x1b[31m";
+const RESET: &str = "\x1b[0m";
+const BOLD: &str = "\x1b[1m";
+
+/// Extract spec category from a spec_ref by removing trailing test number
+/// e.g., "GRASP-01:event-acceptance:1.1" -> "GRASP-01:event-acceptance"
+/// e.g., "NIP-01:basic:2" -> "NIP-01:basic"
+fn extract_spec_category(spec_ref: &str) -> String {
+    let parts: Vec<&str> = spec_ref.split(':').collect();
+    if parts.len() >= 2 {
+        // Check if the last part looks like a test number (starts with digit)
+        if let Some(last) = parts.last() {
+            if last.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                // Remove the trailing number part
+                return parts[..parts.len() - 1].join(":");
+            }
+        }
+    }
+    // Return as-is if no trailing number found
+    spec_ref.to_string()
+}
 
 /// Result of a single test
 #[derive(Debug, Clone)]
@@ -108,34 +133,55 @@ impl AuditResult {
         self.results.len()
     }
 
-    /// Print a detailed report
+    /// Print a detailed report with tests grouped by spec_ref
     pub fn print_report(&self) {
-        println!("\n{}", self.spec);
+        println!("\n{}{}{}", BOLD, self.spec, RESET);
         println!("{}", "═".repeat(60));
-        println!();
 
         let passed = self.passed_count();
         let total = self.total_count();
 
+        // Group results by spec category (strip trailing test number like ":1.1")
+        let mut grouped: BTreeMap<String, Vec<&TestResult>> = BTreeMap::new();
         for result in &self.results {
-            let status = if result.passed { "✓" } else { "✗" };
-
-            println!("{} {} ({})", status, result.name, result.spec_ref);
-            println!("  Requirement: {}", result.requirement);
-
-            if let Some(error) = &result.error {
-                println!("  Error: {}", error);
-            }
-
-            println!("  Duration: {:?}", result.duration);
-            println!();
+            // Extract category from spec_ref (e.g., "GRASP-01:event-acceptance:1.1" -> "GRASP-01:event-acceptance")
+            let category = extract_spec_category(&result.spec_ref);
+            grouped
+                .entry(category)
+                .or_default()
+                .push(result);
         }
 
-        println!(
-            "Results: {}/{} passed ({:.1}%)",
-            passed,
-            total,
+        // Print grouped results
+        for (category, results) in &grouped {
+            println!("\n{}[{}]{}", BOLD, category, RESET);
+
+            for result in results {
+                let (color, status) = if result.passed {
+                    (GREEN, "✓")
+                } else {
+                    (RED, "✗")
+                };
+
+                println!("  {}{} {}{}", color, status, result.name, RESET);
+
+                if let Some(error) = &result.error {
+                    println!("    {}Error: {}{}", RED, error, RESET);
+                }
+            }
+        }
+
+        println!();
+        let pass_rate = if total > 0 {
             (passed as f64 / total as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let summary_color = if passed == total { GREEN } else { RED };
+        println!(
+            "{}Results: {}/{} passed ({:.1}%){}",
+            summary_color, passed, total, pass_rate, RESET
         );
         println!();
     }
