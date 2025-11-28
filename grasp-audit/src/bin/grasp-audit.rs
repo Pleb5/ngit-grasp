@@ -2,6 +2,7 @@
 
 use clap::{Parser, Subcommand};
 use grasp_audit::*;
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "grasp-audit")]
@@ -23,9 +24,13 @@ enum Commands {
         #[arg(short, long, default_value = "ci")]
         mode: String,
 
-        /// Spec to test (nip01-smoke, all)
-        #[arg(short, long, default_value = "nip01-smoke")]
+        /// Spec to test (nip01-smoke, nip11, event-acceptance, cors, git-clone, push-auth, repo-creation, all)
+        #[arg(short, long, default_value = "all")]
         spec: String,
+
+        /// Git data directory (required for cors, git-clone, push-auth, repo-creation specs)
+        #[arg(short, long)]
+        git_data_dir: Option<PathBuf>,
     },
 }
 
@@ -42,12 +47,19 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Audit { relay, mode, spec } => {
+        Commands::Audit { relay, mode, spec, git_data_dir } => {
             let config = match mode.as_str() {
                 "ci" => AuditConfig::ci(),
                 "production" => AuditConfig::production(),
                 _ => return Err(anyhow!("Invalid mode: {}. Use 'ci' or 'production'", mode)),
             };
+
+            // Derive relay_domain from relay URL (e.g., "ws://localhost:8081" -> "localhost:8081")
+            let relay_domain = relay
+                .replace("ws://", "")
+                .replace("wss://", "")
+                .trim_end_matches('/')
+                .to_string();
 
             println!("🔍 GRASP Audit Tool");
             println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -55,6 +67,9 @@ async fn main() -> Result<()> {
             println!("Mode:    {}", mode);
             println!("Spec:    {}", spec);
             println!("Run ID:  {}", config.run_id);
+            if let Some(ref dir) = git_data_dir {
+                println!("Git Dir: {}", dir.display());
+            }
             println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
             println!();
 
@@ -69,18 +84,98 @@ async fn main() -> Result<()> {
 
             println!("✓ Connected\n");
 
+            // Helper to check if git_data_dir is required
+            let require_git_data_dir = |spec_name: &str| -> Result<PathBuf> {
+                git_data_dir.clone().ok_or_else(|| {
+                    anyhow!(
+                        "The '{}' spec requires --git-data-dir to be specified",
+                        spec_name
+                    )
+                })
+            };
+
             let results = match spec.as_str() {
                 "nip01-smoke" => {
                     println!("Running NIP-01 smoke tests...\n");
                     specs::Nip01SmokeTests::run_all(&client).await
                 }
+                "nip11" => {
+                    println!("Running NIP-11 document tests...\n");
+                    specs::Nip11DocumentTests::run_all(&client).await
+                }
+                "event-acceptance" => {
+                    println!("Running event acceptance policy tests...\n");
+                    specs::EventAcceptancePolicyTests::run_all(&client).await
+                }
+                "cors" => {
+                    println!("Running CORS tests...\n");
+                    specs::CorsTests::run_all(&client, &relay_domain).await
+                }
+                "git-clone" => {
+                    let dir = require_git_data_dir("git-clone")?;
+                    println!("Running Git clone tests...\n");
+                    specs::GitCloneTests::run_all(&client, &dir, &relay_domain).await
+                }
+                "push-auth" => {
+                    let dir = require_git_data_dir("push-auth")?;
+                    println!("Running push authorization tests...\n");
+                    specs::PushAuthorizationTests::run_all(&client, &dir, &relay_domain).await
+                }
+                "repo-creation" => {
+                    let dir = require_git_data_dir("repo-creation")?;
+                    println!("Running repository creation tests...\n");
+                    specs::RepositoryCreationTests::run_all(&client, &dir).await
+                }
                 "all" => {
                     println!("Running all tests...\n");
-                    specs::Nip01SmokeTests::run_all(&client).await
+                    let mut all_results = AuditResult::new("All GRASP-01 Tests");
+                    
+                    // NIP-01 smoke tests
+                    println!("  → NIP-01 smoke tests...");
+                    let nip01_results = specs::Nip01SmokeTests::run_all(&client).await;
+                    all_results.merge(nip01_results);
+                    
+                    // NIP-11 document tests
+                    println!("  → NIP-11 document tests...");
+                    let nip11_results = specs::Nip11DocumentTests::run_all(&client).await;
+                    all_results.merge(nip11_results);
+                    
+                    // Event acceptance policy tests
+                    println!("  → Event acceptance policy tests...");
+                    let event_results = specs::EventAcceptancePolicyTests::run_all(&client).await;
+                    all_results.merge(event_results);
+
+                    // CORS tests
+                    println!("  → CORS tests...");
+                    let cors_results = specs::CorsTests::run_all(&client, &relay_domain).await;
+                    all_results.merge(cors_results);
+
+                    // Tests that require git_data_dir
+                    if let Some(ref dir) = git_data_dir {
+                        // Git clone tests
+                        println!("  → Git clone tests...");
+                        let clone_results = specs::GitCloneTests::run_all(&client, dir, &relay_domain).await;
+                        all_results.merge(clone_results);
+
+                        // Push authorization tests
+                        println!("  → Push authorization tests...");
+                        let push_results = specs::PushAuthorizationTests::run_all(&client, dir, &relay_domain).await;
+                        all_results.merge(push_results);
+
+                        // Repository creation tests
+                        println!("  → Repository creation tests...");
+                        let repo_results = specs::RepositoryCreationTests::run_all(&client, dir).await;
+                        all_results.merge(repo_results);
+                    } else {
+                        println!("  ⚠ Skipping git-clone, push-auth, repo-creation tests (no --git-data-dir)");
+                    }
+                    
+                    println!();
+                    all_results
                 }
                 _ => {
                     return Err(anyhow!(
-                        "Unknown spec: {}. Use 'nip01-smoke' or 'all'",
+                        "Unknown spec: {}. Use 'nip01-smoke', 'nip11', 'event-acceptance', 'cors', 'git-clone', 'push-auth', 'repo-creation', or 'all'",
                         spec
                     ))
                 }

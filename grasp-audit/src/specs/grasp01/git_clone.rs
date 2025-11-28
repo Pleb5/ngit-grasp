@@ -24,6 +24,20 @@ use std::process::Command;
 pub struct GitCloneTests;
 
 impl GitCloneTests {
+    /// Run all Git clone tests
+    pub async fn run_all(
+        client: &AuditClient,
+        git_data_dir: &Path,
+        relay_domain: &str,
+    ) -> crate::AuditResult {
+        let mut results = crate::AuditResult::new("GRASP-01 Git Clone Tests");
+
+        results.add(Self::test_basic_git_clone(client, git_data_dir, relay_domain).await);
+        results.add(Self::test_clone_url_format(client, git_data_dir, relay_domain).await);
+
+        results
+    }
+
     /// Test that a repository can be cloned via Git HTTP backend
     ///
     /// This test:

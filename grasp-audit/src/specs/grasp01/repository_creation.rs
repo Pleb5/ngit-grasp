@@ -24,6 +24,20 @@ use std::path::Path;
 pub struct RepositoryCreationTests;
 
 impl RepositoryCreationTests {
+    /// Run all repository creation tests
+    pub async fn run_all(
+        client: &AuditClient,
+        git_data_dir: &Path,
+    ) -> crate::AuditResult {
+        let mut results = crate::AuditResult::new("GRASP-01 Repository Creation Tests");
+
+        results.add(Self::test_bare_repo_created_on_announcement(client, git_data_dir).await);
+        results.add(Self::test_repo_creation_idempotent(client, git_data_dir).await);
+        results.add(Self::test_bare_repo_structure(client, git_data_dir).await);
+
+        results
+    }
+
     /// Test that a bare repository is created when a valid announcement is accepted
     ///
     /// This test:

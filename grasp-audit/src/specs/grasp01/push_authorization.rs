@@ -30,6 +30,22 @@ use std::path::Path;
 pub struct PushAuthorizationTests;
 
 impl PushAuthorizationTests {
+    /// Run all push authorization tests
+    pub async fn run_all(
+        client: &AuditClient,
+        git_data_dir: &Path,
+        relay_domain: &str,
+    ) -> crate::AuditResult {
+        let mut results = crate::AuditResult::new("GRASP-01 Push Authorization Tests");
+
+        results.add(Self::test_push_authorized_by_owner_state(client, git_data_dir, relay_domain).await);
+        results.add(Self::test_push_rejected_without_state_event(client, git_data_dir, relay_domain).await);
+        results.add(Self::test_push_rejected_wrong_commit(client, git_data_dir, relay_domain).await);
+        results.add(Self::test_push_authorized_by_maintainer_state_only(client, git_data_dir, relay_domain).await);
+
+        results
+    }
+
     /// Test that push is authorized when state event matches the commit
     ///
     /// GRASP-01: "MUST accept pushes via this service that match the latest

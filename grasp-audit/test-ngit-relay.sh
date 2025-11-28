@@ -35,19 +35,27 @@ OPTIONS:
     --mode <audit|test>    Execution mode (default: audit)
                            audit: Run grasp-audit CLI tool
                            test: Run cargo test suite
-    --spec <spec>          Specification to test (default: nip01-smoke)
+    --spec <spec>          Specification to test (default: all)
+                           Available specs: nip01-smoke, nip11, event-acceptance,
+                           cors, git-clone, push-auth, repo-creation, all
                            Only used in audit mode
     --help                 Show this help message
 
 EXAMPLES:
-    # Run audit with default settings (current behavior)
+    # Run audit with all tests (default)
     ./test-ngit-relay.sh
 
     # Run cargo tests instead
     ./test-ngit-relay.sh --mode test
 
     # Run audit with specific spec
-    ./test-ngit-relay.sh --mode audit --spec grasp01
+    ./test-ngit-relay.sh --mode audit --spec nip01-smoke
+    ./test-ngit-relay.sh --mode audit --spec nip11
+    ./test-ngit-relay.sh --mode audit --spec event-acceptance
+    ./test-ngit-relay.sh --mode audit --spec cors
+    ./test-ngit-relay.sh --mode audit --spec git-clone
+    ./test-ngit-relay.sh --mode audit --spec push-auth
+    ./test-ngit-relay.sh --mode audit --spec repo-creation
 
 EOF
     exit 0
@@ -56,9 +64,9 @@ EOF
 # -----------------------------------------------------------------------------
 # Argument Parsing
 # -----------------------------------------------------------------------------
-# Default values maintain backward compatibility
+# Default: run audit mode with all specs
 MODE="audit"
-SPEC="nip01-smoke"
+SPEC="all"
 
 # Parse command-line arguments
 while [[ $# -gt 0 ]]; do
@@ -184,11 +192,13 @@ if [ "$MODE" = "audit" ]; then
     # - --relay: Command-line parameter for relay address
     # - --mode ci: Continuous integration mode (structured output)
     # - --spec: Which specification to test
+    # - --git-data-dir: Path to git data directory (for git-clone, push-auth, repo-creation)
     # The '|| { }' block provides user-friendly messaging on failure
     RELAY_URL="ws://localhost:$PORT" cargo run -- audit \
         --relay "ws://localhost:$PORT" \
         --mode ci \
-        --spec "$SPEC" || {
+        --spec "$SPEC" \
+        --git-data-dir "$TEST_DIR/repos" || {
         echo "⚠️  Some tests failed (expected for ngit-relay)"
         echo "    Validation tests should have passed"
     }
