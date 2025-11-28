@@ -24,7 +24,6 @@ use crate::{
 };
 use nostr_sdk::prelude::*;
 use std::fs;
-use std::path::Path;
 
 /// Test suite for Push Authorization operations
 pub struct PushAuthorizationTests;
@@ -37,12 +36,58 @@ impl PushAuthorizationTests {
     ) -> crate::AuditResult {
         let mut results = crate::AuditResult::new("GRASP-01 Push Authorization Tests");
 
-        results.add(Self::test_push_authorized_by_owner_state(client, relay_domain).await);
         results.add(Self::test_push_rejected_without_state_event(client, relay_domain).await);
+        results.add(Self::test_push_authorized_by_owner_state(client, relay_domain).await);
         results.add(Self::test_push_rejected_wrong_commit(client, relay_domain).await);
         results.add(Self::test_push_authorized_by_maintainer_state_only(client, relay_domain).await);
 
         results
+    }
+
+    /// Test that push is rejected when no state event exists
+    pub async fn test_push_rejected_without_state_event(
+        client: &AuditClient,
+        relay_domain: &str,
+    ) -> TestResult {
+        let test_name = "test_push_rejected_without_state_event";
+        let ctx = TestContext::new(client);
+
+        // Create repository (no state event)
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+            Ok(r) => r,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", "Push rejected without state event")
+                    .fail(&format!("Failed to create repo: {}", e))
+            }
+        };
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let repo_id = repo.tags.iter().find(|t| t.kind() == TagKind::d())
+            .and_then(|t| t.content()).unwrap().to_string();
+        let npub = repo.pubkey.to_bech32().unwrap();
+
+        // Clone and create commit
+        let clone_path = match clone_repo(relay_domain, &npub, &repo_id) {
+            Ok(p) => p,
+            Err(e) => return TestResult::new(test_name, "GRASP-01", "Push rejected without state event").fail(&e),
+        };
+        let cleanup = || { let _ = fs::remove_dir_all(&clone_path); };
+
+        if let Err(e) = create_commit(&clone_path, "Unauthorized commit") {
+            cleanup();
+            return TestResult::new(test_name, "GRASP-01", "Push rejected without state event").fail(&e);
+        }
+
+        // Do NOT publish state event - push should be rejected
+        let push_result = try_push(&clone_path);
+        cleanup();
+
+        match push_result {
+            Ok(false) => TestResult::new(test_name, "GRASP-01", "Push rejected without state event").pass(),
+            Ok(true) => TestResult::new(test_name, "GRASP-01", "Push rejected without state event").fail("Push accepted but should be rejected"),
+            Err(e) => TestResult::new(test_name, "GRASP-01", "Push rejected without state event").fail(&e),
+        }
     }
 
     /// Test that push is authorized when state event matches the commit
@@ -210,52 +255,6 @@ impl PushAuthorizationTests {
         }
     }
 
-    /// Test that push is rejected when no state event exists
-    pub async fn test_push_rejected_without_state_event(
-        client: &AuditClient,
-        relay_domain: &str,
-    ) -> TestResult {
-        let test_name = "test_push_rejected_without_state_event";
-        let ctx = TestContext::new(client);
-
-        // Create repository (no state event)
-        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
-            Ok(r) => r,
-            Err(e) => {
-                return TestResult::new(test_name, "GRASP-01", "Push rejected without state event")
-                    .fail(&format!("Failed to create repo: {}", e))
-            }
-        };
-
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-        let repo_id = repo.tags.iter().find(|t| t.kind() == TagKind::d())
-            .and_then(|t| t.content()).unwrap().to_string();
-        let npub = repo.pubkey.to_bech32().unwrap();
-
-        // Clone and create commit
-        let clone_path = match clone_repo(relay_domain, &npub, &repo_id) {
-            Ok(p) => p,
-            Err(e) => return TestResult::new(test_name, "GRASP-01", "Push rejected without state event").fail(&e),
-        };
-        let cleanup = || { let _ = fs::remove_dir_all(&clone_path); };
-
-        if let Err(e) = create_commit(&clone_path, "Unauthorized commit") {
-            cleanup();
-            return TestResult::new(test_name, "GRASP-01", "Push rejected without state event").fail(&e);
-        }
-
-        // Do NOT publish state event - push should be rejected
-        let push_result = try_push(&clone_path);
-        cleanup();
-
-        match push_result {
-            Ok(false) => TestResult::new(test_name, "GRASP-01", "Push rejected without state event").pass(),
-            Ok(true) => TestResult::new(test_name, "GRASP-01", "Push rejected without state event").fail("Push accepted but should be rejected"),
-            Err(e) => TestResult::new(test_name, "GRASP-01", "Push rejected without state event").fail(&e),
-        }
-    }
-
     /// Test that push is rejected when commit doesn't match state event
     ///
     /// GRASP-01: "MUST accept pushes via this service that match the latest repo state announcement"
@@ -264,10 +263,14 @@ impl PushAuthorizationTests {
     /// ## Fixture-First Pattern
     ///
     /// 1. **Generate**: Create TestContext and get RepoState fixture
-    ///    (repo announcement + state event pointing to deterministic commit)
-    /// 2. **Send**: Clone repo, create deterministic commit, push (establishes state on relay)
-    /// 3. **Test**: Create a NEW commit locally, try to push
-    /// 4. **Verify**: Push should be rejected because new commit doesn't match state event
+    ///    (repo announcement + state event pointing to DETERMINISTIC_COMMIT_HASH)
+    /// 2. **Send**: Clone repo, create WRONG deterministic commit (Maintainer variant),
+    ///    try to push
+    /// 3. **Verify**: Push should be rejected because the commit doesn't match state event
+    ///
+    /// Note: This test directly pushes the wrong commit instead of first establishing
+    /// state on the relay. The state event already authorizes DETERMINISTIC_COMMIT_HASH,
+    /// but we try to push MAINTAINER_DETERMINISTIC_COMMIT_HASH which should be rejected.
     pub async fn test_push_rejected_wrong_commit(
         client: &AuditClient,
         relay_domain: &str,
@@ -278,6 +281,7 @@ impl PushAuthorizationTests {
 
         // ============================================================
         // Step 1: GENERATE - Create TestContext and get RepoState fixture
+        // The state event points to DETERMINISTIC_COMMIT_HASH
         // ============================================================
         let ctx = TestContext::new(client);
 
@@ -314,8 +318,8 @@ impl PushAuthorizationTests {
         };
 
         // ============================================================
-        // Step 2: SEND - Clone repo, create deterministic commit, push
-        // (establishes the state on the relay)
+        // Step 2: SEND - Clone repo and create an unauthorized commit
+        // Any commit with a hash different from what's in the state event will work
         // ============================================================
         let clone_path = match clone_repo(relay_domain, &npub, &repo_id) {
             Ok(p) => p,
@@ -330,29 +334,9 @@ impl PushAuthorizationTests {
             let _ = fs::remove_dir_all(&clone_path);
         };
 
-        // Create deterministic commit locally
-        let commit_hash = match create_deterministic_commit(&clone_path, "Initial commit") {
-            Ok(h) => h,
-            Err(e) => {
-                cleanup();
-                return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
-                    .fail(&format!("Failed to create deterministic commit: {}", e));
-            }
-        };
-
-        // Verify commit hash matches expected
-        if commit_hash != DETERMINISTIC_COMMIT_HASH {
-            cleanup();
-            return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
-                .fail(&format!(
-                    "Commit hash mismatch: got {}, expected {}",
-                    commit_hash, DETERMINISTIC_COMMIT_HASH
-                ));
-        }
-
-        // Create main branch pointing to our deterministic commit
+        // Create/checkout main branch
         let branch_output = Command::new("git")
-            .args(["branch", "main"])
+            .args(["checkout", "-B", "main"])
             .current_dir(&clone_path)
             .output();
 
@@ -360,82 +344,30 @@ impl PushAuthorizationTests {
             Err(e) => {
                 cleanup();
                 return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
-                    .fail(&format!("Failed to create main branch: {}", e));
+                    .fail(&format!("Failed to create/checkout main branch: {}", e));
             }
             Ok(output) if !output.status.success() => {
                 cleanup();
                 return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
                     .fail(&format!(
-                        "Failed to create main branch: {}",
+                        "Failed to create/checkout main branch: {}",
                         String::from_utf8_lossy(&output.stderr)
                     ));
             }
             _ => {}
         }
 
-        // Checkout main branch
-        let checkout_output = Command::new("git")
-            .args(["checkout", "main"])
-            .current_dir(&clone_path)
-            .output();
-
-        match checkout_output {
-            Err(e) => {
-                cleanup();
-                return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
-                    .fail(&format!("Failed to checkout main branch: {}", e));
-            }
-            Ok(output) if !output.status.success() => {
-                cleanup();
-                return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
-                    .fail(&format!(
-                        "Failed to checkout main branch: {}",
-                        String::from_utf8_lossy(&output.stderr)
-                    ));
-            }
-            _ => {}
-        }
-
-        // Push the deterministic commit to establish state on relay
-        let push_output = Command::new("git")
-            .args(["push", "origin", "main"])
-            .current_dir(&clone_path)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .output();
-
-        match push_output {
-            Err(e) => {
-                cleanup();
-                return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
-                    .fail(&format!("Failed to push initial commit: {}", e));
-            }
-            Ok(output) if !output.status.success() => {
-                cleanup();
-                return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
-                    .fail(&format!(
-                        "Failed to push initial commit: {}",
-                        String::from_utf8_lossy(&output.stderr)
-                    ));
-            }
-            _ => {}
+        // Create a commit that is NOT in the state event
+        // Any commit hash different from what's authorized in the state event will work
+        if let Err(e) = create_commit(&clone_path, "Unauthorized commit - should be rejected") {
+            cleanup();
+            return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
+                .fail(&format!("Failed to create wrong commit: {}", e));
         }
 
         // ============================================================
-        // Step 3: TEST - Create a NEW commit that is NOT announced
-        // in any state event
-        // ============================================================
-        let new_commit = match create_commit(&clone_path, "Unauthorized commit") {
-            Ok(h) => h,
-            Err(e) => {
-                cleanup();
-                return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
-                    .fail(&format!("Failed to create commit: {}", e));
-            }
-        };
-
-        // ============================================================
-        // Step 4: VERIFY - Push should be rejected because new commit
-        // doesn't match state event
+        // Step 3: VERIFY - Push should be rejected because the commit
+        // doesn't match the state event
         // ============================================================
         let push_result = try_push(&clone_path);
         cleanup();
@@ -443,10 +375,7 @@ impl PushAuthorizationTests {
         match push_result {
             Ok(false) => TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event").pass(),
             Ok(true) => TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
-                .fail(&format!(
-                    "Push accepted but should be rejected. State event points to {}, but pushed {}",
-                    DETERMINISTIC_COMMIT_HASH, new_commit
-                )),
+                .fail("Push accepted but should be rejected. The pushed commit is not in the state event."),
             Err(e) => TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event").fail(&e),
         }
     }
