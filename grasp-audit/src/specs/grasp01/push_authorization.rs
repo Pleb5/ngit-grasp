@@ -40,6 +40,7 @@ impl PushAuthorizationTests {
         results.add(Self::test_push_authorized_by_owner_state(client, relay_domain).await);
         results.add(Self::test_push_rejected_wrong_commit(client, relay_domain).await);
         results.add(Self::test_push_authorized_by_maintainer_state_only(client, relay_domain).await);
+        results.add(Self::test_push_authorized_by_recursive_maintainer_state(client, relay_domain).await);
 
         results
     }
@@ -488,7 +489,20 @@ impl PushAuthorizationTests {
             let _ = fs::remove_dir_all(&clone_path);
         };
 
-        // Create maintainer deterministic commit
+        // Reset to orphan state and create deterministic root commit
+        // Step 1: Create orphan branch (removes all history)
+        let _ = Command::new("git")
+            .args(["checkout", "--orphan", "main-new"])
+            .current_dir(&clone_path)
+            .output();
+
+        // Step 2: Clear staged files (orphan keeps files staged from previous branch)
+        let _ = Command::new("git")
+            .args(["rm", "-rf", "--cached", "."])
+            .current_dir(&clone_path)
+            .output();
+
+        // Step 3: Create deterministic commit using existing function
         let commit_hash =
             match create_deterministic_commit_with_variant(&clone_path, CommitVariant::Maintainer) {
                 Ok(h) => h,
@@ -503,6 +517,17 @@ impl PushAuthorizationTests {
                 }
             };
 
+        // Step 4: Replace main branch with our new orphan branch
+        let _ = Command::new("git")
+            .args(["branch", "-D", "main"])
+            .current_dir(&clone_path)
+            .output();
+
+        let _ = Command::new("git")
+            .args(["branch", "-m", "main"])
+            .current_dir(&clone_path)
+            .output();
+
         // Verify commit hash matches expected
         if commit_hash != MAINTAINER_DETERMINISTIC_COMMIT_HASH {
             cleanup();
@@ -515,68 +540,6 @@ impl PushAuthorizationTests {
                 "Maintainer commit hash mismatch: got {}, expected {}",
                 commit_hash, MAINTAINER_DETERMINISTIC_COMMIT_HASH
             ));
-        }
-
-        // Create main branch
-        let branch_output = Command::new("git")
-            .args(["branch", "main"])
-            .current_dir(&clone_path)
-            .output();
-
-        match branch_output {
-            Err(e) => {
-                cleanup();
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push authorized by maintainer state event only (no announcement)",
-                )
-                .fail(&format!("Failed to create main branch: {}", e));
-            }
-            Ok(output) if !output.status.success() => {
-                cleanup();
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push authorized by maintainer state event only (no announcement)",
-                )
-                .fail(&format!(
-                    "Failed to create main branch: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ));
-            }
-            _ => {}
-        }
-
-        // Checkout main branch
-        let checkout_output = Command::new("git")
-            .args(["checkout", "main"])
-            .current_dir(&clone_path)
-            .output();
-
-        match checkout_output {
-            Err(e) => {
-                cleanup();
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push authorized by maintainer state event only (no announcement)",
-                )
-                .fail(&format!("Failed to checkout main branch: {}", e));
-            }
-            Ok(output) if !output.status.success() => {
-                cleanup();
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push authorized by maintainer state event only (no announcement)",
-                )
-                .fail(&format!(
-                    "Failed to checkout main branch: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ));
-            }
-            _ => {}
         }
 
         // ============================================================
@@ -747,7 +710,20 @@ impl PushAuthorizationTests {
             let _ = fs::remove_dir_all(&clone_path);
         };
 
-        // Create recursive maintainer deterministic commit
+        // Reset to orphan state and create deterministic root commit
+        // Step 1: Create orphan branch (removes all history)
+        let _ = Command::new("git")
+            .args(["checkout", "--orphan", "main-new"])
+            .current_dir(&clone_path)
+            .output();
+
+        // Step 2: Clear staged files (orphan keeps files staged from previous branch)
+        let _ = Command::new("git")
+            .args(["rm", "-rf", "--cached", "."])
+            .current_dir(&clone_path)
+            .output();
+
+        // Step 3: Create recursive maintainer deterministic commit
         let commit_hash =
             match create_deterministic_commit_with_variant(&clone_path, CommitVariant::RecursiveMaintainer) {
                 Ok(h) => h,
@@ -762,6 +738,17 @@ impl PushAuthorizationTests {
                 }
             };
 
+        // Step 4: Replace main branch with our new orphan branch
+        let _ = Command::new("git")
+            .args(["branch", "-D", "main"])
+            .current_dir(&clone_path)
+            .output();
+
+        let _ = Command::new("git")
+            .args(["branch", "-m", "main"])
+            .current_dir(&clone_path)
+            .output();
+
         // Verify commit hash matches expected
         if commit_hash != RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH {
             cleanup();
@@ -774,68 +761,6 @@ impl PushAuthorizationTests {
                 "Recursive maintainer commit hash mismatch: got {}, expected {}",
                 commit_hash, RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH
             ));
-        }
-
-        // Create main branch
-        let branch_output = Command::new("git")
-            .args(["branch", "main"])
-            .current_dir(&clone_path)
-            .output();
-
-        match branch_output {
-            Err(e) => {
-                cleanup();
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push authorized by recursive maintainer state event",
-                )
-                .fail(&format!("Failed to create main branch: {}", e));
-            }
-            Ok(output) if !output.status.success() => {
-                cleanup();
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push authorized by recursive maintainer state event",
-                )
-                .fail(&format!(
-                    "Failed to create main branch: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ));
-            }
-            _ => {}
-        }
-
-        // Checkout main branch
-        let checkout_output = Command::new("git")
-            .args(["checkout", "main"])
-            .current_dir(&clone_path)
-            .output();
-
-        match checkout_output {
-            Err(e) => {
-                cleanup();
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push authorized by recursive maintainer state event",
-                )
-                .fail(&format!("Failed to checkout main branch: {}", e));
-            }
-            Ok(output) if !output.status.success() => {
-                cleanup();
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push authorized by recursive maintainer state event",
-                )
-                .fail(&format!(
-                    "Failed to checkout main branch: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ));
-            }
-            _ => {}
         }
 
         // ============================================================
