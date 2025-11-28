@@ -1199,7 +1199,7 @@ pub fn create_deterministic_commit(clone_path: &Path, _message: &str) -> Result<
 /// ```
 pub fn try_push(clone_path: &Path) -> Result<bool, String> {
     let output = Command::new("git")
-        .args(["push", "origin", "main"])
+        .args(["push", "origin", "main", "--force"])
         .current_dir(clone_path)
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
