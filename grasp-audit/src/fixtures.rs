@@ -6,6 +6,17 @@
 //! - **CI Mode (Isolated)**: Creates fresh events for each test, ensuring complete isolation
 //! - **Production Mode (Shared)**: Reuses shared fixtures to minimize event publication
 //!
+//! # Cache Sharing Strategy
+//!
+//! The fixture cache lives on the `AuditClient`, not on `TestContext`. This provides
+//! natural cache sharing semantics:
+//!
+//! - **CLI mode**: Creates one `AuditClient` → fixtures shared across all tests
+//! - **cargo test**: Creates one `AuditClient` per test → fixtures isolated per test
+//!
+//! This eliminates the need for global state while still enabling fixture reuse
+//! when appropriate.
+//!
 //! # Example
 //!
 //! ```no_run
@@ -25,8 +36,6 @@
 use crate::{AuditClient, AuditMode};
 use anyhow::{Context, Result};
 use nostr_sdk::prelude::Event;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 
 /// Deterministic commit hash used in RepoState fixtures (Owner variant)
 /// This is the hash produced by creating a commit with:
@@ -161,6 +170,13 @@ impl From<AuditMode> for ContextMode {
 /// - In Isolated mode: Creates fresh events for each test
 /// - In Shared mode: Caches and reuses events across tests
 ///
+/// # Cache Location
+///
+/// The fixture cache lives on `AuditClient`, not on `TestContext`. This means:
+/// - Multiple `TestContext` instances from the same client share the cache
+/// - CLI mode (one client) naturally shares fixtures across all tests
+/// - Test mode (one client per test) naturally isolates fixtures
+///
 /// # Example
 ///
 /// ```no_run
@@ -181,20 +197,18 @@ impl From<AuditMode> for ContextMode {
 pub struct TestContext<'a> {
     client: &'a AuditClient,
     mode: ContextMode,
-    cache: Arc<Mutex<HashMap<FixtureKind, Event>>>,
 }
 
 impl<'a> TestContext<'a> {
     /// Create a new test context
     ///
     /// The context mode is automatically determined from the client's audit config.
+    /// The fixture cache is borrowed from the client, enabling natural sharing:
+    /// - Same client = shared cache (CLI mode behavior)
+    /// - Different clients = isolated caches (test mode behavior)
     pub fn new(client: &'a AuditClient) -> Self {
         let mode = ContextMode::from(client.config.mode);
-        Self {
-            client,
-            mode,
-            cache: Arc::new(Mutex::new(HashMap::new())),
-        }
+        Self { client, mode }
     }
 
     /// Create a test context with explicit mode override
@@ -202,11 +216,7 @@ impl<'a> TestContext<'a> {
     /// This is useful for testing the context itself or for advanced use cases
     /// where you want to override the default mode behavior.
     pub fn with_mode(client: &'a AuditClient, mode: ContextMode) -> Self {
-        Self {
-            client,
-            mode,
-            cache: Arc::new(Mutex::new(HashMap::new())),
-        }
+        Self { client, mode }
     }
 
     /// Get a fixture, creating it if needed based on mode
@@ -261,13 +271,26 @@ impl<'a> TestContext<'a> {
     }
 
     /// Get or create a shared fixture (caches for reuse)
+    ///
+    /// Uses the client's fixture cache to ensure fixtures are reused across
+    /// all TestContext instances in Production mode.
     async fn get_or_create_shared(&self, kind: FixtureKind) -> Result<Event> {
-        // Check cache first
+        // Check client's cache first (shared across all TestContext instances using same client)
         {
-            let cache = self.cache.lock().unwrap();
+            let cache = self.client.fixture_cache().lock().unwrap();
             if let Some(event) = cache.get(&kind) {
+                tracing::debug!("get_or_create_shared({:?}) found in client cache", kind);
                 return Ok(event.clone());
             }
+        }
+
+        // Check relay connection before attempting to build
+        let is_connected = self.client.is_connected().await;
+        if !is_connected {
+            return Err(anyhow::anyhow!(
+                "Relay connection lost before building {:?} fixture (shared cache mode)",
+                kind
+            ));
         }
 
         // Not in cache, create it
@@ -286,30 +309,38 @@ impl<'a> TestContext<'a> {
                 )
             })?;
 
-        // Store in cache
+        // Store in client's cache (shared across all TestContext instances using same client)
         {
-            let mut cache = self.cache.lock().unwrap();
+            let mut cache = self.client.fixture_cache().lock().unwrap();
             cache.insert(kind, event.clone());
+            tracing::debug!("get_or_create_shared({:?}) stored in client cache ({} entries)", kind, cache.len());
         }
 
         Ok(event)
     }
 
-    /// Get or create a ValidRepo, with caching within the TestContext.
+    /// Get or create a ValidRepo, with caching.
     /// This is a helper method that avoids async recursion by not going
     /// through get_fixture. It handles the repo specifically.
     ///
-    /// IMPORTANT: We always cache within a TestContext instance to ensure
-    /// fixture dependencies work correctly. The isolation between tests
-    /// comes from each test having its own TestContext with a fresh cache.
+    /// Uses client's fixture_cache for caching - in Shared mode this enables
+    /// cross-test reuse when the same client is used.
     async fn get_or_create_repo(&self) -> Result<Event> {
-        // Always check cache first - this ensures fixture dependencies work
-        // (e.g., MaintainerRepoAndState needs the SAME repo_id as RepoState)
+        // Check client's cache first (shared across all TestContext instances using same client)
         {
-            let cache = self.cache.lock().unwrap();
+            let cache = self.client.fixture_cache().lock().unwrap();
             if let Some(event) = cache.get(&FixtureKind::ValidRepo) {
+                tracing::debug!("get_or_create_repo() found in client cache");
                 return Ok(event.clone());
             }
+        }
+
+        // Check relay connection before creating repo
+        let is_connected = self.client.is_connected().await;
+        if !is_connected {
+            return Err(anyhow::anyhow!(
+                "Relay connection lost before creating ValidRepo fixture"
+            ));
         }
 
         // Create a new repo
@@ -318,32 +349,36 @@ impl<'a> TestContext<'a> {
             FixtureKind::ValidRepo,
             &uuid::Uuid::new_v4().to_string()[..8]
         );
-        let repo = self.client.create_repo_announcement(&test_name).await?;
+        
+        let repo = self.client.create_repo_announcement(&test_name).await
+            .with_context(|| format!("create_repo_announcement failed for {}", test_name))?;
 
         // Send it
-        self.client.send_event(repo.clone()).await?;
+        self.client.send_event(repo.clone()).await
+            .with_context(|| "Failed to send repo announcement to relay")?;
 
-        // Always cache it - isolation comes from each test having its own TestContext
+        // Store in client's cache (shared across all TestContext instances using same client)
         {
-            let mut cache = self.cache.lock().unwrap();
+            let mut cache = self.client.fixture_cache().lock().unwrap();
             cache.insert(FixtureKind::ValidRepo, repo.clone());
+            tracing::debug!("get_or_create_repo() stored in client cache ({} entries)", cache.len());
         }
 
         Ok(repo)
     }
 
-    /// Get or create a RepoWithIssue, with caching within the TestContext.
+    /// Get or create a RepoWithIssue, with caching via the client.
     /// Returns the issue event (repo is already sent/cached via get_or_create_repo).
     async fn get_or_create_issue(&self) -> Result<Event> {
-        // Always check cache first - ensures fixture dependencies work
+        // Check client's cache first
         {
-            let cache = self.cache.lock().unwrap();
+            let cache = self.client.fixture_cache().lock().unwrap();
             if let Some(event) = cache.get(&FixtureKind::RepoWithIssue) {
                 return Ok(event.clone());
             }
         }
 
-        // Get or create repo (reuses cached within this TestContext)
+        // Get or create repo (reuses cached via client)
         let repo = self.get_or_create_repo().await?;
 
         // Create the issue
@@ -357,9 +392,9 @@ impl<'a> TestContext<'a> {
         // Send it
         self.client.send_event(issue.clone()).await?;
 
-        // Always cache it - isolation comes from each test having its own TestContext
+        // Store in client's cache
         {
-            let mut cache = self.cache.lock().unwrap();
+            let mut cache = self.client.fixture_cache().lock().unwrap();
             cache.insert(FixtureKind::RepoWithIssue, issue.clone());
         }
 
@@ -707,10 +742,10 @@ impl<'a> TestContext<'a> {
 
     /// Clear the fixture cache
     ///
-    /// This is useful for tests that want to ensure fresh fixtures
-    /// even in shared mode.
+    /// This clears the client's fixture cache, affecting all TestContext
+    /// instances using the same client.
     pub fn clear_cache(&self) {
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.client.fixture_cache().lock().unwrap();
         cache.clear();
     }
 }

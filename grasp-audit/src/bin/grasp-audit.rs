@@ -120,26 +120,11 @@ async fn main() -> Result<()> {
                 "all" => {
                     println!("Running all tests...\n");
                     let mut all_results = AuditResult::new("All GRASP-01 Tests");
-                    
-                    // NIP-01 smoke tests
-                    println!("  → NIP-01 smoke tests...");
-                    let nip01_results = specs::Nip01SmokeTests::run_all(&client).await;
-                    all_results.merge(nip01_results);
-                    
-                    // NIP-11 document tests
-                    println!("  → NIP-11 document tests...");
-                    let nip11_results = specs::Nip11DocumentTests::run_all(&client).await;
-                    all_results.merge(nip11_results);
-                    
-                    // Event acceptance policy tests
-                    println!("  → Event acceptance policy tests...");
-                    let event_results = specs::EventAcceptancePolicyTests::run_all(&client).await;
-                    all_results.merge(event_results);
 
-                    // CORS tests
-                    println!("  → CORS tests...");
-                    let cors_results = specs::CorsTests::run_all(&client, &relay_domain).await;
-                    all_results.merge(cors_results);
+                    // Repository creation tests
+                    println!("  → Repository creation tests...");
+                    let repo_results = specs::RepositoryCreationTests::run_all(&client, &relay_domain).await;
+                    all_results.merge(repo_results);
 
                     // Git clone tests
                     println!("  → Git clone tests...");
@@ -151,10 +136,25 @@ async fn main() -> Result<()> {
                     let push_results = specs::PushAuthorizationTests::run_all(&client, &relay_domain).await;
                     all_results.merge(push_results);
 
-                    // Repository creation tests
-                    println!("  → Repository creation tests...");
-                    let repo_results = specs::RepositoryCreationTests::run_all(&client, &relay_domain).await;
-                    all_results.merge(repo_results);
+                    // Event acceptance policy tests
+                    println!("  → Event acceptance policy tests...");
+                    let event_results = specs::EventAcceptancePolicyTests::run_all(&client).await;
+                    all_results.merge(event_results);
+
+                    // NIP-01 smoke tests
+                    println!("  → NIP-01 smoke tests...");
+                    let nip01_results = specs::Nip01SmokeTests::run_all(&client).await;
+                    all_results.merge(nip01_results);
+                    
+                    // NIP-11 document tests
+                    println!("  → NIP-11 document tests...");
+                    let nip11_results = specs::Nip11DocumentTests::run_all(&client).await;
+                    all_results.merge(nip11_results);
+                    
+                    // CORS tests
+                    println!("  → CORS tests...");
+                    let cors_results = specs::CorsTests::run_all(&client, &relay_domain).await;
+                    all_results.merge(cors_results);
                     
                     println!();
                     all_results

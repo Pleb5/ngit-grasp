@@ -1,11 +1,22 @@
 //! Audit client for testing GRASP implementations
 
 use crate::audit::{AuditConfig, AuditEventBuilder, AuditMode};
+use crate::fixtures::FixtureKind;
 use anyhow::{anyhow, Result};
 use nostr_sdk::prelude::*;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// Type alias for the fixture cache - shared across TestContext instances
+pub type FixtureCache = Arc<Mutex<HashMap<FixtureKind, Event>>>;
+
 /// Client for auditing GRASP implementations
+///
+/// The AuditClient owns a fixture cache that is shared across all TestContext
+/// instances created from this client. This provides natural cache sharing:
+/// - CLI creates one AuditClient → fixtures shared across all tests
+/// - cargo test creates one AuditClient per test → fixtures isolated per test
 pub struct AuditClient {
     client: Client,
     pub config: AuditConfig,
@@ -14,6 +25,8 @@ pub struct AuditClient {
     maintainer_keys: Keys,
     /// Recursive maintainer keys for testing recursive authorization scenarios
     recursive_maintainer_keys: Keys,
+    /// Fixture cache for TestContext instances - shared across all contexts using this client
+    fixture_cache: FixtureCache,
 }
 
 impl AuditClient {
@@ -30,6 +43,7 @@ impl AuditClient {
             keys,
             maintainer_keys,
             recursive_maintainer_keys,
+            fixture_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -88,7 +102,17 @@ impl AuditClient {
             keys,
             maintainer_keys,
             recursive_maintainer_keys,
+            fixture_cache: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Get the fixture cache for TestContext usage
+    ///
+    /// This cache is shared across all TestContext instances created from this client.
+    /// In CLI mode (one client for all tests), fixtures are reused.
+    /// In test mode (one client per test), fixtures are isolated.
+    pub fn fixture_cache(&self) -> &FixtureCache {
+        &self.fixture_cache
     }
 
     /// Get the public key for this audit client
@@ -488,6 +512,7 @@ mod tests {
             keys: keys.clone(),
             maintainer_keys,
             recursive_maintainer_keys,
+            fixture_cache: Arc::new(Mutex::new(HashMap::new())),
         };
 
         let _builder = client.event_builder(Kind::TextNote, "test content");
@@ -508,6 +533,7 @@ mod tests {
             keys: keys.clone(),
             maintainer_keys,
             recursive_maintainer_keys,
+            fixture_cache: Arc::new(Mutex::new(HashMap::new())),
         };
 
         // Create an event with a custom tag
