@@ -36,6 +36,8 @@
 use crate::{AuditClient, AuditMode};
 use anyhow::{Context, Result};
 use nostr_sdk::prelude::Event;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 /// Deterministic commit hash used in RepoState fixtures (Owner variant)
 /// This is the hash produced by creating a commit with:
@@ -197,18 +199,27 @@ impl From<AuditMode> for ContextMode {
 pub struct TestContext<'a> {
     client: &'a AuditClient,
     mode: ContextMode,
+    /// Per-TestContext cache for Isolated mode
+    /// This cache ensures fixture dependencies work within a single test
+    /// while maintaining isolation between tests.
+    /// In Shared mode, this cache is not used - we use the client's cache instead.
+    local_cache: Arc<Mutex<HashMap<FixtureKind, Event>>>,
 }
 
 impl<'a> TestContext<'a> {
     /// Create a new test context
     ///
     /// The context mode is automatically determined from the client's audit config.
-    /// The fixture cache is borrowed from the client, enabling natural sharing:
-    /// - Same client = shared cache (CLI mode behavior)
-    /// - Different clients = isolated caches (test mode behavior)
+    /// In Isolated mode, fixtures are cached per-TestContext to maintain fixture
+    /// dependencies within a test while ensuring isolation between tests.
+    /// In Shared mode, the client's cache is used for cross-test fixture sharing.
     pub fn new(client: &'a AuditClient) -> Self {
         let mode = ContextMode::from(client.config.mode);
-        Self { client, mode }
+        Self {
+            client,
+            mode,
+            local_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// Create a test context with explicit mode override
@@ -216,7 +227,11 @@ impl<'a> TestContext<'a> {
     /// This is useful for testing the context itself or for advanced use cases
     /// where you want to override the default mode behavior.
     pub fn with_mode(client: &'a AuditClient, mode: ContextMode) -> Self {
-        Self { client, mode }
+        Self {
+            client,
+            mode,
+            local_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// Get a fixture, creating it if needed based on mode
@@ -323,17 +338,29 @@ impl<'a> TestContext<'a> {
     /// This is a helper method that avoids async recursion by not going
     /// through get_fixture. It handles the repo specifically.
     ///
-    /// Uses client's fixture_cache for caching - in Shared mode this enables
-    /// cross-test reuse when the same client is used.
-    /// In Isolated mode, the cache is bypassed to ensure fresh fixtures.
+    /// Caching strategy:
+    /// - **Isolated mode**: Uses per-TestContext local_cache to maintain fixture
+    ///   dependencies within a single test, while ensuring isolation between tests.
+    /// - **Shared mode**: Uses client's fixture_cache for cross-test reuse.
     async fn get_or_create_repo(&self) -> Result<Event> {
-        // Only check client's cache in Shared mode
-        // In Isolated mode, we always create fresh fixtures
-        if self.mode == ContextMode::Shared {
-            let cache = self.client.fixture_cache().lock().unwrap();
-            if let Some(event) = cache.get(&FixtureKind::ValidRepo) {
-                tracing::debug!("get_or_create_repo() found in client cache (Shared mode)");
-                return Ok(event.clone());
+        // Check the appropriate cache based on mode
+        match self.mode {
+            ContextMode::Isolated => {
+                // In Isolated mode, use local TestContext cache
+                // This ensures fixture dependencies work within a single test
+                let cache = self.local_cache.lock().unwrap();
+                if let Some(event) = cache.get(&FixtureKind::ValidRepo) {
+                    tracing::debug!("get_or_create_repo() found in local cache (Isolated mode)");
+                    return Ok(event.clone());
+                }
+            }
+            ContextMode::Shared => {
+                // In Shared mode, use client's cache for cross-test sharing
+                let cache = self.client.fixture_cache().lock().unwrap();
+                if let Some(event) = cache.get(&FixtureKind::ValidRepo) {
+                    tracing::debug!("get_or_create_repo() found in client cache (Shared mode)");
+                    return Ok(event.clone());
+                }
             }
         }
 
@@ -359,29 +386,45 @@ impl<'a> TestContext<'a> {
         self.client.send_event(repo.clone()).await
             .with_context(|| "Failed to send repo announcement to relay")?;
 
-        // Store in client's cache only in Shared mode
-        // In Isolated mode, we don't cache to ensure test isolation
-        if self.mode == ContextMode::Shared {
-            let mut cache = self.client.fixture_cache().lock().unwrap();
-            cache.insert(FixtureKind::ValidRepo, repo.clone());
-            tracing::debug!("get_or_create_repo() stored in client cache ({} entries)", cache.len());
+        // Store in the appropriate cache based on mode
+        match self.mode {
+            ContextMode::Isolated => {
+                // Store in local cache for within-test fixture dependencies
+                let mut cache = self.local_cache.lock().unwrap();
+                cache.insert(FixtureKind::ValidRepo, repo.clone());
+                tracing::debug!("get_or_create_repo() stored in local cache ({} entries)", cache.len());
+            }
+            ContextMode::Shared => {
+                // Store in client cache for cross-test sharing
+                let mut cache = self.client.fixture_cache().lock().unwrap();
+                cache.insert(FixtureKind::ValidRepo, repo.clone());
+                tracing::debug!("get_or_create_repo() stored in client cache ({} entries)", cache.len());
+            }
         }
 
         Ok(repo)
     }
 
-    /// Get or create a RepoWithIssue, with mode-aware caching via the client.
+    /// Get or create a RepoWithIssue, with mode-aware caching.
     /// Returns the issue event (repo is already sent/cached via get_or_create_repo).
     async fn get_or_create_issue(&self) -> Result<Event> {
-        // Only check client's cache in Shared mode
-        if self.mode == ContextMode::Shared {
-            let cache = self.client.fixture_cache().lock().unwrap();
-            if let Some(event) = cache.get(&FixtureKind::RepoWithIssue) {
-                return Ok(event.clone());
+        // Check the appropriate cache based on mode
+        match self.mode {
+            ContextMode::Isolated => {
+                let cache = self.local_cache.lock().unwrap();
+                if let Some(event) = cache.get(&FixtureKind::RepoWithIssue) {
+                    return Ok(event.clone());
+                }
+            }
+            ContextMode::Shared => {
+                let cache = self.client.fixture_cache().lock().unwrap();
+                if let Some(event) = cache.get(&FixtureKind::RepoWithIssue) {
+                    return Ok(event.clone());
+                }
             }
         }
 
-        // Get or create repo (reuses cached via client)
+        // Get or create repo (reuses cached via appropriate cache)
         let repo = self.get_or_create_repo().await?;
 
         // Create the issue
@@ -395,10 +438,16 @@ impl<'a> TestContext<'a> {
         // Send it
         self.client.send_event(issue.clone()).await?;
 
-        // Store in client's cache only in Shared mode
-        if self.mode == ContextMode::Shared {
-            let mut cache = self.client.fixture_cache().lock().unwrap();
-            cache.insert(FixtureKind::RepoWithIssue, issue.clone());
+        // Store in the appropriate cache based on mode
+        match self.mode {
+            ContextMode::Isolated => {
+                let mut cache = self.local_cache.lock().unwrap();
+                cache.insert(FixtureKind::RepoWithIssue, issue.clone());
+            }
+            ContextMode::Shared => {
+                let mut cache = self.client.fixture_cache().lock().unwrap();
+                cache.insert(FixtureKind::RepoWithIssue, issue.clone());
+            }
         }
 
         Ok(issue)
