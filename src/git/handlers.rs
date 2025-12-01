@@ -5,7 +5,6 @@
 use http_body_util::Full;
 use hyper::{body::Bytes, Response, StatusCode};
 use nostr_relay_builder::prelude::MemoryDatabase;
-use nostr_sdk::EventId;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

@@ -55,11 +55,11 @@ impl PktLine {
             return Err(ProtocolError::InsufficientData);
         }
 
-        let len_str = std::str::from_utf8(&input[0..4])
-            .map_err(|_| ProtocolError::InvalidLength)?;
-        
-        let len = u16::from_str_radix(len_str, 16)
-            .map_err(|_| ProtocolError::InvalidLength)? as usize;
+        let len_str =
+            std::str::from_utf8(&input[0..4]).map_err(|_| ProtocolError::InvalidLength)?;
+
+        let len =
+            u16::from_str_radix(len_str, 16).map_err(|_| ProtocolError::InvalidLength)? as usize;
 
         if len == 0 {
             // Flush packet
@@ -81,19 +81,19 @@ impl PktLine {
     /// Parse all pkt-lines from bytes
     pub fn parse_all(mut input: &[u8]) -> Result<Vec<Self>, ProtocolError> {
         let mut packets = Vec::new();
-        
+
         while !input.is_empty() {
             let (packet, remaining) = Self::parse(input)?;
             let is_flush = matches!(packet, PktLine::Flush);
             packets.push(packet);
             input = remaining;
-            
+
             // Stop at flush packet
             if is_flush {
                 break;
             }
         }
-        
+
         Ok(packets)
     }
 }

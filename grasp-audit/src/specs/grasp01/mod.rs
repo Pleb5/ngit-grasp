@@ -26,4 +26,4 @@ pub use git_clone::GitCloneTests;
 pub use nip01_smoke::Nip01SmokeTests;
 pub use nip11_document::Nip11DocumentTests;
 pub use push_authorization::PushAuthorizationTests;
-pub use repository_creation::{RepositoryCreationTests};
+pub use repository_creation::RepositoryCreationTests;

@@ -43,10 +43,7 @@ macro_rules! isolated_push_test {
                 .await
                 .expect("Failed to create audit client");
 
-            let result = PushAuthorizationTests::$test_name(
-                &client,
-                &relay.domain()
-            ).await;
+            let result = PushAuthorizationTests::$test_name(&client, &relay.domain()).await;
 
             relay.stop().await;
 

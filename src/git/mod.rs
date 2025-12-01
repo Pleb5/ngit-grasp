@@ -306,11 +306,7 @@ pub fn parse_git_url(path: &str) -> Option<(&str, &str, &str)> {
     let subpath = parts[2];
 
     // Extract identifier (remove .git suffix if present for the middle part)
-    let identifier = if repo_part.ends_with(".git") {
-        &repo_part[..repo_part.len() - 4]
-    } else {
-        repo_part
-    };
+    let identifier = repo_part.strip_suffix(".git").unwrap_or(repo_part);
 
     Some((npub, identifier, subpath))
 }
@@ -343,7 +339,12 @@ mod tests {
 
         // Initialize bare repository
         Command::new("git")
-            .args(["init", "--bare", "--initial-branch=main", bare_repo.to_str().unwrap()])
+            .args([
+                "init",
+                "--bare",
+                "--initial-branch=main",
+                bare_repo.to_str().unwrap(),
+            ])
             .output()
             .unwrap();
 

@@ -163,27 +163,23 @@ impl Nip01SmokeTests {
     /// Spec: NIP-01 CLOSE message
     /// Requirement: Relay MUST support CLOSE to end subscriptions
     pub async fn test_close_subscription(client: &AuditClient) -> TestResult {
-        TestResult::new(
-            "close_subscription",
-            "NIP-01",
-            "Can close subscriptions",
-        )
-        .run(|| async {
-            // For now, we just verify we can query events
-            // Full subscription management with CLOSE would require
-            // lower-level WebSocket access
+        TestResult::new("close_subscription", "NIP-01", "Can close subscriptions")
+            .run(|| async {
+                // For now, we just verify we can query events
+                // Full subscription management with CLOSE would require
+                // lower-level WebSocket access
 
-            let filter = Filter::new().kind(Kind::TextNote).limit(1);
+                let filter = Filter::new().kind(Kind::TextNote).limit(1);
 
-            let _events = client
-                .subscribe(vec![filter], Some(std::time::Duration::from_secs(2)))
-                .await
-                .map_err(|e| format!("Failed to subscribe: {}", e))?;
+                let _events = client
+                    .subscribe(vec![filter], Some(std::time::Duration::from_secs(2)))
+                    .await
+                    .map_err(|e| format!("Failed to subscribe: {}", e))?;
 
-            // If we got here, subscription worked
-            Ok(())
-        })
-        .await
+                // If we got here, subscription worked
+                Ok(())
+            })
+            .await
     }
 
     /// Test 5: Rejects events with invalid signatures

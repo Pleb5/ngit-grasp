@@ -3,7 +3,6 @@
 //! Provides automatic relay lifecycle management for integration tests.
 
 use nostr_sdk::ToBech32;
-use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tokio::time::sleep;
@@ -16,7 +15,6 @@ pub struct TestRelay {
     process: Child,
     url: String,
     port: u16,
-    git_data_dir: tempfile::TempDir,
 }
 
 impl TestRelay {
@@ -44,8 +42,8 @@ impl TestRelay {
         let url = format!("ws://127.0.0.1:{}", port);
 
         // Create temporary directory for git repositories
-        let git_data_dir = tempfile::tempdir()
-            .expect("Failed to create temporary git data directory");
+        let git_data_dir =
+            tempfile::tempdir().expect("Failed to create temporary git data directory");
 
         // Use the built binary directly (faster than cargo run)
         let binary_path = std::env::current_exe()
@@ -58,7 +56,9 @@ impl TestRelay {
 
         // Generate a test owner npub (using a random keypair)
         let test_keys = nostr_sdk::Keys::generate();
-        let test_npub = test_keys.public_key().to_bech32()
+        let test_npub = test_keys
+            .public_key()
+            .to_bech32()
             .expect("Failed to generate test npub");
 
         // Start the relay process
@@ -73,12 +73,7 @@ impl TestRelay {
             .spawn()
             .expect("Failed to start relay process");
 
-        let relay = Self {
-            process,
-            url,
-            port,
-            git_data_dir,
-        };
+        let relay = Self { process, url, port };
 
         // Wait for relay to be ready
         relay.wait_for_ready().await;
@@ -91,28 +86,9 @@ impl TestRelay {
         &self.url
     }
 
-    /// Get the relay port
-    pub fn port(&self) -> u16 {
-        self.port
-    }
-
     /// Get the relay domain (host:port)
     pub fn domain(&self) -> String {
         format!("127.0.0.1:{}", self.port)
-    }
-
-    /// Get the git data directory path
-    pub fn git_data_dir(&self) -> &std::path::Path {
-        self.git_data_dir.path()
-    }
-
-    /// Get the expected repository path for a given npub and repo identifier
-    ///
-    /// Repositories are stored at: <git_data_dir>/<npub>/<identifier>.git
-    pub fn repo_path(&self, npub: &str, identifier: &str) -> PathBuf {
-        self.git_data_dir.path()
-            .join(npub)
-            .join(format!("{}.git", identifier))
     }
 
     /// Wait for the relay to be ready to accept connections
@@ -182,15 +158,6 @@ impl Drop for TestRelay {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    #[ignore] // Requires relay binary to be built
-    async fn test_relay_lifecycle() {
-        let relay = TestRelay::start().await;
-        assert!(relay.url().starts_with("ws://127.0.0.1:"));
-        assert!(relay.port() > 0);
-        relay.stop().await;
-    }
 
     #[test]
     fn test_find_free_port() {

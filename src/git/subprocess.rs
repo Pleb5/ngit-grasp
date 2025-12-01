@@ -28,9 +28,9 @@ impl GitSubprocess {
         advertise: bool,
     ) -> std::io::Result<Self> {
         let repo_path = repo_path.as_ref();
-        
+
         let mut cmd = Command::new("git");
-        
+
         // GRASP-01 requirement: MUST include `allow-reachable-sha1-in-want` and
         // `allow-tip-sha1-in-want` in advertisement and serve available oids.
         // These config options must be passed before the command name.
@@ -38,22 +38,22 @@ impl GitSubprocess {
         cmd.arg("uploadpack.allowReachableSHA1InWant=true");
         cmd.arg("-c");
         cmd.arg("uploadpack.allowTipSHA1InWant=true");
-        
+
         cmd.arg(service.command_name());
-        
+
         if advertise {
             cmd.arg("--advertise-refs");
         }
-        
+
         cmd.arg("--stateless-rpc");
         cmd.arg(repo_path);
-        
+
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
-        
+
         let child = cmd.spawn()?;
-        
+
         Ok(Self { child })
     }
 
@@ -101,8 +101,8 @@ impl GitSubprocess {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::process::Command as StdCommand;
+    use tempfile::TempDir;
 
     fn create_bare_repo() -> TempDir {
         let dir = TempDir::new().unwrap();
@@ -118,11 +118,8 @@ mod tests {
     #[tokio::test]
     async fn test_spawn_upload_pack_advertise() {
         let repo = create_bare_repo();
-        let mut proc = GitSubprocess::spawn(
-            GitService::UploadPack,
-            repo.path(),
-            true,
-        ).expect("Failed to spawn git");
+        let mut proc = GitSubprocess::spawn(GitService::UploadPack, repo.path(), true)
+            .expect("Failed to spawn git");
 
         // Should have spawned successfully
         assert!(proc.stdout().is_some());
@@ -135,11 +132,8 @@ mod tests {
     #[tokio::test]
     async fn test_spawn_receive_pack() {
         let repo = create_bare_repo();
-        let mut proc = GitSubprocess::spawn(
-            GitService::ReceivePack,
-            repo.path(),
-            false,
-        ).expect("Failed to spawn git");
+        let mut proc = GitSubprocess::spawn(GitService::ReceivePack, repo.path(), false)
+            .expect("Failed to spawn git");
 
         assert!(proc.stdout().is_some());
         assert!(proc.stdin().is_some());

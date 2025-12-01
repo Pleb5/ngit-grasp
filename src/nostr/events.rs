@@ -322,9 +322,9 @@ impl RepositoryState {
 
     /// Get the HEAD branch name (without refs/heads/ prefix)
     pub fn get_head_branch(&self) -> Option<&str> {
-        self.head.as_ref().and_then(|h| {
-            h.strip_prefix("refs/heads/")
-        })
+        self.head
+            .as_ref()
+            .and_then(|h| h.strip_prefix("refs/heads/"))
     }
 
     /// Check if the HEAD commit is available in the git repository
@@ -397,7 +397,7 @@ pub fn validate_state(event: &Event) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr_sdk::{EventBuilder, Keys, Tag};
+    use nostr_sdk::{EventBuilder, Keys};
 
     fn create_test_keys() -> Keys {
         Keys::generate()
@@ -618,7 +618,10 @@ mod tests {
 
         let announcement = RepositoryAnnouncement::from_event(event).unwrap();
         assert_eq!(announcement.maintainers.len(), 1);
-        assert_eq!(announcement.maintainers[0], maintainer_keys.public_key().to_hex());
+        assert_eq!(
+            announcement.maintainers[0],
+            maintainer_keys.public_key().to_hex()
+        );
     }
 
     #[test]
@@ -727,10 +730,7 @@ mod tests {
 
         let keys = create_test_keys();
         let tags = vec![
-            Tag::custom(
-                nostr_sdk::TagKind::d(),
-                vec!["test-repo".to_string()],
-            ),
+            Tag::custom(nostr_sdk::TagKind::d(), vec!["test-repo".to_string()]),
             Tag::custom(
                 nostr_sdk::TagKind::Custom("refs/heads/main".into()),
                 vec!["a1b2c3d4".to_string()],

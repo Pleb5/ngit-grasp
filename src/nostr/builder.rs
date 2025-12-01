@@ -51,7 +51,7 @@ impl Nip34WritePolicy {
     /// Create a bare git repository if it doesn't exist
     /// Path format: <git_data_path>/<npub>/<identifier>.git
     fn ensure_bare_repository(&self, announcement: &RepositoryAnnouncement) -> Result<(), String> {
-        let repo_path = self.git_data_path.join(&announcement.repo_path());
+        let repo_path = self.git_data_path.join(announcement.repo_path());
 
         // Check if repository already exists
         if repo_path.exists() {
@@ -69,7 +69,7 @@ impl Nip34WritePolicy {
 
         // Initialize bare repository using git command
         let output = std::process::Command::new("git")
-            .args(&["init", "--bare", repo_path.to_str().unwrap()])
+            .args(["init", "--bare", repo_path.to_str().unwrap()])
             .output()
             .map_err(|e| format!("Failed to execute git init: {}", e))?;
 
@@ -482,7 +482,7 @@ impl Nip34WritePolicy {
                 };
 
                 // Build repository path
-                let repo_path = self.git_data_path.join(&announcement.repo_path());
+                let repo_path = self.git_data_path.join(announcement.repo_path());
 
                 // Validate the ref
                 match git::validate_nostr_ref(&repo_path, &event_id, &expected_commit) {
@@ -631,8 +631,8 @@ impl Nip34WritePolicy {
         let kind_u16 = event.kind.as_u16();
 
         // Check if this is any kind of replaceable event
-        let is_regular_replaceable = kind_u16 >= 10000 && kind_u16 < 20000;
-        let is_parameterized_replaceable = kind_u16 >= 30000 && kind_u16 < 40000;
+        let is_regular_replaceable = (10000..20000).contains(&kind_u16);
+        let is_parameterized_replaceable = (30000..40000).contains(&kind_u16);
 
         if is_regular_replaceable || is_parameterized_replaceable {
             // Build the appropriate address format based on event type
@@ -669,7 +669,7 @@ impl Nip34WritePolicy {
             ];
 
             for tag_type in &addressable_tags {
-                let filter = Filter::new().custom_tag(tag_type.clone(), address.clone());
+                let filter = Filter::new().custom_tag(*tag_type, address.clone());
 
                 match database.query(filter).await {
                     Ok(events) => {
@@ -691,7 +691,7 @@ impl Nip34WritePolicy {
             ];
 
             for tag_type in &event_id_tags {
-                let filter = Filter::new().custom_tag(tag_type.clone(), event_id_hex.clone());
+                let filter = Filter::new().custom_tag(*tag_type, event_id_hex.clone());
 
                 match database.query(filter).await {
                     Ok(events) => {

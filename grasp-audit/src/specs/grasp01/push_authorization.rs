@@ -351,10 +351,7 @@ async fn setup_repo_with_wrong_commit_pushed(
 /// IMPORTANT: We must publish the EXACT same event that was used during setup,
 /// otherwise the event ID won't match the refs/nostr/<event-id> ref that was pushed.
 #[allow(dead_code)]
-async fn publish_pr_event_and_wait(
-    ctx: &TestContext<'_>,
-    pr_event: &Event,
-) -> Result<(), String> {
+async fn publish_pr_event_and_wait(ctx: &TestContext<'_>, pr_event: &Event) -> Result<(), String> {
     // Publish the exact same PR event that was created during setup
     ctx.client()
         .send_event(pr_event.clone())
@@ -1891,11 +1888,6 @@ impl PushAuthorizationTests {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_module_exists() {
-        assert!(true);
-    }
 
     /// Test to discover the PR test commit hash
     ///

@@ -9,20 +9,20 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use base64::Engine;
+use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::header::{CONNECTION, SEC_WEBSOCKET_ACCEPT, UPGRADE};
 use hyper::server::conn::http1;
 use hyper::service::Service;
 use hyper::{Method, Request, Response};
 use hyper_util::rt::TokioIo;
-use http_body_util::{BodyExt, Full};
+use nostr_relay_builder::prelude::MemoryDatabase;
+use nostr_relay_builder::LocalRelay;
 use nostr_sdk::hashes::sha1::Hash as Sha1Hash;
 use nostr_sdk::hashes::{Hash, HashEngine};
 use nostr_sdk::PublicKey;
-use nostr_relay_builder::prelude::MemoryDatabase;
-use nostr_relay_builder::LocalRelay;
 use tokio::net::TcpListener;
-use base64::Engine;
 
 use crate::config::Config;
 use crate::git;
@@ -50,7 +50,12 @@ struct HttpService {
 }
 
 impl HttpService {
-    fn new(relay: LocalRelay, config: Config, remote: SocketAddr, database: Arc<MemoryDatabase>) -> Self {
+    fn new(
+        relay: LocalRelay,
+        config: Config,
+        remote: SocketAddr,
+        database: Arc<MemoryDatabase>,
+    ) -> Self {
         Self {
             relay,
             config,
@@ -77,10 +82,12 @@ impl Service<Request<Incoming>> for HttpService {
         // GRASP-01 spec line 47: Respond to OPTIONS with 204 No Content
         if method == Method::OPTIONS {
             return Box::pin(async move {
-                Ok(add_cors_headers(Response::builder().header("server", "ngit-grasp"))
-                    .status(204)
-                    .body(Full::new(Bytes::new()))
-                    .unwrap())
+                Ok(
+                    add_cors_headers(Response::builder().header("server", "ngit-grasp"))
+                        .status(204)
+                        .body(Full::new(Bytes::new()))
+                        .unwrap(),
+                )
             });
         }
 
@@ -89,41 +96,47 @@ impl Service<Request<Incoming>> for HttpService {
             let npub = npub.to_string();
             let identifier = identifier.to_string();
             let subpath = subpath.to_string();
-            
-            tracing::debug!("Git request: {} {} (npub={}, id={}, subpath={})",
-                method, path, npub, identifier, subpath);
+
+            tracing::debug!(
+                "Git request: {} {} (npub={}, id={}, subpath={})",
+                method,
+                path,
+                npub,
+                identifier,
+                subpath
+            );
 
             let repo_path = git::resolve_repo_path(&git_data_path, &npub, &identifier);
 
             return Box::pin(async move {
                 // Collect request body once before the match statement
-                let body_bytes = req.collect().await
+                let body_bytes = req
+                    .collect()
+                    .await
                     .map(|collected| collected.to_bytes())
                     .unwrap_or_else(|_| Bytes::new());
-                
+
                 let result = match (method.as_ref(), subpath.as_str()) {
                     // GET /info/refs?service=git-upload-pack or git-receive-pack
                     (m, sp) if m == Method::GET && sp.starts_with("info/refs") => {
                         // Parse query string for service parameter
-                        let service = query.as_deref().unwrap_or("")
+                        let service = query
+                            .as_deref()
+                            .unwrap_or("")
                             .strip_prefix("service=")
                             .and_then(git::protocol::GitService::from_query_param);
 
                         match service {
-                            Some(svc) => {
-                                git::handlers::handle_info_refs(repo_path, svc).await
-                            }
-                            None => {
-                                Err(git::handlers::GitError::RepositoryNotFound)
-                            }
+                            Some(svc) => git::handlers::handle_info_refs(repo_path, svc).await,
+                            None => Err(git::handlers::GitError::RepositoryNotFound),
                         }
                     }
-                    
+
                     // POST /git-upload-pack (clone/fetch)
                     (m, "git-upload-pack") if m == Method::POST => {
                         git::handlers::handle_upload_pack(repo_path, body_bytes).await
                     }
-                    
+
                     // POST /git-receive-pack (push) - with GRASP authorization via database
                     (m, "git-receive-pack") if m == Method::POST => {
                         // Convert npub (bech32) to hex pubkey for authorization
@@ -137,33 +150,41 @@ impl Service<Request<Incoming>> for HttpService {
                                     .unwrap());
                             }
                         };
-                        
+
                         git::handlers::handle_receive_pack(
                             repo_path,
                             body_bytes.clone(),
                             Some(database.clone()),
                             &identifier,
                             &owner_pubkey_hex,
-                        ).await
+                        )
+                        .await
                     }
-                    
-                    _ => {
-                        Err(git::handlers::GitError::RepositoryNotFound)
-                    }
+
+                    _ => Err(git::handlers::GitError::RepositoryNotFound),
                 };
 
                 match result {
                     Ok(response) => {
                         // Add CORS headers to successful Git responses
                         let (parts, body) = response.into_parts();
-                        Ok(add_cors_headers(Response::builder()
-                            .status(parts.status))
-                            .header("content-type", parts.headers.get("content-type")
-                                .and_then(|v| v.to_str().ok())
-                                .unwrap_or("application/octet-stream"))
-                            .header("cache-control", parts.headers.get("cache-control")
-                                .and_then(|v| v.to_str().ok())
-                                .unwrap_or("no-cache"))
+                        Ok(add_cors_headers(Response::builder().status(parts.status))
+                            .header(
+                                "content-type",
+                                parts
+                                    .headers
+                                    .get("content-type")
+                                    .and_then(|v| v.to_str().ok())
+                                    .unwrap_or("application/octet-stream"),
+                            )
+                            .header(
+                                "cache-control",
+                                parts
+                                    .headers
+                                    .get("cache-control")
+                                    .and_then(|v| v.to_str().ok())
+                                    .unwrap_or("no-cache"),
+                            )
                             .body(body)
                             .unwrap())
                     }
@@ -191,15 +212,20 @@ impl Service<Request<Incoming>> for HttpService {
                     tracing::error!("Failed to serialize NIP-11 document: {}", e);
                     "{}".to_string()
                 });
-                
-                tracing::debug!("Serving NIP-11 relay information document to {}", self.remote);
-                
+
+                tracing::debug!(
+                    "Serving NIP-11 relay information document to {}",
+                    self.remote
+                );
+
                 return Box::pin(async move {
-                    Ok(add_cors_headers(Response::builder().header("server", "ngit-grasp"))
-                        .status(200)
-                        .header("content-type", "application/nostr+json")
-                        .body(Full::new(Bytes::from(json)))
-                        .unwrap())
+                    Ok(
+                        add_cors_headers(Response::builder().header("server", "ngit-grasp"))
+                            .status(200)
+                            .header("content-type", "application/nostr+json")
+                            .body(Full::new(Bytes::from(json)))
+                            .unwrap(),
+                    )
                 });
             }
         }
@@ -221,12 +247,13 @@ impl Service<Request<Incoming>> for HttpService {
 
                 let addr = self.remote;
                 let relay = self.relay.clone();
-                
+
                 tokio::spawn(async move {
                     match hyper::upgrade::on(req).await {
                         Ok(upgraded) => {
                             tracing::info!("WebSocket connection established from {}", addr);
-                            if let Err(e) = relay.take_connection(TokioIo::new(upgraded), addr).await
+                            if let Err(e) =
+                                relay.take_connection(TokioIo::new(upgraded), addr).await
                             {
                                 tracing::error!("Relay error for {}: {}", addr, e);
                             }
@@ -288,12 +315,12 @@ pub async fn run_server(
     tracing::info!("Domain: {}", config.domain);
 
     let listener = TcpListener::bind(&bind_addr).await?;
-    
+
     loop {
         let (socket, addr) = listener.accept().await?;
         let io = TokioIo::new(socket);
         let service = HttpService::new(relay.clone(), config.clone(), addr, database.clone());
-        
+
         tokio::spawn(async move {
             if let Err(e) = http1::Builder::new()
                 .serve_connection(io, service)

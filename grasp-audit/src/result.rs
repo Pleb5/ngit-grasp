@@ -17,7 +17,12 @@ fn extract_spec_category(spec_ref: &str) -> String {
     if parts.len() >= 2 {
         // Check if the last part looks like a test number (starts with digit)
         if let Some(last) = parts.last() {
-            if last.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+            if last
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false)
+            {
                 // Remove the trailing number part
                 return parts[..parts.len() - 1].join(":");
             }
@@ -146,10 +151,7 @@ impl AuditResult {
         for result in &self.results {
             // Extract category from spec_ref (e.g., "GRASP-01:event-acceptance:1.1" -> "GRASP-01:event-acceptance")
             let category = extract_spec_category(&result.spec_ref);
-            grouped
-                .entry(category)
-                .or_default()
-                .push(result);
+            grouped.entry(category).or_default().push(result);
         }
 
         // Print grouped results

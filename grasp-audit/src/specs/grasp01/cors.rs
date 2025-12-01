@@ -16,7 +16,6 @@
 
 use crate::{AuditClient, AuditResult, FixtureKind, TestContext, TestResult};
 use nostr_sdk::prelude::*;
-use std::path::Path;
 
 pub struct CorsTests;
 
@@ -42,10 +41,7 @@ impl CorsTests {
     ///
     /// Spec: Line 44 of ../grasp/01.md
     /// Requirement: Set `Access-Control-Allow-Origin: *` on ALL responses
-    pub async fn test_cors_allow_origin(
-        _client: &AuditClient,
-        relay_domain: &str,
-    ) -> TestResult {
+    pub async fn test_cors_allow_origin(_client: &AuditClient, relay_domain: &str) -> TestResult {
         TestResult::new(
             "cors_allow_origin",
             "GRASP-01:git-http:cors:44",
@@ -91,10 +87,7 @@ impl CorsTests {
     ///
     /// Spec: Line 45 of ../grasp/01.md
     /// Requirement: Set `Access-Control-Allow-Methods: GET, POST` on ALL responses
-    pub async fn test_cors_allow_methods(
-        _client: &AuditClient,
-        relay_domain: &str,
-    ) -> TestResult {
+    pub async fn test_cors_allow_methods(_client: &AuditClient, relay_domain: &str) -> TestResult {
         TestResult::new(
             "cors_allow_methods",
             "GRASP-01:git-http:cors:45",
@@ -138,10 +131,7 @@ impl CorsTests {
     ///
     /// Spec: Line 46 of ../grasp/01.md
     /// Requirement: Set `Access-Control-Allow-Headers: Content-Type` on ALL responses
-    pub async fn test_cors_allow_headers(
-        _client: &AuditClient,
-        relay_domain: &str,
-    ) -> TestResult {
+    pub async fn test_cors_allow_headers(_client: &AuditClient, relay_domain: &str) -> TestResult {
         TestResult::new(
             "cors_allow_headers",
             "GRASP-01:git-http:cors:46",
@@ -212,10 +202,8 @@ impl CorsTests {
                 check_options_response(&response, "root endpoint")?;
 
                 // 2. Test OPTIONS on git-upload-pack endpoint
-                let repo_url = format!(
-                    "http://{}/npub1test/test.git/git-upload-pack",
-                    relay_domain
-                );
+                let repo_url =
+                    format!("http://{}/npub1test/test.git/git-upload-pack", relay_domain);
                 let response = http_client
                     .request(reqwest::Method::OPTIONS, &repo_url)
                     .header("Origin", "https://example.com")
@@ -227,10 +215,7 @@ impl CorsTests {
                 check_options_response(&response, "git-upload-pack endpoint")?;
 
                 // 3. Test OPTIONS on info/refs endpoint
-                let refs_url = format!(
-                    "http://{}/npub1test/test.git/info/refs",
-                    relay_domain
-                );
+                let refs_url = format!("http://{}/npub1test/test.git/info/refs", relay_domain);
                 let response = http_client
                     .request(reqwest::Method::OPTIONS, &refs_url)
                     .header("Origin", "https://example.com")
@@ -255,10 +240,7 @@ impl CorsTests {
     /// Integration test: CORS Allow-Origin header with repository creation
     ///
     /// For integration tests that want to test against real repositories
-    pub async fn test_cors_on_real_repo(
-        client: &AuditClient,
-        relay_domain: &str,
-    ) -> TestResult {
+    pub async fn test_cors_on_real_repo(client: &AuditClient, relay_domain: &str) -> TestResult {
         let test_name = "test_cors_on_real_repo";
         let ctx = TestContext::new(client);
 
@@ -271,7 +253,7 @@ impl CorsTests {
                     "GRASP-01",
                     "CORS headers on real repository endpoint",
                 )
-                .fail(&format!("Failed to create repo fixture: {}", e))
+                .fail(format!("Failed to create repo fixture: {}", e))
             }
         };
 
@@ -304,7 +286,7 @@ impl CorsTests {
                     "GRASP-01",
                     "CORS headers on real repository endpoint",
                 )
-                .fail(&format!("Failed to convert pubkey to npub: {}", e))
+                .fail(format!("Failed to convert pubkey to npub: {}", e))
             }
         };
 
@@ -323,7 +305,7 @@ impl CorsTests {
                     "GRASP-01",
                     "CORS headers on real repository endpoint",
                 )
-                .fail(&format!("Failed to GET info/refs: {}", e))
+                .fail(format!("Failed to GET info/refs: {}", e))
             }
         };
 
@@ -492,15 +474,6 @@ mod tests {
         results.print_report();
 
         // Assert all tests passed
-        assert!(
-            results.all_passed(),
-            "Some GRASP-01 CORS tests failed"
-        );
-    }
-
-    #[test]
-    fn test_module_exists() {
-        // Simple compilation test
-        assert!(true);
+        assert!(results.all_passed(), "Some GRASP-01 CORS tests failed");
     }
 }

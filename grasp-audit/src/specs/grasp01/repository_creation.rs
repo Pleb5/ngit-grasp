@@ -23,10 +23,7 @@ pub struct RepositoryCreationTests;
 
 impl RepositoryCreationTests {
     /// Run all repository creation tests
-    pub async fn run_all(
-        client: &AuditClient,
-        relay_domain: &str,
-    ) -> crate::AuditResult {
+    pub async fn run_all(client: &AuditClient, relay_domain: &str) -> crate::AuditResult {
         let mut results = crate::AuditResult::new("GRASP-01 Repository Creation Tests");
 
         results.add(Self::test_bare_repo_created_on_announcement(client, relay_domain).await);
@@ -58,7 +55,7 @@ impl RepositoryCreationTests {
                     "GRASP-01",
                     "Bare repository must be created and accessible via Smart HTTP when announcement is accepted",
                 )
-                .fail(&format!("Failed to create repo fixture: {}", e))
+                .fail(format!("Failed to create repo fixture: {}", e))
             }
         };
 
@@ -91,7 +88,7 @@ impl RepositoryCreationTests {
                     "GRASP-01",
                     "Bare repository must be created and accessible via Smart HTTP when announcement is accepted",
                 )
-                .fail(&format!("Failed to convert pubkey to npub: {}", e))
+                .fail(format!("Failed to convert pubkey to npub: {}", e))
             }
         };
 
@@ -102,7 +99,7 @@ impl RepositoryCreationTests {
                 "GRASP-01",
                 "Bare repository must be created and accessible via Smart HTTP when announcement is accepted",
             )
-            .fail(&format!("Repository not accessible via HTTP: {}", e));
+            .fail(format!("Repository not accessible via HTTP: {}", e));
         }
 
         TestResult::new(
@@ -158,13 +155,4 @@ async fn check_repo_accessible_via_http(
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_module_exists() {
-        // Simple compilation test
-        assert!(true);
-    }
 }

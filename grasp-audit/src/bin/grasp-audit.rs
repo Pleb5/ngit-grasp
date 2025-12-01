@@ -47,14 +47,18 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Audit { relay, mode, spec, git_data_dir } => {
-
+        Commands::Audit {
+            relay,
+            mode,
+            spec,
+            git_data_dir,
+        } => {
             let mut config = match mode.as_str() {
                 "ci" => AuditConfig::ci(),
                 "production" => AuditConfig::production(),
                 _ => return Err(anyhow!("Invalid mode: {}. Use 'ci' or 'production'", mode)),
             };
-            
+
             // Audit needs to create events to test the relay, so disable read-only mode
             config.read_only = false;
 
@@ -145,17 +149,17 @@ async fn main() -> Result<()> {
                     println!("  → NIP-01 smoke tests...");
                     let nip01_results = specs::Nip01SmokeTests::run_all(&client).await;
                     all_results.merge(nip01_results);
-                    
+
                     // NIP-11 document tests
                     println!("  → NIP-11 document tests...");
                     let nip11_results = specs::Nip11DocumentTests::run_all(&client).await;
                     all_results.merge(nip11_results);
-                    
+
                     // CORS tests
                     println!("  → CORS tests...");
                     let cors_results = specs::CorsTests::run_all(&client, &relay_domain).await;
                     all_results.merge(cors_results);
-                    
+
                     println!();
                     all_results
                 }

@@ -5,19 +5,15 @@ use std::env;
 /// Database backend type for the relay
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum DatabaseBackend {
     /// In-memory database (default, fastest, no persistence)
+    #[default]
     Memory,
     /// NostrDB backend (persistent, optimized for Nostr)
     NostrDb,
     /// LMDB backend (persistent, general purpose)
     Lmdb,
-}
-
-impl Default for DatabaseBackend {
-    fn default() -> Self {
-        Self::Memory
-    }
 }
 
 impl std::str::FromStr for DatabaseBackend {

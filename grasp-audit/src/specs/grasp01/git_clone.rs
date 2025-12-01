@@ -25,10 +25,7 @@ pub struct GitCloneTests;
 
 impl GitCloneTests {
     /// Run all Git clone tests
-    pub async fn run_all(
-        client: &AuditClient,
-        relay_domain: &str,
-    ) -> crate::AuditResult {
+    pub async fn run_all(client: &AuditClient, relay_domain: &str) -> crate::AuditResult {
         let mut results = crate::AuditResult::new("GRASP-01 Git Clone Tests");
 
         results.add(Self::test_basic_git_clone(client, relay_domain).await);
@@ -45,10 +42,7 @@ impl GitCloneTests {
     /// 2. Waits for repository creation
     /// 3. Attempts to clone the repository using git clone
     /// 4. Verifies the clone succeeded
-    pub async fn test_basic_git_clone(
-        client: &AuditClient,
-        relay_domain: &str,
-    ) -> TestResult {
+    pub async fn test_basic_git_clone(client: &AuditClient, relay_domain: &str) -> TestResult {
         let test_name = "test_basic_git_clone";
         let ctx = TestContext::new(client);
 
@@ -61,7 +55,7 @@ impl GitCloneTests {
                     "GRASP-01",
                     "Repository must be cloneable via Git HTTP backend",
                 )
-                .fail(&format!("Failed to create repo fixture: {}", e))
+                .fail(format!("Failed to create repo fixture: {}", e))
             }
         };
 
@@ -94,7 +88,7 @@ impl GitCloneTests {
                     "GRASP-01",
                     "Repository must be cloneable via Git HTTP backend",
                 )
-                .fail(&format!("Failed to convert pubkey to npub: {}", e))
+                .fail(format!("Failed to convert pubkey to npub: {}", e))
             }
         };
 
@@ -102,7 +96,7 @@ impl GitCloneTests {
         let temp_base = std::env::temp_dir();
         let clone_dir_name = format!("grasp-test-clone-{}", uuid::Uuid::new_v4());
         let clone_path = temp_base.join(&clone_dir_name);
-        
+
         // Ensure clean state
         let _ = fs::remove_dir_all(&clone_path);
 
@@ -114,7 +108,7 @@ impl GitCloneTests {
             .args(["clone", &clone_url, clone_path.to_str().unwrap()])
             .env("GIT_TERMINAL_PROMPT", "0") // Disable password prompts
             .output();
-        
+
         // Clean up on success or failure
         let cleanup = || {
             let _ = fs::remove_dir_all(&clone_path);
@@ -129,7 +123,7 @@ impl GitCloneTests {
                     "GRASP-01",
                     "Repository must be cloneable via Git HTTP backend",
                 )
-                .fail(&format!("Failed to execute git clone: {}", e))
+                .fail(format!("Failed to execute git clone: {}", e));
             }
         };
 
@@ -141,7 +135,7 @@ impl GitCloneTests {
                 "GRASP-01",
                 "Repository must be cloneable via Git HTTP backend",
             )
-            .fail(&format!("Git clone failed: {}", stderr));
+            .fail(format!("Git clone failed: {}", stderr));
         }
 
         // Verify clone succeeded by checking for .git directory
@@ -169,10 +163,7 @@ impl GitCloneTests {
     /// This test verifies:
     /// 1. URLs follow the pattern http://domain/npub/identifier.git
     /// 2. Invalid URLs are rejected properly
-    pub async fn test_clone_url_format(
-        client: &AuditClient,
-        relay_domain: &str,
-    ) -> TestResult {
+    pub async fn test_clone_url_format(client: &AuditClient, relay_domain: &str) -> TestResult {
         let test_name = "test_clone_url_format";
         let ctx = TestContext::new(client);
 
@@ -185,7 +176,7 @@ impl GitCloneTests {
                     "GRASP-01",
                     "Clone URL must follow correct format",
                 )
-                .fail(&format!("Failed to create repo fixture: {}", e))
+                .fail(format!("Failed to create repo fixture: {}", e))
             }
         };
 
@@ -205,7 +196,7 @@ impl GitCloneTests {
 
         // Test valid URL format
         let valid_url = format!("http://{}/{}/{}.git", relay_domain, npub, repo_id);
-        
+
         // Verify URL contains expected components
         if !valid_url.contains(&npub) {
             return TestResult::new(
@@ -229,10 +220,10 @@ impl GitCloneTests {
         let temp_base = std::env::temp_dir();
         let clone_dir_name = format!("grasp-test-invalid-{}", uuid::Uuid::new_v4());
         let clone_path = temp_base.join(&clone_dir_name);
-        
+
         // Ensure clean state
         let _ = fs::remove_dir_all(&clone_path);
-        
+
         let invalid_url = format!("http://{}/invalid/path", relay_domain);
 
         let output = Command::new("git")
@@ -287,7 +278,7 @@ impl GitCloneTests {
                     "GRASP-01",
                     "MUST include allow-reachable-sha1-in-want and allow-tip-sha1-in-want in advertisement",
                 )
-                .fail(&format!("Failed to create repo fixture: {}", e))
+                .fail(format!("Failed to create repo fixture: {}", e))
             }
         };
 
@@ -320,7 +311,7 @@ impl GitCloneTests {
                     "GRASP-01",
                     "MUST include allow-reachable-sha1-in-want and allow-tip-sha1-in-want in advertisement",
                 )
-                .fail(&format!("Failed to convert pubkey to npub: {}", e))
+                .fail(format!("Failed to convert pubkey to npub: {}", e))
             }
         };
 
@@ -340,7 +331,7 @@ impl GitCloneTests {
                     "GRASP-01",
                     "MUST include allow-reachable-sha1-in-want and allow-tip-sha1-in-want in advertisement",
                 )
-                .fail(&format!("HTTP request failed: {}", e))
+                .fail(format!("HTTP request failed: {}", e))
             }
         };
 
@@ -350,7 +341,7 @@ impl GitCloneTests {
                 "GRASP-01",
                 "MUST include allow-reachable-sha1-in-want and allow-tip-sha1-in-want in advertisement",
             )
-            .fail(&format!(
+            .fail(format!(
                 "info/refs request failed with status: {}",
                 response.status()
             ));
@@ -365,7 +356,7 @@ impl GitCloneTests {
                     "GRASP-01",
                     "MUST include allow-reachable-sha1-in-want and allow-tip-sha1-in-want in advertisement",
                 )
-                .fail(&format!("Failed to read response body: {}", e))
+                .fail(format!("Failed to read response body: {}", e))
             }
         };
 
@@ -397,14 +388,5 @@ impl GitCloneTests {
             "MUST include allow-reachable-sha1-in-want and allow-tip-sha1-in-want in advertisement",
         )
         .pass()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_module_exists() {
-        // Simple compilation test
-        assert!(true);
     }
 }

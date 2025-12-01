@@ -1,10 +1,9 @@
+use crate::config::Config;
 /// NIP-11 Relay Information Document
 ///
 /// Implements NIP-11 relay information endpoint with GRASP-01 extensions.
 /// See: https://github.com/nostr-protocol/nips/blob/master/11.md
-
 use serde::{Deserialize, Serialize};
-use crate::config::Config;
 
 /// NIP-11 Relay Information Document
 ///
@@ -14,37 +13,36 @@ use crate::config::Config;
 pub struct RelayInformationDocument {
     /// Relay name
     pub name: String,
-    
+
     /// Relay description
     pub description: String,
-    
+
     /// Relay owner's public key (hex format)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pubkey: Option<String>,
-    
+
     /// Contact information for relay admin
     #[serde(skip_serializing_if = "Option::is_none")]
     pub contact: Option<String>,
-    
+
     /// List of NIPs supported by this relay
     pub supported_nips: Vec<u16>,
-    
+
     /// Relay software identifier
     pub software: String,
-    
+
     /// Software version
     pub version: String,
-    
+
     // GRASP-01 Extensions (lines 11-14 of GRASP-01 spec)
-    
     /// List of supported GRASPs (e.g., ["GRASP-01"])
     /// Required by GRASP-01 specification line 12
     pub supported_grasps: Vec<String>,
-    
+
     /// Repository acceptance criteria description
     /// Required by GRASP-01 specification line 13
     pub repo_acceptance_criteria: String,
-    
+
     /// Curation policy (present if curated, absent otherwise)
     /// Optional per GRASP-01 specification line 14
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -66,7 +64,7 @@ impl RelayInformationDocument {
             ],
             software: env!("CARGO_PKG_NAME").to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
-            
+
             // GRASP-01 Extensions
             supported_grasps: vec!["GRASP-01".to_string()],
             repo_acceptance_criteria: format!(
@@ -77,7 +75,7 @@ impl RelayInformationDocument {
             curation: None, // Not a curated relay - only SPAM prevention via GRASP-01 policy
         }
     }
-    
+
     /// Serialize to JSON string
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
@@ -102,7 +100,7 @@ mod tests {
         };
 
         let doc = RelayInformationDocument::from_config(&config);
-        
+
         assert_eq!(doc.name, "Test Relay");
         assert_eq!(doc.description, "A test relay");
         assert_eq!(doc.pubkey, Some("npub1test".to_string()));
@@ -129,7 +127,7 @@ mod tests {
 
         let doc = RelayInformationDocument::from_config(&config);
         let json = doc.to_json().expect("Failed to serialize to JSON");
-        
+
         // Verify JSON contains expected fields
         assert!(json.contains("\"name\""));
         assert!(json.contains("\"description\""));
@@ -137,7 +135,7 @@ mod tests {
         assert!(json.contains("\"supported_grasps\""));
         assert!(json.contains("\"repo_acceptance_criteria\""));
         assert!(json.contains("GRASP-01"));
-        
+
         // Verify it's valid JSON by parsing
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("Invalid JSON");
         assert_eq!(parsed["name"], "Test Relay");

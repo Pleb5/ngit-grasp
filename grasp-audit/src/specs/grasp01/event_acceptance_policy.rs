@@ -247,7 +247,9 @@ impl EventAcceptancePolicyTests {
     ///
     /// Spec: Line 5 of ../grasp/01.md
     /// Requirement: MUST reject announcements not listing service (unless GRASP-05)
-    pub async fn test_reject_repo_announcement_missing_clone_tag(client: &AuditClient) -> TestResult {
+    pub async fn test_reject_repo_announcement_missing_clone_tag(
+        client: &AuditClient,
+    ) -> TestResult {
         TestResult::new(
             "reject_repo_announcement_missing_clone_tag",
             "GRASP-01:nostr-relay:5",
@@ -321,7 +323,9 @@ impl EventAcceptancePolicyTests {
     ///
     /// Spec: Line 5 of ../grasp/01.md
     /// Requirement: MUST reject announcements not listing service in relays
-    pub async fn test_reject_repo_announcement_missing_relays_tag(client: &AuditClient) -> TestResult {
+    pub async fn test_reject_repo_announcement_missing_relays_tag(
+        client: &AuditClient,
+    ) -> TestResult {
         TestResult::new(
             "reject_repo_announcement_missing_relays_tag",
             "GRASP-01:nostr-relay:5",
@@ -546,8 +550,7 @@ impl EventAcceptancePolicyTests {
             let issue = Self::create_issue_for_repo(client, &repo, "Test Issue 1")?;
 
             // 3. Send issue and verify it's accepted
-            send_and_verify_accepted(client, issue, "issue referencing repo via 'a' tag")
-                .await?;
+            send_and_verify_accepted(client, issue, "issue referencing repo via 'a' tag").await?;
 
             Ok(())
         })
@@ -693,8 +696,7 @@ impl EventAcceptancePolicyTests {
                 .map_err(|e| format!("Failed to build issue B: {}", e))?;
 
             // Send Issue B and verify it's ACCEPTED (via transitive quote to Issue A)
-            send_and_verify_accepted(client, issue_b, "issue B quoting accepted issue A")
-                .await?;
+            send_and_verify_accepted(client, issue_b, "issue B quoting accepted issue A").await?;
 
             Ok(())
         })
@@ -772,8 +774,7 @@ impl EventAcceptancePolicyTests {
                 .build(client.keys())
                 .map_err(|e| format!("Failed to build kind1 A: {}", e))?;
 
-            send_and_verify_accepted(client, kind1_a.clone(), "kind 1 A quoting repo")
-                .await?;
+            send_and_verify_accepted(client, kind1_a.clone(), "kind 1 A quoting repo").await?;
 
             // Create Kind 1 B that replies to Kind 1 A via 'e' tag
             let kind1_b = client
@@ -783,12 +784,8 @@ impl EventAcceptancePolicyTests {
                 .map_err(|e| format!("Failed to build kind1 B: {}", e))?;
 
             // Send Kind 1 B and verify it's accepted (via 'e' tag to accepted kind 1 A)
-            send_and_verify_accepted(
-                client,
-                kind1_b,
-                "kind 1 B replying to accepted kind 1 A",
-            )
-            .await?;
+            send_and_verify_accepted(client, kind1_b, "kind 1 B replying to accepted kind 1 A")
+                .await?;
 
             Ok(())
         })
@@ -828,17 +825,19 @@ impl EventAcceptancePolicyTests {
                 .kind(Kind::GitRepoAnnouncement)
                 .author(repo.pubkey)
                 .identifier(repo_id);
-            
+
             // Poll until repo is available (with timeout)
             for _ in 0..10 {
-                let events = client.query(verify_filter.clone()).await
+                let events = client
+                    .query(verify_filter.clone())
+                    .await
                     .map_err(|e| format!("Failed to verify repo: {}", e))?;
                 if !events.is_empty() {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            
+
             // Extra delay to ensure relay's internal database is fully synchronized
             tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -907,12 +906,7 @@ impl EventAcceptancePolicyTests {
             let issue = ctx
                 .get_fixture(FixtureKind::RepoWithIssue)
                 .await
-                .map_err(|e| {
-                    format!(
-                        "Test setup failed: could not get issue fixture: {}",
-                        e
-                    )
-                })?;
+                .map_err(|e| format!("Test setup failed: could not get issue fixture: {}", e))?;
 
             // Create Comment A locally but DON'T send it yet
             let comment_a = Self::create_comment_for_event(client, &issue, "Comment A")?;
@@ -997,16 +991,11 @@ impl EventAcceptancePolicyTests {
                 .build(client.keys())
                 .map_err(|e| format!("Failed to build kind1 B: {}", e))?;
 
-            send_and_verify_accepted(client, kind1_b, "kind1 B mentioning unsent kind1 A")
-                .await?;
+            send_and_verify_accepted(client, kind1_b, "kind1 B mentioning unsent kind1 A").await?;
 
             // NOW send Kind 1 A - should be accepted because accepted Kind 1 B mentions it
-            send_and_verify_accepted(
-                client,
-                kind1_a,
-                "kind1 A referenced by accepted kind1 B",
-            )
-            .await?;
+            send_and_verify_accepted(client, kind1_a, "kind1 A referenced by accepted kind1 B")
+                .await?;
 
             Ok(())
         })
@@ -1033,12 +1022,8 @@ impl EventAcceptancePolicyTests {
                 Self::create_issue_for_repo(client, &unaccepted_repo, "Orphan Issue")?;
 
             // 3. Send issue and verify it's REJECTED
-            send_and_verify_rejected(
-                client,
-                orphan_issue,
-                "issue referencing unaccepted repo",
-            )
-            .await?;
+            send_and_verify_rejected(client, orphan_issue, "issue referencing unaccepted repo")
+                .await?;
 
             Ok(())
         })
@@ -1060,8 +1045,7 @@ impl EventAcceptancePolicyTests {
                 .map_err(|e| format!("Failed to build note: {}", e))?;
 
             // 2. Send note and verify it's REJECTED
-            send_and_verify_rejected(client, orphan_note, "kind 1 with no repo references")
-                .await?;
+            send_and_verify_rejected(client, orphan_note, "kind 1 with no repo references").await?;
 
             Ok(())
         })

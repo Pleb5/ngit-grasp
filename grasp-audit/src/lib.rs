@@ -39,14 +39,24 @@ pub use audit::{AuditConfig, AuditEventBuilder, AuditMode};
 pub use client::AuditClient;
 pub use fixtures::{
     // Git operation helpers
-    clone_repo, create_commit, create_deterministic_commit, create_deterministic_commit_with_variant,
-    try_push, try_push_to_ref,
+    clone_repo,
+    create_commit,
+    create_deterministic_commit,
+    create_deterministic_commit_with_variant,
     // Verification helpers
-    send_and_verify_accepted, send_and_verify_rejected,
+    send_and_verify_accepted,
+    send_and_verify_rejected,
+    try_push,
+    try_push_to_ref,
     // Types and constants
-    CommitVariant, ContextMode, FixtureKind, TestContext,
-    DETERMINISTIC_COMMIT_HASH, MAINTAINER_DETERMINISTIC_COMMIT_HASH,
-    PR_TEST_COMMIT_HASH, RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH,
+    CommitVariant,
+    ContextMode,
+    FixtureKind,
+    TestContext,
+    DETERMINISTIC_COMMIT_HASH,
+    MAINTAINER_DETERMINISTIC_COMMIT_HASH,
+    PR_TEST_COMMIT_HASH,
+    RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH,
 };
 pub use result::{AuditResult, TestResult};
 
