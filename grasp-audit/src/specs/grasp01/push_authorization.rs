@@ -32,9 +32,8 @@
 const PR_TEST_COMMIT_HASH: &str = "5d40fb1555a0c28bf4d650515a73aaa54d4d9bfb";
 
 use crate::{
-    clone_repo, create_commit, create_deterministic_commit,
-    create_deterministic_commit_with_variant, try_push, try_push_to_ref, AuditClient,
-    CommitVariant, FixtureKind, TestContext, TestResult, DETERMINISTIC_COMMIT_HASH,
+    clone_repo, create_commit, create_deterministic_commit_with_variant, try_push, try_push_to_ref,
+    AuditClient, CommitVariant, FixtureKind, TestContext, TestResult,
     MAINTAINER_DETERMINISTIC_COMMIT_HASH,
 };
 use nostr_sdk::prelude::*;
@@ -238,131 +237,8 @@ async fn setup_pr_test_repo(
 }
 
 // ============================================================
-// PR Ref Push Test Setup Helpers - Minimize Test Duplication
+// PR Ref Push Test Helpers
 // ============================================================
-
-/// Result of setting up a repo with a wrong commit pushed before PR event exists.
-/// Used as shared setup for tests 3, 4, 5 which all depend on this scenario.
-#[allow(dead_code)]
-struct PrRefTestSetup {
-    clone_path: PathBuf,
-    pr_event_id: String,
-    repo_id: String,
-    owner_npub: String,
-    wrong_commit_hash: String,
-    /// The unpublished PR event - store it so we can publish the SAME event later
-    pr_event: Event,
-}
-
-impl PrRefTestSetup {
-    fn cleanup(&self) {
-        let _ = std::fs::remove_dir_all(&self.clone_path);
-    }
-}
-
-/// Sets up a repo and pushes a WRONG commit to refs/nostr/<pr-event-id> BEFORE PR event exists.
-///
-/// This is the shared setup for PR ref lifecycle tests:
-/// - Creates repo (gets PREvent fixture for event-id but doesn't publish yet)
-/// - Clones repo
-/// - Creates a commit that does NOT match PR_TEST_COMMIT_HASH
-/// - Pushes to refs/nostr/<pr-event-id> (should succeed - no event to validate against)
-///
-/// Tests using this setup:
-/// - test_pr_push_to_nostr_ref_with_wrong_commit_accepted_before_event_received: verify initial push accepted
-/// - test_pr_event_published_removes_nostr_ref_at_incorrect_commit: publish event, verify cleanup
-/// - test_push_to_nostr_ref_with_wrong_commit_after_event_received_rejected: publish event, try push wrong commit
-/// - test_push_to_nostr_ref_with_correct_commit_after_event_received_accepted: publish event, push correct commit
-#[allow(dead_code)]
-async fn setup_repo_with_wrong_commit_pushed(
-    ctx: &TestContext<'_>,
-    relay_domain: &str,
-) -> Result<PrRefTestSetup, String> {
-    // Get ValidRepo fixture (publishes repo announcement to relay)
-    let repo_event = ctx
-        .get_fixture(FixtureKind::ValidRepo)
-        .await
-        .map_err(|e| format!("Failed to get repo announcement: {}", e))?;
-
-    // Build PR event WITHOUT publishing - we need its ID before the event exists on relay
-    // This allows testing refs/nostr/<event-id> push behavior before the event is received
-    let pr_event = ctx
-        .build_fixture_only(FixtureKind::PREvent)
-        .await
-        .map_err(|e| format!("Failed to build PR event fixture: {}", e))?;
-
-    let repo_id = repo_event
-        .tags
-        .iter()
-        .find(|t| t.kind() == TagKind::d())
-        .and_then(|t| t.content())
-        .ok_or("No repo identifier in announcement")?
-        .to_string();
-
-    let owner_npub = repo_event.pubkey.to_bech32().map_err(|e| e.to_string())?;
-    let pr_event_id = pr_event.id.to_hex();
-
-    // Clone the repository
-    let clone_path = clone_repo(relay_domain, &owner_npub, &repo_id)?;
-
-    // Create a WRONG commit (not the one expected by PR event)
-    let wrong_commit_hash =
-        create_deterministic_commit_with_variant(&clone_path, CommitVariant::Owner)?;
-
-    // Verify it's actually different from expected
-    if wrong_commit_hash == PR_TEST_COMMIT_HASH {
-        let _ = std::fs::remove_dir_all(&clone_path);
-        return Err("Test setup error: wrong_commit_hash equals PR_TEST_COMMIT_HASH".to_string());
-    }
-
-    // Push to refs/nostr/<pr-event-id> (no event published yet, should succeed)
-    let push_output = Command::new("git")
-        .args([
-            "push",
-            "origin",
-            &format!("master:refs/nostr/{}", pr_event_id),
-        ])
-        .current_dir(&clone_path)
-        .output()
-        .map_err(|e| format!("Failed to execute git push: {}", e))?;
-
-    if !push_output.status.success() {
-        let stderr = String::from_utf8_lossy(&push_output.stderr);
-        let _ = std::fs::remove_dir_all(&clone_path);
-        return Err(format!(
-            "Initial push failed (expected success before PR event): {}",
-            stderr
-        ));
-    }
-
-    Ok(PrRefTestSetup {
-        clone_path,
-        pr_event_id,
-        repo_id,
-        owner_npub,
-        wrong_commit_hash,
-        pr_event,
-    })
-}
-
-/// Publishes the SAME PR event that was built during setup.
-/// Call this after setup_repo_with_wrong_commit_pushed to test post-event behavior.
-///
-/// IMPORTANT: We must publish the EXACT same event that was used during setup,
-/// otherwise the event ID won't match the refs/nostr/<event-id> ref that was pushed.
-#[allow(dead_code)]
-async fn publish_pr_event_and_wait(ctx: &TestContext<'_>, pr_event: &Event) -> Result<(), String> {
-    // Publish the exact same PR event that was created during setup
-    ctx.client()
-        .send_event(pr_event.clone())
-        .await
-        .map_err(|e| format!("Failed to publish PR event: {}", e))?;
-
-    // Wait for relay to process
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-    Ok(())
-}
 
 /// Creates the correct PR test commit (matching PR_TEST_COMMIT_HASH) in an existing clone.
 /// Used after wrong commit was pushed to test pushing the correct commit.
@@ -1139,7 +1015,9 @@ impl PushAuthorizationTests {
     /// when no corresponding event exists yet. This is expected behavior because
     /// there's no validation event to check against.
     ///
-    /// Uses `setup_repo_with_wrong_commit_pushed` helper which handles all setup.
+    /// Uses `PRWrongCommitPushedBeforeEvent` fixture which handles all setup
+    /// and verifies the push succeeded.
+    #[allow(unused_variables)] // relay_domain is now handled by fixture
     pub async fn test_pr_push_to_nostr_ref_with_wrong_commit_accepted_before_event_received(
         client: &AuditClient,
         relay_domain: &str,
@@ -1149,19 +1027,15 @@ impl PushAuthorizationTests {
         let desc = "Push wrong commit to refs/nostr/<pr-event-id> before PR event (should accept)";
         let ctx = TestContext::new(client);
 
-        // Setup includes: create repo, clone, create wrong commit, push to refs/nostr/<event-id>
-        // The push happens BEFORE PR event is published, so should succeed
-        let setup = match setup_repo_with_wrong_commit_pushed(&ctx, relay_domain).await {
-            Ok(s) => s,
-            Err(e) => {
-                return TestResult::new(test_name, "GRASP-01", desc).fail(&e);
-            }
-        };
-
-        // Setup already pushed and verified success - just cleanup and report pass
-        setup.cleanup();
-
-        TestResult::new(test_name, "GRASP-01", desc).pass()
+        // The PRWrongCommitPushedBeforeEvent fixture handles:
+        // 1. Create repo announcement
+        // 2. Build PR event (but don't send it)
+        // 3. Clone repo, create wrong commit, push to refs/nostr/<event-id>
+        // If the push fails, the fixture will return an error
+        match ctx.get_fixture(FixtureKind::PRWrongCommitPushedBeforeEvent).await {
+            Ok(_pr_event) => TestResult::new(test_name, "GRASP-01", desc).pass(),
+            Err(e) => TestResult::new(test_name, "GRASP-01", desc).fail(format!("{}", e)),
+        }
     }
 
     /// Test 2: After publishing PR event, verify that incorrect refs get cleaned up
@@ -1170,7 +1044,7 @@ impl PushAuthorizationTests {
     /// the relay should validate any existing refs/nostr/<event-id> refs and
     /// delete those that don't match the commit in the PR event's `c` tag.
     ///
-    /// Depends on: `setup_repo_with_wrong_commit_pushed` (wrong commit already pushed)
+    /// Uses `PREventSentAfterWrongPush` fixture which builds on the wrong push fixture.
     pub async fn test_pr_event_published_removes_nostr_ref_at_incorrect_commit(
         client: &AuditClient,
         relay_domain: &str,
@@ -1179,38 +1053,66 @@ impl PushAuthorizationTests {
         let desc = "Publishing PR event should trigger cleanup of incorrect refs";
         let ctx = TestContext::new(client);
 
-        // Setup: wrong commit already pushed to refs/nostr/<pr-event-id>
-        let setup = match setup_repo_with_wrong_commit_pushed(&ctx, relay_domain).await {
-            Ok(s) => s,
+        // Get fixture: wrong commit was pushed, then PR event was sent
+        let pr_event = match ctx.get_fixture(FixtureKind::PREventSentAfterWrongPush).await {
+            Ok(e) => e,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", desc).fail(format!("{}", e));
+            }
+        };
+
+        let pr_event_id = pr_event.id.to_hex();
+
+        // Get repo info for cloning (fresh clone for verification)
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+            Ok(r) => r,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", desc).fail(format!("{}", e));
+            }
+        };
+
+        let repo_id = repo
+            .tags
+            .iter()
+            .find(|t| t.kind() == TagKind::d())
+            .and_then(|t| t.content())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let owner_npub = match repo.pubkey.to_bech32() {
+            Ok(n) => n,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", desc)
+                    .fail(format!("Failed to get owner npub: {}", e));
+            }
+        };
+
+        // Clone fresh for verification
+        let clone_path = match clone_repo(relay_domain, &owner_npub, &repo_id) {
+            Ok(p) => p,
             Err(e) => {
                 return TestResult::new(test_name, "GRASP-01", desc).fail(&e);
             }
         };
-
-        // NOW publish the PR event - this should trigger cleanup validation
-        if let Err(e) = publish_pr_event_and_wait(&ctx, &setup.pr_event).await {
-            setup.cleanup();
-            return TestResult::new(test_name, "GRASP-01", desc).fail(&e);
-        }
 
         // Check if the incorrect ref was deleted
-        let ref_name = format!("refs/nostr/{}", setup.pr_event_id);
-        let refs_exist = match ref_exists_on_remote(&setup.clone_path, &ref_name) {
+        let ref_name = format!("refs/nostr/{}", pr_event_id);
+        let refs_exist = match ref_exists_on_remote(&clone_path, &ref_name) {
             Ok(exists) => exists,
             Err(e) => {
-                setup.cleanup();
+                let _ = fs::remove_dir_all(&clone_path);
                 return TestResult::new(test_name, "GRASP-01", desc).fail(&e);
             }
         };
 
-        setup.cleanup();
+        let _ = fs::remove_dir_all(&clone_path);
 
         // Ref should be deleted since the pushed commit doesn't match the PR event's `c` tag
         if refs_exist {
             TestResult::new(test_name, "GRASP-01", desc).fail(format!(
                 "Expected refs/nostr/{} to be deleted when PR event published with non-matching commit, \
                  but the ref still exists. The relay should delete refs that don't match the event's `c` tag.",
-                setup.pr_event_id
+                pr_event_id
             ))
         } else {
             TestResult::new(test_name, "GRASP-01", desc).pass()
@@ -1223,7 +1125,7 @@ impl PushAuthorizationTests {
     /// when a corresponding event exists but the pushed commit doesn't match
     /// the commit in the PR event's `c` tag.
     ///
-    /// Depends on: `setup_repo_with_wrong_commit_pushed` for repo/clone setup, then publishes PR event
+    /// Uses `PREventSentAfterWrongPush` fixture, then attempts to push wrong commit again.
     pub async fn test_push_to_nostr_ref_with_wrong_commit_after_event_received_rejected(
         client: &AuditClient,
         relay_domain: &str,
@@ -1232,30 +1134,65 @@ impl PushAuthorizationTests {
         let desc = "Push wrong commit to refs/nostr/<pr-event-id> after PR event (should reject)";
         let ctx = TestContext::new(client);
 
-        // Setup: wrong commit already pushed (we'll use the same setup, but publish PR first)
-        let setup = match setup_repo_with_wrong_commit_pushed(&ctx, relay_domain).await {
-            Ok(s) => s,
+        // Get fixture: PR event exists on relay (wrong commit was previously pushed but may have been cleaned up)
+        let pr_event = match ctx.get_fixture(FixtureKind::PREventSentAfterWrongPush).await {
+            Ok(e) => e,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", desc).fail(format!("{}", e));
+            }
+        };
+
+        let pr_event_id = pr_event.id.to_hex();
+
+        // Get repo info for cloning (fresh clone for this test)
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+            Ok(r) => r,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", desc).fail(format!("{}", e));
+            }
+        };
+
+        let repo_id = repo
+            .tags
+            .iter()
+            .find(|t| t.kind() == TagKind::d())
+            .and_then(|t| t.content())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let owner_npub = match repo.pubkey.to_bech32() {
+            Ok(n) => n,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", desc)
+                    .fail(format!("Failed to get owner npub: {}", e));
+            }
+        };
+
+        // Clone fresh for this test
+        let clone_path = match clone_repo(relay_domain, &owner_npub, &repo_id) {
+            Ok(p) => p,
             Err(e) => {
                 return TestResult::new(test_name, "GRASP-01", desc).fail(&e);
             }
         };
 
-        // Publish PR event FIRST (before our test push)
-        if let Err(e) = publish_pr_event_and_wait(&ctx, &setup.pr_event).await {
-            setup.cleanup();
+        // Create a wrong commit (Owner variant, not PRTestCommit)
+        if let Err(e) = create_deterministic_commit_with_variant(&clone_path, CommitVariant::Owner)
+        {
+            let _ = fs::remove_dir_all(&clone_path);
             return TestResult::new(test_name, "GRASP-01", desc).fail(&e);
         }
 
-        // Try to push again with wrong commit (should be rejected now that PR event exists)
-        let push_succeeded = match push_to_pr_ref(&setup.clone_path, &setup.pr_event_id) {
+        // Try to push with wrong commit (should be rejected since PR event exists)
+        let push_succeeded = match push_to_pr_ref(&clone_path, &pr_event_id) {
             Ok(success) => success,
             Err(e) => {
-                setup.cleanup();
+                let _ = fs::remove_dir_all(&clone_path);
                 return TestResult::new(test_name, "GRASP-01", desc).fail(&e);
             }
         };
 
-        setup.cleanup();
+        let _ = fs::remove_dir_all(&clone_path);
 
         // Should REJECT - PR event exists with different commit hash
         if push_succeeded {
@@ -1272,7 +1209,7 @@ impl PushAuthorizationTests {
     /// when a corresponding event exists AND the pushed commit matches
     /// the commit in the PR event's `c` tag.
     ///
-    /// Depends on: `setup_repo_with_wrong_commit_pushed` for setup, then resets to correct commit
+    /// Uses `PREventSentAfterWrongPush` fixture, then creates correct commit and pushes.
     pub async fn test_push_to_nostr_ref_with_correct_commit_after_event_received_accepted(
         client: &AuditClient,
         relay_domain: &str,
@@ -1281,36 +1218,64 @@ impl PushAuthorizationTests {
         let desc = "Push correct commit to refs/nostr/<pr-event-id> after PR event (should accept)";
         let ctx = TestContext::new(client);
 
-        // Setup: wrong commit already pushed
-        let setup = match setup_repo_with_wrong_commit_pushed(&ctx, relay_domain).await {
-            Ok(s) => s,
+        // Get fixture: PR event exists on relay
+        let pr_event = match ctx.get_fixture(FixtureKind::PREventSentAfterWrongPush).await {
+            Ok(e) => e,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", desc).fail(format!("{}", e));
+            }
+        };
+
+        let pr_event_id = pr_event.id.to_hex();
+
+        // Get repo info for cloning (fresh clone for this test)
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+            Ok(r) => r,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", desc).fail(format!("{}", e));
+            }
+        };
+
+        let repo_id = repo
+            .tags
+            .iter()
+            .find(|t| t.kind() == TagKind::d())
+            .and_then(|t| t.content())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let owner_npub = match repo.pubkey.to_bech32() {
+            Ok(n) => n,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", desc)
+                    .fail(format!("Failed to get owner npub: {}", e));
+            }
+        };
+
+        // Clone fresh for this test
+        let clone_path = match clone_repo(relay_domain, &owner_npub, &repo_id) {
+            Ok(p) => p,
             Err(e) => {
                 return TestResult::new(test_name, "GRASP-01", desc).fail(&e);
             }
         };
 
-        // Publish PR event FIRST
-        if let Err(e) = publish_pr_event_and_wait(&ctx, &setup.pr_event).await {
-            setup.cleanup();
-            return TestResult::new(test_name, "GRASP-01", desc).fail(&e);
-        }
-
-        // Reset to CORRECT commit (the one expected by PR event)
-        if let Err(e) = reset_to_correct_pr_commit(&setup.clone_path) {
-            setup.cleanup();
+        // Create the CORRECT PR test commit (the one expected by PR event)
+        if let Err(e) = reset_to_correct_pr_commit(&clone_path) {
+            let _ = fs::remove_dir_all(&clone_path);
             return TestResult::new(test_name, "GRASP-01", desc).fail(&e);
         }
 
         // Push correct commit (should succeed)
-        let push_succeeded = match push_to_pr_ref(&setup.clone_path, &setup.pr_event_id) {
+        let push_succeeded = match push_to_pr_ref(&clone_path, &pr_event_id) {
             Ok(success) => success,
             Err(e) => {
-                setup.cleanup();
+                let _ = fs::remove_dir_all(&clone_path);
                 return TestResult::new(test_name, "GRASP-01", desc).fail(&e);
             }
         };
 
-        setup.cleanup();
+        let _ = fs::remove_dir_all(&clone_path);
 
         // Should ACCEPT - commit matches PR event's c tag
         if !push_succeeded {

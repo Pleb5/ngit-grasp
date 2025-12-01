@@ -188,6 +188,50 @@ pub enum FixtureKind {
     /// - Timestamp: 1 second in the past
     PREvent,
 
+    /// PR event generated (built) but NOT sent to relay
+    ///
+    /// This is a "Generated" stage fixture - the event is created but not published.
+    /// Useful for tests that need the PR event ID before the event exists on the relay.
+    ///
+    /// - Requires ValidRepo (uses same repo_id)
+    /// - Signed by `client.pr_author_keys()`
+    /// - Kind 1618 (NIP-34 PR)
+    /// - Includes `c` tag pointing to PR_TEST_COMMIT_HASH
+    /// - NOT sent to relay (use `client.send_event()` to publish when ready)
+    PREventGenerated,
+
+    /// Wrong commit pushed to refs/nostr/<pr-event-id> BEFORE PR event is sent
+    ///
+    /// This is a "DataPushed" stage fixture for testing pre-event ref behavior.
+    /// The server has refs/nostr/<pr-event-id> pointing to DETERMINISTIC_COMMIT_HASH
+    /// (the "wrong" commit), but no PR event exists yet on the relay.
+    ///
+    /// Server state after this fixture:
+    /// - ValidRepo announcement on relay
+    /// - refs/nostr/<pr-event-id> exists on git server with wrong commit
+    /// - PR event is NOT on relay (but returned for tests to publish later)
+    ///
+    /// - Requires PREventGenerated (for the event ID)
+    /// - Clones repo, creates wrong commit, pushes to refs/nostr/<event-id>
+    /// - Returns: the unsent PR event (tests can publish it later)
+    PRWrongCommitPushedBeforeEvent,
+
+    /// PR event sent to relay AFTER wrong commit was pushed to refs/nostr/<pr-event-id>
+    ///
+    /// This is a compound fixture testing post-event behavior.
+    /// The server had refs/nostr/<pr-event-id> pointing to wrong commit,
+    /// then the PR event was published (which may trigger cleanup).
+    ///
+    /// Server state after this fixture:
+    /// - ValidRepo announcement on relay
+    /// - PR event is on relay
+    /// - refs/nostr/<pr-event-id> may have been cleaned up (that's what tests verify)
+    ///
+    /// - Requires PRWrongCommitPushedBeforeEvent
+    /// - Sends the PR event to relay
+    /// - Returns: the sent PR event
+    PREventSentAfterWrongPush,
+
     /// Owner's state event with git data successfully pushed (full 4-stage fixture)
     ///
     /// This fixture represents the complete flow for testing push authorization:
@@ -268,6 +312,9 @@ impl FixtureKind {
             Self::RecursiveMaintainerState => vec![Self::ValidRepo],
             Self::RecursiveMaintainerRepoAndState => vec![Self::ValidRepo],
             Self::PREvent => vec![Self::ValidRepo],
+            Self::PREventGenerated => vec![Self::ValidRepo],
+            Self::PRWrongCommitPushedBeforeEvent => vec![Self::PREventGenerated],
+            Self::PREventSentAfterWrongPush => vec![Self::PRWrongCommitPushedBeforeEvent],
             Self::OwnerStateDataPushed => vec![Self::ValidRepo],
             
             // Fixtures that depend on RepoWithIssue
@@ -296,6 +343,12 @@ impl FixtureKind {
             Self::RecursiveMaintainerStateDataPushed => true,
             // RecursiveMaintainerRepoAndState sends multiple events internally
             Self::RecursiveMaintainerRepoAndState => true,
+            // PREventGenerated builds but does NOT send the PR event (that's the point)
+            Self::PREventGenerated => true,
+            // PRWrongCommitPushedBeforeEvent pushes git data but doesn't send event
+            Self::PRWrongCommitPushedBeforeEvent => true,
+            // PREventSentAfterWrongPush sends the PR event internally
+            Self::PREventSentAfterWrongPush => true,
             // All other fixtures return a single event for the caller to send
             _ => false,
         }
@@ -751,6 +804,57 @@ impl<'a> TestContext<'a> {
                     .custom_time(pr_timestamp)
                     .build(self.client.pr_author_keys())
                     .map_err(|e| anyhow::anyhow!("Failed to build PR event: {}", e))
+            }
+
+            FixtureKind::PREventGenerated => {
+                // Same as PREvent but will NOT be sent to relay (caller may send it later)
+                // This fixture is for "Generated" stage only
+                use nostr_sdk::prelude::*;
+
+                // ValidRepo is ensured by ensure_fixture before this is called
+                let repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
+
+                let repo_id = repo
+                    .tags
+                    .iter()
+                    .find(|t| t.kind() == TagKind::d())
+                    .and_then(|t| t.content())
+                    .ok_or_else(|| anyhow::anyhow!("Missing repo_id in ValidRepo fixture"))?
+                    .to_string();
+
+                // Create PR event 1 second in the past
+                let base_time = Timestamp::now().as_u64();
+                let pr_timestamp = Timestamp::from(base_time - 1);
+
+                // Build NIP-34 PR event (kind 1618)
+                self.client
+                    .event_builder(
+                        Kind::Custom(1618), // NIP-34 PR kind (has 'c' tag for commit)
+                        "Test PR for GRASP validation",
+                    )
+                    .tag(Tag::custom(
+                        TagKind::custom("a"),
+                        vec![format!(
+                            "30617:{}:{}",
+                            self.client.public_key().to_hex(), // Owner pubkey
+                            repo_id
+                        )],
+                    ))
+                    .tag(Tag::custom(
+                        TagKind::custom("c"),
+                        vec![PR_TEST_COMMIT_HASH.to_string()],
+                    ))
+                    .custom_time(pr_timestamp)
+                    .build(self.client.pr_author_keys())
+                    .map_err(|e| anyhow::anyhow!("Failed to build PR event: {}", e))
+            }
+
+            FixtureKind::PRWrongCommitPushedBeforeEvent => {
+                self.build_pr_wrong_commit_pushed_before_event().await
+            }
+
+            FixtureKind::PREventSentAfterWrongPush => {
+                self.build_pr_event_sent_after_wrong_push().await
             }
 
             FixtureKind::OwnerStateDataPushed => {
@@ -1368,6 +1472,127 @@ impl<'a> TestContext<'a> {
             )),
             Err(e) => Err(anyhow::anyhow!("Push error: {}", e)),
         }
+    }
+
+    /// Build PRWrongCommitPushedBeforeEvent fixture
+    ///
+    /// This fixture sets up a scenario where:
+    /// 1. A repo exists on the relay
+    /// 2. A PR event is generated (but NOT sent to relay)
+    /// 3. A wrong commit is pushed to refs/nostr/<pr-event-id>
+    ///
+    /// Server state after:
+    /// - ValidRepo announcement on relay
+    /// - refs/nostr/<pr-event-id> on git server pointing to DETERMINISTIC_COMMIT_HASH (wrong)
+    /// - NO PR event on relay
+    ///
+    /// Returns: the unsent PR event (tests can publish it later)
+    async fn build_pr_wrong_commit_pushed_before_event(&self) -> Result<Event> {
+        use nostr_sdk::prelude::*;
+
+        // Get the cached PREventGenerated (the unsent PR event)
+        let pr_event = self.get_cached_dependency(FixtureKind::PREventGenerated)?;
+        let pr_event_id = pr_event.id.to_hex();
+
+        // Get the ValidRepo to extract repo info
+        let repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
+        let repo_id = self.extract_repo_id(&repo)?;
+
+        // Get relay domain for cloning
+        let relay_domain = self.get_relay_domain().await?;
+
+        // Owner npub for clone URL
+        let npub = repo
+            .pubkey
+            .to_bech32()
+            .map_err(|e| anyhow::anyhow!("Failed to convert pubkey to bech32: {}", e))?;
+
+        // Clone the repository (fresh clone - local repos are never cached)
+        let clone_path = clone_repo(&relay_domain, &npub, &repo_id)
+            .map_err(|e| anyhow::anyhow!("Failed to clone repo: {}", e))?;
+
+        // Cleanup helper
+        let cleanup = |path: &PathBuf| {
+            let _ = fs::remove_dir_all(path);
+        };
+
+        // Create a WRONG commit (Owner variant, not PRTestCommit)
+        // This commit hash will NOT match what's in the PR event's `c` tag
+        let wrong_commit_hash = match create_deterministic_commit_with_variant(
+            &clone_path,
+            CommitVariant::Owner,
+        ) {
+            Ok(h) => h,
+            Err(e) => {
+                cleanup(&clone_path);
+                return Err(anyhow::anyhow!("Failed to create wrong commit: {}", e));
+            }
+        };
+
+        // Verify it's actually different from expected PR commit
+        if wrong_commit_hash == PR_TEST_COMMIT_HASH {
+            cleanup(&clone_path);
+            return Err(anyhow::anyhow!(
+                "Test setup error: wrong_commit_hash {} equals PR_TEST_COMMIT_HASH",
+                wrong_commit_hash
+            ));
+        }
+
+        // Create master branch if needed and push to refs/nostr/<pr-event-id>
+        let _ = Command::new("git")
+            .args(["branch", "-M", "master"])
+            .current_dir(&clone_path)
+            .output();
+
+        let push_output = Command::new("git")
+            .args([
+                "push",
+                "origin",
+                &format!("master:refs/nostr/{}", pr_event_id),
+            ])
+            .current_dir(&clone_path)
+            .output()
+            .map_err(|e| {
+                cleanup(&clone_path);
+                anyhow::anyhow!("Failed to execute git push: {}", e)
+            })?;
+
+        cleanup(&clone_path);
+
+        if !push_output.status.success() {
+            let stderr = String::from_utf8_lossy(&push_output.stderr);
+            return Err(anyhow::anyhow!(
+                "Initial push to refs/nostr/{} failed (expected success before PR event exists): {}",
+                pr_event_id,
+                stderr
+            ));
+        }
+
+        // Return the unsent PR event (tests can publish it later)
+        Ok(pr_event)
+    }
+
+    /// Build PREventSentAfterWrongPush fixture
+    ///
+    /// This fixture builds on PRWrongCommitPushedBeforeEvent by sending the PR event.
+    /// After this fixture, the relay has:
+    /// - ValidRepo announcement
+    /// - PR event
+    /// - refs/nostr/<pr-event-id> may have been cleaned up (that's what tests verify)
+    ///
+    /// Returns: the sent PR event
+    async fn build_pr_event_sent_after_wrong_push(&self) -> Result<Event> {
+        // Get the PR event that was cached by PRWrongCommitPushedBeforeEvent
+        let pr_event = self.get_cached_dependency(FixtureKind::PRWrongCommitPushedBeforeEvent)?;
+
+        // Send the PR event to relay
+        self.client.send_event(pr_event.clone()).await?;
+
+        // Wait for relay to process
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // Return the now-sent PR event
+        Ok(pr_event)
     }
 
     /// Get relay domain (host:port) from the connected relay
