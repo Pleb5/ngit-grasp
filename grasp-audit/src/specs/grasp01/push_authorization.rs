@@ -1031,7 +1031,10 @@ impl PushAuthorizationTests {
         // 2. Build PR event (but don't send it)
         // 3. Clone repo, create wrong commit, push to refs/nostr/<event-id>
         // If the push fails, the fixture will return an error
-        match ctx.get_fixture(FixtureKind::PRWrongCommitPushedBeforeEvent).await {
+        match ctx
+            .get_fixture(FixtureKind::PRWrongCommitPushedBeforeEvent)
+            .await
+        {
             Ok(_pr_event) => TestResult::new(test_name, "GRASP-01", desc).pass(),
             Err(e) => TestResult::new(test_name, "GRASP-01", desc).fail(format!("{}", e)),
         }
@@ -1053,7 +1056,10 @@ impl PushAuthorizationTests {
         let ctx = TestContext::new(client);
 
         // Get fixture: wrong commit was pushed, then PR event was sent
-        let pr_event = match ctx.get_fixture(FixtureKind::PREventSentAfterWrongPush).await {
+        let pr_event = match ctx
+            .get_fixture(FixtureKind::PREventSentAfterWrongPush)
+            .await
+        {
             Ok(e) => e,
             Err(e) => {
                 return TestResult::new(test_name, "GRASP-01", desc).fail(format!("{}", e));
@@ -1134,7 +1140,10 @@ impl PushAuthorizationTests {
         let ctx = TestContext::new(client);
 
         // Get fixture: PR event exists on relay (wrong commit was previously pushed but may have been cleaned up)
-        let pr_event = match ctx.get_fixture(FixtureKind::PREventSentAfterWrongPush).await {
+        let pr_event = match ctx
+            .get_fixture(FixtureKind::PREventSentAfterWrongPush)
+            .await
+        {
             Ok(e) => e,
             Err(e) => {
                 return TestResult::new(test_name, "GRASP-01", desc).fail(format!("{}", e));
@@ -1218,7 +1227,10 @@ impl PushAuthorizationTests {
         let ctx = TestContext::new(client);
 
         // Get fixture: PR event exists on relay
-        let pr_event = match ctx.get_fixture(FixtureKind::PREventSentAfterWrongPush).await {
+        let pr_event = match ctx
+            .get_fixture(FixtureKind::PREventSentAfterWrongPush)
+            .await
+        {
             Ok(e) => e,
             Err(e) => {
                 return TestResult::new(test_name, "GRASP-01", desc).fail(format!("{}", e));
@@ -1315,11 +1327,14 @@ impl PushAuthorizationTests {
         // ============================================================
         let ctx = TestContext::new(client);
 
-        let _develop_state_event = match ctx.get_fixture(FixtureKind::HeadSetToDevelopBranch).await {
+        let _develop_state_event = match ctx.get_fixture(FixtureKind::HeadSetToDevelopBranch).await
+        {
             Ok(e) => e,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01", desc)
-                    .fail(format!("Failed to create HeadSetToDevelopBranch fixture: {}", e));
+                return TestResult::new(test_name, "GRASP-01", desc).fail(format!(
+                    "Failed to create HeadSetToDevelopBranch fixture: {}",
+                    e
+                ));
             }
         };
 
@@ -1381,36 +1396,193 @@ impl PushAuthorizationTests {
     }
 
     /// Test that HEAD is set after git push with oids
+    ///
+    /// GRASP-01: "MUST set repository HEAD per repository state announcement
+    /// as soon as the git data related to that branch has been received."
+    ///
+    /// This test verifies the HEAD-setting behavior when:
+    /// 1. A new state event is published with HEAD="refs/heads/develop1" pointing to a new commit
+    /// 2. The git data (the new commit) has NOT yet been pushed
+    /// 3. The relay receives the git push with the required oids
+    /// 4. Only AFTER the push completes should HEAD be updated to "develop1"
+    ///
+    /// This differs from test_head_set_after_state_event_with_existing_commit in that
+    /// the git data doesn't exist yet when the state event is published.
+    ///
+    /// ## Fixture-First Pattern
+    ///
+    /// Uses HeadSetToDevelopBranch fixture as base, then:
+    /// 1. **Depends on**: HeadSetToDevelopBranch (HEAD already set to develop)
+    /// 2. **Clone**: Clone repo to create new local branch develop1
+    /// 3. **Create unique commit**: New commit on develop1 that doesn't exist on relay
+    /// 4. **Build state event**: HEAD=refs/heads/develop1 pointing to new commit
+    /// 5. **Send state event**: Before git push (git data not yet on relay)
+    /// 6. **Git push**: Push develop1 branch - sends required oids
+    /// 7. **Verify**: HEAD should now point to refs/heads/develop1
     pub async fn test_head_set_after_git_push_with_required_oids(
-        _client: &AuditClient,
-        _relay_domain: &str,
+        client: &AuditClient,
+        relay_domain: &str,
     ) -> TestResult {
         let test_name = "test_head_set_after_git_push_with_required_oids";
         let desc = "HEAD is set to match state event when git push sends required oids to formulate branch";
 
-        // DO the above as prep. then create a unique commit, create state event with HEAD=develop1 branch at unqiue commit
-        // git push the new develop1 branch. then check HEAD with this:
-        // let default_branch =
-        //     match get_default_branch_from_info_refs(relay_domain, &npub, &repo_id).await {
-        //         Ok(branch) => branch,
-        //         Err(e) => {
-        //             return TestResult::new(test_name, "GRASP-01", desc)
-        //                 .fail(format!("Failed to get default branch: {}", e));
-        //         }
-        //     };
+        // ============================================================
+        // Step 1: Get HeadSetToDevelopBranch fixture as baseline
+        // This establishes: repo, maintainer chain, git data, HEAD=develop
+        // ============================================================
+        let ctx = TestContext::new(client);
 
-        // // Verify HEAD points to refs/heads/develop1
-        // if default_branch == "refs/heads/develop1" {
-        //     TestResult::new(test_name, "GRASP-01", desc).pass()
-        // } else {
-        //     TestResult::new(test_name, "GRASP-01", desc).fail(format!(
-        //         "Expected HEAD to point to 'refs/heads/develop' but got '{}'. \
-        //         GRASP-01 requires: 'MUST set repository HEAD per repository state announcement \
-        //         as soon as the git data related to that branch has been received.'",
-        //         default_branch
-        //     ))
-        // }
-        TestResult::new(test_name, "GRASP-01", desc).fail("test not implemented")
+        let _develop_state = match ctx.get_fixture(FixtureKind::HeadSetToDevelopBranch).await {
+            Ok(e) => e,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", desc).fail(format!(
+                    "Failed to create HeadSetToDevelopBranch fixture: {}",
+                    e
+                ));
+            }
+        };
+
+        // ============================================================
+        // Step 2: Extract repo_id and owner npub from ValidRepo (cached by fixture)
+        // ============================================================
+        let valid_repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+            Ok(e) => e,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", desc)
+                    .fail(format!("Failed to get ValidRepo fixture: {}", e));
+            }
+        };
+
+        let repo_id = match valid_repo
+            .tags
+            .iter()
+            .find(|t| t.kind() == TagKind::d())
+            .and_then(|t| t.content())
+        {
+            Some(id) => id.to_string(),
+            None => {
+                return TestResult::new(test_name, "GRASP-01", desc)
+                    .fail("Missing repo_id in ValidRepo");
+            }
+        };
+
+        let npub = match valid_repo.pubkey.to_bech32() {
+            Ok(n) => n,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", desc)
+                    .fail(format!("Failed to convert pubkey to bech32: {}", e));
+            }
+        };
+
+        // ============================================================
+        // Step 3: Clone the repo to create a new local branch
+        // ============================================================
+        let clone_path = match clone_repo(relay_domain, &npub, &repo_id) {
+            Ok(path) => path,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", desc)
+                    .fail(format!("Failed to clone repo: {}", e));
+            }
+        };
+
+        // ============================================================
+        // Step 4: Create and checkout develop1 branch, then create unique commit
+        // ============================================================
+        let output = Command::new("git")
+            .args(["checkout", "-b", "develop1"])
+            .current_dir(&clone_path)
+            .output();
+
+        if let Err(e) = output {
+            let _ = fs::remove_dir_all(&clone_path);
+            return TestResult::new(test_name, "GRASP-01", desc)
+                .fail(format!("Failed to create develop1 branch: {}", e));
+        }
+
+        // Create a unique commit on develop1
+        let commit_hash = match create_commit(&clone_path, "Unique develop1 commit") {
+            Ok(hash) => hash,
+            Err(e) => {
+                let _ = fs::remove_dir_all(&clone_path);
+                return TestResult::new(test_name, "GRASP-01", desc)
+                    .fail(format!("Failed to create commit: {}", e));
+            }
+        };
+
+        // ============================================================
+        // Step 5: Build and send state event with HEAD=refs/heads/develop1
+        // This references a commit that doesn't yet exist on the relay
+        // ============================================================
+        let state_event = match client
+            .event_builder(Kind::Custom(30618), "")
+            .tag(Tag::identifier(&repo_id))
+            .tag(Tag::custom(
+                TagKind::custom("HEAD"),
+                vec!["refs/heads/develop1".to_string()],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("refs/heads/develop1"),
+                vec![commit_hash.clone()],
+            ))
+            .build(client.keys())
+        {
+            Ok(e) => e,
+            Err(e) => {
+                let _ = fs::remove_dir_all(&clone_path);
+                return TestResult::new(test_name, "GRASP-01", desc)
+                    .fail(format!("Failed to build state event: {}", e));
+            }
+        };
+
+        // Send the state event (commit doesn't exist on relay yet)
+        if let Err(e) = client.send_event(state_event).await {
+            let _ = fs::remove_dir_all(&clone_path);
+            return TestResult::new(test_name, "GRASP-01", desc)
+                .fail(format!("Failed to send state event: {}", e));
+        }
+
+        // ============================================================
+        // Step 6: Push the develop1 branch - this sends the required oids
+        // ============================================================
+        let push_result = try_push_to_ref(&clone_path, "refs/heads/develop1");
+        let _ = fs::remove_dir_all(&clone_path); // Cleanup clone
+
+        match push_result {
+            Ok(true) => { /* Push succeeded, continue to verify */ }
+            Ok(false) => {
+                return TestResult::new(test_name, "GRASP-01", desc)
+                    .fail("Push to refs/heads/develop1 was rejected");
+            }
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", desc)
+                    .fail(format!("Failed to push develop1 branch: {}", e));
+            }
+        }
+
+        // ============================================================
+        // Step 7: VERIFY - Query info/refs to check the default branch
+        // HEAD should now point to refs/heads/develop1 as git data is available
+        // ============================================================
+        let default_branch =
+            match get_default_branch_from_info_refs(relay_domain, &npub, &repo_id).await {
+                Ok(branch) => branch,
+                Err(e) => {
+                    return TestResult::new(test_name, "GRASP-01", desc)
+                        .fail(format!("Failed to get default branch: {}", e));
+                }
+            };
+
+        // Verify HEAD points to refs/heads/develop1
+        if default_branch == "refs/heads/develop1" {
+            TestResult::new(test_name, "GRASP-01", desc).pass()
+        } else {
+            TestResult::new(test_name, "GRASP-01", desc).fail(format!(
+                "Expected HEAD to point to 'refs/heads/develop1' but got '{}'. \
+                GRASP-01 requires: 'MUST set repository HEAD per repository state announcement \
+                as soon as the git data related to that branch has been received.'",
+                default_branch
+            ))
+        }
     }
 }
 
