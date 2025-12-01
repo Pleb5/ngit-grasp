@@ -59,3 +59,5 @@ macro_rules! isolated_test {
 
 // Generate isolated tests for all repository creation tests
 isolated_test!(test_bare_repo_created_on_announcement);
+isolated_test!(test_webpage_served_for_existing_repo);
+isolated_test!(test_404_for_nonexistent_repo);

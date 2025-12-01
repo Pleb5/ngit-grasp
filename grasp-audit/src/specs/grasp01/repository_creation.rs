@@ -27,6 +27,8 @@ impl RepositoryCreationTests {
         let mut results = crate::AuditResult::new("GRASP-01 Repository Creation Tests");
 
         results.add(Self::test_bare_repo_created_on_announcement(client, relay_domain).await);
+        results.add(Self::test_webpage_served_for_existing_repo(client, relay_domain).await);
+        results.add(Self::test_404_for_nonexistent_repo(client, relay_domain).await);
 
         results
     }
@@ -109,6 +111,144 @@ impl RepositoryCreationTests {
         )
         .pass()
     }
+
+    /// Test that a webpage is served for an existing repository
+    ///
+    /// This test verifies:
+    /// 1. Creates a valid repository announcement
+    /// 2. Accesses the repository URL without git service parameters
+    /// 3. Verifies a webpage is returned (any 2xx status with HTML content)
+    ///
+    /// GRASP-01: "SHOULD serve a webpage at the same endpoint linking to git nostr client(s)"
+    pub async fn test_webpage_served_for_existing_repo(
+        client: &AuditClient,
+        relay_domain: &str,
+    ) -> TestResult {
+        let test_name = "test_webpage_served_for_existing_repo";
+        let ctx = TestContext::new(client);
+
+        // Create a repository announcement
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+            Ok(r) => r,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Relay SHOULD serve a webpage for existing repositories",
+                )
+                .fail(format!("Failed to create repo fixture: {}", e))
+            }
+        };
+
+        // Wait for repository creation
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Extract repo identifier and npub
+        let repo_id = match repo
+            .tags
+            .iter()
+            .find(|t| t.kind() == TagKind::d())
+            .and_then(|t| t.content())
+        {
+            Some(id) => id.to_string(),
+            None => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Relay SHOULD serve a webpage for existing repositories",
+                )
+                .fail("Repository announcement missing d tag")
+            }
+        };
+
+        let npub = match repo.pubkey.to_bech32() {
+            Ok(n) => n,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Relay SHOULD serve a webpage for existing repositories",
+                )
+                .fail(format!("Failed to convert pubkey to npub: {}", e))
+            }
+        };
+
+        // Check that a webpage is served at the repository URL
+        if let Err(e) = check_webpage_served(relay_domain, &npub, &repo_id).await {
+            return TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Relay SHOULD serve a webpage for existing repositories",
+            )
+            .fail(format!("Webpage not served: {}", e));
+        }
+
+        TestResult::new(
+            test_name,
+            "GRASP-01",
+            "Relay SHOULD serve a webpage for existing repositories",
+        )
+        .pass()
+    }
+
+    /// Test that 404 is returned for non-existent repositories
+    ///
+    /// This test verifies:
+    /// 1. Accesses a URL for a repository that doesn't exist
+    /// 2. Verifies a 404 status is returned
+    ///
+    /// GRASP-01: "...and a 404 page for repositories it doesn't host"
+    pub async fn test_404_for_nonexistent_repo(
+        client: &AuditClient,
+        relay_domain: &str,
+    ) -> TestResult {
+        let test_name = "test_404_for_nonexistent_repo";
+
+        let ctx = TestContext::new(client);
+
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+            Ok(r) => r,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Relay SHOULD serve a webpage for existing repositories",
+                )
+                .fail(format!("Failed to create repo fixture: {}", e))
+            }
+        };
+
+        let npub = match repo.pubkey.to_bech32() {
+            Ok(n) => n,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Relay SHOULD serve a webpage for existing repositories",
+                )
+                .fail(format!("Failed to convert pubkey to npub: {}", e))
+            }
+        };
+        // Use a clearly non-existent repo id but real npub
+        let fake_repo_id = "nonexistent-repo-12345";
+
+        // Check that 404 is returned
+        if let Err(e) = check_404_for_nonexistent_repo(relay_domain, &npub, fake_repo_id).await {
+            return TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Relay SHOULD return 404 for repositories it doesn't host",
+            )
+            .fail(format!("Expected 404, got: {}", e));
+        }
+
+        TestResult::new(
+            test_name,
+            "GRASP-01",
+            "Relay SHOULD return 404 for repositories it doesn't host",
+        )
+        .pass()
+    }
 }
 
 /// Helper function to check if a repository is accessible via Smart HTTP service
@@ -151,6 +291,59 @@ async fn check_repo_accessible_via_http(
         return Err(format!(
             "Expected Content-Type: application/x-git-upload-pack-advertisement, got: {}",
             content_type
+        ));
+    }
+
+    Ok(())
+}
+
+/// Helper function to check if a webpage is served for an existing repository
+///
+/// Verifies that accessing the repository URL returns a webpage (2xx status)
+/// URL format: http://domain/npub/identifier.git
+async fn check_webpage_served(relay_domain: &str, npub: &str, repo_id: &str) -> Result<(), String> {
+    let repo_url = format!("http://{}/{}/{}.git", relay_domain, npub, repo_id);
+
+    let http_client = reqwest::Client::new();
+    let response = http_client
+        .get(&repo_url)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "Expected 2xx status for existing repo webpage, got {} for URL: {}",
+            response.status(),
+            repo_url
+        ));
+    }
+
+    Ok(())
+}
+
+/// Helper function to check that 404 is returned for non-existent repository
+///
+/// Verifies that accessing a non-existent repository URL returns 404
+async fn check_404_for_nonexistent_repo(
+    relay_domain: &str,
+    npub: &str,
+    repo_id: &str,
+) -> Result<(), String> {
+    let repo_url = format!("http://{}/{}/{}.git", relay_domain, npub, repo_id);
+
+    let http_client = reqwest::Client::new();
+    let response = http_client
+        .get(&repo_url)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+    if response.status().as_u16() != 404 {
+        return Err(format!(
+            "Expected 404 status for non-existent repo, got {} for URL: {}",
+            response.status(),
+            repo_url
         ));
     }
 

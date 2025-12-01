@@ -32,6 +32,47 @@ const CORS_ALLOW_ORIGIN: &str = "*";
 const CORS_ALLOW_METHODS: &str = "GET, POST";
 const CORS_ALLOW_HEADERS: &str = "Content-Type";
 
+/// Extract npub and identifier from a repository URL path (no git subpath required)
+///
+/// Parses paths like `/<npub>/<identifier>.git` (for repository webpage/404)
+///
+/// Returns (npub, identifier) if the path matches a repository URL pattern
+fn parse_repo_url(path: &str) -> Option<(&str, &str)> {
+    // Remove leading slash
+    let path = path.strip_prefix('/').unwrap_or(path);
+
+    // Split into components
+    let parts: Vec<&str> = path.split('/').collect();
+
+    // Must be exactly 2 parts: npub and repo.git (no subpath)
+    if parts.len() != 2 {
+        return None;
+    }
+
+    let npub = parts[0];
+    let repo_part = parts[1];
+
+    // The repo part must end with .git
+    if !repo_part.ends_with(".git") {
+        return None;
+    }
+
+    // Must have an npub that looks valid (starts with npub1)
+    if !npub.starts_with("npub1") {
+        return None;
+    }
+
+    // Extract identifier (remove .git suffix)
+    let identifier = repo_part.strip_suffix(".git").unwrap_or(repo_part);
+
+    // Identifier must not be empty
+    if identifier.is_empty() {
+        return None;
+    }
+
+    Some((npub, identifier))
+}
+
 /// Add CORS headers to a response builder
 fn add_cors_headers(builder: hyper::http::response::Builder) -> hyper::http::response::Builder {
     builder
@@ -230,6 +271,45 @@ impl Service<Request<Incoming>> for HttpService {
             }
         }
 
+        // Check for repository URL pattern (e.g., /npub/repo.git without subpath)
+        // GRASP-01: "SHOULD serve a webpage at the same endpoint linking to git nostr client(s)
+        // to browse the repository and a 404 page for repositories it doesn't host"
+        if let Some((npub, identifier)) = parse_repo_url(&path) {
+            let npub = npub.to_string();
+            let identifier = identifier.to_string();
+            let config = self.config.clone();
+            let repo_path = git::resolve_repo_path(&git_data_path, &npub, &identifier);
+
+            tracing::debug!(
+                "Repository URL request: {} (npub={}, id={}, path={:?})",
+                path,
+                npub,
+                identifier,
+                repo_path
+            );
+
+            return Box::pin(async move {
+                // Check if repository exists
+                if repo_path.exists() {
+                    // Serve repository webpage
+                    let html = landing::get_repo_html(&config, &npub, &identifier);
+                    Ok(add_cors_headers(Response::builder().header("server", "ngit-grasp"))
+                        .status(200)
+                        .header("content-type", "text/html; charset=utf-8")
+                        .body(Full::new(Bytes::from(html)))
+                        .unwrap())
+                } else {
+                    // Serve 404 page for non-existent repository
+                    let html = landing::get_404_html(&config, &npub, &identifier);
+                    Ok(add_cors_headers(Response::builder().header("server", "ngit-grasp"))
+                        .status(404)
+                        .header("content-type", "text/html; charset=utf-8")
+                        .body(Full::new(Bytes::from(html)))
+                        .unwrap())
+                }
+            });
+        }
+
         // Check if this is a WebSocket upgrade request
         if let (Some(c), Some(w)) = (
             req.headers().get("connection"),
@@ -275,14 +355,26 @@ impl Service<Request<Incoming>> for HttpService {
             }
         }
 
-        // Serve landing page for HTTP requests
-        let html = landing::get_html(&self.config);
+        // Only serve landing page for root path "/", 404 for everything else
+        let config = self.config.clone();
         Box::pin(async move {
-            Ok(base
-                .status(200)
-                .header("content-type", "text/html; charset=utf-8")
-                .body(Full::new(Bytes::from(html)))
-                .unwrap())
+            if path == "/" {
+                // Serve landing page for root
+                let html = landing::get_html(&config);
+                Ok(add_cors_headers(Response::builder().header("server", "ngit-grasp"))
+                    .status(200)
+                    .header("content-type", "text/html; charset=utf-8")
+                    .body(Full::new(Bytes::from(html)))
+                    .unwrap())
+            } else {
+                // Serve generic 404 for unknown paths
+                let html = landing::get_generic_404_html(&config, &path);
+                Ok(add_cors_headers(Response::builder().header("server", "ngit-grasp"))
+                    .status(404)
+                    .header("content-type", "text/html; charset=utf-8")
+                    .body(Full::new(Bytes::from(html)))
+                    .unwrap())
+            }
         })
     }
 }
