@@ -217,11 +217,59 @@ pub enum FixtureKind {
     /// 3. **Verified**: Confirms events accepted by relay
     /// 4. **DataPushed**: Clones repo, creates maintainer deterministic commit, pushes to relay
     ///
-    /// - Requires ValidRepo (owner's announcement lists maintainer)
+    /// - Requires OwnerStateDataPushed (owner's data already pushed to git)
     /// - State event signed by maintainer keys (`client.maintainer_keys()`)
     /// - Points to MAINTAINER_DETERMINISTIC_COMMIT_HASH
-    /// - Git push verified to succeed (maintainer's state event authorizes the commit)
+    /// - Git push verified to succeed (force push with maintainer's state event authorizes the commit)
     MaintainerStateDataPushed,
+}
+
+impl FixtureKind {
+    /// Get the fixture dependencies that must be ensured before this one
+    ///
+    /// Dependencies are processed in order and cached, so if a fixture
+    /// depends on another that's already been created, it won't be recreated.
+    pub fn dependencies(&self) -> Vec<FixtureKind> {
+        match self {
+            // Base fixtures - no dependencies
+            Self::ValidRepo => vec![],
+            
+            // Fixtures that depend on ValidRepo
+            Self::RepoWithIssue => vec![Self::ValidRepo],
+            Self::RepoState => vec![Self::ValidRepo],
+            Self::MaintainerAnnouncement => vec![Self::ValidRepo],
+            Self::MaintainerState => vec![Self::ValidRepo],
+            Self::RecursiveMaintainerAnnouncement => vec![Self::ValidRepo],
+            Self::RecursiveMaintainerState => vec![Self::ValidRepo],
+            Self::RecursiveMaintainerRepoAndState => vec![Self::ValidRepo],
+            Self::PREvent => vec![Self::ValidRepo],
+            Self::OwnerStateDataPushed => vec![Self::ValidRepo],
+            
+            // Fixtures that depend on RepoWithIssue
+            Self::RepoWithComment => vec![Self::RepoWithIssue],
+            
+            // MaintainerStateDataPushed depends on OwnerStateDataPushed
+            // (maintainer force-pushes over owner's data)
+            Self::MaintainerStateDataPushed => vec![Self::OwnerStateDataPushed],
+        }
+    }
+
+    /// Whether this fixture sends its own events to the relay
+    ///
+    /// Some fixtures (like DataPushed variants) handle event sending internally
+    /// as part of their build process. For these, the generic ensure_fixture
+    /// should NOT send the event again.
+    pub fn sends_own_events(&self) -> bool {
+        match self {
+            // These fixtures send events and push git data internally
+            Self::OwnerStateDataPushed => true,
+            Self::MaintainerStateDataPushed => true,
+            // RecursiveMaintainerRepoAndState sends multiple events internally
+            Self::RecursiveMaintainerRepoAndState => true,
+            // All other fixtures return a single event for the caller to send
+            _ => false,
+        }
+    }
 }
 
 /// Context mode for fixture management
@@ -313,10 +361,11 @@ impl<'a> TestContext<'a> {
 
     /// Get a fixture, creating it if needed based on mode
     ///
-    /// # Behavior
-    ///
-    /// - **Isolated mode**: Always creates a fresh fixture
-    /// - **Shared mode**: Returns cached fixture or creates and caches if not present
+    /// This is an alias for `ensure_fixture` - the core method for fixture management.
+    /// It automatically handles:
+    /// - Mode-aware caching (Isolated vs Shared)
+    /// - Dependency resolution
+    /// - Event sending
     ///
     /// # Example
     ///
@@ -328,10 +377,7 @@ impl<'a> TestContext<'a> {
     /// # }
     /// ```
     pub async fn get_fixture(&self, kind: FixtureKind) -> Result<Event> {
-        match self.mode {
-            ContextMode::Isolated => self.create_fresh(kind).await,
-            ContextMode::Shared => self.get_or_create_shared(kind).await,
-        }
+        self.ensure_fixture(kind).await
     }
 
     /// Get the underlying client for direct access
@@ -347,15 +393,121 @@ impl<'a> TestContext<'a> {
         self.mode
     }
 
+    // ============================================================
+    // Cache Helper Methods
+    // ============================================================
+
+    /// Get a cached fixture if it exists
+    fn get_cached(&self, kind: FixtureKind) -> Option<Event> {
+        match self.mode {
+            ContextMode::Isolated => {
+                let cache = self.local_cache.lock().unwrap();
+                cache.get(&kind).cloned()
+            }
+            ContextMode::Shared => {
+                let cache = self.client.fixture_cache().lock().unwrap();
+                cache.get(&kind).cloned()
+            }
+        }
+    }
+
+    /// Store a fixture in the cache
+    fn store_cached(&self, kind: FixtureKind, event: Event) {
+        match self.mode {
+            ContextMode::Isolated => {
+                let mut cache = self.local_cache.lock().unwrap();
+                cache.insert(kind, event);
+                tracing::debug!(
+                    "store_cached({:?}) stored in local cache ({} entries)",
+                    kind,
+                    cache.len()
+                );
+            }
+            ContextMode::Shared => {
+                let mut cache = self.client.fixture_cache().lock().unwrap();
+                cache.insert(kind, event);
+                tracing::debug!(
+                    "store_cached({:?}) stored in client cache ({} entries)",
+                    kind,
+                    cache.len()
+                );
+            }
+        }
+    }
+
+    // ============================================================
+    // Core Fixture Methods
+    // ============================================================
+
+    /// Ensure a fixture exists (with all dependencies)
+    ///
+    /// This is the core method for fixture management. It:
+    /// 1. Checks the cache, returning immediately if found
+    /// 2. Ensures all dependencies are met (recursively)
+    /// 3. Builds the fixture
+    /// 4. Sends to relay (unless fixture handles this internally)
+    /// 5. Caches and returns the result
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use grasp_audit::*;
+    /// # async fn example(ctx: &TestContext<'_>) -> anyhow::Result<()> {
+    /// // This ensures ValidRepo exists first, then creates MaintainerState
+    /// let state = ctx.ensure_fixture(FixtureKind::MaintainerState).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn ensure_fixture(&self, kind: FixtureKind) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Event>> + Send + '_>> {
+        Box::pin(async move {
+            // Check cache first
+            if let Some(cached) = self.get_cached(kind) {
+                tracing::debug!("ensure_fixture({:?}) found in cache", kind);
+                return Ok(cached);
+            }
+
+            // Check relay connection before proceeding
+            if !self.client.is_connected().await {
+                return Err(anyhow::anyhow!(
+                    "Relay connection lost before creating {:?} fixture",
+                    kind
+                ));
+            }
+
+            // Ensure all dependencies are met first
+            for dep in kind.dependencies() {
+                tracing::debug!("ensure_fixture({:?}) ensuring dependency {:?}", kind, dep);
+                self.ensure_fixture(dep).await.with_context(|| {
+                    format!("Failed to ensure dependency {:?} for {:?}", dep, kind)
+                })?;
+            }
+
+            // Build the fixture
+            let event = self.build_fixture_inner(kind).await.with_context(|| {
+                format!("Failed to build {:?} fixture", kind)
+            })?;
+
+            // Send to relay if this fixture doesn't handle it internally
+            if !kind.sends_own_events() {
+                self.client.send_event(event.clone()).await.with_context(|| {
+                    format!("Failed to send {:?} fixture event to relay", kind)
+                })?;
+            }
+
+            // Cache and return
+            self.store_cached(kind, event.clone());
+            Ok(event)
+        })
+    }
+
     /// Build a fixture event WITHOUT publishing it to the relay.
     ///
     /// This is useful for tests that need to get a fixture's event ID before
     /// actually publishing it. For example, testing refs/nostr/<event-id>
     /// behavior before the corresponding event exists on the relay.
     ///
-    /// Note: This may still create and publish dependencies (e.g., ValidRepo
-    /// will be created/published if PREvent needs it), but the requested
-    /// fixture itself will NOT be published.
+    /// Note: This ensures dependencies are created/published first, but the
+    /// requested fixture itself will NOT be published.
     ///
     /// # Example
     ///
@@ -375,249 +527,74 @@ impl<'a> TestContext<'a> {
     /// # }
     /// ```
     pub async fn build_fixture_only(&self, kind: FixtureKind) -> Result<Event> {
-        self.build_fixture(kind).await
-    }
-
-    /// Create a fresh fixture (always creates new)
-    async fn create_fresh(&self, kind: FixtureKind) -> Result<Event> {
-        let event = self
-            .build_fixture(kind)
-            .await
-            .with_context(|| format!("Failed to build {:?} fixture", kind))?;
-
-        self.client
-            .send_event(event.clone())
-            .await
-            .with_context(|| format!("Failed to send {:?} fixture event to relay", kind))?;
-
-        Ok(event)
-    }
-
-    /// Get or create a shared fixture (caches for reuse)
-    ///
-    /// Uses the client's fixture cache to ensure fixtures are reused across
-    /// all TestContext instances in Production mode.
-    async fn get_or_create_shared(&self, kind: FixtureKind) -> Result<Event> {
-        // Check client's cache first (shared across all TestContext instances using same client)
-        {
-            let cache = self.client.fixture_cache().lock().unwrap();
-            if let Some(event) = cache.get(&kind) {
-                tracing::debug!("get_or_create_shared({:?}) found in client cache", kind);
-                return Ok(event.clone());
-            }
+        // Ensure dependencies are met first
+        for dep in kind.dependencies() {
+            self.ensure_fixture(dep).await?;
         }
+        // Build but don't send/cache
+        self.build_fixture_inner(kind).await
+    }
 
-        // Check relay connection before attempting to build
-        let is_connected = self.client.is_connected().await;
-        if !is_connected {
-            return Err(anyhow::anyhow!(
-                "Relay connection lost before building {:?} fixture (shared cache mode)",
+    /// Get a cached dependency (assumes ensure_fixture processed dependencies first)
+    ///
+    /// This is a convenience helper for build_fixture_inner to retrieve dependencies
+    /// that were already ensured by ensure_fixture before calling build_fixture_inner.
+    fn get_cached_dependency(&self, kind: FixtureKind) -> Result<Event> {
+        self.get_cached(kind).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Dependency {:?} not found in cache - this is a bug in fixture dependencies",
                 kind
-            ));
-        }
-
-        // Not in cache, create it
-        let event = self
-            .build_fixture(kind)
-            .await
-            .with_context(|| format!("Failed to build {:?} fixture for shared cache", kind))?;
-
-        self.client
-            .send_event(event.clone())
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to send {:?} fixture event to relay (shared cache)",
-                    kind
-                )
-            })?;
-
-        // Store in client's cache (shared across all TestContext instances using same client)
-        {
-            let mut cache = self.client.fixture_cache().lock().unwrap();
-            cache.insert(kind, event.clone());
-            tracing::debug!(
-                "get_or_create_shared({:?}) stored in client cache ({} entries)",
-                kind,
-                cache.len()
-            );
-        }
-
-        Ok(event)
+            )
+        })
     }
 
-    /// Get or create a ValidRepo, with mode-aware caching.
-    /// This is a helper method that avoids async recursion by not going
-    /// through get_fixture. It handles the repo specifically.
+    /// Build a fixture event (internal - assumes dependencies are cached)
     ///
-    /// Caching strategy:
-    /// - **Isolated mode**: Uses per-TestContext local_cache to maintain fixture
-    ///   dependencies within a single test, while ensuring isolation between tests.
-    /// - **Shared mode**: Uses client's fixture_cache for cross-test reuse.
-    async fn get_or_create_repo(&self) -> Result<Event> {
-        // Check the appropriate cache based on mode
-        match self.mode {
-            ContextMode::Isolated => {
-                // In Isolated mode, use local TestContext cache
-                // This ensures fixture dependencies work within a single test
-                let cache = self.local_cache.lock().unwrap();
-                if let Some(event) = cache.get(&FixtureKind::ValidRepo) {
-                    tracing::debug!("get_or_create_repo() found in local cache (Isolated mode)");
-                    return Ok(event.clone());
-                }
-            }
-            ContextMode::Shared => {
-                // In Shared mode, use client's cache for cross-test sharing
-                let cache = self.client.fixture_cache().lock().unwrap();
-                if let Some(event) = cache.get(&FixtureKind::ValidRepo) {
-                    tracing::debug!("get_or_create_repo() found in client cache (Shared mode)");
-                    return Ok(event.clone());
-                }
-            }
-        }
-
-        // Check relay connection before creating repo
-        let is_connected = self.client.is_connected().await;
-        if !is_connected {
-            return Err(anyhow::anyhow!(
-                "Relay connection lost before creating ValidRepo fixture"
-            ));
-        }
-
-        // Create a new repo
-        let test_name = format!(
-            "fixture-{:?}-{}",
-            FixtureKind::ValidRepo,
-            &uuid::Uuid::new_v4().to_string()[..8]
-        );
-
-        let repo = self
-            .client
-            .create_repo_announcement(&test_name)
-            .await
-            .with_context(|| format!("create_repo_announcement failed for {}", test_name))?;
-
-        // Send it
-        self.client
-            .send_event(repo.clone())
-            .await
-            .with_context(|| "Failed to send repo announcement to relay")?;
-
-        // Store in the appropriate cache based on mode
-        match self.mode {
-            ContextMode::Isolated => {
-                // Store in local cache for within-test fixture dependencies
-                let mut cache = self.local_cache.lock().unwrap();
-                cache.insert(FixtureKind::ValidRepo, repo.clone());
-                tracing::debug!(
-                    "get_or_create_repo() stored in local cache ({} entries)",
-                    cache.len()
-                );
-            }
-            ContextMode::Shared => {
-                // Store in client cache for cross-test sharing
-                let mut cache = self.client.fixture_cache().lock().unwrap();
-                cache.insert(FixtureKind::ValidRepo, repo.clone());
-                tracing::debug!(
-                    "get_or_create_repo() stored in client cache ({} entries)",
-                    cache.len()
-                );
-            }
-        }
-
-        Ok(repo)
-    }
-
-    /// Get or create a RepoWithIssue, with mode-aware caching.
-    /// Returns the issue event (repo is already sent/cached via get_or_create_repo).
-    async fn get_or_create_issue(&self) -> Result<Event> {
-        // Check the appropriate cache based on mode
-        match self.mode {
-            ContextMode::Isolated => {
-                let cache = self.local_cache.lock().unwrap();
-                if let Some(event) = cache.get(&FixtureKind::RepoWithIssue) {
-                    return Ok(event.clone());
-                }
-            }
-            ContextMode::Shared => {
-                let cache = self.client.fixture_cache().lock().unwrap();
-                if let Some(event) = cache.get(&FixtureKind::RepoWithIssue) {
-                    return Ok(event.clone());
-                }
-            }
-        }
-
-        // Get or create repo (reuses cached via appropriate cache)
-        let repo = self.get_or_create_repo().await?;
-
-        // Create the issue
-        let issue =
-            self.client
-                .create_issue(&repo, "Test Issue", "Issue content for testing", vec![])?;
-
-        // Send it
-        self.client.send_event(issue.clone()).await?;
-
-        // Store in the appropriate cache based on mode
-        match self.mode {
-            ContextMode::Isolated => {
-                let mut cache = self.local_cache.lock().unwrap();
-                cache.insert(FixtureKind::RepoWithIssue, issue.clone());
-            }
-            ContextMode::Shared => {
-                let mut cache = self.client.fixture_cache().lock().unwrap();
-                cache.insert(FixtureKind::RepoWithIssue, issue.clone());
-            }
-        }
-
-        Ok(issue)
-    }
-
-    /// Build a fixture event (doesn't send it)
-    async fn build_fixture(&self, kind: FixtureKind) -> Result<Event> {
+    /// This method is called by `ensure_fixture` after all dependencies have been
+    /// ensured and cached. It should NOT call `ensure_fixture` or it will cause
+    /// infinite recursion. Instead, use `get_cached_dependency` to retrieve
+    /// already-cached dependencies.
+    async fn build_fixture_inner(&self, kind: FixtureKind) -> Result<Event> {
         match kind {
             FixtureKind::ValidRepo => {
-                // Delegate to get_or_create_repo() which handles caching properly.
-                self.get_or_create_repo().await
+                // ValidRepo has no dependencies - create a new repo announcement
+                let test_name = format!(
+                    "fixture-ValidRepo-{}",
+                    &uuid::Uuid::new_v4().to_string()[..8]
+                );
+
+                self.client
+                    .create_repo_announcement(&test_name)
+                    .await
+                    .with_context(|| format!("create_repo_announcement failed for {}", test_name))
             }
 
             FixtureKind::RepoWithIssue => {
-                // Reuse ValidRepo fixture - this leverages caching in Shared mode
-                // In Isolated mode: creates fresh repo
-                // In Shared mode: returns cached repo (no duplicate events!)
-                // Uses direct helper to avoid async recursion through get_fixture
-                let repo = self.get_or_create_repo().await?;
+                // ValidRepo is ensured by ensure_fixture before this is called
+                let repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
 
-                // Then create issue referencing it - this will have 'a' tag to repo
-                // Note: We build the issue but DON'T send it here - the caller will send it
-                let issue = self.client.create_issue(
+                // Build issue referencing it - caller will send it
+                self.client.create_issue(
                     &repo,
                     "Test Issue",
                     "Issue content for testing",
                     vec![],
-                )?;
-
-                // Return the issue - tests can extract repo reference from its 'a' tag
-                // The caller (create_fresh/get_or_create_shared) will send this event
-                Ok(issue)
+                )
             }
 
             FixtureKind::RepoWithComment => {
-                // Reuse RepoWithIssue fixture - this leverages caching in Shared mode
-                // In Isolated mode: creates fresh repo + issue
-                // In Shared mode: returns cached issue (repo already cached too!)
-                let issue = self.get_or_create_issue().await?;
+                // RepoWithIssue is ensured by ensure_fixture before this is called
+                let issue = self.get_cached_dependency(FixtureKind::RepoWithIssue)?;
 
-                // Then create comment on issue
-                // Note: We build the comment but DON'T send it here - the caller will send it
+                // Build comment on issue - caller will send it
                 self.client.create_comment(&issue, "Test comment", vec![])
             }
 
             FixtureKind::RepoState => {
                 use nostr_sdk::prelude::*;
 
-                // Reuse ValidRepo fixture - this leverages caching in Shared mode
-                let repo = self.get_or_create_repo().await?;
+                // ValidRepo is ensured by ensure_fixture before this is called
+                let repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
 
                 // Extract repo_id from repo announcement
                 let repo_id = repo
@@ -651,98 +628,45 @@ impl<'a> TestContext<'a> {
             }
 
             FixtureKind::MaintainerAnnouncement => {
-                use nostr_sdk::prelude::*;
+                // ValidRepo is ensured by ensure_fixture before this is called
+                let owner_repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
 
-                // Get the owner's repo to use the SAME repo_id
-                let owner_repo = self.get_or_create_repo().await?;
-
-                // Extract repo_id from owner's repo announcement
-                let repo_id = owner_repo
-                    .tags
-                    .iter()
-                    .find(|t| t.kind() == TagKind::d())
-                    .and_then(|t| t.content())
-                    .ok_or_else(|| anyhow::anyhow!("Missing d tag in owner repo announcement"))?
-                    .to_string();
-
+                let repo_id = self.extract_repo_id(&owner_repo)?;
                 self.build_maintainer_announcement(&repo_id).await
             }
 
             FixtureKind::MaintainerState => {
-                use nostr_sdk::prelude::*;
+                // ValidRepo is ensured by ensure_fixture before this is called
+                let owner_repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
 
-                // Get the owner's repo to use the SAME repo_id
-                let owner_repo = self.get_or_create_repo().await?;
-
-                // Extract repo_id from owner's repo announcement
-                let repo_id = owner_repo
-                    .tags
-                    .iter()
-                    .find(|t| t.kind() == TagKind::d())
-                    .and_then(|t| t.content())
-                    .ok_or_else(|| anyhow::anyhow!("Missing d tag in owner repo announcement"))?
-                    .to_string();
-
-                // Build state event ONLY - does NOT send announcement
-                // This allows testing state-only scenarios
+                let repo_id = self.extract_repo_id(&owner_repo)?;
                 self.build_maintainer_state(&repo_id)
             }
 
             FixtureKind::RecursiveMaintainerAnnouncement => {
-                use nostr_sdk::prelude::*;
+                // ValidRepo is ensured by ensure_fixture before this is called
+                let owner_repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
 
-                // Get the owner's repo to use the SAME repo_id
-                let owner_repo = self.get_or_create_repo().await?;
-
-                // Extract repo_id from owner's repo announcement
-                let repo_id = owner_repo
-                    .tags
-                    .iter()
-                    .find(|t| t.kind() == TagKind::d())
-                    .and_then(|t| t.content())
-                    .ok_or_else(|| anyhow::anyhow!("Missing d tag in owner repo announcement"))?
-                    .to_string();
-
+                let repo_id = self.extract_repo_id(&owner_repo)?;
                 self.build_recursive_maintainer_announcement(&repo_id).await
             }
 
             FixtureKind::RecursiveMaintainerState => {
-                use nostr_sdk::prelude::*;
+                // ValidRepo is ensured by ensure_fixture before this is called
+                let owner_repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
 
-                // Get the owner's repo to use the SAME repo_id
-                let owner_repo = self.get_or_create_repo().await?;
-
-                // Extract repo_id from owner's repo announcement
-                let repo_id = owner_repo
-                    .tags
-                    .iter()
-                    .find(|t| t.kind() == TagKind::d())
-                    .and_then(|t| t.content())
-                    .ok_or_else(|| anyhow::anyhow!("Missing d tag in owner repo announcement"))?
-                    .to_string();
-
-                // Build state event ONLY - does NOT send announcement
+                let repo_id = self.extract_repo_id(&owner_repo)?;
                 self.build_recursive_maintainer_state(&repo_id)
             }
 
             FixtureKind::RecursiveMaintainerRepoAndState => {
-                use nostr_sdk::prelude::*;
+                // ValidRepo is ensured by ensure_fixture before this is called
+                let owner_repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
 
-                // Get the owner's repo to use the SAME repo_id
-                let owner_repo = self.get_or_create_repo().await?;
-
-                // Extract repo_id from owner's repo announcement
-                let repo_id = owner_repo
-                    .tags
-                    .iter()
-                    .find(|t| t.kind() == TagKind::d())
-                    .and_then(|t| t.content())
-                    .ok_or_else(|| anyhow::anyhow!("Missing d tag in owner repo announcement"))?
-                    .to_string();
+                let repo_id = self.extract_repo_id(&owner_repo)?;
 
                 // Build and send the maintainer's repo announcement first
                 // This establishes the chain: Owner -> Maintainer -> RecursiveMaintainer
-                // The maintainer's announcement lists the recursive maintainer in its maintainers tag
                 let maintainer_announcement = self.build_maintainer_announcement(&repo_id).await?;
                 self.client.send_event(maintainer_announcement).await?;
 
@@ -761,8 +685,8 @@ impl<'a> TestContext<'a> {
             FixtureKind::PREvent => {
                 use nostr_sdk::prelude::*;
 
-                // Reuse ValidRepo fixture to get repo_id and owner pubkey
-                let repo = self.get_or_create_repo().await?;
+                // ValidRepo is ensured by ensure_fixture before this is called
+                let repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
 
                 let repo_id = repo
                     .tags
@@ -971,6 +895,17 @@ impl<'a> TestContext<'a> {
             })
     }
 
+    /// Extract repo_id from a repo announcement event
+    fn extract_repo_id(&self, repo: &Event) -> Result<String> {
+        use nostr_sdk::prelude::*;
+        repo.tags
+            .iter()
+            .find(|t| t.kind() == TagKind::d())
+            .and_then(|t| t.content())
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow::anyhow!("Missing d tag in repo announcement"))
+    }
+
     /// Build OwnerStateDataPushed fixture: full 4-stage fixture for push authorization
     ///
     /// This handles all stages of the fixture:
@@ -985,19 +920,10 @@ impl<'a> TestContext<'a> {
         use nostr_sdk::prelude::*;
 
         // ============================================================
-        // Stage 1 & 2: Generate and Send RepoState fixture
-        // (get_or_create_repo handles caching, build_fixture builds state event)
+        // Stage 1 & 2: ValidRepo is ensured by ensure_fixture before this is called
         // ============================================================
-        let repo = self.get_or_create_repo().await?;
-
-        // Extract repo_id from repo announcement
-        let repo_id = repo
-            .tags
-            .iter()
-            .find(|t| t.kind() == TagKind::d())
-            .and_then(|t| t.content())
-            .ok_or_else(|| anyhow::anyhow!("Missing d tag in repo announcement"))?
-            .to_string();
+        let repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
+        let repo_id = self.extract_repo_id(&repo)?;
 
         // Build state event
         let base_time = Timestamp::now().as_u64();
@@ -1129,26 +1055,25 @@ impl<'a> TestContext<'a> {
     /// This tests that a maintainer can authorize pushes with ONLY a state event,
     /// without publishing their own repo announcement.
     ///
+    /// Depends on OwnerStateDataPushed - the owner's data has already been pushed.
+    /// The maintainer force-pushes their commit on top.
+    ///
     /// # Returns
     /// The maintainer's state event (kind 30618) after all stages complete successfully
     async fn build_maintainer_state_data_pushed(&self) -> Result<Event> {
         use nostr_sdk::prelude::*;
 
         // ============================================================
-        // Stage 1 & 2: Generate and Send ValidRepo + MaintainerState fixtures
+        // Stage 1: OwnerStateDataPushed is ensured by ensure_fixture before this is called
+        // The owner's repo and state event are already on the relay, and git data is pushed
         // ============================================================
+        let owner_state = self.get_cached_dependency(FixtureKind::OwnerStateDataPushed)?;
         
-        // Get owner's repo (ValidRepo) - this includes maintainer in maintainers tag
-        let repo = self.get_or_create_repo().await?;
-
-        // Extract repo_id from repo announcement
-        let repo_id = repo
-            .tags
-            .iter()
-            .find(|t| t.kind() == TagKind::d())
-            .and_then(|t| t.content())
-            .ok_or_else(|| anyhow::anyhow!("Missing d tag in repo announcement"))?
-            .to_string();
+        // Extract repo_id from owner's state event (same d-tag structure)
+        let repo_id = self.extract_repo_id(&owner_state)?;
+        
+        // Get the repo (ValidRepo, also cached) for the owner's npub
+        let repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
 
         // Build maintainer's state event (state event ONLY - no announcement)
         let base_time = Timestamp::now().as_u64();
