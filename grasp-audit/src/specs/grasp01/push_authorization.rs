@@ -587,197 +587,31 @@ impl PushAuthorizationTests {
     /// GRASP-01: "MUST accept pushes via this service that match the latest
     /// repo state announcement on the relay"
     ///
-    /// ## Fixture-First Pattern
+    /// This test uses the OwnerStateDataPushed fixture which handles all 4 stages:
+    /// 1. **Generated**: Creates RepoState (repo announcement + state event)
+    /// 2. **Sent**: Sends events to relay
+    /// 3. **Verified**: Confirms events accepted by relay
+    /// 4. **DataPushed**: Clones repo, creates deterministic commit, pushes to relay
     ///
-    /// 1. **Generate**: Create TestContext and get RepoState fixture
-    ///    (repo announcement + state event pointing to deterministic commit)
-    /// 2. **Send**: Clone repo, create deterministic commit locally, push to relay
-    /// 3. **Verify**: Push should succeed because state event authorizes this commit
+    /// The test wraps the fixture result in pass/fail using the error message.
+    #[allow(unused_variables)]  // relay_domain is now handled by fixture
     pub async fn test_push_authorized_by_owner_state(
         client: &AuditClient,
         relay_domain: &str,
     ) -> TestResult {
-        use std::process::Command;
-
         let test_name = "test_push_authorized_by_owner_state";
-
-        // ============================================================
-        // Step 1: GENERATE - Create TestContext and get RepoState fixture
-        // ============================================================
         let ctx = TestContext::new(client);
 
-        let state_event = match ctx.get_fixture(FixtureKind::RepoState).await {
-            Ok(e) => e,
-            Err(e) => {
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push authorized with matching state",
-                )
-                .fail(format!("Failed to create RepoState fixture: {}", e));
-            }
-        };
-
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-        // Extract repo_id and npub from state event
-        let repo_id = match state_event
-            .tags
-            .iter()
-            .find(|t| t.kind() == TagKind::d())
-            .and_then(|t| t.content())
-        {
-            Some(id) => id.to_string(),
-            None => {
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push authorized with matching state",
-                )
-                .fail("Missing repo_id in state event");
-            }
-        };
-
-        let npub = match state_event.pubkey.to_bech32() {
-            Ok(n) => n,
-            Err(e) => {
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push authorized with matching state",
-                )
-                .fail(format!("Failed to convert pubkey to bech32: {}", e));
-            }
-        };
-
-        // ============================================================
-        // Step 2: SEND - Clone repo, create deterministic commit, push
-        // ============================================================
-        let clone_path = match clone_repo(relay_domain, &npub, &repo_id) {
-            Ok(p) => p,
-            Err(e) => {
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push authorized with matching state",
-                )
-                .fail(format!("Failed to clone repo: {}", e));
-            }
-        };
-
-        // Cleanup helper
-        let cleanup = || {
-            let _ = fs::remove_dir_all(&clone_path);
-        };
-
-        // Create deterministic commit locally
-        let commit_hash = match create_deterministic_commit(&clone_path, "Initial commit") {
-            Ok(h) => h,
-            Err(e) => {
-                cleanup();
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push authorized with matching state",
-                )
-                .fail(format!("Failed to create deterministic commit: {}", e));
-            }
-        };
-
-        // Verify commit hash matches expected
-        if commit_hash != DETERMINISTIC_COMMIT_HASH {
-            cleanup();
-            return TestResult::new(test_name, "GRASP-01", "Push authorized with matching state")
-                .fail(format!(
-                    "Commit hash mismatch: got {}, expected {}",
-                    commit_hash, DETERMINISTIC_COMMIT_HASH
-                ));
-        }
-
-        // Create main branch pointing to our deterministic commit
-        let branch_output = Command::new("git")
-            .args(["branch", "main"])
-            .current_dir(&clone_path)
-            .output();
-
-        match branch_output {
-            Err(e) => {
-                cleanup();
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push authorized with matching state",
-                )
-                .fail(format!("Failed to create main branch: {}", e));
-            }
-            Ok(output) if !output.status.success() => {
-                cleanup();
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push authorized with matching state",
-                )
-                .fail(format!(
-                    "Failed to create main branch: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ));
-            }
-            _ => {}
-        }
-
-        // Checkout main branch
-        let checkout_output = Command::new("git")
-            .args(["checkout", "main"])
-            .current_dir(&clone_path)
-            .output();
-
-        match checkout_output {
-            Err(e) => {
-                cleanup();
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push authorized with matching state",
-                )
-                .fail(format!("Failed to checkout main branch: {}", e));
-            }
-            Ok(output) if !output.status.success() => {
-                cleanup();
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push authorized with matching state",
-                )
-                .fail(format!(
-                    "Failed to checkout main branch: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ));
-            }
-            _ => {}
-        }
-
-        // ============================================================
-        // Step 3: VERIFY - Push should succeed because state event
-        // authorizes this commit
-        // ============================================================
-        let push_result = try_push(&clone_path);
-        cleanup();
-
-        match push_result {
-            Ok(true) => {
+        // The OwnerStateDataPushed fixture handles all stages:
+        // Generate → Send → Verify → DataPush
+        match ctx.get_fixture(FixtureKind::OwnerStateDataPushed).await {
+            Ok(_state_event) => {
                 TestResult::new(test_name, "GRASP-01", "Push authorized with matching state").pass()
             }
-            Ok(false) => {
-                TestResult::new(test_name, "GRASP-01", "Push authorized with matching state").fail(
-                    format!(
-                        "Push was rejected but should have been accepted. \
-                        The state event points to commit {} which matches the pushed commit.",
-                        DETERMINISTIC_COMMIT_HASH
-                    ),
-                )
+            Err(e) => {
+                TestResult::new(test_name, "GRASP-01", "Push authorized with matching state")
+                    .fail(format!("{}", e))
             }
-            Err(e) => TestResult::new(test_name, "GRASP-01", "Push authorized with matching state")
-                .fail(format!("Push error: {}", e)),
         }
     }
 

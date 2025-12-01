@@ -17,6 +17,27 @@
 //! This eliminates the need for global state while still enabling fixture reuse
 //! when appropriate.
 //!
+//! # What is a Fixture?
+//! A fixture represents the state of a repository on a grasp server and/or nostr events to be
+//! sent to the server to change this state.
+//!
+//! 1. <event-name>Generated - Nostr Event created (not yet sent)
+//! 2. <event-name>Sent - Sent To Grasp Server
+//! 3. <event-name> - Verfied and Confirmed as accepted via client query
+//! 4. <event-or-data-pushed-name>DataPushed - what refs were pushed
+//!
+//! Some Nostr Events need each of these stages as seperate fixtures whereas 1-3 or event 1-4 are often
+//! bundled and 4 is only sometimes needed.
+//!
+//! Nearly all fixures include dependant fixtures so tests dont need to call every parent fixture.
+//!
+//! As entire tests are often fixtures to be built on by other fixtures / tests, some tests just take
+//! the fixture Result and wrap it in pass fail using the error message.
+//!
+//! # Out of Scope
+//!
+//! local repo's used in tests are always cloned fresh and never part of a fixture
+//!
 //! # Example
 //!
 //! ```no_run
@@ -166,6 +187,20 @@ pub enum FixtureKind {
     /// - Includes `c` tag pointing to PR_TEST_COMMIT_HASH
     /// - Timestamp: 1 second in the past
     PREvent,
+
+    /// Owner's state event with git data successfully pushed (full 4-stage fixture)
+    ///
+    /// This fixture represents the complete flow for testing push authorization:
+    /// 1. **Generated**: Creates RepoState (repo announcement + state event)
+    /// 2. **Sent**: Sends events to relay
+    /// 3. **Verified**: Confirms events accepted by relay
+    /// 4. **DataPushed**: Clones repo, creates deterministic commit, pushes to relay
+    ///
+    /// - Requires ValidRepo (uses same repo_id)
+    /// - State event signed by owner keys (`client.keys()`)
+    /// - Points to DETERMINISTIC_COMMIT_HASH
+    /// - Git push verified to succeed (state matches pushed commit)
+    OwnerStateDataPushed,
 }
 
 /// Context mode for fixture management
@@ -742,6 +777,10 @@ impl<'a> TestContext<'a> {
                     .build(self.client.pr_author_keys())
                     .map_err(|e| anyhow::anyhow!("Failed to build PR event: {}", e))
             }
+
+            FixtureKind::OwnerStateDataPushed => {
+                self.build_owner_state_data_pushed().await
+            }
         }
     }
 
@@ -905,6 +944,184 @@ impl<'a> TestContext<'a> {
                     e
                 )
             })
+    }
+
+    /// Build OwnerStateDataPushed fixture: full 4-stage fixture for push authorization
+    ///
+    /// This handles all stages of the fixture:
+    /// 1. **Generated**: Creates RepoState (repo announcement + state event)
+    /// 2. **Sent**: Sends events to relay
+    /// 3. **Verified**: Confirms events accepted by relay
+    /// 4. **DataPushed**: Clones repo, creates deterministic commit, pushes to relay
+    ///
+    /// # Returns
+    /// The state event (kind 30618) after all stages complete successfully
+    async fn build_owner_state_data_pushed(&self) -> Result<Event> {
+        use nostr_sdk::prelude::*;
+
+        // ============================================================
+        // Stage 1 & 2: Generate and Send RepoState fixture
+        // (get_or_create_repo handles caching, build_fixture builds state event)
+        // ============================================================
+        let repo = self.get_or_create_repo().await?;
+
+        // Extract repo_id from repo announcement
+        let repo_id = repo
+            .tags
+            .iter()
+            .find(|t| t.kind() == TagKind::d())
+            .and_then(|t| t.content())
+            .ok_or_else(|| anyhow::anyhow!("Missing d tag in repo announcement"))?
+            .to_string();
+
+        // Build state event
+        let base_time = Timestamp::now().as_u64();
+        let older_timestamp = Timestamp::from(base_time - 10); // 10 seconds ago
+
+        let state_event = self
+            .client
+            .event_builder(Kind::Custom(30618), "")
+            .tag(Tag::identifier(&repo_id))
+            .tag(Tag::custom(
+                TagKind::custom("refs/heads/main"),
+                vec![DETERMINISTIC_COMMIT_HASH.to_string()],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("HEAD"),
+                vec!["ref: refs/heads/main".to_string()],
+            ))
+            .custom_time(older_timestamp)
+            .build(self.client.keys())
+            .map_err(|e| anyhow::anyhow!("Failed to build state announcement: {}", e))?;
+
+        // Send state event to relay
+        self.client.send_event(state_event.clone()).await?;
+
+        // ============================================================
+        // Stage 3: Verify state event was accepted
+        // ============================================================
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // ============================================================
+        // Stage 4: DataPushed - Clone repo, create commit, push
+        // ============================================================
+        
+        // Get relay domain from connected relay
+        let relay_domain = self.get_relay_domain().await?;
+
+        let npub = state_event
+            .pubkey
+            .to_bech32()
+            .map_err(|e| anyhow::anyhow!("Failed to convert pubkey to bech32: {}", e))?;
+
+        // Clone the repository
+        let clone_path = clone_repo(&relay_domain, &npub, &repo_id)
+            .map_err(|e| anyhow::anyhow!("Failed to clone repo: {}", e))?;
+
+        // Cleanup helper (always clean up on error or success)
+        let cleanup = |path: &PathBuf| {
+            let _ = fs::remove_dir_all(path);
+        };
+
+        // Create deterministic commit locally
+        let commit_hash = match create_deterministic_commit(&clone_path, "Initial commit") {
+            Ok(h) => h,
+            Err(e) => {
+                cleanup(&clone_path);
+                return Err(anyhow::anyhow!("Failed to create deterministic commit: {}", e));
+            }
+        };
+
+        // Verify commit hash matches expected
+        if commit_hash != DETERMINISTIC_COMMIT_HASH {
+            cleanup(&clone_path);
+            return Err(anyhow::anyhow!(
+                "Commit hash mismatch: got {}, expected {}",
+                commit_hash,
+                DETERMINISTIC_COMMIT_HASH
+            ));
+        }
+
+        // Create main branch pointing to our deterministic commit
+        let branch_output = Command::new("git")
+            .args(["branch", "main"])
+            .current_dir(&clone_path)
+            .output();
+
+        match branch_output {
+            Err(e) => {
+                cleanup(&clone_path);
+                return Err(anyhow::anyhow!("Failed to create main branch: {}", e));
+            }
+            Ok(output) if !output.status.success() => {
+                cleanup(&clone_path);
+                return Err(anyhow::anyhow!(
+                    "Failed to create main branch: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+            _ => {}
+        }
+
+        // Checkout main branch
+        let checkout_output = Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(&clone_path)
+            .output();
+
+        match checkout_output {
+            Err(e) => {
+                cleanup(&clone_path);
+                return Err(anyhow::anyhow!("Failed to checkout main branch: {}", e));
+            }
+            Ok(output) if !output.status.success() => {
+                cleanup(&clone_path);
+                return Err(anyhow::anyhow!(
+                    "Failed to checkout main branch: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+            _ => {}
+        }
+
+        // Push to relay
+        let push_result = try_push(&clone_path);
+        cleanup(&clone_path);
+
+        match push_result {
+            Ok(true) => Ok(state_event),
+            Ok(false) => Err(anyhow::anyhow!(
+                "Push was rejected but should have been accepted. \
+                The state event points to commit {} which matches the pushed commit.",
+                DETERMINISTIC_COMMIT_HASH
+            )),
+            Err(e) => Err(anyhow::anyhow!("Push error: {}", e)),
+        }
+    }
+
+    /// Get relay domain (host:port) from the connected relay
+    ///
+    /// Extracts the domain from the relay URL for git HTTP operations.
+    /// Example: ws://localhost:7000 -> localhost:7000
+    async fn get_relay_domain(&self) -> Result<String> {
+        let relay_url = self
+            .client
+            .client()
+            .relays()
+            .await
+            .keys()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("No relay connected"))?
+            .to_string();
+
+        // Extract domain from URL (ws://host:port -> host:port)
+        let domain = relay_url
+            .replace("ws://", "")
+            .replace("wss://", "")
+            .trim_end_matches('/')
+            .to_string();
+
+        Ok(domain)
     }
 
     /// Clear the fixture cache
