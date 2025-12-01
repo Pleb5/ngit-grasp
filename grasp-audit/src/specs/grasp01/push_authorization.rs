@@ -594,7 +594,7 @@ impl PushAuthorizationTests {
     /// 4. **DataPushed**: Clones repo, creates deterministic commit, pushes to relay
     ///
     /// The test wraps the fixture result in pass/fail using the error message.
-    #[allow(unused_variables)]  // relay_domain is now handled by fixture
+    #[allow(unused_variables)] // relay_domain is now handled by fixture
     pub async fn test_push_authorized_by_owner_state(
         client: &AuditClient,
         relay_domain: &str,
@@ -608,10 +608,8 @@ impl PushAuthorizationTests {
             Ok(_state_event) => {
                 TestResult::new(test_name, "GRASP-01", "Push authorized with matching state").pass()
             }
-            Err(e) => {
-                TestResult::new(test_name, "GRASP-01", "Push authorized with matching state")
-                    .fail(format!("{}", e))
-            }
+            Err(e) => TestResult::new(test_name, "GRASP-01", "Push authorized with matching state")
+                .fail(format!("{}", e)),
         }
     }
 
@@ -622,7 +620,7 @@ impl PushAuthorizationTests {
     ///
     /// ## Fixture-First Pattern
     ///
-    /// 1. **Generate**: Create TestContext and get RepoState fixture
+    /// 1. **Generate**: Create TestContext and get OwnerStateDataPushed fixture
     ///    (repo announcement + state event pointing to DETERMINISTIC_COMMIT_HASH)
     /// 2. **Send**: Clone repo, create WRONG deterministic commit (Maintainer variant),
     ///    try to push
@@ -640,12 +638,12 @@ impl PushAuthorizationTests {
         let test_name = "test_push_rejected_wrong_commit";
 
         // ============================================================
-        // Step 1: GENERATE - Create TestContext and get RepoState fixture
+        // Step 1: GENERATE - Create TestContext and get OwnerStateDataPushed fixture
         // The state event points to DETERMINISTIC_COMMIT_HASH
         // ============================================================
         let ctx = TestContext::new(client);
 
-        let state_event = match ctx.get_fixture(FixtureKind::RepoState).await {
+        let state_event = match ctx.get_fixture(FixtureKind::OwnerStateDataPushed).await {
             Ok(e) => e,
             Err(e) => {
                 return TestResult::new(
@@ -775,195 +773,41 @@ impl PushAuthorizationTests {
     /// without publishing their own repo announcement. The maintainer is still
     /// listed in the owner's announcement, so they're a valid maintainer.
     ///
-    /// ## Fixture-First Pattern
+    /// This test uses the MaintainerStateDataPushed fixture which handles all 4 stages:
+    /// 1. **Generated**: Creates ValidRepo (owner's announcement with maintainer in maintainers tag)
+    ///                   + MaintainerState (maintainer's state event ONLY - no announcement)
+    /// 2. **Sent**: Sends events to relay
+    /// 3. **Verified**: Confirms events accepted by relay
+    /// 4. **DataPushed**: Clones repo, creates maintainer deterministic commit, pushes to relay
     ///
-    /// 1. **Generate**: Create TestContext, get RepoState (owner) and MaintainerState fixtures
-    /// 2. **Send**: Clone repo, create maintainer deterministic commit, push to relay
-    /// 3. **Verify**: Push should succeed because maintainer's state event authorizes this commit
-    ///
-    /// Scenario:
-    /// 1. Owner's repo announcement lists maintainer in maintainers tag
-    /// 2. Maintainer publishes ONLY a state event (no announcement)
-    /// 3. Clone, create maintainer commit, verify hash, push
-    /// 4. The push should be ACCEPTED because maintainer's state event authorizes it
+    /// The test wraps the fixture result in pass/fail using the error message.
+    #[allow(unused_variables)]  // relay_domain is now handled by fixture
     pub async fn test_push_authorized_by_maintainer_state_only(
         client: &AuditClient,
         relay_domain: &str,
     ) -> TestResult {
-        use std::process::Command;
-
         let test_name = "test_push_authorized_by_maintainer_state_only";
-
-        // ============================================================
-        // Step 1: GENERATE - Create TestContext and get fixtures
-        // ============================================================
         let ctx = TestContext::new(client);
 
-        // Get RepoState fixture (owner's repo announcement + state event)
-        let state_event = match ctx.get_fixture(FixtureKind::RepoState).await {
-            Ok(e) => e,
+        // The MaintainerStateDataPushed fixture handles all stages:
+        // Generate → Send → Verify → DataPush
+        match ctx.get_fixture(FixtureKind::MaintainerStateDataPushed).await {
+            Ok(_maintainer_state_event) => {
+                TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by maintainer state event only (no announcement)",
+                )
+                .pass()
+            }
             Err(e) => {
-                return TestResult::new(
+                TestResult::new(
                     test_name,
                     "GRASP-01",
                     "Push authorized by maintainer state event only (no announcement)",
                 )
-                .fail(format!("Failed to create RepoState fixture: {}", e));
+                .fail(format!("{}", e))
             }
-        };
-
-        // Get MaintainerState fixture (maintainer's state event ONLY - no announcement)
-        // This tests that state-only authorization works without a maintainer announcement
-        match ctx.get_fixture(FixtureKind::MaintainerState).await {
-            Ok(_) => {}
-            Err(e) => {
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push authorized by maintainer state event only (no announcement)",
-                )
-                .fail(format!("Failed to create MaintainerState fixture: {}", e));
-            }
-        };
-
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-        // Extract repo_id and npub from owner's state event
-        let repo_id = match state_event
-            .tags
-            .iter()
-            .find(|t| t.kind() == TagKind::d())
-            .and_then(|t| t.content())
-        {
-            Some(id) => id.to_string(),
-            None => {
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push authorized by maintainer state event only (no announcement)",
-                )
-                .fail("Missing repo_id in state event");
-            }
-        };
-
-        let npub = match state_event.pubkey.to_bech32() {
-            Ok(n) => n,
-            Err(e) => {
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push authorized by maintainer state event only (no announcement)",
-                )
-                .fail(format!("Failed to convert pubkey to bech32: {}", e));
-            }
-        };
-
-        // ============================================================
-        // Step 2: SEND - Clone, create maintainer commit, push
-        // ============================================================
-        let clone_path = match clone_repo(relay_domain, &npub, &repo_id) {
-            Ok(p) => p,
-            Err(e) => {
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push authorized by maintainer state event only (no announcement)",
-                )
-                .fail(&e);
-            }
-        };
-        let cleanup = || {
-            let _ = fs::remove_dir_all(&clone_path);
-        };
-
-        // Reset to orphan state and create deterministic root commit
-        // Step 1: Create orphan branch (removes all history)
-        let _ = Command::new("git")
-            .args(["checkout", "--orphan", "main-new"])
-            .current_dir(&clone_path)
-            .output();
-
-        // Step 2: Clear staged files (orphan keeps files staged from previous branch)
-        let _ = Command::new("git")
-            .args(["rm", "-rf", "--cached", "."])
-            .current_dir(&clone_path)
-            .output();
-
-        // Step 3: Create deterministic commit using existing function
-        let commit_hash = match create_deterministic_commit_with_variant(
-            &clone_path,
-            CommitVariant::Maintainer,
-        ) {
-            Ok(h) => h,
-            Err(e) => {
-                cleanup();
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push authorized by maintainer state event only (no announcement)",
-                )
-                .fail(format!("Failed to create maintainer commit: {}", e));
-            }
-        };
-
-        // Step 4: Replace main branch with our new orphan branch
-        let _ = Command::new("git")
-            .args(["branch", "-D", "main"])
-            .current_dir(&clone_path)
-            .output();
-
-        let _ = Command::new("git")
-            .args(["branch", "-m", "main"])
-            .current_dir(&clone_path)
-            .output();
-
-        // Verify commit hash matches expected
-        if commit_hash != MAINTAINER_DETERMINISTIC_COMMIT_HASH {
-            cleanup();
-            return TestResult::new(
-                test_name,
-                "GRASP-01",
-                "Push authorized by maintainer state event only (no announcement)",
-            )
-            .fail(format!(
-                "Maintainer commit hash mismatch: got {}, expected {}",
-                commit_hash, MAINTAINER_DETERMINISTIC_COMMIT_HASH
-            ));
-        }
-
-        // ============================================================
-        // Step 3: VERIFY - Push should succeed because maintainer's
-        // state event authorizes this commit
-        // ============================================================
-        let push_result = try_push(&clone_path);
-        cleanup();
-
-        match push_result {
-            Ok(true) => TestResult::new(
-                test_name,
-                "GRASP-01",
-                "Push authorized by maintainer state event only (no announcement)",
-            )
-            .pass(),
-            Ok(false) => TestResult::new(
-                test_name,
-                "GRASP-01",
-                "Push authorized by maintainer state event only (no announcement)",
-            )
-            .fail(format!(
-                "Push was rejected but should have been accepted. \
-                The maintainer published a state event with commit {}, \
-                and even without a separate announcement, the relay should \
-                authorize pushes matching this state event since the maintainer \
-                is listed in the owner's announcement.",
-                MAINTAINER_DETERMINISTIC_COMMIT_HASH
-            )),
-            Err(e) => TestResult::new(
-                test_name,
-                "GRASP-01",
-                "Push authorized by maintainer state event only (no announcement)",
-            )
-            .fail(format!("Push error: {}", e)),
         }
     }
 

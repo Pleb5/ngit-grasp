@@ -201,6 +201,27 @@ pub enum FixtureKind {
     /// - Points to DETERMINISTIC_COMMIT_HASH
     /// - Git push verified to succeed (state matches pushed commit)
     OwnerStateDataPushed,
+
+    /// Maintainer's state event with git data successfully pushed (full 4-stage fixture)
+    ///
+    /// This fixture tests that a maintainer can authorize pushes with ONLY a state event,
+    /// without publishing their own repo announcement. The maintainer is still listed in
+    /// the owner's announcement, so they're a valid maintainer.
+    ///
+    /// GRASP-01: "respecting the recursive maintainer set"
+    ///
+    /// Stages:
+    /// 1. **Generated**: Creates ValidRepo (owner's announcement with maintainer in maintainers tag)
+    ///                   + MaintainerState (maintainer's state event ONLY - no announcement)
+    /// 2. **Sent**: Sends events to relay
+    /// 3. **Verified**: Confirms events accepted by relay
+    /// 4. **DataPushed**: Clones repo, creates maintainer deterministic commit, pushes to relay
+    ///
+    /// - Requires ValidRepo (owner's announcement lists maintainer)
+    /// - State event signed by maintainer keys (`client.maintainer_keys()`)
+    /// - Points to MAINTAINER_DETERMINISTIC_COMMIT_HASH
+    /// - Git push verified to succeed (maintainer's state event authorizes the commit)
+    MaintainerStateDataPushed,
 }
 
 /// Context mode for fixture management
@@ -781,6 +802,10 @@ impl<'a> TestContext<'a> {
             FixtureKind::OwnerStateDataPushed => {
                 self.build_owner_state_data_pushed().await
             }
+
+            FixtureKind::MaintainerStateDataPushed => {
+                self.build_maintainer_state_data_pushed().await
+            }
         }
     }
 
@@ -1094,6 +1119,146 @@ impl<'a> TestContext<'a> {
                 "Push was rejected but should have been accepted. \
                 The state event points to commit {} which matches the pushed commit.",
                 DETERMINISTIC_COMMIT_HASH
+            )),
+            Err(e) => Err(anyhow::anyhow!("Push error: {}", e)),
+        }
+    }
+
+    /// Build MaintainerStateDataPushed fixture: full 4-stage fixture for maintainer push authorization
+    ///
+    /// This tests that a maintainer can authorize pushes with ONLY a state event,
+    /// without publishing their own repo announcement.
+    ///
+    /// # Returns
+    /// The maintainer's state event (kind 30618) after all stages complete successfully
+    async fn build_maintainer_state_data_pushed(&self) -> Result<Event> {
+        use nostr_sdk::prelude::*;
+
+        // ============================================================
+        // Stage 1 & 2: Generate and Send ValidRepo + MaintainerState fixtures
+        // ============================================================
+        
+        // Get owner's repo (ValidRepo) - this includes maintainer in maintainers tag
+        let repo = self.get_or_create_repo().await?;
+
+        // Extract repo_id from repo announcement
+        let repo_id = repo
+            .tags
+            .iter()
+            .find(|t| t.kind() == TagKind::d())
+            .and_then(|t| t.content())
+            .ok_or_else(|| anyhow::anyhow!("Missing d tag in repo announcement"))?
+            .to_string();
+
+        // Build maintainer's state event (state event ONLY - no announcement)
+        let base_time = Timestamp::now().as_u64();
+        let maintainer_timestamp = Timestamp::from(base_time - 5); // 5 seconds ago (more recent than owner's state)
+
+        let maintainer_state_event = self
+            .client
+            .event_builder(Kind::Custom(30618), "")
+            .tag(Tag::identifier(&repo_id))
+            .tag(Tag::custom(
+                TagKind::custom("refs/heads/main"),
+                vec![MAINTAINER_DETERMINISTIC_COMMIT_HASH.to_string()],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("HEAD"),
+                vec!["ref: refs/heads/main".to_string()],
+            ))
+            .custom_time(maintainer_timestamp)
+            .build(self.client.maintainer_keys())
+            .map_err(|e| anyhow::anyhow!("Failed to build maintainer state event: {}", e))?;
+
+        // Send maintainer state event to relay
+        self.client.send_event(maintainer_state_event.clone()).await?;
+
+        // ============================================================
+        // Stage 3: Verify state event was accepted
+        // ============================================================
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // ============================================================
+        // Stage 4: DataPushed - Clone repo, create maintainer commit, push
+        // ============================================================
+        
+        // Get relay domain from connected relay
+        let relay_domain = self.get_relay_domain().await?;
+
+        // Use owner's npub for cloning (repo belongs to owner)
+        let npub = repo
+            .pubkey
+            .to_bech32()
+            .map_err(|e| anyhow::anyhow!("Failed to convert pubkey to bech32: {}", e))?;
+
+        // Clone the repository
+        let clone_path = clone_repo(&relay_domain, &npub, &repo_id)
+            .map_err(|e| anyhow::anyhow!("Failed to clone repo: {}", e))?;
+
+        // Cleanup helper (always clean up on error or success)
+        let cleanup = |path: &PathBuf| {
+            let _ = fs::remove_dir_all(path);
+        };
+
+        // Reset to orphan state and create deterministic root commit
+        // Step 1: Create orphan branch (removes all history)
+        let _ = Command::new("git")
+            .args(["checkout", "--orphan", "main-new"])
+            .current_dir(&clone_path)
+            .output();
+
+        // Step 2: Clear staged files (orphan keeps files staged from previous branch)
+        let _ = Command::new("git")
+            .args(["rm", "-rf", "--cached", "."])
+            .current_dir(&clone_path)
+            .output();
+
+        // Step 3: Create deterministic commit using maintainer variant
+        let commit_hash = match create_deterministic_commit_with_variant(
+            &clone_path,
+            CommitVariant::Maintainer,
+        ) {
+            Ok(h) => h,
+            Err(e) => {
+                cleanup(&clone_path);
+                return Err(anyhow::anyhow!("Failed to create maintainer commit: {}", e));
+            }
+        };
+
+        // Step 4: Replace main branch with our new orphan branch
+        let _ = Command::new("git")
+            .args(["branch", "-D", "main"])
+            .current_dir(&clone_path)
+            .output();
+
+        let _ = Command::new("git")
+            .args(["branch", "-m", "main"])
+            .current_dir(&clone_path)
+            .output();
+
+        // Verify commit hash matches expected
+        if commit_hash != MAINTAINER_DETERMINISTIC_COMMIT_HASH {
+            cleanup(&clone_path);
+            return Err(anyhow::anyhow!(
+                "Maintainer commit hash mismatch: got {}, expected {}",
+                commit_hash,
+                MAINTAINER_DETERMINISTIC_COMMIT_HASH
+            ));
+        }
+
+        // Push to relay
+        let push_result = try_push(&clone_path);
+        cleanup(&clone_path);
+
+        match push_result {
+            Ok(true) => Ok(maintainer_state_event),
+            Ok(false) => Err(anyhow::anyhow!(
+                "Push was rejected but should have been accepted. \
+                The maintainer published a state event with commit {}, \
+                and even without a separate announcement, the relay should \
+                authorize pushes matching this state event since the maintainer \
+                is listed in the owner's announcement.",
+                MAINTAINER_DETERMINISTIC_COMMIT_HASH
             )),
             Err(e) => Err(anyhow::anyhow!("Push error: {}", e)),
         }
