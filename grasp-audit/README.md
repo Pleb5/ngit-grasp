@@ -252,14 +252,14 @@ pub async fn test_something(client: &AuditClient) -> TestResult {
 
 ### Available Fixtures
 
-| FixtureKind              | Provides                                | Use When                              |
-| ------------------------ | --------------------------------------- | ------------------------------------- |
-| `ValidRepo`              | Accepted repo announcement (kind 30617) | Need a repo as prerequisite           |
-| `RepoState`              | Repo + state event (kind 30618)         | Testing owner push authorization      |
-| `MaintainerAnnouncement` | Maintainer's repo announcement          | Testing maintainer chain setup        |
-| `MaintainerState`        | Maintainer's state event                | Testing maintainer push authorization |
-| `RepoWithIssue`          | Repo + accepted issue (kind 1621)       | Testing issue-dependent events        |
-| `RepoWithComment`        | Repo + issue + comment                  | Testing comment-dependent events      |
+| FixtureKind                          | Provides                                | Use When                              |
+| ------------------------------------ | --------------------------------------- | ------------------------------------- |
+| `ValidRepo`                          | Accepted repo announcement (kind 30617) | Need a repo as prerequisite           |
+| `RepoState`                          | Repo + state event (kind 30618)         | Testing owner push authorization      |
+| `RepoWithIssue`                      | Repo + accepted issue (kind 1621)       | Testing issue-dependent events        |
+| `RepoWithComment`                    | Repo + issue + comment                  | Testing comment-dependent events      |
+| `MaintainerStateDataPushed`          | Full maintainer push with git data      | Testing maintainer push authorization |
+| `RecursiveMaintainerStateDataPushed` | Full recursive maintainer push          | Testing recursive maintainer chain    |
 
 ### Fixture Lifecycle: Generate → Send → Verify
 

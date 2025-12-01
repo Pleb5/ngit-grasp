@@ -18,16 +18,8 @@
 //! when appropriate.
 //!
 //! # What is a Fixture?
-//! A fixture represents the state of a repository on a grasp server and/or nostr events to be
-//! sent to the server to change this state.
-//!
-//! 1. <event-name>Generated - Nostr Event created (not yet sent)
-//! 2. <event-name>Sent - Sent To Grasp Server
-//! 3. <event-name> - Verfied and Confirmed as accepted via client query
-//! 4. <event-or-data-pushed-name>DataPushed - what refs were pushed
-//!
-//! Some Nostr Events need each of these stages as seperate fixtures whereas 1-3 or event 1-4 are often
-//! bundled and 4 is only sometimes needed.
+//! A fixture represents the state of a repository on a grasp server (events and git refs)
+//! and/or nostr events to be sent to the server to change this state.
 //!
 //! Nearly all fixures include dependant fixtures so tests dont need to call every parent fixture.
 //!
@@ -140,44 +132,6 @@ pub enum FixtureKind {
     /// - Points to DETERMINISTIC_COMMIT_HASH
     /// - Timestamp: 10 seconds in the past
     RepoState,
-
-    /// Maintainer's repo announcement only for the SAME repo_id as ValidRepo
-    /// - Requires ValidRepo (uses same repo_id for maintainer chain)
-    /// - Announcement signed by `client.maintainer_keys()`
-    /// - Lists `client.recursive_maintainer_pubkey_hex()` in maintainers tag
-    /// - Does NOT include state event (use MaintainerState for that)
-    MaintainerAnnouncement,
-
-    /// Maintainer's state event only for the SAME repo_id as ValidRepo
-    /// - Requires ValidRepo (uses same repo_id for maintainer chain)
-    /// - State event signed by `client.maintainer_keys()`
-    /// - Points to MAINTAINER_DETERMINISTIC_COMMIT_HASH
-    /// - Timestamp: 5 seconds in the past (more recent than owner's state)
-    /// - Does NOT include announcement (use MaintainerAnnouncement for that)
-    MaintainerState,
-
-    /// Recursive maintainer's announcement only for the SAME repo_id as ValidRepo
-    /// - Requires ValidRepo (uses same repo_id for recursive chain)
-    /// - Announcement signed by `client.recursive_maintainer_keys()`
-    /// - Lists owner and maintainer in maintainers tag
-    /// - Does NOT include state event (use RecursiveMaintainerState for that)
-    RecursiveMaintainerAnnouncement,
-
-    /// Recursive maintainer's state event only for the SAME repo_id as ValidRepo
-    /// - Requires ValidRepo (uses same repo_id for recursive chain)
-    /// - State event signed by `client.recursive_maintainer_keys()`
-    /// - Points to RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH
-    /// - Timestamp: 2 seconds in the past (most recent)
-    /// - Does NOT include announcement (use RecursiveMaintainerAnnouncement for that)
-    RecursiveMaintainerState,
-
-    /// Recursive maintainer's announcement + state for the SAME repo_id as ValidRepo
-    /// - Requires ValidRepo (uses same repo_id for recursive chain)
-    /// - Announcement signed by `client.recursive_maintainer_keys()`
-    /// - Lists owner and maintainer in maintainers tag
-    /// - State event points to RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH
-    /// - Timestamp: 2 seconds in the past (most recent)
-    RecursiveMaintainerRepoAndState,
 
     /// PR (Pull Request) event for the SAME repo_id as ValidRepo
     /// - Requires ValidRepo (uses same repo_id)
@@ -322,32 +276,27 @@ impl FixtureKind {
         match self {
             // Base fixtures - no dependencies
             Self::ValidRepo => vec![],
-            
+
             // Fixtures that depend on ValidRepo
             Self::RepoWithIssue => vec![Self::ValidRepo],
             Self::RepoState => vec![Self::ValidRepo],
-            Self::MaintainerAnnouncement => vec![Self::ValidRepo],
-            Self::MaintainerState => vec![Self::ValidRepo],
-            Self::RecursiveMaintainerAnnouncement => vec![Self::ValidRepo],
-            Self::RecursiveMaintainerState => vec![Self::ValidRepo],
-            Self::RecursiveMaintainerRepoAndState => vec![Self::ValidRepo],
             Self::PREvent => vec![Self::ValidRepo],
             Self::PREventGenerated => vec![Self::ValidRepo],
             Self::PRWrongCommitPushedBeforeEvent => vec![Self::PREventGenerated],
             Self::PREventSentAfterWrongPush => vec![Self::PRWrongCommitPushedBeforeEvent],
             Self::OwnerStateDataPushed => vec![Self::ValidRepo],
-            
+
             // Fixtures that depend on RepoWithIssue
             Self::RepoWithComment => vec![Self::RepoWithIssue],
-            
+
             // MaintainerStateDataPushed depends on OwnerStateDataPushed
             // (maintainer force-pushes over owner's data)
             Self::MaintainerStateDataPushed => vec![Self::OwnerStateDataPushed],
-            
+
             // RecursiveMaintainerStateDataPushed depends on MaintainerStateDataPushed
             // (recursive maintainer force-pushes over maintainer's data)
             Self::RecursiveMaintainerStateDataPushed => vec![Self::MaintainerStateDataPushed],
-            
+
             // HeadSetToDevelopBranch depends on RecursiveMaintainerStateDataPushed
             // (all git data already exists, we just publish a new state event)
             Self::HeadSetToDevelopBranch => vec![Self::RecursiveMaintainerStateDataPushed],
@@ -365,8 +314,6 @@ impl FixtureKind {
             Self::OwnerStateDataPushed => true,
             Self::MaintainerStateDataPushed => true,
             Self::RecursiveMaintainerStateDataPushed => true,
-            // RecursiveMaintainerRepoAndState sends multiple events internally
-            Self::RecursiveMaintainerRepoAndState => true,
             // PREventGenerated builds but does NOT send the PR event (that's the point)
             Self::PREventGenerated => true,
             // PRWrongCommitPushedBeforeEvent pushes git data but doesn't send event
@@ -567,7 +514,10 @@ impl<'a> TestContext<'a> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn ensure_fixture(&self, kind: FixtureKind) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Event>> + Send + '_>> {
+    pub fn ensure_fixture(
+        &self,
+        kind: FixtureKind,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Event>> + Send + '_>> {
         Box::pin(async move {
             // Check cache first
             if let Some(cached) = self.get_cached(kind) {
@@ -592,15 +542,17 @@ impl<'a> TestContext<'a> {
             }
 
             // Build the fixture
-            let event = self.build_fixture_inner(kind).await.with_context(|| {
-                format!("Failed to build {:?} fixture", kind)
-            })?;
+            let event = self
+                .build_fixture_inner(kind)
+                .await
+                .with_context(|| format!("Failed to build {:?} fixture", kind))?;
 
             // Send to relay if this fixture doesn't handle it internally
             if !kind.sends_own_events() {
-                self.client.send_event(event.clone()).await.with_context(|| {
-                    format!("Failed to send {:?} fixture event to relay", kind)
-                })?;
+                self.client
+                    .send_event(event.clone())
+                    .await
+                    .with_context(|| format!("Failed to send {:?} fixture event to relay", kind))?;
             }
 
             // Cache and return
@@ -683,12 +635,8 @@ impl<'a> TestContext<'a> {
                 let repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
 
                 // Build issue referencing it - caller will send it
-                self.client.create_issue(
-                    &repo,
-                    "Test Issue",
-                    "Issue content for testing",
-                    vec![],
-                )
+                self.client
+                    .create_issue(&repo, "Test Issue", "Issue content for testing", vec![])
             }
 
             FixtureKind::RepoWithComment => {
@@ -734,61 +682,6 @@ impl<'a> TestContext<'a> {
                     .custom_time(older_timestamp)
                     .build(self.client.keys())
                     .map_err(|e| anyhow::anyhow!("Failed to build state announcement: {}", e))
-            }
-
-            FixtureKind::MaintainerAnnouncement => {
-                // ValidRepo is ensured by ensure_fixture before this is called
-                let owner_repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
-
-                let repo_id = self.extract_repo_id(&owner_repo)?;
-                self.build_maintainer_announcement(&repo_id).await
-            }
-
-            FixtureKind::MaintainerState => {
-                // ValidRepo is ensured by ensure_fixture before this is called
-                let owner_repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
-
-                let repo_id = self.extract_repo_id(&owner_repo)?;
-                self.build_maintainer_state(&repo_id)
-            }
-
-            FixtureKind::RecursiveMaintainerAnnouncement => {
-                // ValidRepo is ensured by ensure_fixture before this is called
-                let owner_repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
-
-                let repo_id = self.extract_repo_id(&owner_repo)?;
-                self.build_recursive_maintainer_announcement(&repo_id).await
-            }
-
-            FixtureKind::RecursiveMaintainerState => {
-                // ValidRepo is ensured by ensure_fixture before this is called
-                let owner_repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
-
-                let repo_id = self.extract_repo_id(&owner_repo)?;
-                self.build_recursive_maintainer_state(&repo_id)
-            }
-
-            FixtureKind::RecursiveMaintainerRepoAndState => {
-                // ValidRepo is ensured by ensure_fixture before this is called
-                let owner_repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
-
-                let repo_id = self.extract_repo_id(&owner_repo)?;
-
-                // Build and send the maintainer's repo announcement first
-                // This establishes the chain: Owner -> Maintainer -> RecursiveMaintainer
-                let maintainer_announcement = self.build_maintainer_announcement(&repo_id).await?;
-                self.client.send_event(maintainer_announcement).await?;
-
-                // Build and send the recursive maintainer's repo announcement
-                let recursive_maintainer_announcement = self
-                    .build_recursive_maintainer_announcement(&repo_id)
-                    .await?;
-                self.client
-                    .send_event(recursive_maintainer_announcement)
-                    .await?;
-
-                // Return the state event (caller will send it)
-                self.build_recursive_maintainer_state(&repo_id)
             }
 
             FixtureKind::PREvent => {
@@ -883,9 +776,7 @@ impl<'a> TestContext<'a> {
                 self.build_pr_event_sent_after_wrong_push().await
             }
 
-            FixtureKind::OwnerStateDataPushed => {
-                self.build_owner_state_data_pushed().await
-            }
+            FixtureKind::OwnerStateDataPushed => self.build_owner_state_data_pushed().await,
 
             FixtureKind::MaintainerStateDataPushed => {
                 self.build_maintainer_state_data_pushed().await
@@ -895,9 +786,7 @@ impl<'a> TestContext<'a> {
                 self.build_recursive_maintainer_state_data_pushed().await
             }
 
-            FixtureKind::HeadSetToDevelopBranch => {
-                self.build_head_set_to_develop_branch().await
-            }
+            FixtureKind::HeadSetToDevelopBranch => self.build_head_set_to_develop_branch().await,
         }
     }
 
@@ -948,119 +837,6 @@ impl<'a> TestContext<'a> {
             ))
             .build(self.client.maintainer_keys())
             .map_err(|e| anyhow::anyhow!("Failed to build maintainer repo announcement: {}", e))
-    }
-
-    /// Build maintainer state event for the given repo_id
-    fn build_maintainer_state(&self, repo_id: &str) -> Result<Event> {
-        use nostr_sdk::prelude::*;
-
-        // Create state announcement 5 seconds in the past, signed by maintainer
-        let base_time = Timestamp::now().as_u64();
-        let older_timestamp = Timestamp::from(base_time - 5); // 5 seconds ago
-
-        self.client
-            .event_builder(Kind::Custom(30618), "")
-            .tag(Tag::identifier(repo_id))
-            .tag(Tag::custom(
-                TagKind::custom("refs/heads/main"),
-                vec![MAINTAINER_DETERMINISTIC_COMMIT_HASH.to_string()],
-            ))
-            .tag(Tag::custom(
-                TagKind::custom("HEAD"),
-                vec!["ref: refs/heads/main".to_string()],
-            ))
-            .custom_time(older_timestamp)
-            .build(self.client.maintainer_keys())
-            .map_err(|e| anyhow::anyhow!("Failed to build maintainer state announcement: {}", e))
-    }
-
-    /// Build recursive maintainer announcement event for the given repo_id
-    async fn build_recursive_maintainer_announcement(&self, repo_id: &str) -> Result<Event> {
-        use nostr_sdk::prelude::*;
-
-        // Get relay URL for clone tag
-        let relay_url = self
-            .client
-            .client()
-            .relays()
-            .await
-            .keys()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("No relay connected"))?
-            .to_string();
-        let http_url = relay_url
-            .replace("ws://", "http://")
-            .replace("wss://", "https://");
-
-        // Create recursive maintainer's repo announcement for the SAME repo_id
-        let recursive_maintainer_npub = self
-            .client
-            .recursive_maintainer_keys()
-            .public_key()
-            .to_bech32()
-            .map_err(|e| anyhow::anyhow!("Failed to convert recursive maintainer pubkey: {}", e))?;
-
-        self.client
-            .event_builder(
-                Kind::GitRepoAnnouncement,
-                format!("Recursive maintainer announcement for {}", repo_id),
-            )
-            .tag(Tag::identifier(repo_id))
-            .tag(Tag::custom(
-                TagKind::custom("name"),
-                vec![format!("{} (recursive maintainer)", repo_id)],
-            ))
-            .tag(Tag::custom(
-                TagKind::custom("clone"),
-                vec![format!(
-                    "{}/{}/{}.git",
-                    http_url, recursive_maintainer_npub, repo_id
-                )],
-            ))
-            .tag(Tag::custom(TagKind::custom("relays"), vec![relay_url]))
-            .tag(Tag::custom(
-                TagKind::custom("maintainers"),
-                vec![
-                    self.client.public_key().to_hex(),
-                    self.client.maintainer_pubkey_hex(),
-                ],
-            ))
-            .build(self.client.recursive_maintainer_keys())
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to build recursive maintainer repo announcement: {}",
-                    e
-                )
-            })
-    }
-
-    /// Build recursive maintainer state event for the given repo_id
-    fn build_recursive_maintainer_state(&self, repo_id: &str) -> Result<Event> {
-        use nostr_sdk::prelude::*;
-
-        // Create state announcement 2 seconds in the past, signed by recursive maintainer
-        let base_time = Timestamp::now().as_u64();
-        let older_timestamp = Timestamp::from(base_time - 2); // 2 seconds ago
-
-        self.client
-            .event_builder(Kind::Custom(30618), "")
-            .tag(Tag::identifier(repo_id))
-            .tag(Tag::custom(
-                TagKind::custom("refs/heads/main"),
-                vec![RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH.to_string()],
-            ))
-            .tag(Tag::custom(
-                TagKind::custom("HEAD"),
-                vec!["ref: refs/heads/main".to_string()],
-            ))
-            .custom_time(older_timestamp)
-            .build(self.client.recursive_maintainer_keys())
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to build recursive maintainer state announcement: {}",
-                    e
-                )
-            })
     }
 
     /// Extract repo_id from a repo announcement event
@@ -1124,7 +900,7 @@ impl<'a> TestContext<'a> {
         // ============================================================
         // Stage 4: DataPushed - Clone repo, create commit, push
         // ============================================================
-        
+
         // Get relay domain from connected relay
         let relay_domain = self.get_relay_domain().await?;
 
@@ -1147,7 +923,10 @@ impl<'a> TestContext<'a> {
             Ok(h) => h,
             Err(e) => {
                 cleanup(&clone_path);
-                return Err(anyhow::anyhow!("Failed to create deterministic commit: {}", e));
+                return Err(anyhow::anyhow!(
+                    "Failed to create deterministic commit: {}",
+                    e
+                ));
             }
         };
 
@@ -1236,10 +1015,10 @@ impl<'a> TestContext<'a> {
         // The owner's repo and state event are already on the relay, and git data is pushed
         // ============================================================
         let owner_state = self.get_cached_dependency(FixtureKind::OwnerStateDataPushed)?;
-        
+
         // Extract repo_id from owner's state event (same d-tag structure)
         let repo_id = self.extract_repo_id(&owner_state)?;
-        
+
         // Get the repo (ValidRepo, also cached) for the owner's npub
         let repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
 
@@ -1264,7 +1043,9 @@ impl<'a> TestContext<'a> {
             .map_err(|e| anyhow::anyhow!("Failed to build maintainer state event: {}", e))?;
 
         // Send maintainer state event to relay
-        self.client.send_event(maintainer_state_event.clone()).await?;
+        self.client
+            .send_event(maintainer_state_event.clone())
+            .await?;
 
         // ============================================================
         // Stage 3: Verify state event was accepted
@@ -1274,7 +1055,7 @@ impl<'a> TestContext<'a> {
         // ============================================================
         // Stage 4: DataPushed - Clone repo, create maintainer commit, push
         // ============================================================
-        
+
         // Get relay domain from connected relay
         let relay_domain = self.get_relay_domain().await?;
 
@@ -1377,11 +1158,12 @@ impl<'a> TestContext<'a> {
         // The owner's repo, owner's state event, and maintainer's state event are already on the relay,
         // and maintainer's git data is pushed
         // ============================================================
-        let maintainer_state = self.get_cached_dependency(FixtureKind::MaintainerStateDataPushed)?;
-        
+        let maintainer_state =
+            self.get_cached_dependency(FixtureKind::MaintainerStateDataPushed)?;
+
         // Extract repo_id from maintainer's state event (same d-tag structure)
         let repo_id = self.extract_repo_id(&maintainer_state)?;
-        
+
         // Get the repo (ValidRepo, also cached) for the owner's npub
         let repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
 
@@ -1409,10 +1191,14 @@ impl<'a> TestContext<'a> {
             ))
             .custom_time(recursive_maintainer_timestamp)
             .build(self.client.recursive_maintainer_keys())
-            .map_err(|e| anyhow::anyhow!("Failed to build recursive maintainer state event: {}", e))?;
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to build recursive maintainer state event: {}", e)
+            })?;
 
         // Send recursive maintainer state event to relay
-        self.client.send_event(recursive_maintainer_state_event.clone()).await?;
+        self.client
+            .send_event(recursive_maintainer_state_event.clone())
+            .await?;
 
         // ============================================================
         // Stage 3: Verify state event was accepted
@@ -1422,7 +1208,7 @@ impl<'a> TestContext<'a> {
         // ============================================================
         // Stage 4: DataPushed - Clone repo, create recursive maintainer commit, push
         // ============================================================
-        
+
         // Get relay domain from connected relay
         let relay_domain = self.get_relay_domain().await?;
 
@@ -1462,7 +1248,10 @@ impl<'a> TestContext<'a> {
             Ok(h) => h,
             Err(e) => {
                 cleanup(&clone_path);
-                return Err(anyhow::anyhow!("Failed to create recursive maintainer commit: {}", e));
+                return Err(anyhow::anyhow!(
+                    "Failed to create recursive maintainer commit: {}",
+                    e
+                ));
             }
         };
 
@@ -1525,8 +1314,9 @@ impl<'a> TestContext<'a> {
         // Stage 1: RecursiveMaintainerStateDataPushed is ensured by ensure_fixture before this is called
         // All git data already exists on the relay (main branch with RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH)
         // ============================================================
-        let recursive_state = self.get_cached_dependency(FixtureKind::RecursiveMaintainerStateDataPushed)?;
-        
+        let recursive_state =
+            self.get_cached_dependency(FixtureKind::RecursiveMaintainerStateDataPushed)?;
+
         // Extract repo_id from the recursive maintainer's state event
         let repo_id = self.extract_repo_id(&recursive_state)?;
 
@@ -1607,16 +1397,14 @@ impl<'a> TestContext<'a> {
 
         // Create a WRONG commit (Owner variant, not PRTestCommit)
         // This commit hash will NOT match what's in the PR event's `c` tag
-        let wrong_commit_hash = match create_deterministic_commit_with_variant(
-            &clone_path,
-            CommitVariant::Owner,
-        ) {
-            Ok(h) => h,
-            Err(e) => {
-                cleanup(&clone_path);
-                return Err(anyhow::anyhow!("Failed to create wrong commit: {}", e));
-            }
-        };
+        let wrong_commit_hash =
+            match create_deterministic_commit_with_variant(&clone_path, CommitVariant::Owner) {
+                Ok(h) => h,
+                Err(e) => {
+                    cleanup(&clone_path);
+                    return Err(anyhow::anyhow!("Failed to create wrong commit: {}", e));
+                }
+            };
 
         // Verify it's actually different from expected PR commit
         if wrong_commit_hash == PR_TEST_COMMIT_HASH {
