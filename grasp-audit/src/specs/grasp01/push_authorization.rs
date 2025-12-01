@@ -514,6 +514,8 @@ impl PushAuthorizationTests {
         results.add(
             Self::test_head_set_after_state_event_with_existing_commit(client, relay_domain).await,
         );
+        results
+            .add(Self::test_head_set_after_git_push_with_required_oids(client, relay_domain).await);
 
         results
     }
@@ -2235,6 +2237,39 @@ impl PushAuthorizationTests {
                 default_branch
             ))
         }
+    }
+
+    /// Test that HEAD is set after git push with oids
+    pub async fn test_head_set_after_git_push_with_required_oids(
+        client: &AuditClient,
+        relay_domain: &str,
+    ) -> TestResult {
+        let test_name = "test_head_set_after_git_push_with_required_oids";
+        let desc = "HEAD is set to match state event when git push sends required oids to formulate branch";
+
+        // DO the above as prep. then create a unique commit, create state event with HEAD=develop1 branch at unqiue commit
+        // git push the new develop1 branch. then check HEAD with this:
+        // let default_branch =
+        //     match get_default_branch_from_info_refs(relay_domain, &npub, &repo_id).await {
+        //         Ok(branch) => branch,
+        //         Err(e) => {
+        //             return TestResult::new(test_name, "GRASP-01", desc)
+        //                 .fail(format!("Failed to get default branch: {}", e));
+        //         }
+        //     };
+
+        // // Verify HEAD points to refs/heads/develop1
+        // if default_branch == "refs/heads/develop1" {
+        //     TestResult::new(test_name, "GRASP-01", desc).pass()
+        // } else {
+        //     TestResult::new(test_name, "GRASP-01", desc).fail(format!(
+        //         "Expected HEAD to point to 'refs/heads/develop' but got '{}'. \
+        //         GRASP-01 requires: 'MUST set repository HEAD per repository state announcement \
+        //         as soon as the git data related to that branch has been received.'",
+        //         default_branch
+        //     ))
+        // }
+        TestResult::new(test_name, "GRASP-01", desc).fail("test not implemented")
     }
 }
 
