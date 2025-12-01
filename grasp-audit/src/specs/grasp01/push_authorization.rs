@@ -781,7 +781,7 @@ impl PushAuthorizationTests {
     /// 4. **DataPushed**: Clones repo, creates maintainer deterministic commit, pushes to relay
     ///
     /// The test wraps the fixture result in pass/fail using the error message.
-    #[allow(unused_variables)]  // relay_domain is now handled by fixture
+    #[allow(unused_variables)] // relay_domain is now handled by fixture
     pub async fn test_push_authorized_by_maintainer_state_only(
         client: &AuditClient,
         relay_domain: &str,
@@ -791,23 +791,22 @@ impl PushAuthorizationTests {
 
         // The MaintainerStateDataPushed fixture handles all stages:
         // Generate → Send → Verify → DataPush
-        match ctx.get_fixture(FixtureKind::MaintainerStateDataPushed).await {
-            Ok(_maintainer_state_event) => {
-                TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push authorized by maintainer state event only (no announcement)",
-                )
-                .pass()
-            }
-            Err(e) => {
-                TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push authorized by maintainer state event only (no announcement)",
-                )
-                .fail(format!("{}", e))
-            }
+        match ctx
+            .get_fixture(FixtureKind::MaintainerStateDataPushed)
+            .await
+        {
+            Ok(_maintainer_state_event) => TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push authorized by maintainer state event only (no announcement)",
+            )
+            .pass(),
+            Err(e) => TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push authorized by maintainer state event only (no announcement)",
+            )
+            .fail(format!("{}", e)),
         }
     }
 
@@ -825,7 +824,7 @@ impl PushAuthorizationTests {
     /// 4. **DataPushed**: Clones repo, creates recursive maintainer deterministic commit, pushes to relay
     ///
     /// The test wraps the fixture result in pass/fail using the error message.
-    #[allow(unused_variables)]  // relay_domain is now handled by fixture
+    #[allow(unused_variables)] // relay_domain is now handled by fixture
     pub async fn test_push_authorized_by_recursive_maintainer_state(
         client: &AuditClient,
         relay_domain: &str,
@@ -835,23 +834,22 @@ impl PushAuthorizationTests {
 
         // The RecursiveMaintainerStateDataPushed fixture handles all stages:
         // Generate → Send → Verify → DataPush
-        match ctx.get_fixture(FixtureKind::RecursiveMaintainerStateDataPushed).await {
-            Ok(_recursive_maintainer_state_event) => {
-                TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push authorized by recursive maintainer state event",
-                )
-                .pass()
-            }
-            Err(e) => {
-                TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Push authorized by recursive maintainer state event",
-                )
-                .fail(format!("{}", e))
-            }
+        match ctx
+            .get_fixture(FixtureKind::RecursiveMaintainerStateDataPushed)
+            .await
+        {
+            Ok(_recursive_maintainer_state_event) => TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push authorized by recursive maintainer state event",
+            )
+            .pass(),
+            Err(e) => TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push authorized by recursive maintainer state event",
+            )
+            .fail(format!("{}", e)),
         }
     }
 
@@ -860,28 +858,34 @@ impl PushAuthorizationTests {
     /// GRASP-01: "respecting the recursive maintainer set"
     /// (Conversely, state events from non-maintainers MUST be ignored)
     ///
-    /// ## Fixture-First Pattern
+    /// ## Fixture Compatibility
     ///
-    /// 1. **Generate**: Create TestContext and get RepoState fixture
-    ///    (repo announcement + state event pointing to deterministic commit)
-    /// 2. **Send**: Clone repo, create deterministic commit, push (establishes state on relay)
-    /// 3. **Attack**: Create a rogue state event signed by a non-maintainer
-    /// 4. **Test**: Create a new commit and try to push
-    /// 5. **Verify**: Push should be rejected because rogue state event is ignored
+    /// This test is compatible with any descendant of `OwnerStateDataPushed`:
+    /// - `OwnerStateDataPushed` - owner's state event with git data pushed
+    /// - `MaintainerStateDataPushed` - maintainer's state event with git data pushed
+    /// - `RecursiveMaintainerStateDataPushed` - recursive maintainer's state event with git data pushed
+    ///
+    /// All of these establish valid state on the relay that a non-maintainer should NOT be able to override.
+    ///
+    /// ## Test Flow
+    ///
+    /// 1. **Setup**: Get OwnerStateDataPushed fixture (repo + state event + git data pushed)
+    /// 2. **Clone**: Fresh clone of the repository
+    /// 3. **Attack**: Create a new commit and a rogue state event signed by a non-maintainer
+    /// 4. **Verify**: Push should be rejected because rogue state event is ignored
     pub async fn test_non_maintainer_state_rejected(
         client: &AuditClient,
         relay_domain: &str,
     ) -> TestResult {
-        use std::process::Command;
-
         let test_name = "test_non_maintainer_state_rejected";
 
         // ============================================================
-        // Step 1: GENERATE - Create TestContext and get RepoState fixture
+        // Step 1: SETUP - Get OwnerStateDataPushed fixture
+        // This establishes valid state on the relay with git data
         // ============================================================
         let ctx = TestContext::new(client);
 
-        let state_event = match ctx.get_fixture(FixtureKind::RepoState).await {
+        let state_event = match ctx.get_fixture(FixtureKind::OwnerStateDataPushed).await {
             Ok(e) => e,
             Err(e) => {
                 return TestResult::new(
@@ -889,11 +893,9 @@ impl PushAuthorizationTests {
                     "GRASP-01",
                     "Non-maintainer state events ignored",
                 )
-                .fail(format!("Failed to create RepoState fixture: {}", e));
+                .fail(format!("Failed to get OwnerStateDataPushed fixture: {}", e));
             }
         };
-
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         // Extract repo_id and npub from state event
         let repo_id = match state_event
@@ -926,8 +928,7 @@ impl PushAuthorizationTests {
         };
 
         // ============================================================
-        // Step 2: SEND - Clone repo, create deterministic commit, push
-        // (establishes the state on the relay)
+        // Step 2: CLONE - Fresh clone of the repository
         // ============================================================
         let clone_path = match clone_repo(relay_domain, &npub, &repo_id) {
             Ok(p) => p,
@@ -945,124 +946,6 @@ impl PushAuthorizationTests {
         let cleanup = || {
             let _ = fs::remove_dir_all(&clone_path);
         };
-
-        // Create deterministic commit locally
-        let commit_hash = match create_deterministic_commit(&clone_path, "Initial commit") {
-            Ok(h) => h,
-            Err(e) => {
-                cleanup();
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Non-maintainer state events ignored",
-                )
-                .fail(format!("Failed to create deterministic commit: {}", e));
-            }
-        };
-
-        // Verify commit hash matches expected
-        if commit_hash != DETERMINISTIC_COMMIT_HASH {
-            cleanup();
-            return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
-                .fail(format!(
-                    "Commit hash mismatch: got {}, expected {}",
-                    commit_hash, DETERMINISTIC_COMMIT_HASH
-                ));
-        }
-
-        // Create main branch pointing to our deterministic commit
-        let branch_output = Command::new("git")
-            .args(["branch", "main"])
-            .current_dir(&clone_path)
-            .output();
-
-        match branch_output {
-            Err(e) => {
-                cleanup();
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Non-maintainer state events ignored",
-                )
-                .fail(format!("Failed to create main branch: {}", e));
-            }
-            Ok(output) if !output.status.success() => {
-                cleanup();
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Non-maintainer state events ignored",
-                )
-                .fail(format!(
-                    "Failed to create main branch: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ));
-            }
-            _ => {}
-        }
-
-        // Checkout main branch
-        let checkout_output = Command::new("git")
-            .args(["checkout", "main"])
-            .current_dir(&clone_path)
-            .output();
-
-        match checkout_output {
-            Err(e) => {
-                cleanup();
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Non-maintainer state events ignored",
-                )
-                .fail(format!("Failed to checkout main branch: {}", e));
-            }
-            Ok(output) if !output.status.success() => {
-                cleanup();
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Non-maintainer state events ignored",
-                )
-                .fail(format!(
-                    "Failed to checkout main branch: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ));
-            }
-            _ => {}
-        }
-
-        // Push the deterministic commit to establish state on relay
-        let push_output = Command::new("git")
-            .args(["push", "origin", "main"])
-            .current_dir(&clone_path)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .output();
-
-        match push_output {
-            Err(e) => {
-                cleanup();
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Non-maintainer state events ignored",
-                )
-                .fail(format!("Failed to push initial commit: {}", e));
-            }
-            Ok(output) if !output.status.success() => {
-                cleanup();
-                return TestResult::new(
-                    test_name,
-                    "GRASP-01",
-                    "Non-maintainer state events ignored",
-                )
-                .fail(format!(
-                    "Failed to push initial commit: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ));
-            }
-            _ => {}
-        }
 
         // ============================================================
         // Step 3: ATTACK - Create a new commit and a rogue state event
@@ -1118,7 +1001,7 @@ impl PushAuthorizationTests {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         // ============================================================
-        // Step 4 & 5: VERIFY - Push should be rejected because rogue
+        // Step 4: VERIFY - Push should be rejected because rogue
         // state event is ignored
         // ============================================================
         let push_result = try_push(&clone_path);
