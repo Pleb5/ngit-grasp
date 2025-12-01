@@ -203,6 +203,82 @@ pub fn delete_ref(repo_path: &Path, ref_name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Update a git ref to point to a specific commit
+///
+/// # Arguments
+/// * `repo_path` - Path to the bare git repository
+/// * `ref_name` - The ref name to update (e.g., "refs/heads/main")
+/// * `commit_hash` - The commit hash to set the ref to
+///
+/// # Returns
+/// Ok(()) if successful, Err with error message otherwise
+pub fn update_ref(repo_path: &Path, ref_name: &str, commit_hash: &str) -> Result<(), String> {
+    debug!(
+        "Updating ref {} to {} in {}",
+        ref_name,
+        commit_hash,
+        repo_path.display()
+    );
+
+    let output = Command::new("git")
+        .args(["update-ref", ref_name, commit_hash])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to execute git update-ref: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git update-ref failed: {}", stderr));
+    }
+
+    info!(
+        "Updated ref {} to {} in {}",
+        ref_name,
+        commit_hash,
+        repo_path.display()
+    );
+    Ok(())
+}
+
+/// List all refs in a repository with their commit hashes
+///
+/// # Arguments
+/// * `repo_path` - Path to the bare git repository
+///
+/// # Returns
+/// Vec of (ref_name, commit_hash) tuples
+pub fn list_refs(repo_path: &Path) -> Result<Vec<(String, String)>, String> {
+    if !repo_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let output = Command::new("git")
+        .args(["for-each-ref", "--format=%(refname) %(objectname)"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to execute git for-each-ref: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git for-each-ref failed: {}", stderr));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let refs = stdout
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.splitn(2, ' ').collect();
+            if parts.len() == 2 {
+                Some((parts[0].to_string(), parts[1].to_string()))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    Ok(refs)
+}
+
 /// Validate refs/nostr/<event-id> ref against expected commit
 ///
 /// If the ref exists but points to a different commit than expected,

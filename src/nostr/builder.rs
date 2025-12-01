@@ -18,6 +18,19 @@ use crate::nostr::events::{
     KIND_PR_UPDATE, KIND_REPOSITORY_ANNOUNCEMENT, KIND_REPOSITORY_STATE,
 };
 
+/// Result of aligning a repository with authorized state
+#[derive(Debug, Default)]
+struct AlignmentResult {
+    /// Number of refs created
+    refs_created: usize,
+    /// Number of refs updated
+    refs_updated: usize,
+    /// Number of refs deleted
+    refs_deleted: usize,
+    /// Whether HEAD was set
+    head_set: bool,
+}
+
 /// NIP-34 Write Policy with Full GRASP-01 Event Validation
 ///
 /// Validates all events according to GRASP-01 specification:
@@ -185,56 +198,16 @@ impl Nip34WritePolicy {
         }
     }
 
-    /// Try to set repository HEAD for all authorized announcement owners
+    /// Identify all owner repositories for which this state event is the latest authorized state
     ///
-    /// Per GRASP-01: "MUST set repository HEAD per repository state announcement
-    /// as soon as the git data related to that branch has been received."
-    ///
-    /// This function:
-    /// 1. Checks if this state event is the latest for the identifier
-    /// 2. Finds all announcements where the state author is authorized
-    /// 3. Updates HEAD in each relevant repository
-    ///
-    /// Returns Ok(count) with the number of repositories updated.
-    async fn try_set_head_for_authorized_repos(
+    /// Returns a list of (announcement, repo_path) pairs where:
+    /// - The state author is authorized (owner or maintainer)
+    /// - This state event is the latest for the identifier in that context
+    async fn identify_owner_repositories(
         &self,
         database: &Arc<MemoryDatabase>,
         state: &RepositoryState,
-    ) -> Result<usize, String> {
-        // Check if state has a HEAD reference
-        let head_ref = match &state.head {
-            Some(h) => h,
-            None => {
-                tracing::debug!("State event for {} has no HEAD reference", state.identifier);
-                return Ok(0);
-            }
-        };
-
-        // Get the branch name and commit
-        let branch_name = match state.get_head_branch() {
-            Some(b) => b,
-            None => {
-                tracing::debug!(
-                    "State event for {} has invalid HEAD format: {}",
-                    state.identifier,
-                    head_ref
-                );
-                return Ok(0);
-            }
-        };
-
-        let head_commit = match state.get_branch_commit(branch_name) {
-            Some(c) => c,
-            None => {
-                tracing::debug!(
-                    "State event for {} HEAD branch {} has no commit in state",
-                    state.identifier,
-                    branch_name
-                );
-                return Ok(0);
-            }
-        };
-
+    ) -> Result<Vec<(RepositoryAnnouncement, std::path::PathBuf)>, String> {
         // Find all announcements where state author is authorized
         let announcements =
             Self::find_authorized_announcements(database, &state.identifier, &state.event.pubkey)
@@ -246,12 +219,12 @@ impl Nip34WritePolicy {
                 state.identifier,
                 state.event.pubkey.to_hex()
             );
-            return Ok(0);
+            return Ok(Vec::new());
         }
 
-        // Update HEAD in each authorized announcement's repository
-        let mut updated_count = 0;
-        for announcement in &announcements {
+        let mut owner_repos = Vec::new();
+
+        for announcement in announcements {
             // Build the list of authorized pubkeys for this specific announcement
             // (owner + maintainers)
             let mut authorized_pubkeys = vec![announcement.event.pubkey];
@@ -262,10 +235,9 @@ impl Nip34WritePolicy {
             }
 
             // Check if this is the latest state event for THIS announcement's context
-            // Different owners with the same identifier should not interfere
             if !Self::is_latest_state_for_identifier(database, state, &authorized_pubkeys).await? {
                 tracing::debug!(
-                    "Skipping HEAD update for {} in {}'s repo - not the latest state event for this context",
+                    "Skipping {} in {}'s repo - not the latest state event for this context",
                     state.identifier,
                     announcement.event.pubkey.to_hex()
                 );
@@ -274,31 +246,186 @@ impl Nip34WritePolicy {
 
             // Build repository path: <git_data_path>/<owner_npub>/<identifier>.git
             let repo_path = self.git_data_path.join(announcement.repo_path().clone());
+            owner_repos.push((announcement, repo_path));
+        }
 
-            match git::try_set_head_if_available(&repo_path, head_ref, head_commit) {
-                Ok(true) => {
-                    tracing::info!(
-                        "Set HEAD to {} in repository {} (from state by {})",
-                        head_ref,
-                        repo_path.display(),
-                        state.event.pubkey.to_hex()
-                    );
-                    updated_count += 1;
+        Ok(owner_repos)
+    }
+
+    /// Align an owner repository's refs with the authorized state
+    ///
+    /// This function:
+    /// 1. Deletes refs that are in the repo but not in the state (for refs/heads/ and refs/tags/)
+    /// 2. Updates refs that exist in state if we have the commit (for refs/heads/ and refs/tags/)
+    /// 3. Sets HEAD if the HEAD branch's commit is available
+    ///
+    /// Per GRASP-01: "MUST set repository HEAD per repository state announcement
+    /// as soon as the git data related to that branch has been received."
+    ///
+    /// Returns a summary of actions taken.
+    fn align_owner_repository_with_state(
+        &self,
+        repo_path: &std::path::Path,
+        state: &RepositoryState,
+    ) -> AlignmentResult {
+        let mut result = AlignmentResult::default();
+
+        // Check if repository exists
+        if !repo_path.exists() {
+            tracing::debug!(
+                "Repository not found at {}, cannot align with state",
+                repo_path.display()
+            );
+            return result;
+        }
+
+        // Get current refs from the repository
+        let current_refs = match git::list_refs(repo_path) {
+            Ok(refs) => refs,
+            Err(e) => {
+                tracing::warn!("Failed to list refs in {}: {}", repo_path.display(), e);
+                return result;
+            }
+        };
+
+        // Build expected refs from state
+        let mut expected_refs: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+
+        for branch in &state.branches {
+            let ref_name = format!("refs/heads/{}", branch.name);
+            expected_refs.insert(ref_name, branch.commit.clone());
+        }
+
+        for tag in &state.tags {
+            let ref_name = format!("refs/tags/{}", tag.name);
+            expected_refs.insert(ref_name, tag.commit.clone());
+        }
+
+        // Process current refs: update or delete as needed
+        for (ref_name, current_commit) in &current_refs {
+            // Only process refs/heads/ and refs/tags/
+            if !ref_name.starts_with("refs/heads/") && !ref_name.starts_with("refs/tags/") {
+                continue;
+            }
+
+            match expected_refs.get(ref_name) {
+                Some(expected_commit) => {
+                    // Ref should exist - check if commit matches
+                    if current_commit != expected_commit {
+                        // Check if we have the expected commit
+                        if git::commit_exists(repo_path, expected_commit) {
+                            // Update the ref
+                            match git::update_ref(repo_path, ref_name, expected_commit) {
+                                Ok(()) => {
+                                    tracing::info!(
+                                        "Updated {} from {} to {} in {}",
+                                        ref_name,
+                                        current_commit,
+                                        expected_commit,
+                                        repo_path.display()
+                                    );
+                                    result.refs_updated += 1;
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Failed to update {} in {}: {}",
+                                        ref_name,
+                                        repo_path.display(),
+                                        e
+                                    );
+                                }
+                            }
+                        } else {
+                            tracing::debug!(
+                                "Commit {} not available for {} in {}",
+                                expected_commit,
+                                ref_name,
+                                repo_path.display()
+                            );
+                        }
+                    }
                 }
-                Ok(false) => {
-                    tracing::debug!(
-                        "HEAD commit {} not available yet in {}",
-                        head_commit,
-                        repo_path.display()
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to set HEAD in {}: {}", repo_path.display(), e);
+                None => {
+                    // Ref should not exist - delete it
+                    match git::delete_ref(repo_path, ref_name) {
+                        Ok(()) => {
+                            tracing::info!(
+                                "Deleted {} (not in state) from {}",
+                                ref_name,
+                                repo_path.display()
+                            );
+                            result.refs_deleted += 1;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to delete {} from {}: {}",
+                                ref_name,
+                                repo_path.display(),
+                                e
+                            );
+                        }
+                    }
                 }
             }
         }
 
-        Ok(updated_count)
+        // Add refs that exist in state but not in repo (if we have the commit)
+        for (ref_name, expected_commit) in &expected_refs {
+            let exists = current_refs.iter().any(|(r, _)| r == ref_name);
+            if !exists && git::commit_exists(repo_path, expected_commit) {
+                match git::update_ref(repo_path, ref_name, expected_commit) {
+                    Ok(()) => {
+                        tracing::info!(
+                            "Created {} at {} in {}",
+                            ref_name,
+                            expected_commit,
+                            repo_path.display()
+                        );
+                        result.refs_created += 1;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to create {} in {}: {}",
+                            ref_name,
+                            repo_path.display(),
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        // Set HEAD if specified in state
+        if let Some(head_ref) = &state.head {
+            if let Some(branch_name) = state.get_head_branch() {
+                if let Some(head_commit) = state.get_branch_commit(branch_name) {
+                    match git::try_set_head_if_available(repo_path, head_ref, head_commit) {
+                        Ok(true) => {
+                            tracing::info!(
+                                "Set HEAD to {} in {} (from state by {})",
+                                head_ref,
+                                repo_path.display(),
+                                state.event.pubkey.to_hex()
+                            );
+                            result.head_set = true;
+                        }
+                        Ok(false) => {
+                            tracing::debug!(
+                                "HEAD commit {} not available yet in {}",
+                                head_commit,
+                                repo_path.display()
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to set HEAD in {}: {}", repo_path.display(), e);
+                        }
+                    }
+                }
+            }
+        }
+
+        result
     }
 
     /// Extract all reference tags from an event (a, A, q, e, E)
@@ -763,28 +890,54 @@ impl WritePolicy for Nip34WritePolicy {
                         // Parse state to get HEAD and branch info
                         match RepositoryState::from_event(event.clone()) {
                             Ok(state) => {
-                                // Try to set HEAD for all authorized repos if this is the latest state
-                                match self
-                                    .try_set_head_for_authorized_repos(&database, &state)
-                                    .await
-                                {
-                                    Ok(count) if count > 0 => {
-                                        tracing::info!(
-                                            "Set HEAD from state event {} for {} repo(s) with identifier {}",
-                                            event_id_str,
-                                            count,
-                                            state.identifier
-                                        );
-                                    }
-                                    Ok(_) => {
-                                        tracing::debug!(
-                                            "HEAD not set from state {} - git data not available yet or not latest",
-                                            event_id_str
-                                        );
+                                // Identify owner repositories for which this is the latest authorized state
+                                match self.identify_owner_repositories(&database, &state).await {
+                                    Ok(owner_repos) => {
+                                        let repo_count = owner_repos.len();
+                                        let mut total_aligned = 0;
+
+                                        // Align each owner repository with the authorized state
+                                        for (_announcement, repo_path) in owner_repos {
+                                            let result = self.align_owner_repository_with_state(
+                                                &repo_path, &state,
+                                            );
+
+                                            if result.refs_created > 0
+                                                || result.refs_updated > 0
+                                                || result.refs_deleted > 0
+                                                || result.head_set
+                                            {
+                                                tracing::info!(
+                                                    "Aligned {} with state {}: created={}, updated={}, deleted={}, head_set={}",
+                                                    repo_path.display(),
+                                                    event_id_str,
+                                                    result.refs_created,
+                                                    result.refs_updated,
+                                                    result.refs_deleted,
+                                                    result.head_set
+                                                );
+                                                total_aligned += 1;
+                                            }
+                                        }
+
+                                        if repo_count > 0 {
+                                            tracing::info!(
+                                                "Processed state event {} for {} repo(s) ({} aligned) with identifier {}",
+                                                event_id_str,
+                                                repo_count,
+                                                total_aligned,
+                                                state.identifier
+                                            );
+                                        } else {
+                                            tracing::debug!(
+                                                "No owner repos to align for state {} - git data not available yet or not latest",
+                                                event_id_str
+                                            );
+                                        }
                                     }
                                     Err(e) => {
                                         tracing::warn!(
-                                            "Failed to process HEAD from state {}: {}",
+                                            "Failed to identify owner repositories for state {}: {}",
                                             event_id_str,
                                             e
                                         );
