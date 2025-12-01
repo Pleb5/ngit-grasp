@@ -34,7 +34,6 @@ const PR_TEST_COMMIT_HASH: &str = "5d40fb1555a0c28bf4d650515a73aaa54d4d9bfb";
 use crate::{
     clone_repo, create_commit, create_deterministic_commit_with_variant, try_push, try_push_to_ref,
     AuditClient, CommitVariant, FixtureKind, TestContext, TestResult,
-    MAINTAINER_DETERMINISTIC_COMMIT_HASH,
 };
 use nostr_sdk::prelude::*;
 use std::fs;
@@ -1292,41 +1291,50 @@ impl PushAuthorizationTests {
     /// as soon as the git data related to that branch has been received."
     ///
     /// This test verifies the HEAD-setting behavior when:
-    /// 1. A maintainer commit is pushed to the relay (git data exists)
-    /// 2. A state event is published pointing to that commit with HEAD="refs/heads/develop"
+    /// 1. Git data has already been pushed via RecursiveMaintainerStateDataPushed
+    /// 2. A new state event is published with HEAD="refs/heads/develop"
     /// 3. The relay should update the repository's default branch to "develop"
     ///
     /// ## Fixture-First Pattern
     ///
-    /// 1. **Generate**: Create TestContext and get RepoState + MaintainerState fixtures
-    ///    (both commits are pushed as part of the fixture setup)
-    /// 2. **Send**: Push maintainer commit to relay first, then publish state event with HEAD=develop
-    /// 3. **Verify**: Query info/refs to verify HEAD symref points to refs/heads/develop
+    /// Uses HeadSetToDevelopBranch fixture which:
+    /// 1. **Depends on**: RecursiveMaintainerStateDataPushed (all git data exists)
+    /// 2. **Creates**: New state event with HEAD=refs/heads/develop
+    /// 3. **Sends**: State event to relay
+    /// 4. **Verify**: Query info/refs to verify HEAD symref points to refs/heads/develop
     pub async fn test_head_set_after_state_event_with_existing_commit(
         client: &AuditClient,
         relay_domain: &str,
     ) -> TestResult {
-        use std::process::Command;
-
         let test_name = "test_head_set_after_state_event_with_existing_commit";
         let desc = "HEAD is set when state event published with existing commit";
 
         // ============================================================
-        // Step 1: GENERATE - Create TestContext and get fixtures
+        // Step 1: Get HeadSetToDevelopBranch fixture
+        // This sets up everything: repo, maintainer chain, git data, and state event with HEAD=develop
         // ============================================================
         let ctx = TestContext::new(client);
 
-        // Get RepoState fixture (owner's repo announcement + state event)
-        let state_event = match ctx.get_fixture(FixtureKind::RepoState).await {
+        let _develop_state_event = match ctx.get_fixture(FixtureKind::HeadSetToDevelopBranch).await {
             Ok(e) => e,
             Err(e) => {
                 return TestResult::new(test_name, "GRASP-01", desc)
-                    .fail(format!("Failed to create RepoState fixture: {}", e));
+                    .fail(format!("Failed to create HeadSetToDevelopBranch fixture: {}", e));
             }
         };
 
-        // Extract repo_id and npub from owner's state event
-        let repo_id = match state_event
+        // ============================================================
+        // Step 2: Extract repo_id and owner npub from ValidRepo (cached by fixture)
+        // ============================================================
+        let valid_repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+            Ok(e) => e,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", desc)
+                    .fail(format!("Failed to get ValidRepo fixture: {}", e));
+            }
+        };
+
+        let repo_id = match valid_repo
             .tags
             .iter()
             .find(|t| t.kind() == TagKind::d())
@@ -1335,11 +1343,11 @@ impl PushAuthorizationTests {
             Some(id) => id.to_string(),
             None => {
                 return TestResult::new(test_name, "GRASP-01", desc)
-                    .fail("Missing repo_id in state event");
+                    .fail("Missing repo_id in ValidRepo");
             }
         };
 
-        let npub = match state_event.pubkey.to_bech32() {
+        let npub = match valid_repo.pubkey.to_bech32() {
             Ok(n) => n,
             Err(e) => {
                 return TestResult::new(test_name, "GRASP-01", desc)
@@ -1347,211 +1355,8 @@ impl PushAuthorizationTests {
             }
         };
 
-        let _maintainer_ann_event = match ctx.get_fixture(FixtureKind::MaintainerAnnouncement).await
-        {
-            Ok(e) => e,
-            Err(e) => {
-                return TestResult::new(test_name, "GRASP-01", desc).fail(format!(
-                    "Failed to create MaintainerAnnouncement fixture: {}",
-                    e
-                ));
-            }
-        };
-
-        let _maintainer_state_event = match ctx.get_fixture(FixtureKind::MaintainerState).await {
-            Ok(e) => e,
-            Err(e) => {
-                return TestResult::new(test_name, "GRASP-01", desc)
-                    .fail(format!("Failed to create MaintainerState fixture: {}", e));
-            }
-        };
-
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
         // ============================================================
-        // Step 2: SEND - First push maintainer commit so relay has the git data
-        // ============================================================
-        let clone_path = match clone_repo(relay_domain, &npub, &repo_id) {
-            Ok(p) => p,
-            Err(e) => {
-                return TestResult::new(test_name, "GRASP-01", desc)
-                    .fail(format!("Failed to clone repo: {}", e));
-            }
-        };
-
-        let cleanup = || {
-            let _ = fs::remove_dir_all(&clone_path);
-        };
-
-        // TODO - this should be pushed inside the MaintainerState fixture.
-
-        // Reset to orphan state and create deterministic root commit
-        // Step 1: Create orphan branch (removes all history)
-        let _ = Command::new("git")
-            .args(["checkout", "--orphan", "main"])
-            .current_dir(&clone_path)
-            .output();
-
-        // Step 2: Clear staged files (orphan keeps files staged from previous branch)
-        let _ = Command::new("git")
-            .args(["rm", "-rf", "--cached", "."])
-            .current_dir(&clone_path)
-            .output();
-
-        // Step 3: Create deterministic commit using Maintainer variant
-        let commit_hash = match create_deterministic_commit_with_variant(
-            &clone_path,
-            CommitVariant::Maintainer,
-        ) {
-            Ok(h) => h,
-            Err(e) => {
-                cleanup();
-                return TestResult::new(test_name, "GRASP-01", desc)
-                    .fail(format!("Failed to create maintainer commit: {}", e));
-            }
-        };
-
-        // Verify commit hash matches expected
-        if commit_hash != MAINTAINER_DETERMINISTIC_COMMIT_HASH {
-            cleanup();
-            return TestResult::new(test_name, "GRASP-01", desc).fail(format!(
-                "Maintainer commit hash mismatch: got {}, expected {}",
-                commit_hash, MAINTAINER_DETERMINISTIC_COMMIT_HASH
-            ));
-        }
-
-        // Push the develop branch with the maintainer commit
-        let push_output = Command::new("git")
-            .args(["push", "origin", "main"])
-            .current_dir(&clone_path)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .output();
-
-        match push_output {
-            Err(e) => {
-                cleanup();
-                return TestResult::new(test_name, "GRASP-01", desc)
-                    .fail(format!("Failed to push develop branch: {}", e));
-            }
-            Ok(output) if !output.status.success() => {
-                // this will fail when not in isolation - as the Recusive state will be the authorised state
-                // but we need to do it here so the grasp server has the oid
-            }
-            _ => {}
-        }
-
-        let _recursive_maintainer_ann_event = match ctx
-            .get_fixture(FixtureKind::RecursiveMaintainerAnnouncement)
-            .await
-        {
-            Ok(e) => e,
-            Err(e) => {
-                return TestResult::new(test_name, "GRASP-01", desc).fail(format!(
-                    "Failed to create RecursiveMaintainerAnnouncement fixture: {}",
-                    e
-                ));
-            }
-        };
-
-        let _recursive_maintainer_state_event =
-            match ctx.get_fixture(FixtureKind::RecursiveMaintainerState).await {
-                Ok(e) => e,
-                Err(e) => {
-                    return TestResult::new(test_name, "GRASP-01", desc)
-                        .fail(format!("Failed to create MaintainerState fixture: {}", e));
-                }
-            };
-
-        // Verify commit hash matches expected
-        if commit_hash != MAINTAINER_DETERMINISTIC_COMMIT_HASH {
-            cleanup();
-            return TestResult::new(test_name, "GRASP-01", desc).fail(format!(
-                "Maintainer commit hash mismatch: got {}, expected {}",
-                commit_hash, MAINTAINER_DETERMINISTIC_COMMIT_HASH
-            ));
-        }
-
-        // Reset to orphan state and create deterministic root commit
-        // Step 1: Create orphan branch (removes all history)
-        let _ = Command::new("git")
-            .args(["checkout", "--orphan", "develop"])
-            .current_dir(&clone_path)
-            .output();
-
-        // Step 2: Clear staged files (orphan keeps files staged from previous branch)
-        let _ = Command::new("git")
-            .args(["rm", "-rf", "--cached", "."])
-            .current_dir(&clone_path)
-            .output();
-
-        // ============================================================
-        // Step 3: Publish state event with HEAD pointing to develop branch
-        // ============================================================
-
-        // Create state event with HEAD=refs/heads/develop and develop branch pointing to maintainer commit
-        let state_event = match client
-            .event_builder(Kind::Custom(30618), "")
-            .tag(Tag::identifier(&repo_id))
-            .tag(Tag::custom(
-                TagKind::custom("HEAD"),
-                vec!["refs/heads/develop".to_string()],
-            ))
-            .tag(Tag::custom(
-                TagKind::custom("refs/heads/develop"),
-                vec![MAINTAINER_DETERMINISTIC_COMMIT_HASH.to_string()],
-            ))
-            .build(client.maintainer_keys())
-        {
-            Ok(e) => e,
-            Err(e) => {
-                cleanup();
-                return TestResult::new(test_name, "GRASP-01", desc)
-                    .fail(format!("Failed to build state event: {}", e));
-            }
-        };
-
-        // Send the state event
-        if let Err(e) = client.client().send_event(&state_event).await {
-            cleanup();
-            return TestResult::new(test_name, "GRASP-01", desc)
-                .fail(format!("Failed to send state event: {}", e));
-        }
-
-        // Wait for relay to process the state event
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-        // // Now that state event is published, try pushing again if previous push failed
-        // let push_output = Command::new("git")
-        //     .args(["push", "-f", "origin", "develop"])
-        //     .current_dir(&clone_path)
-        //     .env("GIT_TERMINAL_PROMPT", "0")
-        //     .output();
-
-        // match push_output {
-        //     Err(e) => {
-        //         cleanup();
-        //         return TestResult::new(test_name, "GRASP-01", desc).fail(format!(
-        //             "Failed to push develop branch after state event: {}",
-        //             e
-        //         ));
-        //     }
-        //     Ok(output) if !output.status.success() => {
-        //         cleanup();
-        //         return TestResult::new(test_name, "GRASP-01", desc).fail(format!(
-        //             "Push of develop branch rejected after state event: {}",
-        //             String::from_utf8_lossy(&output.stderr)
-        //         ));
-        //     }
-        //     _ => {}
-        // }
-
-        cleanup();
-
-        // Wait a bit more for HEAD to be updated
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
-        // ============================================================
-        // Step 4: VERIFY - Query info/refs to check the default branch
+        // Step 3: VERIFY - Query info/refs to check the default branch
         // ============================================================
         let default_branch =
             match get_default_branch_from_info_refs(relay_domain, &npub, &repo_id).await {
@@ -1577,8 +1382,8 @@ impl PushAuthorizationTests {
 
     /// Test that HEAD is set after git push with oids
     pub async fn test_head_set_after_git_push_with_required_oids(
-        client: &AuditClient,
-        relay_domain: &str,
+        _client: &AuditClient,
+        _relay_domain: &str,
     ) -> TestResult {
         let test_name = "test_head_set_after_git_push_with_required_oids";
         let desc = "HEAD is set to match state event when git push sends required oids to formulate branch";

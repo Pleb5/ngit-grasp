@@ -200,6 +200,26 @@ pub enum FixtureKind {
     /// - NOT sent to relay (use `client.send_event()` to publish when ready)
     PREventGenerated,
 
+    /// HEAD set to 'develop' branch via state event
+    ///
+    /// This fixture tests that HEAD is updated when a state event is published
+    /// with HEAD pointing to a different branch that already has git data pushed.
+    ///
+    /// GRASP-01: "MUST set repository HEAD per repository state announcement
+    /// as soon as the git data related to that branch has been received."
+    ///
+    /// Stages:
+    /// 1. **Depends on**: RecursiveMaintainerStateDataPushed (all git data exists on main)
+    /// 2. **Creates**: New state event with HEAD=refs/heads/develop pointing to existing commit
+    /// 3. **Sends**: State event to relay
+    /// 4. **Verifies**: Can be checked via get_default_branch_from_info_refs
+    ///
+    /// - Requires RecursiveMaintainerStateDataPushed (establishes full maintainer chain with git data)
+    /// - Creates state event signed by maintainer keys (`client.maintainer_keys()`)
+    /// - Points refs/heads/develop to RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH
+    /// - Sets HEAD to refs/heads/develop
+    HeadSetToDevelopBranch,
+
     /// Wrong commit pushed to refs/nostr/<pr-event-id> BEFORE PR event is sent
     ///
     /// This is a "DataPushed" stage fixture for testing pre-event ref behavior.
@@ -327,6 +347,10 @@ impl FixtureKind {
             // RecursiveMaintainerStateDataPushed depends on MaintainerStateDataPushed
             // (recursive maintainer force-pushes over maintainer's data)
             Self::RecursiveMaintainerStateDataPushed => vec![Self::MaintainerStateDataPushed],
+            
+            // HeadSetToDevelopBranch depends on RecursiveMaintainerStateDataPushed
+            // (all git data already exists, we just publish a new state event)
+            Self::HeadSetToDevelopBranch => vec![Self::RecursiveMaintainerStateDataPushed],
         }
     }
 
@@ -349,6 +373,8 @@ impl FixtureKind {
             Self::PRWrongCommitPushedBeforeEvent => true,
             // PREventSentAfterWrongPush sends the PR event internally
             Self::PREventSentAfterWrongPush => true,
+            // HeadSetToDevelopBranch sends its state event internally
+            Self::HeadSetToDevelopBranch => true,
             // All other fixtures return a single event for the caller to send
             _ => false,
         }
@@ -867,6 +893,10 @@ impl<'a> TestContext<'a> {
 
             FixtureKind::RecursiveMaintainerStateDataPushed => {
                 self.build_recursive_maintainer_state_data_pushed().await
+            }
+
+            FixtureKind::HeadSetToDevelopBranch => {
+                self.build_head_set_to_develop_branch().await
             }
         }
     }
@@ -1472,6 +1502,65 @@ impl<'a> TestContext<'a> {
             )),
             Err(e) => Err(anyhow::anyhow!("Push error: {}", e)),
         }
+    }
+
+    /// Build HeadSetToDevelopBranch fixture: creates state event with HEAD=develop
+    ///
+    /// This tests that HEAD is updated when a state event is published with HEAD
+    /// pointing to a different branch that already has git data pushed.
+    ///
+    /// GRASP-01: "MUST set repository HEAD per repository state announcement
+    /// as soon as the git data related to that branch has been received."
+    ///
+    /// Depends on RecursiveMaintainerStateDataPushed - all git data already exists.
+    /// We just create a new state event with HEAD=refs/heads/develop pointing to
+    /// the already-pushed commit.
+    ///
+    /// # Returns
+    /// The state event (kind 30618) with HEAD=refs/heads/develop after it's sent
+    async fn build_head_set_to_develop_branch(&self) -> Result<Event> {
+        use nostr_sdk::prelude::*;
+
+        // ============================================================
+        // Stage 1: RecursiveMaintainerStateDataPushed is ensured by ensure_fixture before this is called
+        // All git data already exists on the relay (main branch with RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH)
+        // ============================================================
+        let recursive_state = self.get_cached_dependency(FixtureKind::RecursiveMaintainerStateDataPushed)?;
+        
+        // Extract repo_id from the recursive maintainer's state event
+        let repo_id = self.extract_repo_id(&recursive_state)?;
+
+        // ============================================================
+        // Stage 2: Create state event with HEAD=refs/heads/develop
+        // ============================================================
+        // Use the same commit hash that's already pushed to the relay
+        // but point HEAD to develop branch instead of main
+        let base_time = Timestamp::now().as_u64();
+        let develop_timestamp = Timestamp::from(base_time - 1); // 1 second ago (most recent)
+
+        let develop_state_event = self
+            .client
+            .event_builder(Kind::Custom(30618), "")
+            .tag(Tag::identifier(&repo_id))
+            .tag(Tag::custom(
+                TagKind::custom("HEAD"),
+                vec!["refs/heads/develop".to_string()],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("refs/heads/develop"),
+                vec![RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH.to_string()],
+            ))
+            .custom_time(develop_timestamp)
+            .build(self.client.maintainer_keys())
+            .map_err(|e| anyhow::anyhow!("Failed to build develop state event: {}", e))?;
+
+        // Send state event to relay
+        self.client.send_event(develop_state_event.clone()).await?;
+
+        // Wait for relay to process the state event
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        Ok(develop_state_event)
     }
 
     /// Build PRWrongCommitPushedBeforeEvent fixture
