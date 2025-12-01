@@ -242,7 +242,7 @@ pub async fn test_something(client: &AuditClient) -> TestResult {
 │  Create TestContext, get fixtures, build scenarios, verify       │
 ├─────────────────────────────────────────────────────────────────┤
 │           Layer 2: FixtureKind + TestContext                     │
-│  ValidRepo, RepoState, MaintainerState, etc.                     │
+│  ValidRepo, RepoState, OwnerStateDataPushed, etc.                │
 │  Mode-aware caching within TestContext                           │
 ├─────────────────────────────────────────────────────────────────┤
 │               Layer 1: AuditClient                               │
@@ -252,24 +252,60 @@ pub async fn test_something(client: &AuditClient) -> TestResult {
 
 ### Available Fixtures
 
-| FixtureKind                          | Provides                                | Use When                              |
-| ------------------------------------ | --------------------------------------- | ------------------------------------- |
-| `ValidRepo`                          | Accepted repo announcement (kind 30617) | Need a repo as prerequisite           |
-| `RepoState`                          | Repo + state event (kind 30618)         | Testing owner push authorization      |
-| `RepoWithIssue`                      | Repo + accepted issue (kind 1621)       | Testing issue-dependent events        |
-| `RepoWithComment`                    | Repo + issue + comment                  | Testing comment-dependent events      |
-| `MaintainerStateDataPushed`          | Full maintainer push with git data      | Testing maintainer push authorization |
-| `RecursiveMaintainerStateDataPushed` | Full recursive maintainer push          | Testing recursive maintainer chain    |
+| FixtureKind | Provides | Use When |
+| ----------- | -------- | -------- |
+| `ValidRepo` | Accepted repo announcement (kind 30617). Signed by owner keys, lists maintainer in maintainers tag. | Need a repo as prerequisite |
+| `RepoWithIssue` | Repo + accepted issue (kind 1621) | Testing issue-dependent events |
+| `RepoWithComment` | Repo + issue + comment (kind 1111) | Testing comment-dependent events |
+| `RepoState` | Repo + state event (kind 30618). Signed by owner, points to `DETERMINISTIC_COMMIT_HASH`. | Testing owner state events |
+| `PREvent` | Repo + PR event (kind 1618). Signed by PR author, points to `PR_TEST_COMMIT_HASH`. | Testing PR-dependent events |
+| `PREventGenerated` | PR event built but NOT sent to relay. | Need PR event ID before publishing |
+| `PRWrongCommitPushedBeforeEvent` | Wrong commit pushed to `refs/nostr/<pr-event-id>` before PR event sent. Returns unsent PR event. | Testing pre-event ref cleanup |
+| `PREventSentAfterWrongPush` | PR event sent after wrong commit was pushed. Tests cleanup behavior. | Testing post-event ref cleanup |
+| `OwnerStateDataPushed` | Full owner push flow: state event + git data pushed. Points to `DETERMINISTIC_COMMIT_HASH`. | Testing owner push authorization |
+| `MaintainerStateDataPushed` | Full maintainer push flow: force-pushes over owner's data. Points to `MAINTAINER_DETERMINISTIC_COMMIT_HASH`. | Testing maintainer push authorization |
+| `RecursiveMaintainerStateDataPushed` | Full recursive maintainer push flow: Owner → Maintainer → RecursiveMaintainer chain. Points to `RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH`. | Testing recursive maintainer authorization |
+| `HeadSetToDevelopBranch` | State event with HEAD=refs/heads/develop. Depends on RecursiveMaintainerStateDataPushed. | Testing HEAD branch switching |
 
-### Fixture Lifecycle: Generate → Send → Verify
+### Deterministic Commit Hashes
 
-Every fixture follows a 3-step lifecycle:
+Fixtures use deterministic commit hashes for reproducible testing:
+
+| Constant | Hash | Used By |
+| -------- | ---- | ------- |
+| `DETERMINISTIC_COMMIT_HASH` | `64ea71d79a57a7acb334cd9651f8aec067c0ce5d` | Owner fixtures (RepoState, OwnerStateDataPushed) |
+| `MAINTAINER_DETERMINISTIC_COMMIT_HASH` | `1c2d472c9b71ed51968a66500281a3c4a6840464` | MaintainerStateDataPushed |
+| `RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH` | `05939b82de66fbdb9c077d0a64fc68522f3cb8e0` | RecursiveMaintainerStateDataPushed |
+| `PR_TEST_COMMIT_HASH` | `5d40fb1555a0c28bf4d650515a73aaa54d4d9bfb` | PR fixtures (PREvent, PREventGenerated) |
+
+### Fixture Dependencies
+
+Fixtures automatically resolve their dependencies:
+
+```
+ValidRepo (base)
+├── RepoWithIssue → RepoWithComment
+├── RepoState
+├── PREventGenerated → PRWrongCommitPushedBeforeEvent → PREventSentAfterWrongPush
+├── PREvent
+└── OwnerStateDataPushed
+    └── MaintainerStateDataPushed
+        └── RecursiveMaintainerStateDataPushed
+            └── HeadSetToDevelopBranch
+```
+
+### Fixture Lifecycle: Generate → Send → Verify → DataPushed
+
+Every fixture follows a lifecycle (some stop earlier):
 
 1. **GENERATE**: Build event via `AuditClient.event_builder()` (in memory only)
 2. **SEND**: `client.send_event(event)` transmits to relay (rate-limited operation)
 3. **VERIFY**: Query relay to confirm acceptance/rejection
+4. **DATA_PUSHED**: (DataPushed variants only) Clone repo, create commit, push to git server
 
-Caching happens after SEND succeeds - same fixture request returns cached Event.
+Caching happens after the fixture completes - same fixture request returns cached Event.
+
+**Note:** Some fixtures handle their own event sending (e.g., `OwnerStateDataPushed`, `MaintainerStateDataPushed`). These are marked with `sends_own_events() -> true`.
 
 ### How TestContext Correlates Events
 
