@@ -21,7 +21,7 @@
 /// This hash is produced by creating a commit with:
 /// - File: test.txt containing "PR test deterministic commit"
 /// - Message: "PR test deterministic commit"
-/// - Author: "PR Test Author <pr-test@example.com>"
+/// - Author: "GRASP Audit Test <test@grasp-audit.local>"
 /// - Author date: 2024-01-01T00:00:00Z
 /// - Committer date: 2024-01-01T00:00:00Z
 /// - GPG signing: disabled
@@ -29,13 +29,13 @@
 ///
 /// Run `test_pr_test_commit_hash_discovery` to discover/verify this value.
 #[allow(dead_code)]
-const PR_TEST_COMMIT_HASH: &str = "8935183ff722bf04e861928c6a7e50868c6ca4a6";
+const PR_TEST_COMMIT_HASH: &str = "5d40fb1555a0c28bf4d650515a73aaa54d4d9bfb";
 
 use crate::{
-    clone_repo, create_commit, create_deterministic_commit, create_deterministic_commit_with_variant,
-    try_push, try_push_to_ref, AuditClient, CommitVariant, FixtureKind, TestContext, TestResult,
-    DETERMINISTIC_COMMIT_HASH, MAINTAINER_DETERMINISTIC_COMMIT_HASH,
-    RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH,
+    clone_repo, create_commit, create_deterministic_commit,
+    create_deterministic_commit_with_variant, try_push, try_push_to_ref, AuditClient,
+    CommitVariant, FixtureKind, TestContext, TestResult, DETERMINISTIC_COMMIT_HASH,
+    MAINTAINER_DETERMINISTIC_COMMIT_HASH, RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH,
 };
 use nostr_sdk::prelude::*;
 use std::fs;
@@ -63,37 +63,121 @@ use std::process::Command;
 /// * `Ok(String)` - The commit hash (should match PR_TEST_COMMIT_HASH)
 /// * `Err(String)` - Error message if commit creation failed
 fn create_pr_test_commit(clone_path: &Path) -> Result<String, String> {
-    // Step 1: Create orphan branch (removes all history)
+    // Step 1: Clean up any tracked files in the working directory
+    // This ensures we start with a clean slate
     let _ = Command::new("git")
+        .args(["clean", "-fd"])
+        .current_dir(clone_path)
+        .output();
+
+    // Step 2: Create orphan branch (removes all history)
+    let output = Command::new("git")
         .args(["checkout", "--orphan", "pr-test-branch"])
         .current_dir(clone_path)
-        .output();
+        .output()
+        .map_err(|e| format!("Failed to execute git checkout --orphan: {}", e))?;
 
-    // Step 2: Clear staged files (orphan keeps files staged from previous branch)
-    let _ = Command::new("git")
+    if !output.status.success() {
+        return Err(format!(
+            "git checkout --orphan failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    // Step 3: Remove ALL files from the index (staging area)
+    let output = Command::new("git")
         .args(["rm", "-rf", "--cached", "."])
         .current_dir(clone_path)
-        .output();
+        .output()
+        .map_err(|e| format!("Failed to execute git rm: {}", e))?;
 
-    // Step 3: Create deterministic commit using existing function
-    let commit_hash = create_deterministic_commit_with_variant(clone_path, CommitVariant::PRTestCommit)?;
+    // Note: git rm may return error if there are no files to remove, that's OK
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Ignore "did not match any files" errors
+        if !stderr.contains("did not match any files") {
+            return Err(format!("git rm -rf --cached . failed: {}", stderr));
+        }
+    }
 
-    // Step 4: Replace main branch with our new orphan branch
+    // Step 4: Remove ALL files from working directory (except .git)
+    // This ensures only test.txt will be in the commit
+    for entry in fs::read_dir(clone_path).map_err(|e| format!("Failed to read dir: {}", e))? {
+        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
+        let path = entry.path();
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if file_name != ".git" {
+            if path.is_dir() {
+                fs::remove_dir_all(&path)
+                    .map_err(|e| format!("Failed to remove dir {}: {}", path.display(), e))?;
+            } else {
+                fs::remove_file(&path)
+                    .map_err(|e| format!("Failed to remove file {}: {}", path.display(), e))?;
+            }
+        }
+    }
+
+    // Step 5: Create deterministic commit using existing function
+    let commit_hash =
+        create_deterministic_commit_with_variant(clone_path, CommitVariant::PRTestCommit)?;
+
+    // Step 6: Verify this is actually a root commit (no parent)
+    let output = Command::new("git")
+        .args(["rev-list", "--max-parents=0", "HEAD"])
+        .current_dir(clone_path)
+        .output()
+        .map_err(|e| format!("Failed to check root commit: {}", e))?;
+
+    let root_commits = String::from_utf8_lossy(&output.stdout);
+    if !root_commits.trim().contains(&commit_hash) {
+        return Err(format!(
+            "Commit {} is not a root commit (has parent). Root commits: {}",
+            commit_hash,
+            root_commits.trim()
+        ));
+    }
+
+    // Step 7: Replace main branch with our new orphan branch
     let _ = Command::new("git")
         .args(["branch", "-D", "main"])
         .current_dir(clone_path)
         .output();
 
-    let _ = Command::new("git")
+    let output = Command::new("git")
         .args(["branch", "-m", "main"])
         .current_dir(clone_path)
-        .output();
+        .output()
+        .map_err(|e| format!("Failed to rename branch: {}", e))?;
 
-    // Verify commit hash matches expected
-    if commit_hash != PR_TEST_COMMIT_HASH {
+    if !output.status.success() {
         return Err(format!(
-            "PR test commit hash mismatch: got {}, expected {}",
-            commit_hash, PR_TEST_COMMIT_HASH
+            "Failed to rename branch to main: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    // Step 8: Verify commit hash matches expected
+    if commit_hash != PR_TEST_COMMIT_HASH {
+        // Debug: Show what's in the commit
+        let tree_output = Command::new("git")
+            .args(["ls-tree", "-r", "HEAD"])
+            .current_dir(clone_path)
+            .output();
+        let tree_info = tree_output
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_else(|_| "Failed to get tree".to_string());
+
+        let cat_output = Command::new("git")
+            .args(["cat-file", "-p", "HEAD"])
+            .current_dir(clone_path)
+            .output();
+        let commit_info = cat_output
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_else(|_| "Failed to get commit".to_string());
+
+        return Err(format!(
+            "PR test commit hash mismatch: got {}, expected {}\nTree contents:\n{}\nCommit info:\n{}",
+            commit_hash, PR_TEST_COMMIT_HASH, tree_info, commit_info
         ));
     }
 
@@ -166,6 +250,8 @@ struct PrRefTestSetup {
     repo_id: String,
     owner_npub: String,
     wrong_commit_hash: String,
+    /// The unpublished PR event - store it so we can publish the SAME event later
+    pr_event: Event,
 }
 
 impl PrRefTestSetup {
@@ -192,17 +278,18 @@ async fn setup_repo_with_wrong_commit_pushed(
     ctx: &TestContext<'_>,
     relay_domain: &str,
 ) -> Result<PrRefTestSetup, String> {
-    // Get fixtures (PREvent fixture creates the event but doesn't publish until we call get_fixture)
+    // Get ValidRepo fixture (publishes repo announcement to relay)
     let repo_event = ctx
         .get_fixture(FixtureKind::ValidRepo)
         .await
         .map_err(|e| format!("Failed to get repo announcement: {}", e))?;
 
-    // Get PR event fixture (creates event object but doesn't publish to relay yet)
+    // Build PR event WITHOUT publishing - we need its ID before the event exists on relay
+    // This allows testing refs/nostr/<event-id> push behavior before the event is received
     let pr_event = ctx
-        .get_fixture(FixtureKind::PREvent)
+        .build_fixture_only(FixtureKind::PREvent)
         .await
-        .map_err(|e| format!("Failed to get PR event fixture: {}", e))?;
+        .map_err(|e| format!("Failed to build PR event fixture: {}", e))?;
 
     let repo_id = repo_event
         .tags
@@ -219,7 +306,8 @@ async fn setup_repo_with_wrong_commit_pushed(
     let clone_path = clone_repo(relay_domain, &owner_npub, &repo_id)?;
 
     // Create a WRONG commit (not the one expected by PR event)
-    let wrong_commit_hash = create_deterministic_commit_with_variant(&clone_path, CommitVariant::Owner)?;
+    let wrong_commit_hash =
+        create_deterministic_commit_with_variant(&clone_path, CommitVariant::Owner)?;
 
     // Verify it's actually different from expected
     if wrong_commit_hash == PR_TEST_COMMIT_HASH {
@@ -229,7 +317,11 @@ async fn setup_repo_with_wrong_commit_pushed(
 
     // Push to refs/nostr/<pr-event-id> (no event published yet, should succeed)
     let push_output = Command::new("git")
-        .args(["push", "origin", &format!("main:refs/nostr/{}", pr_event_id)])
+        .args([
+            "push",
+            "origin",
+            &format!("master:refs/nostr/{}", pr_event_id),
+        ])
         .current_dir(&clone_path)
         .output()
         .map_err(|e| format!("Failed to execute git push: {}", e))?;
@@ -249,23 +341,30 @@ async fn setup_repo_with_wrong_commit_pushed(
         repo_id,
         owner_npub,
         wrong_commit_hash,
+        pr_event,
     })
 }
 
-/// Publishes the PR event fixture and waits for relay to process it.
+/// Publishes the SAME PR event that was built during setup.
 /// Call this after setup_repo_with_wrong_commit_pushed to test post-event behavior.
+///
+/// IMPORTANT: We must publish the EXACT same event that was used during setup,
+/// otherwise the event ID won't match the refs/nostr/<event-id> ref that was pushed.
 #[allow(dead_code)]
-async fn publish_pr_event_and_wait(ctx: &TestContext<'_>) -> Result<Event, String> {
-    // Publishing the PR event - get_fixture publishes if not already published
-    let pr_event = ctx
-        .get_fixture(FixtureKind::PREvent)
+async fn publish_pr_event_and_wait(
+    ctx: &TestContext<'_>,
+    pr_event: &Event,
+) -> Result<(), String> {
+    // Publish the exact same PR event that was created during setup
+    ctx.client()
+        .send_event(pr_event.clone())
         .await
         .map_err(|e| format!("Failed to publish PR event: {}", e))?;
 
     // Wait for relay to process
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-    Ok(pr_event)
+    Ok(())
 }
 
 /// Creates the correct PR test commit (matching PR_TEST_COMMIT_HASH) in an existing clone.
@@ -281,7 +380,12 @@ fn reset_to_correct_pr_commit(clone_path: &Path) -> Result<String, String> {
 #[allow(dead_code)]
 fn push_to_pr_ref(clone_path: &Path, pr_event_id: &str) -> Result<bool, String> {
     let push_output = Command::new("git")
-        .args(["push", "--force", "origin", &format!("main:refs/nostr/{}", pr_event_id)])
+        .args([
+            "push",
+            "--force",
+            "origin",
+            &format!("HEAD:refs/nostr/{}", pr_event_id),
+        ])
         .current_dir(clone_path)
         .output()
         .map_err(|e| format!("Failed to execute git push: {}", e))?;
@@ -307,22 +411,48 @@ pub struct PushAuthorizationTests;
 
 impl PushAuthorizationTests {
     /// Run all push authorization tests
-    pub async fn run_all(
-        client: &AuditClient,
-        relay_domain: &str,
-    ) -> crate::AuditResult {
+    pub async fn run_all(client: &AuditClient, relay_domain: &str) -> crate::AuditResult {
         let mut results = crate::AuditResult::new("GRASP-01 Push Authorization Tests");
 
         results.add(Self::test_push_rejected_without_state_event(client, relay_domain).await);
         results.add(Self::test_push_authorized_by_owner_state(client, relay_domain).await);
         results.add(Self::test_push_rejected_wrong_commit(client, relay_domain).await);
-        results.add(Self::test_push_authorized_by_maintainer_state_only(client, relay_domain).await);
-        results.add(Self::test_push_authorized_by_recursive_maintainer_state(client, relay_domain).await);
-        results.add(Self::test_push_to_nostr_ref_with_invalid_event_id_rejected(client, relay_domain).await);
-        results.add(Self::test_pr_push_to_nostr_ref_with_wrong_commit_accepted_before_event_received(client, relay_domain).await);
-        results.add(Self::test_pr_event_published_removes_nostr_ref_at_incorrect_commit(client, relay_domain).await);
-        results.add(Self::test_push_to_nostr_ref_with_wrong_commit_after_event_received_rejected(client, relay_domain).await);
-        results.add(Self::test_push_to_nostr_ref_with_correct_commit_after_event_received_accepted(client, relay_domain).await);
+        results
+            .add(Self::test_push_authorized_by_maintainer_state_only(client, relay_domain).await);
+        results.add(
+            Self::test_push_authorized_by_recursive_maintainer_state(client, relay_domain).await,
+        );
+        results.add(
+            Self::test_push_to_nostr_ref_with_invalid_event_id_rejected(client, relay_domain).await,
+        );
+        results.add(
+            Self::test_pr_push_to_nostr_ref_with_wrong_commit_accepted_before_event_received(
+                client,
+                relay_domain,
+            )
+            .await,
+        );
+        results.add(
+            Self::test_pr_event_published_removes_nostr_ref_at_incorrect_commit(
+                client,
+                relay_domain,
+            )
+            .await,
+        );
+        results.add(
+            Self::test_push_to_nostr_ref_with_wrong_commit_after_event_received_rejected(
+                client,
+                relay_domain,
+            )
+            .await,
+        );
+        results.add(
+            Self::test_push_to_nostr_ref_with_correct_commit_after_event_received_accepted(
+                client,
+                relay_domain,
+            )
+            .await,
+        );
 
         results
     }
@@ -340,26 +470,37 @@ impl PushAuthorizationTests {
             Ok(r) => r,
             Err(e) => {
                 return TestResult::new(test_name, "GRASP-01", "Push rejected without state event")
-                    .fail(&format!("Failed to create repo: {}", e))
+                    .fail(format!("Failed to create repo: {}", e))
             }
         };
 
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-        let repo_id = repo.tags.iter().find(|t| t.kind() == TagKind::d())
-            .and_then(|t| t.content()).unwrap().to_string();
+        let repo_id = repo
+            .tags
+            .iter()
+            .find(|t| t.kind() == TagKind::d())
+            .and_then(|t| t.content())
+            .unwrap()
+            .to_string();
         let npub = repo.pubkey.to_bech32().unwrap();
 
         // Clone and create commit
         let clone_path = match clone_repo(relay_domain, &npub, &repo_id) {
             Ok(p) => p,
-            Err(e) => return TestResult::new(test_name, "GRASP-01", "Push rejected without state event").fail(&e),
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", "Push rejected without state event")
+                    .fail(&e)
+            }
         };
-        let cleanup = || { let _ = fs::remove_dir_all(&clone_path); };
+        let cleanup = || {
+            let _ = fs::remove_dir_all(&clone_path);
+        };
 
         if let Err(e) = create_commit(&clone_path, "Unauthorized commit") {
             cleanup();
-            return TestResult::new(test_name, "GRASP-01", "Push rejected without state event").fail(&e);
+            return TestResult::new(test_name, "GRASP-01", "Push rejected without state event")
+                .fail(&e);
         }
 
         // Do NOT publish state event - push should be rejected
@@ -367,9 +508,14 @@ impl PushAuthorizationTests {
         cleanup();
 
         match push_result {
-            Ok(false) => TestResult::new(test_name, "GRASP-01", "Push rejected without state event").pass(),
-            Ok(true) => TestResult::new(test_name, "GRASP-01", "Push rejected without state event").fail("Push accepted but should be rejected"),
-            Err(e) => TestResult::new(test_name, "GRASP-01", "Push rejected without state event").fail(&e),
+            Ok(false) => {
+                TestResult::new(test_name, "GRASP-01", "Push rejected without state event").pass()
+            }
+            Ok(true) => TestResult::new(test_name, "GRASP-01", "Push rejected without state event")
+                .fail("Push accepted but should be rejected"),
+            Err(e) => {
+                TestResult::new(test_name, "GRASP-01", "Push rejected without state event").fail(&e)
+            }
         }
     }
 
@@ -400,8 +546,12 @@ impl PushAuthorizationTests {
         let state_event = match ctx.get_fixture(FixtureKind::RepoState).await {
             Ok(e) => e,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01", "Push authorized with matching state")
-                    .fail(&format!("Failed to create RepoState fixture: {}", e));
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized with matching state",
+                )
+                .fail(format!("Failed to create RepoState fixture: {}", e));
             }
         };
 
@@ -416,16 +566,24 @@ impl PushAuthorizationTests {
         {
             Some(id) => id.to_string(),
             None => {
-                return TestResult::new(test_name, "GRASP-01", "Push authorized with matching state")
-                    .fail("Missing repo_id in state event");
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized with matching state",
+                )
+                .fail("Missing repo_id in state event");
             }
         };
 
         let npub = match state_event.pubkey.to_bech32() {
             Ok(n) => n,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01", "Push authorized with matching state")
-                    .fail(&format!("Failed to convert pubkey to bech32: {}", e));
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized with matching state",
+                )
+                .fail(format!("Failed to convert pubkey to bech32: {}", e));
             }
         };
 
@@ -435,8 +593,12 @@ impl PushAuthorizationTests {
         let clone_path = match clone_repo(relay_domain, &npub, &repo_id) {
             Ok(p) => p,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01", "Push authorized with matching state")
-                    .fail(&format!("Failed to clone repo: {}", e));
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized with matching state",
+                )
+                .fail(format!("Failed to clone repo: {}", e));
             }
         };
 
@@ -450,8 +612,12 @@ impl PushAuthorizationTests {
             Ok(h) => h,
             Err(e) => {
                 cleanup();
-                return TestResult::new(test_name, "GRASP-01", "Push authorized with matching state")
-                    .fail(&format!("Failed to create deterministic commit: {}", e));
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized with matching state",
+                )
+                .fail(format!("Failed to create deterministic commit: {}", e));
             }
         };
 
@@ -459,7 +625,7 @@ impl PushAuthorizationTests {
         if commit_hash != DETERMINISTIC_COMMIT_HASH {
             cleanup();
             return TestResult::new(test_name, "GRASP-01", "Push authorized with matching state")
-                .fail(&format!(
+                .fail(format!(
                     "Commit hash mismatch: got {}, expected {}",
                     commit_hash, DETERMINISTIC_COMMIT_HASH
                 ));
@@ -474,16 +640,24 @@ impl PushAuthorizationTests {
         match branch_output {
             Err(e) => {
                 cleanup();
-                return TestResult::new(test_name, "GRASP-01", "Push authorized with matching state")
-                    .fail(&format!("Failed to create main branch: {}", e));
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized with matching state",
+                )
+                .fail(format!("Failed to create main branch: {}", e));
             }
             Ok(output) if !output.status.success() => {
                 cleanup();
-                return TestResult::new(test_name, "GRASP-01", "Push authorized with matching state")
-                    .fail(&format!(
-                        "Failed to create main branch: {}",
-                        String::from_utf8_lossy(&output.stderr)
-                    ));
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized with matching state",
+                )
+                .fail(format!(
+                    "Failed to create main branch: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
             }
             _ => {}
         }
@@ -497,16 +671,24 @@ impl PushAuthorizationTests {
         match checkout_output {
             Err(e) => {
                 cleanup();
-                return TestResult::new(test_name, "GRASP-01", "Push authorized with matching state")
-                    .fail(&format!("Failed to checkout main branch: {}", e));
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized with matching state",
+                )
+                .fail(format!("Failed to checkout main branch: {}", e));
             }
             Ok(output) if !output.status.success() => {
                 cleanup();
-                return TestResult::new(test_name, "GRASP-01", "Push authorized with matching state")
-                    .fail(&format!(
-                        "Failed to checkout main branch: {}",
-                        String::from_utf8_lossy(&output.stderr)
-                    ));
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized with matching state",
+                )
+                .fail(format!(
+                    "Failed to checkout main branch: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
             }
             _ => {}
         }
@@ -524,17 +706,15 @@ impl PushAuthorizationTests {
             }
             Ok(false) => {
                 TestResult::new(test_name, "GRASP-01", "Push authorized with matching state").fail(
-                    &format!(
+                    format!(
                         "Push was rejected but should have been accepted. \
                         The state event points to commit {} which matches the pushed commit.",
                         DETERMINISTIC_COMMIT_HASH
                     ),
                 )
             }
-            Err(e) => {
-                TestResult::new(test_name, "GRASP-01", "Push authorized with matching state")
-                    .fail(&format!("Push error: {}", e))
-            }
+            Err(e) => TestResult::new(test_name, "GRASP-01", "Push authorized with matching state")
+                .fail(format!("Push error: {}", e)),
         }
     }
 
@@ -571,8 +751,12 @@ impl PushAuthorizationTests {
         let state_event = match ctx.get_fixture(FixtureKind::RepoState).await {
             Ok(e) => e,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
-                    .fail(&format!("Failed to create RepoState fixture: {}", e));
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push rejected when commit not in state event",
+                )
+                .fail(format!("Failed to create RepoState fixture: {}", e));
             }
         };
 
@@ -587,16 +771,24 @@ impl PushAuthorizationTests {
         {
             Some(id) => id.to_string(),
             None => {
-                return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
-                    .fail("Missing repo_id in state event");
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push rejected when commit not in state event",
+                )
+                .fail("Missing repo_id in state event");
             }
         };
 
         let npub = match state_event.pubkey.to_bech32() {
             Ok(n) => n,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
-                    .fail(&format!("Failed to convert pubkey to bech32: {}", e));
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push rejected when commit not in state event",
+                )
+                .fail(format!("Failed to convert pubkey to bech32: {}", e));
             }
         };
 
@@ -607,8 +799,12 @@ impl PushAuthorizationTests {
         let clone_path = match clone_repo(relay_domain, &npub, &repo_id) {
             Ok(p) => p,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
-                    .fail(&format!("Failed to clone repo: {}", e));
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push rejected when commit not in state event",
+                )
+                .fail(format!("Failed to clone repo: {}", e));
             }
         };
 
@@ -626,16 +822,24 @@ impl PushAuthorizationTests {
         match branch_output {
             Err(e) => {
                 cleanup();
-                return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
-                    .fail(&format!("Failed to create/checkout main branch: {}", e));
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push rejected when commit not in state event",
+                )
+                .fail(format!("Failed to create/checkout main branch: {}", e));
             }
             Ok(output) if !output.status.success() => {
                 cleanup();
-                return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
-                    .fail(&format!(
-                        "Failed to create/checkout main branch: {}",
-                        String::from_utf8_lossy(&output.stderr)
-                    ));
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push rejected when commit not in state event",
+                )
+                .fail(format!(
+                    "Failed to create/checkout main branch: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
             }
             _ => {}
         }
@@ -644,8 +848,12 @@ impl PushAuthorizationTests {
         // Any commit hash different from what's authorized in the state event will work
         if let Err(e) = create_commit(&clone_path, "Unauthorized commit - should be rejected") {
             cleanup();
-            return TestResult::new(test_name, "GRASP-01", "Push rejected when commit not in state event")
-                .fail(&format!("Failed to create wrong commit: {}", e));
+            return TestResult::new(
+                test_name,
+                "GRASP-01",
+                "Push rejected when commit not in state event",
+            )
+            .fail(format!("Failed to create wrong commit: {}", e));
         }
 
         // ============================================================
@@ -703,7 +911,7 @@ impl PushAuthorizationTests {
                     "GRASP-01",
                     "Push authorized by maintainer state event only (no announcement)",
                 )
-                .fail(&format!("Failed to create RepoState fixture: {}", e));
+                .fail(format!("Failed to create RepoState fixture: {}", e));
             }
         };
 
@@ -717,7 +925,7 @@ impl PushAuthorizationTests {
                     "GRASP-01",
                     "Push authorized by maintainer state event only (no announcement)",
                 )
-                .fail(&format!("Failed to create MaintainerState fixture: {}", e));
+                .fail(format!("Failed to create MaintainerState fixture: {}", e));
             }
         };
 
@@ -749,7 +957,7 @@ impl PushAuthorizationTests {
                     "GRASP-01",
                     "Push authorized by maintainer state event only (no announcement)",
                 )
-                .fail(&format!("Failed to convert pubkey to bech32: {}", e));
+                .fail(format!("Failed to convert pubkey to bech32: {}", e));
             }
         };
 
@@ -785,19 +993,21 @@ impl PushAuthorizationTests {
             .output();
 
         // Step 3: Create deterministic commit using existing function
-        let commit_hash =
-            match create_deterministic_commit_with_variant(&clone_path, CommitVariant::Maintainer) {
-                Ok(h) => h,
-                Err(e) => {
-                    cleanup();
-                    return TestResult::new(
-                        test_name,
-                        "GRASP-01",
-                        "Push authorized by maintainer state event only (no announcement)",
-                    )
-                    .fail(&format!("Failed to create maintainer commit: {}", e));
-                }
-            };
+        let commit_hash = match create_deterministic_commit_with_variant(
+            &clone_path,
+            CommitVariant::Maintainer,
+        ) {
+            Ok(h) => h,
+            Err(e) => {
+                cleanup();
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by maintainer state event only (no announcement)",
+                )
+                .fail(format!("Failed to create maintainer commit: {}", e));
+            }
+        };
 
         // Step 4: Replace main branch with our new orphan branch
         let _ = Command::new("git")
@@ -818,7 +1028,7 @@ impl PushAuthorizationTests {
                 "GRASP-01",
                 "Push authorized by maintainer state event only (no announcement)",
             )
-            .fail(&format!(
+            .fail(format!(
                 "Maintainer commit hash mismatch: got {}, expected {}",
                 commit_hash, MAINTAINER_DETERMINISTIC_COMMIT_HASH
             ));
@@ -843,7 +1053,7 @@ impl PushAuthorizationTests {
                 "GRASP-01",
                 "Push authorized by maintainer state event only (no announcement)",
             )
-            .fail(&format!(
+            .fail(format!(
                 "Push was rejected but should have been accepted. \
                 The maintainer published a state event with commit {}, \
                 and even without a separate announcement, the relay should \
@@ -856,7 +1066,7 @@ impl PushAuthorizationTests {
                 "GRASP-01",
                 "Push authorized by maintainer state event only (no announcement)",
             )
-            .fail(&format!("Push error: {}", e)),
+            .fail(format!("Push error: {}", e)),
         }
     }
 
@@ -899,7 +1109,7 @@ impl PushAuthorizationTests {
                     "GRASP-01",
                     "Push authorized by recursive maintainer state event",
                 )
-                .fail(&format!("Failed to create RepoState fixture: {}", e));
+                .fail(format!("Failed to create RepoState fixture: {}", e));
             }
         };
 
@@ -912,7 +1122,10 @@ impl PushAuthorizationTests {
                     "GRASP-01",
                     "Push authorized by recursive maintainer state event",
                 )
-                .fail(&format!("Failed to create MaintainerAnnouncement fixture: {}", e));
+                .fail(format!(
+                    "Failed to create MaintainerAnnouncement fixture: {}",
+                    e
+                ));
             }
         };
 
@@ -925,12 +1138,15 @@ impl PushAuthorizationTests {
                     "GRASP-01",
                     "Push authorized by recursive maintainer state event",
                 )
-                .fail(&format!("Failed to create MaintainerState fixture: {}", e));
+                .fail(format!("Failed to create MaintainerState fixture: {}", e));
             }
         };
 
         // Get RecursiveMaintainerRepoAndState fixture (completes 3-level delegation chain)
-        match ctx.get_fixture(FixtureKind::RecursiveMaintainerRepoAndState).await {
+        match ctx
+            .get_fixture(FixtureKind::RecursiveMaintainerRepoAndState)
+            .await
+        {
             Ok(_) => {}
             Err(e) => {
                 return TestResult::new(
@@ -938,7 +1154,10 @@ impl PushAuthorizationTests {
                     "GRASP-01",
                     "Push authorized by recursive maintainer state event",
                 )
-                .fail(&format!("Failed to create RecursiveMaintainerRepoAndState fixture: {}", e));
+                .fail(format!(
+                    "Failed to create RecursiveMaintainerRepoAndState fixture: {}",
+                    e
+                ));
             }
         };
 
@@ -970,7 +1189,7 @@ impl PushAuthorizationTests {
                     "GRASP-01",
                     "Push authorized by recursive maintainer state event",
                 )
-                .fail(&format!("Failed to convert pubkey to bech32: {}", e));
+                .fail(format!("Failed to convert pubkey to bech32: {}", e));
             }
         };
 
@@ -1006,19 +1225,24 @@ impl PushAuthorizationTests {
             .output();
 
         // Step 3: Create recursive maintainer deterministic commit
-        let commit_hash =
-            match create_deterministic_commit_with_variant(&clone_path, CommitVariant::RecursiveMaintainer) {
-                Ok(h) => h,
-                Err(e) => {
-                    cleanup();
-                    return TestResult::new(
-                        test_name,
-                        "GRASP-01",
-                        "Push authorized by recursive maintainer state event",
-                    )
-                    .fail(&format!("Failed to create recursive maintainer commit: {}", e));
-                }
-            };
+        let commit_hash = match create_deterministic_commit_with_variant(
+            &clone_path,
+            CommitVariant::RecursiveMaintainer,
+        ) {
+            Ok(h) => h,
+            Err(e) => {
+                cleanup();
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Push authorized by recursive maintainer state event",
+                )
+                .fail(format!(
+                    "Failed to create recursive maintainer commit: {}",
+                    e
+                ));
+            }
+        };
 
         // Step 4: Replace main branch with our new orphan branch
         let _ = Command::new("git")
@@ -1039,7 +1263,7 @@ impl PushAuthorizationTests {
                 "GRASP-01",
                 "Push authorized by recursive maintainer state event",
             )
-            .fail(&format!(
+            .fail(format!(
                 "Recursive maintainer commit hash mismatch: got {}, expected {}",
                 commit_hash, RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH
             ));
@@ -1064,7 +1288,7 @@ impl PushAuthorizationTests {
                 "GRASP-01",
                 "Push authorized by recursive maintainer state event",
             )
-            .fail(&format!(
+            .fail(format!(
                 "Push was rejected but should have been accepted. \
                 The recursive maintainer published a state event with commit {}, \
                 and the relay should authorize pushes matching this state event \
@@ -1076,7 +1300,7 @@ impl PushAuthorizationTests {
                 "GRASP-01",
                 "Push authorized by recursive maintainer state event",
             )
-            .fail(&format!("Push error: {}", e)),
+            .fail(format!("Push error: {}", e)),
         }
     }
 
@@ -1109,8 +1333,12 @@ impl PushAuthorizationTests {
         let state_event = match ctx.get_fixture(FixtureKind::RepoState).await {
             Ok(e) => e,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
-                    .fail(&format!("Failed to create RepoState fixture: {}", e));
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Non-maintainer state events ignored",
+                )
+                .fail(format!("Failed to create RepoState fixture: {}", e));
             }
         };
 
@@ -1125,16 +1353,24 @@ impl PushAuthorizationTests {
         {
             Some(id) => id.to_string(),
             None => {
-                return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
-                    .fail("Missing repo_id in state event");
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Non-maintainer state events ignored",
+                )
+                .fail("Missing repo_id in state event");
             }
         };
 
         let npub = match state_event.pubkey.to_bech32() {
             Ok(n) => n,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
-                    .fail(&format!("Failed to convert pubkey to bech32: {}", e));
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Non-maintainer state events ignored",
+                )
+                .fail(format!("Failed to convert pubkey to bech32: {}", e));
             }
         };
 
@@ -1145,8 +1381,12 @@ impl PushAuthorizationTests {
         let clone_path = match clone_repo(relay_domain, &npub, &repo_id) {
             Ok(p) => p,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
-                    .fail(&format!("Failed to clone repo: {}", e));
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Non-maintainer state events ignored",
+                )
+                .fail(format!("Failed to clone repo: {}", e));
             }
         };
 
@@ -1160,8 +1400,12 @@ impl PushAuthorizationTests {
             Ok(h) => h,
             Err(e) => {
                 cleanup();
-                return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
-                    .fail(&format!("Failed to create deterministic commit: {}", e));
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Non-maintainer state events ignored",
+                )
+                .fail(format!("Failed to create deterministic commit: {}", e));
             }
         };
 
@@ -1169,7 +1413,7 @@ impl PushAuthorizationTests {
         if commit_hash != DETERMINISTIC_COMMIT_HASH {
             cleanup();
             return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
-                .fail(&format!(
+                .fail(format!(
                     "Commit hash mismatch: got {}, expected {}",
                     commit_hash, DETERMINISTIC_COMMIT_HASH
                 ));
@@ -1184,16 +1428,24 @@ impl PushAuthorizationTests {
         match branch_output {
             Err(e) => {
                 cleanup();
-                return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
-                    .fail(&format!("Failed to create main branch: {}", e));
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Non-maintainer state events ignored",
+                )
+                .fail(format!("Failed to create main branch: {}", e));
             }
             Ok(output) if !output.status.success() => {
                 cleanup();
-                return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
-                    .fail(&format!(
-                        "Failed to create main branch: {}",
-                        String::from_utf8_lossy(&output.stderr)
-                    ));
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Non-maintainer state events ignored",
+                )
+                .fail(format!(
+                    "Failed to create main branch: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
             }
             _ => {}
         }
@@ -1207,16 +1459,24 @@ impl PushAuthorizationTests {
         match checkout_output {
             Err(e) => {
                 cleanup();
-                return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
-                    .fail(&format!("Failed to checkout main branch: {}", e));
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Non-maintainer state events ignored",
+                )
+                .fail(format!("Failed to checkout main branch: {}", e));
             }
             Ok(output) if !output.status.success() => {
                 cleanup();
-                return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
-                    .fail(&format!(
-                        "Failed to checkout main branch: {}",
-                        String::from_utf8_lossy(&output.stderr)
-                    ));
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Non-maintainer state events ignored",
+                )
+                .fail(format!(
+                    "Failed to checkout main branch: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
             }
             _ => {}
         }
@@ -1231,16 +1491,24 @@ impl PushAuthorizationTests {
         match push_output {
             Err(e) => {
                 cleanup();
-                return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
-                    .fail(&format!("Failed to push initial commit: {}", e));
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Non-maintainer state events ignored",
+                )
+                .fail(format!("Failed to push initial commit: {}", e));
             }
             Ok(output) if !output.status.success() => {
                 cleanup();
-                return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
-                    .fail(&format!(
-                        "Failed to push initial commit: {}",
-                        String::from_utf8_lossy(&output.stderr)
-                    ));
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Non-maintainer state events ignored",
+                )
+                .fail(format!(
+                    "Failed to push initial commit: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
             }
             _ => {}
         }
@@ -1253,14 +1521,18 @@ impl PushAuthorizationTests {
             Ok(h) => h,
             Err(e) => {
                 cleanup();
-                return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
-                    .fail(&format!("Failed to create commit: {}", e));
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Non-maintainer state events ignored",
+                )
+                .fail(format!("Failed to create commit: {}", e));
             }
         };
 
         // Create a rogue keypair (NOT the maintainer)
         let rogue_keys = Keys::generate();
-        
+
         // Create a rogue state event announcing the new commit
         // This event has the correct repo_id but is signed by a non-maintainer
         let rogue_state = match client
@@ -1275,8 +1547,12 @@ impl PushAuthorizationTests {
             Ok(e) => e,
             Err(e) => {
                 cleanup();
-                return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
-                    .fail(&format!("Failed to build rogue state event: {}", e));
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01",
+                    "Non-maintainer state events ignored",
+                )
+                .fail(format!("Failed to build rogue state event: {}", e));
             }
         };
 
@@ -1284,7 +1560,7 @@ impl PushAuthorizationTests {
         if let Err(e) = client.client().send_event(&rogue_state).await {
             cleanup();
             return TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
-                .fail(&format!("Failed to send rogue state event: {}", e));
+                .fail(format!("Failed to send rogue state event: {}", e));
         }
 
         // Wait for event to propagate
@@ -1300,7 +1576,7 @@ impl PushAuthorizationTests {
         match push_result {
             Ok(false) => TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored").pass(),
             Ok(true) => TestResult::new(test_name, "GRASP-01", "Non-maintainer state events ignored")
-                .fail(&format!(
+                .fail(format!(
                     "Push accepted but should be rejected. A non-maintainer (pubkey: {}) published \
                     a state event announcing commit {}, but the push was accepted. The relay should \
                     only accept state events from maintainers (pubkey: {}).",
@@ -1342,7 +1618,7 @@ impl PushAuthorizationTests {
                     "GRASP-01",
                     "Push to refs/nostr/<invalid-event-id> rejected",
                 )
-                .fail(&format!("Failed to create repo: {}", e));
+                .fail(format!("Failed to create repo: {}", e));
             }
         };
 
@@ -1408,7 +1684,7 @@ impl PushAuthorizationTests {
                 "GRASP-01",
                 "Push to refs/nostr/<invalid-event-id> rejected",
             )
-            .fail(&format!(
+            .fail(format!(
                 "Push to {} was accepted but should be rejected. \
                 The event-id '{}' is NOT a valid 64-character hex string (EventId format). \
                 The relay should reject pushes to refs/nostr/ with invalid event-id format.",
@@ -1419,7 +1695,7 @@ impl PushAuthorizationTests {
                 "GRASP-01",
                 "Push to refs/nostr/<invalid-event-id> rejected",
             )
-            .fail(&format!("Push error: {}", e)),
+            .fail(format!("Push error: {}", e)),
         }
     }
 
@@ -1434,7 +1710,8 @@ impl PushAuthorizationTests {
         client: &AuditClient,
         relay_domain: &str,
     ) -> TestResult {
-        let test_name = "test_pr_push_to_nostr_ref_with_wrong_commit_accepted_before_event_received";
+        let test_name =
+            "test_pr_push_to_nostr_ref_with_wrong_commit_accepted_before_event_received";
         let desc = "Push wrong commit to refs/nostr/<pr-event-id> before PR event (should accept)";
         let ctx = TestContext::new(client);
 
@@ -1459,15 +1736,13 @@ impl PushAuthorizationTests {
     /// the relay should validate any existing refs/nostr/<event-id> refs and
     /// delete those that don't match the commit in the PR event's `c` tag.
     ///
-    /// Currently NOT_IMPLEMENTED - the relay doesn't have this cleanup logic yet.
-    ///
     /// Depends on: `setup_repo_with_wrong_commit_pushed` (wrong commit already pushed)
     pub async fn test_pr_event_published_removes_nostr_ref_at_incorrect_commit(
         client: &AuditClient,
         relay_domain: &str,
     ) -> TestResult {
         let test_name = "test_pr_event_published_removes_nostr_ref_at_incorrect_commit";
-        let desc = "Publishing PR event should trigger cleanup of incorrect refs (NOT_IMPLEMENTED)";
+        let desc = "Publishing PR event should trigger cleanup of incorrect refs";
         let ctx = TestContext::new(client);
 
         // Setup: wrong commit already pushed to refs/nostr/<pr-event-id>
@@ -1479,7 +1754,7 @@ impl PushAuthorizationTests {
         };
 
         // NOW publish the PR event - this should trigger cleanup validation
-        if let Err(e) = publish_pr_event_and_wait(&ctx).await {
+        if let Err(e) = publish_pr_event_and_wait(&ctx, &setup.pr_event).await {
             setup.cleanup();
             return TestResult::new(test_name, "GRASP-01", desc).fail(&e);
         }
@@ -1496,12 +1771,16 @@ impl PushAuthorizationTests {
 
         setup.cleanup();
 
-        // Document current behavior: relay doesn't implement automatic cleanup yet
-        TestResult::new(test_name, "GRASP-01", desc).fail(&format!(
-            "NOT_IMPLEMENTED: Relay should delete refs/nostr/<event-id> when PR event is published \
-             with non-matching commit. Currently ref still exists: {}. This requires relay-side validation logic.",
-            refs_exist
-        ))
+        // Ref should be deleted since the pushed commit doesn't match the PR event's `c` tag
+        if refs_exist {
+            TestResult::new(test_name, "GRASP-01", desc).fail(format!(
+                "Expected refs/nostr/{} to be deleted when PR event published with non-matching commit, \
+                 but the ref still exists. The relay should delete refs that don't match the event's `c` tag.",
+                setup.pr_event_id
+            ))
+        } else {
+            TestResult::new(test_name, "GRASP-01", desc).pass()
+        }
     }
 
     /// Test 3: Push wrong commit to refs/nostr/<pr-event-id> AFTER PR event exists
@@ -1528,7 +1807,7 @@ impl PushAuthorizationTests {
         };
 
         // Publish PR event FIRST (before our test push)
-        if let Err(e) = publish_pr_event_and_wait(&ctx).await {
+        if let Err(e) = publish_pr_event_and_wait(&ctx, &setup.pr_event).await {
             setup.cleanup();
             return TestResult::new(test_name, "GRASP-01", desc).fail(&e);
         }
@@ -1577,7 +1856,7 @@ impl PushAuthorizationTests {
         };
 
         // Publish PR event FIRST
-        if let Err(e) = publish_pr_event_and_wait(&ctx).await {
+        if let Err(e) = publish_pr_event_and_wait(&ctx, &setup.pr_event).await {
             setup.cleanup();
             return TestResult::new(test_name, "GRASP-01", desc).fail(&e);
         }
@@ -1626,9 +1905,9 @@ mod tests {
     /// Run with: cd grasp-audit && nix develop -c cargo test --lib test_pr_test_commit_hash_discovery -- --nocapture
     #[test]
     fn test_pr_test_commit_hash_discovery() {
+        use std::fs;
         use std::process::Command;
         use tempfile::TempDir;
-        use std::fs;
 
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let path = temp_dir.path();
@@ -1639,7 +1918,11 @@ mod tests {
             .current_dir(path)
             .output()
             .expect("Failed to init git");
-        assert!(output.status.success(), "git init failed: {:?}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "git init failed: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
 
         // Configure git user - use PR Test Author identity
         let output = Command::new("git")
@@ -1666,21 +1949,31 @@ mod tests {
             .current_dir(path)
             .output()
             .expect("git add failed");
-        assert!(output.status.success(), "git add failed: {:?}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "git add failed: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
 
         // Create deterministic commit with fixed dates and GPG disabled
         let output = Command::new("git")
             .args([
-                "-c", "commit.gpgsign=false",
+                "-c",
+                "commit.gpgsign=false",
                 "commit",
-                "-m", "PR test deterministic commit",
+                "-m",
+                "PR test deterministic commit",
             ])
             .env("GIT_AUTHOR_DATE", "2024-01-01T00:00:00Z")
             .env("GIT_COMMITTER_DATE", "2024-01-01T00:00:00Z")
             .current_dir(path)
             .output()
             .expect("git commit failed");
-        assert!(output.status.success(), "git commit failed: {:?}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "git commit failed: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
 
         // Get the commit hash
         let output = Command::new("git")
@@ -1688,7 +1981,11 @@ mod tests {
             .current_dir(path)
             .output()
             .expect("git rev-parse failed");
-        assert!(output.status.success(), "git rev-parse failed: {:?}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "git rev-parse failed: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
 
         let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
@@ -1698,7 +1995,10 @@ mod tests {
 
         // Verify we got a valid 40-character hex hash
         assert_eq!(hash.len(), 40, "Hash should be 40 hex chars, got: {}", hash);
-        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()), "Hash should be hex chars only");
+        assert!(
+            hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "Hash should be hex chars only"
+        );
 
         // If the constant is not PLACEHOLDER, verify it matches
         if PR_TEST_COMMIT_HASH != "PLACEHOLDER" {

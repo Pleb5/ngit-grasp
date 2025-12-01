@@ -129,7 +129,9 @@ impl AuditClient {
     /// Get the relay URL
     pub async fn relay_url(&self) -> Result<String> {
         let relays = self.client.relays().await;
-        let relay = relays.values().next()
+        let relay = relays
+            .values()
+            .next()
             .ok_or_else(|| anyhow!("No relays configured"))?;
         Ok(relay.url().to_string())
     }
@@ -522,12 +524,14 @@ mod tests {
         let keys = Keys::generate();
         let maintainer_keys = Keys::generate();
         let recursive_maintainer_keys = Keys::generate();
+        let pr_author_keys = Keys::generate();
         let client = AuditClient {
             client: Client::new(keys.clone()),
             config: config.clone(),
             keys: keys.clone(),
             maintainer_keys,
             recursive_maintainer_keys,
+            pr_author_keys,
             fixture_cache: Arc::new(Mutex::new(HashMap::new())),
         };
 
@@ -543,12 +547,14 @@ mod tests {
         let keys = Keys::generate();
         let maintainer_keys = Keys::generate();
         let recursive_maintainer_keys = Keys::generate();
+        let pr_author_keys = Keys::generate();
         let client = AuditClient {
             client: Client::new(keys.clone()),
             config: config.clone(),
             keys: keys.clone(),
             maintainer_keys,
             recursive_maintainer_keys,
+            pr_author_keys,
             fixture_cache: Arc::new(Mutex::new(HashMap::new())),
         };
 
@@ -610,13 +616,10 @@ mod tests {
         // Note: We can't test create_repo_announcement_with_maintainers directly in unit tests
         // because it requires a connected relay. Instead, we test the underlying event building
         // with maintainers tag to verify the tag format is correct.
-        
+
         // Build an event with maintainers tag directly to test the tag format
         let event = client
-            .event_builder(
-                Kind::GitRepoAnnouncement,
-                "Test repository",
-            )
+            .event_builder(Kind::GitRepoAnnouncement, "Test repository")
             .tag(Tag::identifier("test-repo"))
             .tag(Tag::custom(
                 TagKind::custom("maintainers"),
@@ -639,10 +642,14 @@ mod tests {
         // Verify the tag contains the maintainer pubkeys
         let tag = maintainers_tag.unwrap();
         let tag_vec: Vec<String> = tag.clone().to_vec();
-        
+
         // First element is "maintainers", rest are the pubkeys
         assert_eq!(tag_vec[0], "maintainers");
-        assert_eq!(tag_vec.len(), 3, "Expected 3 elements: tag name + 2 pubkeys");
+        assert_eq!(
+            tag_vec.len(),
+            3,
+            "Expected 3 elements: tag name + 2 pubkeys"
+        );
         assert_eq!(tag_vec[1], maintainer_pubkeys[0]);
         assert_eq!(tag_vec[2], maintainer_pubkeys[1]);
     }

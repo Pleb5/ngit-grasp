@@ -59,7 +59,7 @@ pub const DETERMINISTIC_COMMIT_HASH: &str = "64ea71d79a57a7acb334cd9651f8aec067c
 /// - GPG signing: disabled
 /// - User: "GRASP Audit Test <test@grasp-audit.local>"
 /// - Parent: none (root commit)
-/// NOTE: This value is different from DETERMINISTIC_COMMIT_HASH due to different content
+///   NOTE: This value is different from DETERMINISTIC_COMMIT_HASH due to different content
 pub const MAINTAINER_DETERMINISTIC_COMMIT_HASH: &str = "1c2d472c9b71ed51968a66500281a3c4a6840464";
 
 /// Deterministic commit hash for recursive maintainer fixtures (RecursiveMaintainer variant)
@@ -71,8 +71,9 @@ pub const MAINTAINER_DETERMINISTIC_COMMIT_HASH: &str = "1c2d472c9b71ed51968a6650
 /// - GPG signing: disabled
 /// - User: "GRASP Audit Test <test@grasp-audit.local>"
 /// - Parent: none (root commit)
-/// NOTE: This value is different from DETERMINISTIC_COMMIT_HASH due to different content
-pub const RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH: &str = "05939b82de66fbdb9c077d0a64fc68522f3cb8e0";
+///   NOTE: This value is different from DETERMINISTIC_COMMIT_HASH due to different content
+pub const RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH: &str =
+    "05939b82de66fbdb9c077d0a64fc68522f3cb8e0";
 
 /// Deterministic commit hash for PR test fixtures (PRTestCommit variant)
 /// This is the hash produced by creating a commit with:
@@ -83,7 +84,7 @@ pub const RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH: &str = "05939b82de66fb
 /// - GPG signing: disabled
 /// - User: "GRASP Audit Test <test@grasp-audit.local>"
 /// - Parent: none (root commit)
-pub const PR_TEST_COMMIT_HASH: &str = "8935183ff722bf04e861928c6a7e50868c6ca4a6";
+pub const PR_TEST_COMMIT_HASH: &str = "5d40fb1555a0c28bf4d650515a73aaa54d4d9bfb";
 
 /// Types of test fixtures available
 ///
@@ -157,10 +158,10 @@ pub enum FixtureKind {
     /// - Timestamp: 2 seconds in the past (most recent)
     RecursiveMaintainerRepoAndState,
 
-    /// PR (Patch/Pull Request) event for the SAME repo_id as ValidRepo
+    /// PR (Pull Request) event for the SAME repo_id as ValidRepo
     /// - Requires ValidRepo (uses same repo_id)
     /// - Signed by `client.pr_author_keys()`
-    /// - Kind 1617 (NIP-34 patch)
+    /// - Kind 1618 (NIP-34 PR)
     /// - Includes `a` tag referencing the repo
     /// - Includes `c` tag pointing to PR_TEST_COMMIT_HASH
     /// - Timestamp: 1 second in the past
@@ -290,6 +291,37 @@ impl<'a> TestContext<'a> {
         self.mode
     }
 
+    /// Build a fixture event WITHOUT publishing it to the relay.
+    ///
+    /// This is useful for tests that need to get a fixture's event ID before
+    /// actually publishing it. For example, testing refs/nostr/<event-id>
+    /// behavior before the corresponding event exists on the relay.
+    ///
+    /// Note: This may still create and publish dependencies (e.g., ValidRepo
+    /// will be created/published if PREvent needs it), but the requested
+    /// fixture itself will NOT be published.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use grasp_audit::*;
+    /// # async fn example(ctx: &TestContext<'_>) -> anyhow::Result<()> {
+    /// // Build PR event to get its ID without publishing
+    /// let pr_event = ctx.build_fixture_only(FixtureKind::PREvent).await?;
+    /// let pr_event_id = pr_event.id.to_hex();
+    ///
+    /// // Now push to refs/nostr/<pr_event_id> before event exists
+    /// // ... git push ...
+    ///
+    /// // Later, publish the PR event when ready
+    /// ctx.client().send_event(pr_event).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn build_fixture_only(&self, kind: FixtureKind) -> Result<Event> {
+        self.build_fixture(kind).await
+    }
+
     /// Create a fresh fixture (always creates new)
     async fn create_fresh(&self, kind: FixtureKind) -> Result<Event> {
         let event = self
@@ -348,7 +380,11 @@ impl<'a> TestContext<'a> {
         {
             let mut cache = self.client.fixture_cache().lock().unwrap();
             cache.insert(kind, event.clone());
-            tracing::debug!("get_or_create_shared({:?}) stored in client cache ({} entries)", kind, cache.len());
+            tracing::debug!(
+                "get_or_create_shared({:?}) stored in client cache ({} entries)",
+                kind,
+                cache.len()
+            );
         }
 
         Ok(event)
@@ -398,12 +434,17 @@ impl<'a> TestContext<'a> {
             FixtureKind::ValidRepo,
             &uuid::Uuid::new_v4().to_string()[..8]
         );
-        
-        let repo = self.client.create_repo_announcement(&test_name).await
+
+        let repo = self
+            .client
+            .create_repo_announcement(&test_name)
+            .await
             .with_context(|| format!("create_repo_announcement failed for {}", test_name))?;
 
         // Send it
-        self.client.send_event(repo.clone()).await
+        self.client
+            .send_event(repo.clone())
+            .await
             .with_context(|| "Failed to send repo announcement to relay")?;
 
         // Store in the appropriate cache based on mode
@@ -412,13 +453,19 @@ impl<'a> TestContext<'a> {
                 // Store in local cache for within-test fixture dependencies
                 let mut cache = self.local_cache.lock().unwrap();
                 cache.insert(FixtureKind::ValidRepo, repo.clone());
-                tracing::debug!("get_or_create_repo() stored in local cache ({} entries)", cache.len());
+                tracing::debug!(
+                    "get_or_create_repo() stored in local cache ({} entries)",
+                    cache.len()
+                );
             }
             ContextMode::Shared => {
                 // Store in client cache for cross-test sharing
                 let mut cache = self.client.fixture_cache().lock().unwrap();
                 cache.insert(FixtureKind::ValidRepo, repo.clone());
-                tracing::debug!("get_or_create_repo() stored in client cache ({} entries)", cache.len());
+                tracing::debug!(
+                    "get_or_create_repo() stored in client cache ({} entries)",
+                    cache.len()
+                );
             }
         }
 
@@ -448,12 +495,9 @@ impl<'a> TestContext<'a> {
         let repo = self.get_or_create_repo().await?;
 
         // Create the issue
-        let issue = self.client.create_issue(
-            &repo,
-            "Test Issue",
-            "Issue content for testing",
-            vec![],
-        )?;
+        let issue =
+            self.client
+                .create_issue(&repo, "Test Issue", "Issue content for testing", vec![])?;
 
         // Send it
         self.client.send_event(issue.clone()).await?;
@@ -555,7 +599,7 @@ impl<'a> TestContext<'a> {
 
                 // Get the owner's repo to use the SAME repo_id
                 let owner_repo = self.get_or_create_repo().await?;
-                
+
                 // Extract repo_id from owner's repo announcement
                 let repo_id = owner_repo
                     .tags
@@ -573,7 +617,7 @@ impl<'a> TestContext<'a> {
 
                 // Get the owner's repo to use the SAME repo_id
                 let owner_repo = self.get_or_create_repo().await?;
-                
+
                 // Extract repo_id from owner's repo announcement
                 let repo_id = owner_repo
                     .tags
@@ -593,7 +637,7 @@ impl<'a> TestContext<'a> {
 
                 // Get the owner's repo to use the SAME repo_id
                 let owner_repo = self.get_or_create_repo().await?;
-                
+
                 // Extract repo_id from owner's repo announcement
                 let repo_id = owner_repo
                     .tags
@@ -611,7 +655,7 @@ impl<'a> TestContext<'a> {
 
                 // Get the owner's repo to use the SAME repo_id
                 let owner_repo = self.get_or_create_repo().await?;
-                
+
                 // Extract repo_id from owner's repo announcement
                 let repo_id = owner_repo
                     .tags
@@ -630,7 +674,7 @@ impl<'a> TestContext<'a> {
 
                 // Get the owner's repo to use the SAME repo_id
                 let owner_repo = self.get_or_create_repo().await?;
-                
+
                 // Extract repo_id from owner's repo announcement
                 let repo_id = owner_repo
                     .tags
@@ -647,8 +691,12 @@ impl<'a> TestContext<'a> {
                 self.client.send_event(maintainer_announcement).await?;
 
                 // Build and send the recursive maintainer's repo announcement
-                let recursive_maintainer_announcement = self.build_recursive_maintainer_announcement(&repo_id).await?;
-                self.client.send_event(recursive_maintainer_announcement).await?;
+                let recursive_maintainer_announcement = self
+                    .build_recursive_maintainer_announcement(&repo_id)
+                    .await?;
+                self.client
+                    .send_event(recursive_maintainer_announcement)
+                    .await?;
 
                 // Return the state event (caller will send it)
                 self.build_recursive_maintainer_state(&repo_id)
@@ -672,10 +720,10 @@ impl<'a> TestContext<'a> {
                 let base_time = Timestamp::now().as_u64();
                 let pr_timestamp = Timestamp::from(base_time - 1);
 
-                // Build NIP-34 patch event (kind 1617)
+                // Build NIP-34 PR event (kind 1618)
                 self.client
                     .event_builder(
-                        Kind::Custom(1617), // NIP-34 patch/PR kind
+                        Kind::Custom(1618), // NIP-34 PR kind (has 'c' tag for commit)
                         "Test PR for GRASP validation",
                     )
                     .tag(Tag::custom(
@@ -702,7 +750,8 @@ impl<'a> TestContext<'a> {
         use nostr_sdk::prelude::*;
 
         // Get relay URL for clone tag
-        let relay_url = self.client
+        let relay_url = self
+            .client
             .client()
             .relays()
             .await
@@ -715,7 +764,8 @@ impl<'a> TestContext<'a> {
             .replace("wss://", "https://");
 
         // Create maintainer's repo announcement for the SAME repo_id
-        let maintainer_npub = self.client
+        let maintainer_npub = self
+            .client
             .maintainer_keys()
             .public_key()
             .to_bech32()
@@ -735,10 +785,7 @@ impl<'a> TestContext<'a> {
                 TagKind::custom("clone"),
                 vec![format!("{}/{}/{}.git", http_url, maintainer_npub, repo_id)],
             ))
-            .tag(Tag::custom(
-                TagKind::custom("relays"),
-                vec![relay_url],
-            ))
+            .tag(Tag::custom(TagKind::custom("relays"), vec![relay_url]))
             .tag(Tag::custom(
                 TagKind::custom("maintainers"),
                 vec![self.client.recursive_maintainer_pubkey_hex()],
@@ -776,7 +823,8 @@ impl<'a> TestContext<'a> {
         use nostr_sdk::prelude::*;
 
         // Get relay URL for clone tag
-        let relay_url = self.client
+        let relay_url = self
+            .client
             .client()
             .relays()
             .await
@@ -789,7 +837,8 @@ impl<'a> TestContext<'a> {
             .replace("wss://", "https://");
 
         // Create recursive maintainer's repo announcement for the SAME repo_id
-        let recursive_maintainer_npub = self.client
+        let recursive_maintainer_npub = self
+            .client
             .recursive_maintainer_keys()
             .public_key()
             .to_bech32()
@@ -807,12 +856,12 @@ impl<'a> TestContext<'a> {
             ))
             .tag(Tag::custom(
                 TagKind::custom("clone"),
-                vec![format!("{}/{}/{}.git", http_url, recursive_maintainer_npub, repo_id)],
+                vec![format!(
+                    "{}/{}/{}.git",
+                    http_url, recursive_maintainer_npub, repo_id
+                )],
             ))
-            .tag(Tag::custom(
-                TagKind::custom("relays"),
-                vec![relay_url],
-            ))
+            .tag(Tag::custom(TagKind::custom("relays"), vec![relay_url]))
             .tag(Tag::custom(
                 TagKind::custom("maintainers"),
                 vec![
@@ -821,7 +870,12 @@ impl<'a> TestContext<'a> {
                 ],
             ))
             .build(self.client.recursive_maintainer_keys())
-            .map_err(|e| anyhow::anyhow!("Failed to build recursive maintainer repo announcement: {}", e))
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to build recursive maintainer repo announcement: {}",
+                    e
+                )
+            })
     }
 
     /// Build recursive maintainer state event for the given repo_id
@@ -898,7 +952,7 @@ pub async fn send_and_verify_accepted(
 ) -> Result<(), String> {
     use nostr_sdk::prelude::Filter;
     use std::time::Duration;
-    
+
     let event_id = event.id;
 
     client
@@ -952,12 +1006,12 @@ pub async fn send_and_verify_rejected(
 ) -> Result<(), String> {
     use nostr_sdk::prelude::Filter;
     use std::time::Duration;
-    
+
     let event_id = event.id;
 
     // Try to send event - rejection may cause send_event to fail with an error
     let send_result = client.send_event(event).await;
-    
+
     // If send succeeded, the relay might have accepted it (we'll verify below)
     // If send failed, check if it's a rejection error (expected)
     if let Err(e) = send_result {
@@ -966,7 +1020,7 @@ pub async fn send_and_verify_rejected(
         if err_msg.contains("rejected") || err_msg.contains("blocked") {
             // Expected rejection - verify event is NOT in database
             tokio::time::sleep(Duration::from_millis(100)).await;
-            
+
             let filter = Filter::new().id(event_id);
             let events = client
                 .query(filter)
@@ -974,9 +1028,12 @@ pub async fn send_and_verify_rejected(
                 .map_err(|e| format!("Failed to query relay for verification: {}", e))?;
 
             if !events.is_empty() {
-                return Err(format!("Event was rejected but still stored: {}", description));
+                return Err(format!(
+                    "Event was rejected but still stored: {}",
+                    description
+                ));
             }
-            
+
             return Ok(()); // Rejected as expected
         } else {
             // Unexpected error (network, etc.)
@@ -1029,11 +1086,7 @@ use std::process::Command;
 /// # Ok(())
 /// # }
 /// ```
-pub fn clone_repo(
-    relay_domain: &str,
-    npub: &str,
-    repo_id: &str,
-) -> Result<PathBuf, String> {
+pub fn clone_repo(relay_domain: &str, npub: &str, repo_id: &str) -> Result<PathBuf, String> {
     let temp_base = std::env::temp_dir();
     let clone_dir_name = format!("grasp-push-test-{}", uuid::Uuid::new_v4());
     let clone_path = temp_base.join(&clone_dir_name);
@@ -1146,7 +1199,7 @@ impl CommitVariant {
             CommitVariant::PRTestCommit => "PR test deterministic commit",
         }
     }
-    
+
     /// Get the commit message for this variant
     pub fn commit_message(&self) -> &'static str {
         match self {
@@ -1172,11 +1225,14 @@ impl CommitVariant {
 /// # Returns
 /// * `Ok(String)` - The deterministic commit hash
 /// * `Err(String)` - Error message if commit failed
-pub fn create_deterministic_commit_with_variant(clone_path: &Path, variant: CommitVariant) -> Result<String, String> {
+pub fn create_deterministic_commit_with_variant(
+    clone_path: &Path,
+    variant: CommitVariant,
+) -> Result<String, String> {
     let test_file = clone_path.join("test.txt");
     let content = variant.file_content();
     let message = variant.commit_message();
-    
+
     fs::write(&test_file, content).map_err(|e| format!("Failed to write file: {}", e))?;
 
     let output = Command::new("git")
@@ -1191,11 +1247,7 @@ pub fn create_deterministic_commit_with_variant(clone_path: &Path, variant: Comm
 
     // Create deterministic commit with fixed dates and GPG disabled
     let output = Command::new("git")
-        .args([
-            "-c", "commit.gpgsign=false",
-            "commit",
-            "-m", message,
-        ])
+        .args(["-c", "commit.gpgsign=false", "commit", "-m", message])
         .env("GIT_AUTHOR_DATE", "2024-01-01T00:00:00Z")
         .env("GIT_COMMITTER_DATE", "2024-01-01T00:00:00Z")
         .current_dir(clone_path)

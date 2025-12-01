@@ -14,8 +14,8 @@ use nostr_relay_builder::prelude::*;
 use crate::config::{Config, DatabaseBackend};
 use crate::git;
 use crate::nostr::events::{
-    validate_announcement, validate_state, RepositoryAnnouncement, RepositoryState,
-    KIND_REPOSITORY_ANNOUNCEMENT, KIND_REPOSITORY_STATE,
+    validate_announcement, validate_state, RepositoryAnnouncement, RepositoryState, KIND_PR,
+    KIND_PR_UPDATE, KIND_REPOSITORY_ANNOUNCEMENT, KIND_REPOSITORY_STATE,
 };
 
 /// NIP-34 Write Policy with Full GRASP-01 Event Validation
@@ -36,7 +36,11 @@ pub struct Nip34WritePolicy {
 }
 
 impl Nip34WritePolicy {
-    pub fn new(domain: impl Into<String>, database: Arc<MemoryDatabase>, git_data_path: impl Into<PathBuf>) -> Self {
+    pub fn new(
+        domain: impl Into<String>,
+        database: Arc<MemoryDatabase>,
+        git_data_path: impl Into<PathBuf>,
+    ) -> Self {
         Self {
             domain: domain.into(),
             database,
@@ -48,7 +52,7 @@ impl Nip34WritePolicy {
     /// Path format: <git_data_path>/<npub>/<identifier>.git
     fn ensure_bare_repository(&self, announcement: &RepositoryAnnouncement) -> Result<(), String> {
         let repo_path = self.git_data_path.join(&announcement.repo_path());
-        
+
         // Check if repository already exists
         if repo_path.exists() {
             tracing::debug!("Repository already exists at {}", repo_path.display());
@@ -56,13 +60,12 @@ impl Nip34WritePolicy {
         }
 
         // Create parent directory (npub directory)
-        let parent = repo_path.parent().ok_or_else(|| {
-            format!("Invalid repository path: {}", repo_path.display())
-        })?;
-        
-        std::fs::create_dir_all(parent).map_err(|e| {
-            format!("Failed to create directory {}: {}", parent.display(), e)
-        })?;
+        let parent = repo_path
+            .parent()
+            .ok_or_else(|| format!("Invalid repository path: {}", repo_path.display()))?;
+
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create directory {}: {}", parent.display(), e))?;
 
         // Initialize bare repository using git command
         let output = std::process::Command::new("git")
@@ -165,7 +168,11 @@ impl Nip34WritePolicy {
                             tracing::debug!(
                                 "Found authorized announcement for {}: owner={}, maintainer={}",
                                 identifier,
-                                if is_owner { event.pubkey.to_hex() } else { "n/a".to_string() },
+                                if is_owner {
+                                    event.pubkey.to_hex()
+                                } else {
+                                    "n/a".to_string()
+                                },
                                 is_maintainer
                             );
                             authorized.push(announcement);
@@ -198,10 +205,7 @@ impl Nip34WritePolicy {
         let head_ref = match &state.head {
             Some(h) => h,
             None => {
-                tracing::debug!(
-                    "State event for {} has no HEAD reference",
-                    state.identifier
-                );
+                tracing::debug!("State event for {} has no HEAD reference", state.identifier);
                 return Ok(0);
             }
         };
@@ -232,11 +236,9 @@ impl Nip34WritePolicy {
         };
 
         // Find all announcements where state author is authorized
-        let announcements = Self::find_authorized_announcements(
-            database,
-            &state.identifier,
-            &state.event.pubkey,
-        ).await?;
+        let announcements =
+            Self::find_authorized_announcements(database, &state.identifier, &state.event.pubkey)
+                .await?;
 
         if announcements.is_empty() {
             tracing::debug!(
@@ -271,7 +273,7 @@ impl Nip34WritePolicy {
             }
 
             // Build repository path: <git_data_path>/<owner_npub>/<identifier>.git
-            let repo_path = self.git_data_path.join(&announcement.repo_path());
+            let repo_path = self.git_data_path.join(announcement.repo_path().clone());
 
             match git::try_set_head_if_available(&repo_path, head_ref, head_commit) {
                 Ok(true) => {
@@ -291,11 +293,7 @@ impl Nip34WritePolicy {
                     );
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "Failed to set HEAD in {}: {}",
-                        repo_path.display(),
-                        e
-                    );
+                    tracing::warn!("Failed to set HEAD in {}: {}", repo_path.display(), e);
                 }
             }
         }
@@ -338,6 +336,191 @@ impl Nip34WritePolicy {
         (addressable_refs, event_refs)
     }
 
+    /// Validate refs/nostr/<event-id> ref against a PR or PR Update event's `c` tag
+    ///
+    /// When a PR event (kind 1618) or PR Update event (kind 1619) is received,
+    /// this checks if a corresponding refs/nostr/<event-id> ref exists in the
+    /// repository and validates that it points to the correct commit (from the
+    /// `c` tag). If the ref exists but points to a different commit, the ref is
+    /// deleted.
+    ///
+    /// PR and PR Update events can have multiple `a` tags to update multiple
+    /// repositories simultaneously.
+    ///
+    /// This is part of GRASP-01 compliance: ensuring refs/nostr refs are consistent
+    /// with their corresponding events.
+    ///
+    /// # Arguments
+    /// * `database` - Database for looking up repository announcements
+    /// * `event` - The PR event (kind 1618) or PR Update event (kind 1619)
+    ///
+    /// # Returns
+    /// Ok(Some(n)) if n refs were deleted, Ok(None) if no action taken, Err on failure
+    async fn validate_pr_nostr_ref(
+        &self,
+        database: &Arc<MemoryDatabase>,
+        event: &Event,
+    ) -> Result<Option<usize>, String> {
+        let event_id = event.id.to_hex();
+
+        // Extract the `c` tag (commit hash) from the PR event
+        let expected_commit = event.tags.iter().find_map(|tag| {
+            let tag_vec = tag.clone().to_vec();
+            if tag_vec.len() >= 2 && tag_vec[0] == "c" {
+                Some(tag_vec[1].clone())
+            } else {
+                None
+            }
+        });
+
+        let expected_commit = match expected_commit {
+            Some(c) => c,
+            None => {
+                tracing::debug!(
+                    "PR event {} has no 'c' tag, skipping ref validation",
+                    event_id
+                );
+                return Ok(None);
+            }
+        };
+
+        // Extract ALL `a` tags (repository references) from the PR event
+        // PR events can reference multiple repositories
+        // Format: 30617:<pubkey>:<identifier>
+        let repo_refs: Vec<String> = event
+            .tags
+            .iter()
+            .filter_map(|tag| {
+                let tag_vec = tag.clone().to_vec();
+                if tag_vec.len() >= 2 && tag_vec[0] == "a" && tag_vec[1].starts_with("30617:") {
+                    Some(tag_vec[1].clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if repo_refs.is_empty() {
+            tracing::debug!(
+                "PR event {} has no repo 'a' tags, skipping ref validation",
+                event_id
+            );
+            return Ok(None);
+        }
+
+        let mut deleted_count = 0;
+
+        // Process each repository reference
+        for repo_ref in repo_refs {
+            // Parse the repo reference: 30617:<pubkey>:<identifier>
+            let parts: Vec<&str> = repo_ref.split(':').collect();
+            if parts.len() < 3 {
+                tracing::debug!(
+                    "PR event {} has invalid 'a' tag format: {}",
+                    event_id,
+                    repo_ref
+                );
+                continue;
+            }
+
+            let repo_pubkey = match PublicKey::from_hex(parts[1]) {
+                Ok(pk) => pk,
+                Err(_) => {
+                    tracing::debug!(
+                        "PR event {} has invalid pubkey in 'a' tag: {}",
+                        event_id,
+                        parts[1]
+                    );
+                    continue;
+                }
+            };
+            let identifier = parts[2];
+
+            // Look up repository announcement to get the npub for path
+            let filter = Filter::new()
+                .kind(Kind::from(KIND_REPOSITORY_ANNOUNCEMENT))
+                .author(repo_pubkey)
+                .custom_tag(
+                    SingleLetterTag::lowercase(Alphabet::D),
+                    identifier.to_string(),
+                );
+
+            let announcements: Vec<Event> = match database.query(filter).await {
+                Ok(events) => events.into_iter().collect(),
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to query for repository announcement for PR {}: {}",
+                        event_id,
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            if announcements.is_empty() {
+                tracing::debug!(
+                    "No repository announcement found for PR event {} (repo {}:{})",
+                    event_id,
+                    repo_pubkey.to_hex(),
+                    identifier
+                );
+                continue;
+            }
+
+            // Process each matching announcement (there could be multiple)
+            for announcement_event in announcements {
+                let announcement = match RepositoryAnnouncement::from_event(announcement_event) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to parse announcement for PR {} validation: {}",
+                            event_id,
+                            e
+                        );
+                        continue;
+                    }
+                };
+
+                // Build repository path
+                let repo_path = self.git_data_path.join(&announcement.repo_path());
+
+                // Validate the ref
+                match git::validate_nostr_ref(&repo_path, &event_id, &expected_commit) {
+                    Ok(true) => {
+                        tracing::info!(
+                            "Deleted mismatched refs/nostr/{} in {} (expected commit {})",
+                            event_id,
+                            repo_path.display(),
+                            expected_commit
+                        );
+                        deleted_count += 1;
+                    }
+                    Ok(false) => {
+                        tracing::debug!(
+                            "refs/nostr/{} in {} is valid or doesn't exist",
+                            event_id,
+                            repo_path.display()
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to validate refs/nostr/{} in {}: {}",
+                            event_id,
+                            repo_path.display(),
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        if deleted_count > 0 {
+            Ok(Some(deleted_count))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Check if any addressable events (repositories) exist in database
     /// Returns the first matching addressable reference found, or None if none match
     async fn find_accepted_repository(
@@ -377,16 +560,17 @@ impl Nip34WritePolicy {
         use std::collections::HashMap;
         let mut by_kind: HashMap<u16, Vec<_>> = HashMap::new();
         for (addr, kind, pubkey, identifier) in parsed_refs {
-            by_kind.entry(kind).or_default().push((addr, pubkey, identifier));
+            by_kind
+                .entry(kind)
+                .or_default()
+                .push((addr, pubkey, identifier));
         }
 
         // Query each kind group
         for (kind, refs) in by_kind {
             let authors: Vec<PublicKey> = refs.iter().map(|(_, pk, _)| *pk).collect();
-            
-            let filter = Filter::new()
-                .kind(Kind::from(kind))
-                .authors(authors);
+
+            let filter = Filter::new().kind(Kind::from(kind)).authors(authors);
 
             match database.query(filter).await {
                 Ok(events) => {
@@ -445,7 +629,7 @@ impl Nip34WritePolicy {
         event: &Event,
     ) -> Result<bool, String> {
         let kind_u16 = event.kind.as_u16();
-        
+
         // Check if this is any kind of replaceable event
         let is_regular_replaceable = kind_u16 >= 10000 && kind_u16 < 20000;
         let is_parameterized_replaceable = kind_u16 >= 30000 && kind_u16 < 40000;
@@ -454,7 +638,9 @@ impl Nip34WritePolicy {
             // Build the appropriate address format based on event type
             let address = if is_parameterized_replaceable {
                 // For parameterized replaceable: kind:pubkey:d-identifier format (2 colons)
-                let identifier = event.tags.iter()
+                let identifier = event
+                    .tags
+                    .iter()
                     .find_map(|tag| {
                         let tag_vec = tag.clone().to_vec();
                         if tag_vec.len() >= 2 && tag_vec[0] == "d" {
@@ -464,12 +650,17 @@ impl Nip34WritePolicy {
                         }
                     })
                     .unwrap_or_default(); // Empty string if no 'd' tag
-                format!("{}:{}:{}", event.kind.as_u16(), event.pubkey.to_hex(), identifier)
+                format!(
+                    "{}:{}:{}",
+                    event.kind.as_u16(),
+                    event.pubkey.to_hex(),
+                    identifier
+                )
             } else {
                 // For regular replaceable: kind:pubkey format (1 colon)
                 format!("{}:{}", event.kind.as_u16(), event.pubkey.to_hex())
             };
-            
+
             // Check addressable reference tags: a, A, q (with address format)
             let addressable_tags = [
                 SingleLetterTag::lowercase(Alphabet::A), // 'a' - addressable event reference
@@ -479,7 +670,7 @@ impl Nip34WritePolicy {
 
             for tag_type in &addressable_tags {
                 let filter = Filter::new().custom_tag(tag_type.clone(), address.clone());
-                
+
                 match database.query(filter).await {
                     Ok(events) => {
                         if !events.is_empty() {
@@ -492,7 +683,7 @@ impl Nip34WritePolicy {
         } else {
             // For regular events, check event ID reference tags: e, E, q (with hex ID)
             let event_id_hex = event.id.to_hex();
-            
+
             let event_id_tags = [
                 SingleLetterTag::lowercase(Alphabet::E), // 'e' - standard event reference
                 SingleLetterTag::uppercase(Alphabet::E), // 'E' - NIP-22 root event reference
@@ -501,7 +692,7 @@ impl Nip34WritePolicy {
 
             for tag_type in &event_id_tags {
                 let filter = Filter::new().custom_tag(tag_type.clone(), event_id_hex.clone());
-                
+
                 match database.query(filter).await {
                     Ok(events) => {
                         if !events.is_empty() {
@@ -545,7 +736,7 @@ impl WritePolicy for Nip34WritePolicy {
                                     // Note: We still accept the event even if repo creation fails
                                     // The git operation failure shouldn't prevent event acceptance
                                 }
-                                
+
                                 tracing::debug!(
                                     "Accepted repository announcement: {}",
                                     event_id_str
@@ -563,11 +754,7 @@ impl WritePolicy for Nip34WritePolicy {
                         }
                     }
                     Err(e) => {
-                        tracing::warn!(
-                            "Rejected repository announcement {}: {}",
-                            event_id_str,
-                            e
-                        );
+                        tracing::warn!("Rejected repository announcement {}: {}", event_id_str, e);
                         PolicyResult::Reject(e.to_string())
                     }
                 },
@@ -577,7 +764,10 @@ impl WritePolicy for Nip34WritePolicy {
                         match RepositoryState::from_event(event.clone()) {
                             Ok(state) => {
                                 // Try to set HEAD for all authorized repos if this is the latest state
-                                match self.try_set_head_for_authorized_repos(&database, &state).await {
+                                match self
+                                    .try_set_head_for_authorized_repos(&database, &state)
+                                    .await
+                                {
                                     Ok(count) if count > 0 => {
                                         tracing::info!(
                                             "Set HEAD from state event {} for {} repo(s) with identifier {}",
@@ -600,11 +790,8 @@ impl WritePolicy for Nip34WritePolicy {
                                         );
                                     }
                                 }
-                                
-                                tracing::debug!(
-                                    "Accepted repository state: {}",
-                                    event_id_str
-                                );
+
+                                tracing::debug!("Accepted repository state: {}", event_id_str);
                                 PolicyResult::Accept
                             }
                             Err(e) => {
@@ -620,14 +807,104 @@ impl WritePolicy for Nip34WritePolicy {
                         }
                     }
                     Err(e) => {
-                        tracing::warn!(
-                            "Rejected repository state {}: {}",
-                            event_id_str,
-                            e
-                        );
+                        tracing::warn!("Rejected repository state {}: {}", event_id_str, e);
                         PolicyResult::Reject(e.to_string())
                     }
                 },
+                // KIND_PR (1618) and KIND_PR_UPDATE (1619): Validate refs/nostr/<event-id> refs before acceptance
+                KIND_PR | KIND_PR_UPDATE => {
+                    // Validate refs/nostr refs for this PR event
+                    // This deletes any refs/nostr/<event-id> that points to wrong commit
+                    if let Err(e) = self.validate_pr_nostr_ref(&database, event).await {
+                        tracing::warn!(
+                            "Failed to validate refs/nostr for PR event {}: {}",
+                            event_id_str,
+                            e
+                        );
+                        // Don't reject - just log the error and proceed with normal validation
+                    }
+
+                    // Continue with standard reference checking (same as default case)
+                    let (addressable_refs, event_refs) = Self::extract_reference_tags(event);
+
+                    // Check 1: Does this event reference an accepted repository?
+                    match Self::find_accepted_repository(&database, &addressable_refs).await {
+                        Ok(Some(addr_ref)) => {
+                            tracing::debug!(
+                                "Accepted PR event {}: references accepted repository {}",
+                                event_id_str,
+                                addr_ref
+                            );
+                            return PolicyResult::Accept;
+                        }
+                        Ok(None) => {
+                            // No matching repositories, continue to next check
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Database query failed for PR {}, rejecting (fail-secure): {}",
+                                event_id_str,
+                                e
+                            );
+                            return PolicyResult::Reject(format!("Database query failed: {}", e));
+                        }
+                    }
+
+                    // Check 2: Does this event reference an accepted event?
+                    match Self::find_accepted_event(&database, &event_refs).await {
+                        Ok(Some(event_ref)) => {
+                            tracing::debug!(
+                                "Accepted PR event {}: references accepted event {}",
+                                event_id_str,
+                                event_ref
+                            );
+                            return PolicyResult::Accept;
+                        }
+                        Ok(None) => {
+                            // No matching events, continue to next check
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Database query failed for PR {}, rejecting (fail-secure): {}",
+                                event_id_str,
+                                e
+                            );
+                            return PolicyResult::Reject(format!("Database query failed: {}", e));
+                        }
+                    }
+
+                    // Check 3: Is this event referenced by an accepted event?
+                    match Self::is_referenced_by_accepted(&database, event).await {
+                        Ok(true) => {
+                            tracing::debug!(
+                                "Accepted PR event {}: referenced by accepted event",
+                                event_id_str
+                            );
+                            return PolicyResult::Accept;
+                        }
+                        Ok(false) => {
+                            // No forward references found, continue to rejection
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Database query failed for PR {}, rejecting (fail-secure): {}",
+                                event_id_str,
+                                e
+                            );
+                            return PolicyResult::Reject(format!("Database query failed: {}", e));
+                        }
+                    }
+
+                    // No valid references found - reject as orphan event
+                    tracing::info!(
+                        "Rejected orphan PR event {}: no references to accepted repos or events",
+                        event_id_str
+                    );
+                    PolicyResult::Reject(
+                        "PR event must reference an accepted repository or accepted event"
+                            .to_string(),
+                    )
+                }
                 // GRASP-01: Check if event references accepted repositories or events
                 _ => {
                     // Extract all reference tags from event
@@ -709,7 +986,7 @@ impl WritePolicy for Nip34WritePolicy {
                         event_refs.len()
                     );
                     PolicyResult::Reject(
-                        "Event must reference an accepted repository or accepted event".to_string()
+                        "Event must reference an accepted repository or accepted event".to_string(),
                     )
                 }
             }

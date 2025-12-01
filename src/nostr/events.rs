@@ -15,6 +15,12 @@ pub const KIND_REPOSITORY_ANNOUNCEMENT: u16 = 30617;
 /// NIP-34 Repository State Announcement (kind 30618)
 pub const KIND_REPOSITORY_STATE: u16 = 30618;
 
+/// NIP-34 Pull Request (kind 1618) - has `c` tag for commit
+pub const KIND_PR: u16 = 1618;
+
+/// NIP-34 Pull Request Update (kind 1619) - has `c` tag for commit
+pub const KIND_PR_UPDATE: u16 = 1619;
+
 /// Repository announcement details extracted from NIP-34 event
 #[derive(Debug, Clone)]
 pub struct RepositoryAnnouncement {

@@ -35,7 +35,8 @@ use std::sync::Arc;
 use tracing::debug;
 
 use crate::nostr::events::{
-    RepositoryAnnouncement, RepositoryState, KIND_REPOSITORY_ANNOUNCEMENT, KIND_REPOSITORY_STATE,
+    RepositoryAnnouncement, RepositoryState, KIND_PR, KIND_PR_UPDATE, KIND_REPOSITORY_ANNOUNCEMENT,
+    KIND_REPOSITORY_STATE,
 };
 
 /// Repository data fetched from the database
@@ -172,9 +173,9 @@ fn get_maintainers_recursive(
     checked.insert(pubkey.to_string()); // Mark as checked
 
     // Find the announcement event for this pubkey+identifier
-    let announcement = announcements.iter().find(|a| {
-        a.event.pubkey.to_hex() == pubkey && a.identifier == identifier
-    });
+    let announcement = announcements
+        .iter()
+        .find(|a| a.event.pubkey.to_hex() == pubkey && a.identifier == identifier);
 
     let Some(announcement) = announcement else {
         return; // No announcement found for this pubkey
@@ -195,19 +196,19 @@ pub fn collect_all_authorized_maintainers(
 ) -> HashSet<String> {
     let by_owner = collect_authorized_maintainers(announcements);
     let mut all_authorized = HashSet::new();
-    
+
     for maintainers in by_owner.values() {
         for maintainer in maintainers {
             all_authorized.insert(maintainer.clone());
         }
     }
-    
+
     debug!(
         "Collected {} total authorized maintainers from {} owners",
         all_authorized.len(),
         by_owner.len()
     );
-    
+
     all_authorized
 }
 
@@ -601,10 +602,7 @@ pub fn validate_push_refs(
     pushed_refs: &[(String, String, String)], // (old_oid, new_oid, ref_name)
 ) -> Result<()> {
     for (old_oid, new_oid, ref_name) in pushed_refs {
-        debug!(
-            "Validating push: {} {} -> {}",
-            ref_name, old_oid, new_oid
-        );
+        debug!("Validating push: {} {} -> {}", ref_name, old_oid, new_oid);
 
         // Handle branch updates
         if let Some(branch_name) = ref_name.strip_prefix("refs/heads/") {
@@ -657,7 +655,10 @@ pub fn validate_push_refs(
                     ));
                 }
                 // Valid EventId format - allow push (skip state event check)
-                debug!("refs/nostr/{} push authorized (valid EventId)", event_id_str);
+                debug!(
+                    "refs/nostr/{} push authorized (valid EventId)",
+                    event_id_str
+                );
                 continue; // Skip the rest of ref validation for this ref
             } else {
                 return Err(anyhow!("Invalid refs/nostr/ format: {}", ref_name));
@@ -805,6 +806,119 @@ pub fn npub_to_pubkey(npub: &str) -> Result<String> {
     Ok(pk.to_hex())
 }
 
+/// Fetch an event by ID from the database and extract the `c` tag commit hash
+///
+/// This is used for validating pushes to refs/nostr/<event-id>. Per GRASP-01,
+/// if a PR or PR Update event with this ID exists in the database, the pushed
+/// commit must match the commit in the event's `c` tag.
+///
+/// # Returns
+/// - `Ok(Some(commit))` if the event exists and has a valid `c` tag
+/// - `Ok(None)` if the event doesn't exist (push should be allowed)
+/// - `Err(_)` on database errors
+pub async fn get_event_commit_tag(
+    database: &Arc<MemoryDatabase>,
+    event_id: &EventId,
+) -> Result<Option<String>> {
+    // Query for PR (1618) and PR Update (1619) events with this ID
+    let filter = Filter::new()
+        .ids([*event_id])
+        .kinds([Kind::from(KIND_PR), Kind::from(KIND_PR_UPDATE)]);
+
+    let events: Vec<Event> = database
+        .query(filter)
+        .await
+        .map_err(|e| anyhow!("Database query failed: {}", e))?
+        .into_iter()
+        .collect();
+
+    if events.is_empty() {
+        debug!("No PR/PR Update event found with ID {}", event_id);
+        return Ok(None);
+    }
+
+    // Get the first (should be only) event
+    let event = &events[0];
+
+    // Extract the `c` tag (commit hash)
+    // Per NIP-34, PR events have a `c` tag with the head commit
+    let commit = event
+        .tags
+        .iter()
+        .find(|tag| tag.as_slice().first().map(|s| s.as_str()) == Some("c"))
+        .and_then(|tag| tag.as_slice().get(1).map(|s| s.to_string()));
+
+    debug!(
+        "Found PR event {} with commit tag: {:?}",
+        event_id,
+        commit.as_ref()
+    );
+
+    Ok(commit)
+}
+
+/// Validate refs/nostr/ pushes against existing PR/PR Update events
+///
+/// For each ref being pushed to refs/nostr/<event-id>:
+/// 1. Validate the event ID format (error if invalid)
+/// 2. Check if a corresponding event exists in the database
+/// 3. If event exists, verify the pushed commit matches the `c` tag
+///
+/// # Arguments
+/// * `database` - The nostr database to query
+/// * `pushed_refs` - List of (old_oid, new_oid, ref_name) tuples
+///
+/// # Returns
+/// * `Ok(())` if all refs/nostr/ pushes are valid
+/// * `Err(_)` if any ref has invalid event ID format or fails commit validation
+pub async fn validate_nostr_ref_pushes(
+    database: &Arc<MemoryDatabase>,
+    pushed_refs: &[(String, String, String)],
+) -> Result<()> {
+    for (_, new_oid, ref_name) in pushed_refs {
+        // Only check refs/nostr/ refs
+        if let Some(event_id_str) = ref_name.strip_prefix("refs/nostr/") {
+            // Parse the event ID - error on invalid format
+            let event_id = EventId::parse(event_id_str).map_err(|_| {
+                anyhow!(
+                    "Invalid event ID format '{}' in ref: {}",
+                    event_id_str,
+                    ref_name
+                )
+            })?;
+
+            // Check if event exists and get commit tag
+            match get_event_commit_tag(database, &event_id).await? {
+                Some(expected_commit) => {
+                    // Event exists - verify commit matches
+                    if new_oid != &expected_commit {
+                        return Err(anyhow!(
+                            "Push to {} rejected: event {} specifies commit {}, but push contains {}",
+                            ref_name,
+                            event_id_str,
+                            expected_commit,
+                            new_oid
+                        ));
+                    }
+                    debug!(
+                        "Push to {} validated: commit {} matches event's c tag",
+                        ref_name, new_oid
+                    );
+                }
+                None => {
+                    // No event exists yet - allow push
+                    debug!(
+                        "Push to {} allowed: no PR/PR Update event with ID {} found yet",
+                        ref_name, event_id_str
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -920,7 +1034,7 @@ mod tests {
         let eve = create_test_keys(); // Not authorized
         let identifier = "test-repo";
 
-        // Alice lists Bob as maintainer  
+        // Alice lists Bob as maintainer
         let alice_announcement = create_announcement_event(&alice, identifier, &[&bob]);
 
         let events = vec![alice_announcement];

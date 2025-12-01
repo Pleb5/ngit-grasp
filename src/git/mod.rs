@@ -40,7 +40,7 @@ use tracing::{debug, info};
 pub fn resolve_repo_path(git_data_path: &str, npub: &str, identifier: &str) -> PathBuf {
     // Remove .git suffix if present
     let identifier = identifier.strip_suffix(".git").unwrap_or(identifier);
-    
+
     PathBuf::from(git_data_path)
         .join(npub)
         .join(format!("{}.git", identifier))
@@ -89,7 +89,10 @@ pub fn commit_exists(repo_path: &Path, commit_hash: &str) -> bool {
 pub fn set_repository_head(repo_path: &Path, head_ref: &str) -> Result<(), String> {
     // Validate the ref format
     if !head_ref.starts_with("refs/heads/") {
-        return Err(format!("Invalid HEAD ref: {} (must start with refs/heads/)", head_ref));
+        return Err(format!(
+            "Invalid HEAD ref: {} (must start with refs/heads/)",
+            head_ref
+        ));
     }
 
     debug!("Setting HEAD to {} in {}", head_ref, repo_path.display());
@@ -130,7 +133,10 @@ pub fn try_set_head_if_available(
 ) -> Result<bool, String> {
     // Check if repository exists
     if !repo_path.exists() {
-        debug!("Repository not found at {}, cannot set HEAD", repo_path.display());
+        debug!(
+            "Repository not found at {}, cannot set HEAD",
+            repo_path.display()
+        );
         return Ok(false);
     }
 
@@ -146,6 +152,115 @@ pub fn try_set_head_if_available(
 
     // Commit exists, set HEAD
     set_repository_head(repo_path, head_ref)?;
+    Ok(true)
+}
+
+/// Get the commit hash that a ref points to
+///
+/// # Arguments
+/// * `repo_path` - Path to the bare git repository
+/// * `ref_name` - The ref name (e.g., "refs/nostr/<event-id>")
+///
+/// # Returns
+/// Some(commit_hash) if the ref exists, None otherwise
+pub fn get_ref_commit(repo_path: &Path, ref_name: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", ref_name])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        None
+    }
+}
+
+/// Delete a git ref from the repository
+///
+/// # Arguments
+/// * `repo_path` - Path to the bare git repository
+/// * `ref_name` - The ref name to delete (e.g., "refs/nostr/<event-id>")
+///
+/// # Returns
+/// Ok(()) if successful, Err with error message otherwise
+pub fn delete_ref(repo_path: &Path, ref_name: &str) -> Result<(), String> {
+    debug!("Deleting ref {} from {}", ref_name, repo_path.display());
+
+    let output = Command::new("git")
+        .args(["update-ref", "-d", ref_name])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to execute git update-ref: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git update-ref -d failed: {}", stderr));
+    }
+
+    info!("Deleted ref {} from {}", ref_name, repo_path.display());
+    Ok(())
+}
+
+/// Validate refs/nostr/<event-id> ref against expected commit
+///
+/// If the ref exists but points to a different commit than expected,
+/// the ref is deleted. This is called when a PR event is received to
+/// ensure refs/nostr refs are consistent with their corresponding events.
+///
+/// # Arguments
+/// * `repo_path` - Path to the bare git repository
+/// * `event_id` - The event ID (hex string)
+/// * `expected_commit` - The commit hash from the event's `c` tag
+///
+/// # Returns
+/// Ok(true) if ref was deleted (mismatch), Ok(false) if no action taken, Err on failure
+pub fn validate_nostr_ref(
+    repo_path: &Path,
+    event_id: &str,
+    expected_commit: &str,
+) -> Result<bool, String> {
+    let ref_name = format!("refs/nostr/{}", event_id);
+
+    // Check if repository exists
+    if !repo_path.exists() {
+        debug!(
+            "Repository not found at {}, skipping ref validation",
+            repo_path.display()
+        );
+        return Ok(false);
+    }
+
+    // Check if the ref exists
+    let current_commit = match get_ref_commit(repo_path, &ref_name) {
+        Some(commit) => commit,
+        None => {
+            debug!("Ref {} does not exist in {}", ref_name, repo_path.display());
+            return Ok(false);
+        }
+    };
+
+    // Compare commits
+    if current_commit == expected_commit {
+        debug!(
+            "Ref {} points to correct commit {} in {}",
+            ref_name,
+            expected_commit,
+            repo_path.display()
+        );
+        return Ok(false);
+    }
+
+    // Commit mismatch - delete the ref
+    info!(
+        "Deleting mismatched ref {} in {}: expected {}, found {}",
+        ref_name,
+        repo_path.display(),
+        expected_commit,
+        current_commit
+    );
+    delete_ref(repo_path, &ref_name)?;
     Ok(true)
 }
 
@@ -178,25 +293,25 @@ pub fn get_repository_head(repo_path: &Path) -> Option<String> {
 pub fn parse_git_url(path: &str) -> Option<(&str, &str, &str)> {
     // Remove leading slash
     let path = path.strip_prefix('/').unwrap_or(path);
-    
+
     // Split into components
     let parts: Vec<&str> = path.splitn(3, '/').collect();
-    
+
     if parts.len() < 3 {
         return None;
     }
-    
+
     let npub = parts[0];
     let repo_part = parts[1];
     let subpath = parts[2];
-    
+
     // Extract identifier (remove .git suffix if present for the middle part)
     let identifier = if repo_part.ends_with(".git") {
         &repo_part[..repo_part.len() - 4]
     } else {
         repo_part
     };
-    
+
     Some((npub, identifier, subpath))
 }
 
@@ -210,13 +325,13 @@ mod tests {
     fn create_test_repo() -> (TempDir, PathBuf) {
         let temp_dir = TempDir::new().unwrap();
         let repo_path = temp_dir.path().join("test.git");
-        
+
         // Initialize bare repository
         Command::new("git")
             .args(["init", "--bare", repo_path.to_str().unwrap()])
             .output()
             .unwrap();
-        
+
         (temp_dir, repo_path)
     }
 
@@ -225,19 +340,23 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let work_dir = temp_dir.path().join("work");
         let bare_repo = temp_dir.path().join("test.git");
-        
+
         // Initialize bare repository
         Command::new("git")
-            .args(["init", "--bare", bare_repo.to_str().unwrap()])
+            .args(["init", "--bare", "--initial-branch=main", bare_repo.to_str().unwrap()])
             .output()
             .unwrap();
-        
+
         // Clone to working directory
         Command::new("git")
-            .args(["clone", bare_repo.to_str().unwrap(), work_dir.to_str().unwrap()])
+            .args([
+                "clone",
+                bare_repo.to_str().unwrap(),
+                work_dir.to_str().unwrap(),
+            ])
             .output()
             .unwrap();
-        
+
         // Configure git for commits
         Command::new("git")
             .args(["config", "user.email", "test@test.com"])
@@ -249,7 +368,7 @@ mod tests {
             .current_dir(&work_dir)
             .output()
             .unwrap();
-        
+
         // Create a file and commit
         fs::write(work_dir.join("README.md"), "# Test").unwrap();
         Command::new("git")
@@ -262,7 +381,7 @@ mod tests {
             .current_dir(&work_dir)
             .output()
             .unwrap();
-        
+
         // Get commit hash
         let output = Command::new("git")
             .args(["rev-parse", "HEAD"])
@@ -270,41 +389,27 @@ mod tests {
             .output()
             .unwrap();
         let commit_hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        
+
         // Push to bare repo
         Command::new("git")
-            .args(["push", "origin", "master"])
+            .args(["push", "origin", "main"])
             .current_dir(&work_dir)
             .output()
             .unwrap();
-        
+
         (temp_dir, bare_repo, commit_hash)
     }
 
     #[test]
     fn test_resolve_repo_path() {
-        let path = resolve_repo_path(
-            "/data/git",
-            "npub1abc123",
-            "my-repo"
-        );
-        assert_eq!(
-            path,
-            PathBuf::from("/data/git/npub1abc123/my-repo.git")
-        );
+        let path = resolve_repo_path("/data/git", "npub1abc123", "my-repo");
+        assert_eq!(path, PathBuf::from("/data/git/npub1abc123/my-repo.git"));
     }
 
     #[test]
     fn test_resolve_repo_path_with_git_suffix() {
-        let path = resolve_repo_path(
-            "/data/git",
-            "npub1abc123",
-            "my-repo.git"
-        );
-        assert_eq!(
-            path,
-            PathBuf::from("/data/git/npub1abc123/my-repo.git")
-        );
+        let path = resolve_repo_path("/data/git", "npub1abc123", "my-repo.git");
+        assert_eq!(path, PathBuf::from("/data/git/npub1abc123/my-repo.git"));
     }
 
     #[test]
@@ -332,7 +437,10 @@ mod tests {
     #[test]
     fn test_commit_exists_nonexistent() {
         let (_temp_dir, repo_path) = create_test_repo();
-        assert!(!commit_exists(&repo_path, "deadbeef1234567890abcdef1234567890abcdef"));
+        assert!(!commit_exists(
+            &repo_path,
+            "deadbeef1234567890abcdef1234567890abcdef"
+        ));
     }
 
     #[test]
@@ -344,11 +452,11 @@ mod tests {
     #[test]
     fn test_set_repository_head() {
         let (_temp_dir, repo_path, _commit_hash) = create_test_repo_with_commit();
-        
+
         // Default HEAD might be refs/heads/master
         let result = set_repository_head(&repo_path, "refs/heads/main");
         assert!(result.is_ok());
-        
+
         let head = get_repository_head(&repo_path);
         assert_eq!(head, Some("refs/heads/main".to_string()));
     }
@@ -356,7 +464,7 @@ mod tests {
     #[test]
     fn test_set_repository_head_invalid_ref() {
         let (_temp_dir, repo_path) = create_test_repo();
-        
+
         // Invalid ref format should fail
         let result = set_repository_head(&repo_path, "main");
         assert!(result.is_err());
@@ -366,13 +474,13 @@ mod tests {
     #[test]
     fn test_try_set_head_if_available_commit_missing() {
         let (_temp_dir, repo_path) = create_test_repo();
-        
+
         let result = try_set_head_if_available(
             &repo_path,
             "refs/heads/main",
             "deadbeef1234567890abcdef1234567890abcdef",
         );
-        
+
         // Should return Ok(false) - commit not found
         assert!(result.is_ok());
         assert!(!result.unwrap());
@@ -381,17 +489,13 @@ mod tests {
     #[test]
     fn test_try_set_head_if_available_success() {
         let (_temp_dir, repo_path, commit_hash) = create_test_repo_with_commit();
-        
-        let result = try_set_head_if_available(
-            &repo_path,
-            "refs/heads/main",
-            &commit_hash,
-        );
-        
+
+        let result = try_set_head_if_available(&repo_path, "refs/heads/main", &commit_hash);
+
         // Should return Ok(true) - HEAD was set
         assert!(result.is_ok());
         assert!(result.unwrap());
-        
+
         // Verify HEAD was set
         let head = get_repository_head(&repo_path);
         assert_eq!(head, Some("refs/heads/main".to_string()));

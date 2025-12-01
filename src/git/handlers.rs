@@ -2,17 +2,18 @@
 //!
 //! This module implements the HTTP handlers for Git Smart HTTP protocol.
 
-use std::path::PathBuf;
-use std::sync::Arc;
-use hyper::{body::Bytes, Response, StatusCode};
 use http_body_util::Full;
+use hyper::{body::Bytes, Response, StatusCode};
 use nostr_relay_builder::prelude::MemoryDatabase;
 use nostr_sdk::EventId;
+use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, info, warn};
 
 use super::authorization::{
-    get_authorization_for_owner, parse_pushed_refs, validate_push_refs, AuthorizationResult,
+    get_authorization_for_owner, parse_pushed_refs, validate_nostr_ref_pushes, validate_push_refs,
+    AuthorizationResult,
 };
 use super::protocol::{GitService, PktLine};
 use super::subprocess::GitSubprocess;
@@ -27,7 +28,10 @@ pub async fn handle_info_refs(
     repo_path: PathBuf,
     service: GitService,
 ) -> Result<Response<Full<Bytes>>, GitError> {
-    debug!("Handling info/refs for {:?} with service {:?}", repo_path, service);
+    debug!(
+        "Handling info/refs for {:?} with service {:?}",
+        repo_path, service
+    );
 
     // Check if repository exists
     if !repo_path.exists() {
@@ -36,55 +40,54 @@ pub async fn handle_info_refs(
     }
 
     // Spawn git with --advertise-refs
-    let mut git = GitSubprocess::spawn(service, &repo_path, true)
-        .map_err(|e| {
-            error!("Failed to spawn git process: {}", e);
-            GitError::ProcessSpawnFailed(e)
-        })?;
+    let mut git = GitSubprocess::spawn(service, &repo_path, true).map_err(|e| {
+        error!("Failed to spawn git process: {}", e);
+        GitError::ProcessSpawnFailed(e)
+    })?;
 
     // Read the output from git
     let mut output = Vec::new();
     let mut stderr_output = Vec::new();
-    
+
     if let Some(stdout) = git.take_stdout() {
         let mut stdout = stdout;
-        stdout.read_to_end(&mut output).await
-            .map_err(|e| {
-                error!("Failed to read git output: {}", e);
-                GitError::IoError(e)
-            })?;
+        stdout.read_to_end(&mut output).await.map_err(|e| {
+            error!("Failed to read git output: {}", e);
+            GitError::IoError(e)
+        })?;
     }
-    
+
     if let Some(stderr) = git.take_stderr() {
         let mut stderr = stderr;
-        stderr.read_to_end(&mut stderr_output).await
-            .map_err(|e| {
-                error!("Failed to read git stderr: {}", e);
-                GitError::IoError(e)
-            })?;
+        stderr.read_to_end(&mut stderr_output).await.map_err(|e| {
+            error!("Failed to read git stderr: {}", e);
+            GitError::IoError(e)
+        })?;
     }
 
     // Wait for process to complete
-    let status = git.wait().await
-        .map_err(|e| {
-            error!("Failed to wait for git process: {}", e);
-            GitError::IoError(e)
-        })?;
+    let status = git.wait().await.map_err(|e| {
+        error!("Failed to wait for git process: {}", e);
+        GitError::IoError(e)
+    })?;
 
     if !status.success() {
         let stderr_str = String::from_utf8_lossy(&stderr_output);
-        error!("Git process failed with status: {:?}, stderr: {}", status, stderr_str);
+        error!(
+            "Git process failed with status: {:?}, stderr: {}",
+            status, stderr_str
+        );
         return Err(GitError::GitFailed(status.code()));
     }
 
     // Build response with pkt-line header
     let mut response_body = Vec::new();
-    
+
     // First line: service advertisement
     let service_line = format!("# service={}\n", service.as_str());
     response_body.extend_from_slice(&PktLine::data(service_line.as_bytes()).encode());
     response_body.extend_from_slice(&PktLine::flush().encode());
-    
+
     // Then the git output
     response_body.extend_from_slice(&output);
 
@@ -113,7 +116,9 @@ pub async fn handle_upload_pack(
 
     // Write request to git's stdin
     if let Some(mut stdin) = git.take_stdin() {
-        stdin.write_all(&request_body).await
+        stdin
+            .write_all(&request_body)
+            .await
             .map_err(GitError::IoError)?;
         // Close stdin to signal end of input
         drop(stdin);
@@ -122,22 +127,25 @@ pub async fn handle_upload_pack(
     // Read response from git's stdout
     let mut output = Vec::new();
     let mut stderr_output = Vec::new();
-    
+
     if let Some(stdout) = git.take_stdout() {
         let mut stdout = stdout;
-        stdout.read_to_end(&mut output).await
+        stdout
+            .read_to_end(&mut output)
+            .await
             .map_err(GitError::IoError)?;
     }
-    
+
     if let Some(stderr) = git.take_stderr() {
         let mut stderr = stderr;
-        stderr.read_to_end(&mut stderr_output).await
+        stderr
+            .read_to_end(&mut stderr_output)
+            .await
             .map_err(GitError::IoError)?;
     }
 
     // Wait for process
-    let status = git.wait().await
-        .map_err(GitError::IoError)?;
+    let status = git.wait().await.map_err(GitError::IoError)?;
 
     if !status.success() {
         let stderr_str = String::from_utf8_lossy(&stderr_output);
@@ -194,10 +202,7 @@ pub async fn handle_receive_pack(
         match authorize_push(db, identifier, owner_pubkey, &request_body).await {
             Ok(auth_result) => {
                 if !auth_result.authorized {
-                    warn!(
-                        "Push rejected for {}: {}",
-                        identifier, auth_result.reason
-                    );
+                    warn!("Push rejected for {}: {}", identifier, auth_result.reason);
                     return Err(GitError::Unauthorized);
                 }
                 info!(
@@ -209,10 +214,7 @@ pub async fn handle_receive_pack(
                 authorized_state = auth_result.state;
             }
             Err(e) => {
-                warn!(
-                    "Authorization check failed for {}: {}",
-                    identifier, e
-                );
+                warn!("Authorization check failed for {}: {}", identifier, e);
                 return Err(GitError::Unauthorized);
             }
         }
@@ -226,7 +228,9 @@ pub async fn handle_receive_pack(
 
     // Write request to git's stdin
     if let Some(mut stdin) = git.take_stdin() {
-        stdin.write_all(&request_body).await
+        stdin
+            .write_all(&request_body)
+            .await
             .map_err(GitError::IoError)?;
         drop(stdin);
     }
@@ -234,22 +238,25 @@ pub async fn handle_receive_pack(
     // Read response from git's stdout
     let mut output = Vec::new();
     let mut stderr_output = Vec::new();
-    
+
     if let Some(stdout) = git.take_stdout() {
         let mut stdout = stdout;
-        stdout.read_to_end(&mut output).await
+        stdout
+            .read_to_end(&mut output)
+            .await
             .map_err(GitError::IoError)?;
     }
-    
+
     if let Some(stderr) = git.take_stderr() {
         let mut stderr = stderr;
-        stderr.read_to_end(&mut stderr_output).await
+        stderr
+            .read_to_end(&mut stderr_output)
+            .await
             .map_err(GitError::IoError)?;
     }
 
     // Wait for process
-    let status = git.wait().await
-        .map_err(GitError::IoError)?;
+    let status = git.wait().await.map_err(GitError::IoError)?;
 
     if !status.success() {
         let stderr_str = String::from_utf8_lossy(&stderr_output);
@@ -266,10 +273,7 @@ pub async fn handle_receive_pack(
                 if let Some(commit) = state.get_branch_commit(branch_name) {
                     match try_set_head_if_available(&repo_path, head_ref, commit) {
                         Ok(true) => {
-                            info!(
-                                "Set HEAD to {} after push to {:?}",
-                                head_ref, repo_path
-                            );
+                            info!("Set HEAD to {} after push to {:?}", head_ref, repo_path);
                         }
                         Ok(false) => {
                             debug!(
@@ -278,10 +282,7 @@ pub async fn handle_receive_pack(
                             );
                         }
                         Err(e) => {
-                            warn!(
-                                "Failed to set HEAD after push: {}",
-                                e
-                            );
+                            warn!("Failed to set HEAD after push: {}", e);
                         }
                     }
                 }
@@ -291,7 +292,10 @@ pub async fn handle_receive_pack(
 
     Ok(Response::builder()
         .status(StatusCode::OK)
-        .header("content-type", GitService::ReceivePack.result_content_type())
+        .header(
+            "content-type",
+            GitService::ReceivePack.result_content_type(),
+        )
         .header("cache-control", "no-cache")
         .body(Full::new(Bytes::from(output)))
         .unwrap())
@@ -305,6 +309,7 @@ pub async fn handle_receive_pack(
 /// 3. Collects authorized publishers from that announcement (owner + maintainers)
 /// 4. Gets the latest authorized state from those publishers
 /// 5. Validates that pushed refs match the state
+/// 6. Validates refs/nostr/<event-id> has valid event id and if event exists, `c` tag matches ref
 async fn authorize_push(
     database: &Arc<MemoryDatabase>,
     identifier: &str,
@@ -323,59 +328,79 @@ async fn authorize_push(
         debug!("  {} {} -> {}", ref_name, old_oid, new_oid);
     }
 
-    // Check if ALL pushed refs are to refs/nostr/ with valid EventId format
+    // Separate refs/nostr/ refs from other refs
     // Per GRASP-01: "MUST accept pushes via this service to `refs/nostr/<event-id>`"
-    // These pushes only require EventId format validation, not state validation
-    let all_refs_nostr_valid = !pushed_refs.is_empty()
-        && pushed_refs.iter().all(|(_, _, ref_name)| {
-            if let Some(event_id_str) = ref_name.strip_prefix("refs/nostr/") {
-                // Validate it parses as a valid EventId
-                EventId::parse(event_id_str).is_ok()
-            } else {
-                false
-            }
-        });
-    
-    if all_refs_nostr_valid {
-        debug!("All refs are refs/nostr/ with valid EventId format - authorized without state check");
-        // Return success for refs/nostr/ pushes without requiring state
+    let (nostr_refs, other_refs): (Vec<_>, Vec<_>) = pushed_refs
+        .iter()
+        .partition(|(_, _, ref_name)| ref_name.starts_with("refs/nostr/"));
+
+    // Validate refs/nostr/ refs if any exist
+    if !nostr_refs.is_empty() {
+        debug!(
+            "Found {} refs/nostr/ refs - validating against events",
+            nostr_refs.len()
+        );
+
+        // Validate refs/nostr/ pushes: checks event ID format and commit matching
+        let nostr_refs_owned: Vec<(String, String, String)> = nostr_refs
+            .into_iter()
+            .map(|(a, b, c)| (a.clone(), b.clone(), c.clone()))
+            .collect();
+        if let Err(e) = validate_nostr_ref_pushes(database, &nostr_refs_owned).await {
+            warn!("refs/nostr/ validation failed: {}", e);
+            return Ok(AuthorizationResult::denied(format!(
+                "refs/nostr/ validation failed: {}",
+                e
+            )));
+        }
+        debug!("refs/nostr/ push validated successfully");
+    }
+
+    // If only refs/nostr/ refs, we're done - return success
+    if other_refs.is_empty() {
+        debug!("Only refs/nostr/ refs in push - authorization complete");
         return Ok(AuthorizationResult {
             authorized: true,
-            reason: "Push to refs/nostr/ with valid EventId format".to_string(),
+            reason: "Push to refs/nostr/ validated against events".to_string(),
             state: None,
             maintainers: vec![],
         });
     }
 
-    // For non-refs/nostr/ pushes, require state validation as normal
-    debug!("Non-refs/nostr/ push detected - checking state authorization");
+    // For non-refs/nostr/ refs, require state validation
+    debug!(
+        "Found {} non-refs/nostr/ refs - checking state authorization",
+        other_refs.len()
+    );
     let auth_result = get_authorization_for_owner(database, identifier, owner_pubkey).await?;
 
     if !auth_result.authorized {
         return Ok(auth_result);
     }
 
-    // Parse refs from the push request
-    let pushed_refs = parse_pushed_refs(request_body);
-    debug!("Parsed {} refs from push request", pushed_refs.len());
-    for (old_oid, new_oid, ref_name) in &pushed_refs {
-        debug!("  {} {} -> {}", ref_name, old_oid, new_oid);
-    }
+    // Convert other_refs for validation
+    let other_refs_owned: Vec<(String, String, String)> = other_refs
+        .into_iter()
+        .map(|(a, b, c)| (a.clone(), b.clone(), c.clone()))
+        .collect();
 
-    // Validate refs against state
+    // Validate non-refs/nostr/ refs against state
     if let Some(ref state) = auth_result.state {
-        debug!("Validating against state with {} branches", state.branches.len());
-        
+        debug!(
+            "Validating against state with {} branches",
+            state.branches.len()
+        );
+
         // If we have a state event but couldn't parse any refs, reject the push.
         // This protects against parsing failures allowing unauthorized pushes.
-        if pushed_refs.is_empty() && !state.branches.is_empty() {
+        if other_refs_owned.is_empty() && !state.branches.is_empty() {
             warn!("No refs parsed from push request but state event has branches - rejecting");
             return Ok(AuthorizationResult::denied(
-                "Failed to parse refs from push request - cannot validate against state"
+                "Failed to parse refs from push request - cannot validate against state",
             ));
         }
-        
-        if let Err(e) = validate_push_refs(state, &pushed_refs) {
+
+        if let Err(e) = validate_push_refs(state, &other_refs_owned) {
             warn!("Ref validation failed: {}", e);
             return Ok(AuthorizationResult::denied(format!(
                 "Ref validation failed: {}",
