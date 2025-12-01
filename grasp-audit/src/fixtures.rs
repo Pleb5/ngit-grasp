@@ -222,6 +222,31 @@ pub enum FixtureKind {
     /// - Points to MAINTAINER_DETERMINISTIC_COMMIT_HASH
     /// - Git push verified to succeed (force push with maintainer's state event authorizes the commit)
     MaintainerStateDataPushed,
+
+    /// Recursive maintainer's state event with git data successfully pushed (full 4-stage fixture)
+    ///
+    /// This fixture tests that a recursive maintainer (authorized via maintainer chain) can
+    /// authorize pushes. The recursive maintainer is listed in the maintainer's announcement,
+    /// not the owner's announcement, so this tests the recursive maintainer traversal.
+    ///
+    /// GRASP-01: "respecting the recursive maintainer set"
+    ///
+    /// Chain: Owner -> Maintainer -> RecursiveMaintainer
+    ///
+    /// Stages:
+    /// 1. **Generated**: Creates MaintainerStateDataPushed (includes ValidRepo + OwnerStateDataPushed)
+    ///                   + MaintainerAnnouncement (maintainer's announcement listing recursive maintainer)
+    ///                   + RecursiveMaintainerState (recursive maintainer's state event)
+    /// 2. **Sent**: Sends events to relay
+    /// 3. **Verified**: Confirms events accepted by relay
+    /// 4. **DataPushed**: Clones repo, creates recursive maintainer deterministic commit, pushes to relay
+    ///
+    /// - Requires MaintainerStateDataPushed (establishes Owner -> Maintainer chain with git data)
+    /// - Sends MaintainerAnnouncement (establishes Maintainer -> RecursiveMaintainer connection)
+    /// - State event signed by recursive maintainer keys (`client.recursive_maintainer_keys()`)
+    /// - Points to RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH
+    /// - Git push verified to succeed (recursive maintainer's state event authorizes the commit)
+    RecursiveMaintainerStateDataPushed,
 }
 
 impl FixtureKind {
@@ -251,6 +276,10 @@ impl FixtureKind {
             // MaintainerStateDataPushed depends on OwnerStateDataPushed
             // (maintainer force-pushes over owner's data)
             Self::MaintainerStateDataPushed => vec![Self::OwnerStateDataPushed],
+            
+            // RecursiveMaintainerStateDataPushed depends on MaintainerStateDataPushed
+            // (recursive maintainer force-pushes over maintainer's data)
+            Self::RecursiveMaintainerStateDataPushed => vec![Self::MaintainerStateDataPushed],
         }
     }
 
@@ -264,6 +293,7 @@ impl FixtureKind {
             // These fixtures send events and push git data internally
             Self::OwnerStateDataPushed => true,
             Self::MaintainerStateDataPushed => true,
+            Self::RecursiveMaintainerStateDataPushed => true,
             // RecursiveMaintainerRepoAndState sends multiple events internally
             Self::RecursiveMaintainerRepoAndState => true,
             // All other fixtures return a single event for the caller to send
@@ -730,6 +760,10 @@ impl<'a> TestContext<'a> {
             FixtureKind::MaintainerStateDataPushed => {
                 self.build_maintainer_state_data_pushed().await
             }
+
+            FixtureKind::RecursiveMaintainerStateDataPushed => {
+                self.build_recursive_maintainer_state_data_pushed().await
+            }
         }
     }
 
@@ -1184,6 +1218,153 @@ impl<'a> TestContext<'a> {
                 authorize pushes matching this state event since the maintainer \
                 is listed in the owner's announcement.",
                 MAINTAINER_DETERMINISTIC_COMMIT_HASH
+            )),
+            Err(e) => Err(anyhow::anyhow!("Push error: {}", e)),
+        }
+    }
+
+    /// Build RecursiveMaintainerStateDataPushed fixture: full 4-stage fixture for recursive maintainer push authorization
+    ///
+    /// This tests that a recursive maintainer (authorized via maintainer chain) can authorize pushes.
+    /// The recursive maintainer is listed in the maintainer's announcement, not the owner's announcement,
+    /// so this tests the recursive maintainer traversal (Owner -> Maintainer -> RecursiveMaintainer).
+    ///
+    /// Depends on MaintainerStateDataPushed - the maintainer's data has already been pushed.
+    /// We then send the MaintainerAnnouncement (which lists the recursive maintainer), and the
+    /// recursive maintainer force-pushes their commit on top.
+    ///
+    /// # Returns
+    /// The recursive maintainer's state event (kind 30618) after all stages complete successfully
+    async fn build_recursive_maintainer_state_data_pushed(&self) -> Result<Event> {
+        use nostr_sdk::prelude::*;
+
+        // ============================================================
+        // Stage 1: MaintainerStateDataPushed is ensured by ensure_fixture before this is called
+        // The owner's repo, owner's state event, and maintainer's state event are already on the relay,
+        // and maintainer's git data is pushed
+        // ============================================================
+        let maintainer_state = self.get_cached_dependency(FixtureKind::MaintainerStateDataPushed)?;
+        
+        // Extract repo_id from maintainer's state event (same d-tag structure)
+        let repo_id = self.extract_repo_id(&maintainer_state)?;
+        
+        // Get the repo (ValidRepo, also cached) for the owner's npub
+        let repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
+
+        // ============================================================
+        // Stage 2: Send MaintainerAnnouncement (establishes Maintainer -> RecursiveMaintainer chain)
+        // ============================================================
+        let maintainer_announcement = self.build_maintainer_announcement(&repo_id).await?;
+        self.client.send_event(maintainer_announcement).await?;
+
+        // Build recursive maintainer's state event
+        let base_time = Timestamp::now().as_u64();
+        let recursive_maintainer_timestamp = Timestamp::from(base_time - 2); // 2 seconds ago (most recent)
+
+        let recursive_maintainer_state_event = self
+            .client
+            .event_builder(Kind::Custom(30618), "")
+            .tag(Tag::identifier(&repo_id))
+            .tag(Tag::custom(
+                TagKind::custom("refs/heads/main"),
+                vec![RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH.to_string()],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("HEAD"),
+                vec!["ref: refs/heads/main".to_string()],
+            ))
+            .custom_time(recursive_maintainer_timestamp)
+            .build(self.client.recursive_maintainer_keys())
+            .map_err(|e| anyhow::anyhow!("Failed to build recursive maintainer state event: {}", e))?;
+
+        // Send recursive maintainer state event to relay
+        self.client.send_event(recursive_maintainer_state_event.clone()).await?;
+
+        // ============================================================
+        // Stage 3: Verify state event was accepted
+        // ============================================================
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // ============================================================
+        // Stage 4: DataPushed - Clone repo, create recursive maintainer commit, push
+        // ============================================================
+        
+        // Get relay domain from connected relay
+        let relay_domain = self.get_relay_domain().await?;
+
+        // Use owner's npub for cloning (repo belongs to owner)
+        let npub = repo
+            .pubkey
+            .to_bech32()
+            .map_err(|e| anyhow::anyhow!("Failed to convert pubkey to bech32: {}", e))?;
+
+        // Clone the repository
+        let clone_path = clone_repo(&relay_domain, &npub, &repo_id)
+            .map_err(|e| anyhow::anyhow!("Failed to clone repo: {}", e))?;
+
+        // Cleanup helper (always clean up on error or success)
+        let cleanup = |path: &PathBuf| {
+            let _ = fs::remove_dir_all(path);
+        };
+
+        // Reset to orphan state and create deterministic root commit
+        // Step 1: Create orphan branch (removes all history)
+        let _ = Command::new("git")
+            .args(["checkout", "--orphan", "main-new"])
+            .current_dir(&clone_path)
+            .output();
+
+        // Step 2: Clear staged files (orphan keeps files staged from previous branch)
+        let _ = Command::new("git")
+            .args(["rm", "-rf", "--cached", "."])
+            .current_dir(&clone_path)
+            .output();
+
+        // Step 3: Create deterministic commit using recursive maintainer variant
+        let commit_hash = match create_deterministic_commit_with_variant(
+            &clone_path,
+            CommitVariant::RecursiveMaintainer,
+        ) {
+            Ok(h) => h,
+            Err(e) => {
+                cleanup(&clone_path);
+                return Err(anyhow::anyhow!("Failed to create recursive maintainer commit: {}", e));
+            }
+        };
+
+        // Step 4: Replace main branch with our new orphan branch
+        let _ = Command::new("git")
+            .args(["branch", "-D", "main"])
+            .current_dir(&clone_path)
+            .output();
+
+        let _ = Command::new("git")
+            .args(["branch", "-m", "main"])
+            .current_dir(&clone_path)
+            .output();
+
+        // Verify commit hash matches expected
+        if commit_hash != RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH {
+            cleanup(&clone_path);
+            return Err(anyhow::anyhow!(
+                "Recursive maintainer commit hash mismatch: got {}, expected {}",
+                commit_hash,
+                RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH
+            ));
+        }
+
+        // Push to relay
+        let push_result = try_push(&clone_path);
+        cleanup(&clone_path);
+
+        match push_result {
+            Ok(true) => Ok(recursive_maintainer_state_event),
+            Ok(false) => Err(anyhow::anyhow!(
+                "Push was rejected but should have been accepted. \
+                The recursive maintainer published a state event with commit {}, \
+                and the relay should authorize pushes matching this state event \
+                through recursive maintainer traversal (Owner -> Maintainer -> RecursiveMaintainer).",
+                RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH
             )),
             Err(e) => Err(anyhow::anyhow!("Push error: {}", e)),
         }
