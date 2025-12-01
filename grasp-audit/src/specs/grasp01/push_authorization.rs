@@ -390,6 +390,67 @@ fn push_to_pr_ref(clone_path: &Path, pr_event_id: &str) -> Result<bool, String> 
     Ok(push_output.status.success())
 }
 
+/// Queries the git smart HTTP info/refs endpoint to determine the default branch.
+///
+/// This parses the git-upload-pack service response to find the symref=HEAD capability
+/// which indicates what branch HEAD points to (i.e., the default branch).
+///
+/// # Arguments
+/// * `relay_domain` - The relay domain (e.g., "localhost:7000")
+/// * `npub` - The owner's npub (bech32 public key)
+/// * `repo_id` - The repository identifier
+///
+/// # Returns
+/// * `Ok(String)` - The default branch ref (e.g., "refs/heads/main")
+/// * `Err(String)` - Error message if request or parsing failed
+async fn get_default_branch_from_info_refs(
+    relay_domain: &str,
+    npub: &str,
+    repo_id: &str,
+) -> Result<String, String> {
+    let info_refs_url = format!(
+        "http://{}/{}/{}.git/info/refs?service=git-upload-pack",
+        relay_domain, npub, repo_id
+    );
+
+    let http_client = reqwest::Client::new();
+    let response = http_client
+        .get(&info_refs_url)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "info/refs returned status {} for URL: {}",
+            response.status(),
+            info_refs_url
+        ));
+    }
+
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read response body: {}", e))?;
+
+    // Parse the git smart HTTP response to find symref=HEAD:refs/heads/xxx
+    // The format is: capabilities are space-separated after the first NUL byte
+    // Example line: 0000000000000000000000000000000000000000 capabilities^{}\0symref=HEAD:refs/heads/master ...
+    for line in body.lines() {
+        if let Some(caps_start) = line.find('\0') {
+            let caps = &line[caps_start + 1..];
+            for cap in caps.split(' ') {
+                if cap.starts_with("symref=HEAD:") {
+                    let branch = cap.trim_start_matches("symref=HEAD:");
+                    return Ok(branch.to_string());
+                }
+            }
+        }
+    }
+
+    Err("No symref=HEAD capability found in info/refs response".to_string())
+}
+
 /// Checks if a ref exists on the remote.
 #[allow(dead_code)]
 fn ref_exists_on_remote(clone_path: &Path, ref_name: &str) -> Result<bool, String> {
@@ -449,6 +510,9 @@ impl PushAuthorizationTests {
                 relay_domain,
             )
             .await,
+        );
+        results.add(
+            Self::test_head_set_after_state_event_with_existing_commit(client, relay_domain).await,
         );
 
         results
@@ -1882,6 +1946,295 @@ impl PushAuthorizationTests {
         }
 
         TestResult::new(test_name, "GRASP-01", desc).pass()
+    }
+
+    /// Test that HEAD is set after a state event is published with an existing commit
+    ///
+    /// GRASP-01: "MUST set repository HEAD per repository state announcement
+    /// as soon as the git data related to that branch has been received."
+    ///
+    /// This test verifies the HEAD-setting behavior when:
+    /// 1. A maintainer commit is pushed to the relay (git data exists)
+    /// 2. A state event is published pointing to that commit with HEAD="refs/heads/develop"
+    /// 3. The relay should update the repository's default branch to "develop"
+    ///
+    /// ## Fixture-First Pattern
+    ///
+    /// 1. **Generate**: Create TestContext and get RepoState + MaintainerState fixtures
+    ///    (both commits are pushed as part of the fixture setup)
+    /// 2. **Send**: Push maintainer commit to relay first, then publish state event with HEAD=develop
+    /// 3. **Verify**: Query info/refs to verify HEAD symref points to refs/heads/develop
+    pub async fn test_head_set_after_state_event_with_existing_commit(
+        client: &AuditClient,
+        relay_domain: &str,
+    ) -> TestResult {
+        use std::process::Command;
+
+        let test_name = "test_head_set_after_state_event_with_existing_commit";
+        let desc = "HEAD is set when state event published with existing commit";
+
+        // ============================================================
+        // Step 1: GENERATE - Create TestContext and get fixtures
+        // ============================================================
+        let ctx = TestContext::new(client);
+
+        // Get RepoState fixture (owner's repo announcement + state event)
+        let state_event = match ctx.get_fixture(FixtureKind::RepoState).await {
+            Ok(e) => e,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", desc)
+                    .fail(format!("Failed to create RepoState fixture: {}", e));
+            }
+        };
+
+        // Extract repo_id and npub from owner's state event
+        let repo_id = match state_event
+            .tags
+            .iter()
+            .find(|t| t.kind() == TagKind::d())
+            .and_then(|t| t.content())
+        {
+            Some(id) => id.to_string(),
+            None => {
+                return TestResult::new(test_name, "GRASP-01", desc)
+                    .fail("Missing repo_id in state event");
+            }
+        };
+
+        let npub = match state_event.pubkey.to_bech32() {
+            Ok(n) => n,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", desc)
+                    .fail(format!("Failed to convert pubkey to bech32: {}", e));
+            }
+        };
+
+        let _maintainer_ann_event = match ctx.get_fixture(FixtureKind::MaintainerAnnouncement).await
+        {
+            Ok(e) => e,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", desc).fail(format!(
+                    "Failed to create MaintainerAnnouncement fixture: {}",
+                    e
+                ));
+            }
+        };
+
+        let _maintainer_state_event = match ctx.get_fixture(FixtureKind::MaintainerState).await {
+            Ok(e) => e,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", desc)
+                    .fail(format!("Failed to create MaintainerState fixture: {}", e));
+            }
+        };
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // ============================================================
+        // Step 2: SEND - First push maintainer commit so relay has the git data
+        // ============================================================
+        let clone_path = match clone_repo(relay_domain, &npub, &repo_id) {
+            Ok(p) => p,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", desc)
+                    .fail(format!("Failed to clone repo: {}", e));
+            }
+        };
+
+        let cleanup = || {
+            let _ = fs::remove_dir_all(&clone_path);
+        };
+
+        // TODO - this should be pushed inside the MaintainerState fixture.
+
+        // Reset to orphan state and create deterministic root commit
+        // Step 1: Create orphan branch (removes all history)
+        let _ = Command::new("git")
+            .args(["checkout", "--orphan", "main"])
+            .current_dir(&clone_path)
+            .output();
+
+        // Step 2: Clear staged files (orphan keeps files staged from previous branch)
+        let _ = Command::new("git")
+            .args(["rm", "-rf", "--cached", "."])
+            .current_dir(&clone_path)
+            .output();
+
+        // Step 3: Create deterministic commit using Maintainer variant
+        let commit_hash = match create_deterministic_commit_with_variant(
+            &clone_path,
+            CommitVariant::Maintainer,
+        ) {
+            Ok(h) => h,
+            Err(e) => {
+                cleanup();
+                return TestResult::new(test_name, "GRASP-01", desc)
+                    .fail(format!("Failed to create maintainer commit: {}", e));
+            }
+        };
+
+        // Verify commit hash matches expected
+        if commit_hash != MAINTAINER_DETERMINISTIC_COMMIT_HASH {
+            cleanup();
+            return TestResult::new(test_name, "GRASP-01", desc).fail(format!(
+                "Maintainer commit hash mismatch: got {}, expected {}",
+                commit_hash, MAINTAINER_DETERMINISTIC_COMMIT_HASH
+            ));
+        }
+
+        // Push the develop branch with the maintainer commit
+        let push_output = Command::new("git")
+            .args(["push", "origin", "main"])
+            .current_dir(&clone_path)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output();
+
+        match push_output {
+            Err(e) => {
+                cleanup();
+                return TestResult::new(test_name, "GRASP-01", desc)
+                    .fail(format!("Failed to push develop branch: {}", e));
+            }
+            Ok(output) if !output.status.success() => {
+                // this will fail when not in isolation - as the Recusive state will be the authorised state
+                // but we need to do it here so the grasp server has the oid
+            }
+            _ => {}
+        }
+
+        let _recursive_maintainer_ann_event = match ctx
+            .get_fixture(FixtureKind::RecursiveMaintainerAnnouncement)
+            .await
+        {
+            Ok(e) => e,
+            Err(e) => {
+                return TestResult::new(test_name, "GRASP-01", desc).fail(format!(
+                    "Failed to create RecursiveMaintainerAnnouncement fixture: {}",
+                    e
+                ));
+            }
+        };
+
+        let _recursive_maintainer_state_event =
+            match ctx.get_fixture(FixtureKind::RecursiveMaintainerState).await {
+                Ok(e) => e,
+                Err(e) => {
+                    return TestResult::new(test_name, "GRASP-01", desc)
+                        .fail(format!("Failed to create MaintainerState fixture: {}", e));
+                }
+            };
+
+        // Verify commit hash matches expected
+        if commit_hash != MAINTAINER_DETERMINISTIC_COMMIT_HASH {
+            cleanup();
+            return TestResult::new(test_name, "GRASP-01", desc).fail(format!(
+                "Maintainer commit hash mismatch: got {}, expected {}",
+                commit_hash, MAINTAINER_DETERMINISTIC_COMMIT_HASH
+            ));
+        }
+
+        // Reset to orphan state and create deterministic root commit
+        // Step 1: Create orphan branch (removes all history)
+        let _ = Command::new("git")
+            .args(["checkout", "--orphan", "develop"])
+            .current_dir(&clone_path)
+            .output();
+
+        // Step 2: Clear staged files (orphan keeps files staged from previous branch)
+        let _ = Command::new("git")
+            .args(["rm", "-rf", "--cached", "."])
+            .current_dir(&clone_path)
+            .output();
+
+        // ============================================================
+        // Step 3: Publish state event with HEAD pointing to develop branch
+        // ============================================================
+
+        // Create state event with HEAD=refs/heads/develop and develop branch pointing to maintainer commit
+        let state_event = match client
+            .event_builder(Kind::Custom(30618), "")
+            .tag(Tag::identifier(&repo_id))
+            .tag(Tag::custom(
+                TagKind::custom("HEAD"),
+                vec!["refs/heads/develop".to_string()],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("refs/heads/develop"),
+                vec![MAINTAINER_DETERMINISTIC_COMMIT_HASH.to_string()],
+            ))
+            .build(client.maintainer_keys())
+        {
+            Ok(e) => e,
+            Err(e) => {
+                cleanup();
+                return TestResult::new(test_name, "GRASP-01", desc)
+                    .fail(format!("Failed to build state event: {}", e));
+            }
+        };
+
+        // Send the state event
+        if let Err(e) = client.client().send_event(&state_event).await {
+            cleanup();
+            return TestResult::new(test_name, "GRASP-01", desc)
+                .fail(format!("Failed to send state event: {}", e));
+        }
+
+        // Wait for relay to process the state event
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // // Now that state event is published, try pushing again if previous push failed
+        // let push_output = Command::new("git")
+        //     .args(["push", "-f", "origin", "develop"])
+        //     .current_dir(&clone_path)
+        //     .env("GIT_TERMINAL_PROMPT", "0")
+        //     .output();
+
+        // match push_output {
+        //     Err(e) => {
+        //         cleanup();
+        //         return TestResult::new(test_name, "GRASP-01", desc).fail(format!(
+        //             "Failed to push develop branch after state event: {}",
+        //             e
+        //         ));
+        //     }
+        //     Ok(output) if !output.status.success() => {
+        //         cleanup();
+        //         return TestResult::new(test_name, "GRASP-01", desc).fail(format!(
+        //             "Push of develop branch rejected after state event: {}",
+        //             String::from_utf8_lossy(&output.stderr)
+        //         ));
+        //     }
+        //     _ => {}
+        // }
+
+        cleanup();
+
+        // Wait a bit more for HEAD to be updated
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        // ============================================================
+        // Step 4: VERIFY - Query info/refs to check the default branch
+        // ============================================================
+        let default_branch =
+            match get_default_branch_from_info_refs(relay_domain, &npub, &repo_id).await {
+                Ok(branch) => branch,
+                Err(e) => {
+                    return TestResult::new(test_name, "GRASP-01", desc)
+                        .fail(format!("Failed to get default branch: {}", e));
+                }
+            };
+
+        // Verify HEAD points to refs/heads/develop
+        if default_branch == "refs/heads/develop" {
+            TestResult::new(test_name, "GRASP-01", desc).pass()
+        } else {
+            TestResult::new(test_name, "GRASP-01", desc).fail(format!(
+                "Expected HEAD to point to 'refs/heads/develop' but got '{}'. \
+                GRASP-01 requires: 'MUST set repository HEAD per repository state announcement \
+                as soon as the git data related to that branch has been received.'",
+                default_branch
+            ))
+        }
     }
 }
 
