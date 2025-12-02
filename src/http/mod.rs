@@ -32,6 +32,9 @@ const CORS_ALLOW_ORIGIN: &str = "*";
 const CORS_ALLOW_METHODS: &str = "GET, POST";
 const CORS_ALLOW_HEADERS: &str = "Content-Type";
 
+/// Embedded icon image (Grasp logo)
+const ICON_PNG: &[u8] = include_bytes!("../../static/icon.png");
+
 /// Extract npub and identifier from a repository URL path (no git subpath required)
 ///
 /// Parses paths like `/<npub>/<identifier>.git` (for repository webpage/404)
@@ -357,6 +360,20 @@ impl Service<Request<Incoming>> for HttpService {
                         .unwrap())
                 });
             }
+        }
+
+        // Serve static icon at /icon.png
+        if path == "/icon.png" {
+            return Box::pin(async move {
+                Ok(
+                    add_cors_headers(Response::builder().header("server", "ngit-grasp"))
+                        .status(200)
+                        .header("content-type", "image/png")
+                        .header("cache-control", "public, max-age=86400")
+                        .body(Full::new(Bytes::from_static(ICON_PNG)))
+                        .unwrap(),
+                )
+            });
         }
 
         // Only serve landing page for root path "/", 404 for everything else

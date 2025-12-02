@@ -34,6 +34,10 @@ pub struct RelayInformationDocument {
     /// Software version
     pub version: String,
 
+    /// Relay icon URL (NIP-11 optional field)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+
     // GRASP-01 Extensions (lines 11-14 of GRASP-01 spec)
     /// List of supported GRASPs (e.g., ["GRASP-01"])
     /// Required by GRASP-01 specification line 12
@@ -67,6 +71,7 @@ impl RelayInformationDocument {
                 Some(commit) => format!("{}-{}", env!("CARGO_PKG_VERSION"), commit),
                 None => env!("CARGO_PKG_VERSION").to_string(),
             },
+            icon: Some(format!("https://{}/icon.png", config.domain)),
 
             // GRASP-01 Extensions
             supported_grasps: vec!["GRASP-01".to_string()],
@@ -113,6 +118,10 @@ mod tests {
         assert_eq!(doc.supported_grasps, vec!["GRASP-01"]);
         assert!(doc.repo_acceptance_criteria.contains("relay.example.com"));
         assert!(doc.curation.is_none());
+        assert_eq!(
+            doc.icon,
+            Some("https://relay.example.com/icon.png".to_string())
+        );
     }
 
     #[test]
@@ -143,5 +152,6 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("Invalid JSON");
         assert_eq!(parsed["name"], "Test Relay");
         assert_eq!(parsed["supported_grasps"][0], "GRASP-01");
+        assert_eq!(parsed["icon"], "https://relay.example.com/icon.png");
     }
 }
