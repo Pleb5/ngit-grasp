@@ -297,7 +297,7 @@ mod tests {
         let relay_url = std::env::var("RELAY_URL")
             .expect("RELAY_URL environment variable must be set for integration tests");
 
-        let config = AuditConfig::ci();
+        let config = AuditConfig::isolated();
         let client = AuditClient::new(&relay_url, config)
             .await
             .expect("Failed to connect to relay");

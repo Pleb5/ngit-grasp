@@ -16,8 +16,8 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     // Create audit client for CI testing
-//!     let config = AuditConfig::ci();
+//!     // Create audit client with shared fixtures (default for CLI)
+//!     let config = AuditConfig::shared();
 //!     let client = AuditClient::new("ws://localhost:7000", config).await?;
 //!
 //!     // Run smoke tests

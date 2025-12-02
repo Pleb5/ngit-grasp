@@ -6,8 +6,8 @@ use grasp_audit::*;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Create audit config for CI testing
-    let config = AuditConfig::ci();
+    // Create audit config with shared fixtures (default for CLI)
+    let config = AuditConfig::shared();
 
     println!("GRASP Audit Example");
     println!("==================");

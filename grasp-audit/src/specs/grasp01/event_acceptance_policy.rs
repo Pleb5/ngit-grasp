@@ -1139,7 +1139,7 @@ mod tests {
             "RELAY_URL environment variable must be set. Example: RELAY_URL=ws://localhost:18081",
         );
 
-        let config = AuditConfig::ci();
+        let config = AuditConfig::isolated();
         let client = AuditClient::new(&relay_url, config)
             .await
             .unwrap_or_else(|_| {

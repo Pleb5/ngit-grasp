@@ -20,8 +20,11 @@ enum Commands {
         #[arg(short, long)]
         relay: String,
 
-        /// Mode: ci or production
-        #[arg(short, long, default_value = "ci")]
+        /// Fixture mode: shared (default) or isolated
+        ///
+        /// - shared: Fixtures are cached and reused across tests (efficient for sequential test runs)
+        /// - isolated: Each test creates fresh fixtures (for parallel tests like cargo test)
+        #[arg(short, long, default_value = "shared")]
         mode: String,
 
         /// Spec to test (nip01-smoke, nip11, event-acceptance, cors, git-clone, push-auth, repo-creation, all)
@@ -53,10 +56,14 @@ async fn main() -> Result<()> {
             spec,
             git_data_dir,
         } => {
+            #[allow(deprecated)]
             let mut config = match mode.as_str() {
+                "shared" => AuditConfig::shared(),
+                "isolated" => AuditConfig::isolated(),
+                // Backwards compatibility aliases
                 "ci" => AuditConfig::ci(),
                 "production" => AuditConfig::production(),
-                _ => return Err(anyhow!("Invalid mode: {}. Use 'ci' or 'production'", mode)),
+                _ => return Err(anyhow!("Invalid mode: {}. Use 'shared' or 'isolated'", mode)),
             };
 
             // Audit needs to create events to test the relay, so disable read-only mode

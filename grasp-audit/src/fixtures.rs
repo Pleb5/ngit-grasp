@@ -3,19 +3,25 @@
 //! This module provides a TestContext abstraction that manages prerequisite events
 //! differently based on the audit mode:
 //!
-//! - **CI Mode (Isolated)**: Creates fresh events for each test, ensuring complete isolation
-//! - **Production Mode (Shared)**: Reuses shared fixtures to minimize event publication
+//! - **Isolated Mode**: Creates fresh events for each test, ensuring complete isolation.
+//!   Use this for `cargo test` where tests run in parallel and need isolation.
+//! - **Shared Mode**: Reuses shared fixtures across tests to minimize event publication.
+//!   Use this for CLI audit where tests run sequentially and build on each other.
 //!
 //! # Cache Sharing Strategy
 //!
-//! The fixture cache lives on the `AuditClient`, not on `TestContext`. This provides
-//! natural cache sharing semantics:
+//! The caching behavior depends on the mode:
 //!
-//! - **CLI mode**: Creates one `AuditClient` → fixtures shared across all tests
-//! - **cargo test**: Creates one `AuditClient` per test → fixtures isolated per test
+//! - **Shared mode** (default for CLI): Uses the client's fixture cache, shared across
+//!   all TestContext instances. Fixtures are created once and reused.
+//! - **Isolated mode**: Each TestContext has its own local cache. Fixtures are created
+//!   fresh for each TestContext, providing complete test isolation.
 //!
-//! This eliminates the need for global state while still enabling fixture reuse
-//! when appropriate.
+//! # When to Use Each Mode
+//!
+//! - **CLI audit tool**: Use Shared mode (default). Tests run sequentially and fixtures
+//!   build on each other efficiently.
+//! - **cargo test**: Use Isolated mode. Tests run in parallel and need complete isolation.
 //!
 //! # What is a Fixture?
 //! A fixture represents the state of a repository on a grasp server (events and git refs)
@@ -36,7 +42,7 @@
 //! use grasp_audit::*;
 //!
 //! # async fn example() -> anyhow::Result<()> {
-//! let config = AuditConfig::ci();
+//! let config = AuditConfig::shared();  // Use shared() for CLI, isolated() for cargo test
 //! let client = AuditClient::new("ws://localhost:7000", config).await?;
 //! let ctx = TestContext::new(&client);
 //!
@@ -341,8 +347,8 @@ pub enum ContextMode {
 impl From<AuditMode> for ContextMode {
     fn from(mode: AuditMode) -> Self {
         match mode {
-            AuditMode::CI => ContextMode::Isolated,
-            AuditMode::Production => ContextMode::Shared,
+            AuditMode::Isolated => ContextMode::Isolated,
+            AuditMode::Shared => ContextMode::Shared,
         }
     }
 }
@@ -350,30 +356,37 @@ impl From<AuditMode> for ContextMode {
 /// Test context for managing prerequisite events
 ///
 /// The TestContext provides mode-aware fixture management:
-/// - In Isolated mode: Creates fresh events for each test
-/// - In Shared mode: Caches and reuses events across tests
+/// - In **Isolated mode**: Each TestContext has its own local cache, creating fresh
+///   fixtures for each test. Use this for `cargo test` where tests run in parallel.
+/// - In **Shared mode**: Uses the client's fixture cache, shared across all TestContexts.
+///   Use this for CLI audit where tests run sequentially and build on each other.
 ///
-/// # Cache Location
+/// # Mode Selection
 ///
-/// The fixture cache lives on `AuditClient`, not on `TestContext`. This means:
-/// - Multiple `TestContext` instances from the same client share the cache
-/// - CLI mode (one client) naturally shares fixtures across all tests
-/// - Test mode (one client per test) naturally isolates fixtures
+/// The mode is determined by `AuditConfig::mode`:
+/// - `AuditConfig::isolated()` → Creates fresh fixtures per TestContext
+/// - `AuditConfig::shared()` → Reuses fixtures across all TestContexts (default for CLI)
 ///
 /// # Example
 ///
 /// ```no_run
 /// # use grasp_audit::*;
 /// # async fn example() -> anyhow::Result<()> {
-/// let config = AuditConfig::ci();
+/// // For CLI audit (shared fixtures - default)
+/// let config = AuditConfig::shared();
 /// let client = AuditClient::new("ws://localhost:7000", config).await?;
 /// let ctx = TestContext::new(&client);
 ///
-/// // Get a repository fixture
+/// // Get a repository fixture - will be reused by subsequent TestContexts
 /// let repo = ctx.get_fixture(FixtureKind::ValidRepo).await?;
 ///
-/// // In CI mode: Creates new repo
-/// // In Production mode: Returns cached repo
+/// // For cargo test (isolated fixtures)
+/// let config = AuditConfig::isolated();
+/// let client = AuditClient::new("ws://localhost:7000", config).await?;
+/// let ctx = TestContext::new(&client);
+///
+/// // Get a repository fixture - fresh for this TestContext only
+/// let repo = ctx.get_fixture(FixtureKind::ValidRepo).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -1960,9 +1973,9 @@ mod tests {
 
     #[test]
     fn test_context_mode_from_audit_mode() {
-        assert_eq!(ContextMode::from(AuditMode::CI), ContextMode::Isolated);
+        assert_eq!(ContextMode::from(AuditMode::Isolated), ContextMode::Isolated);
         assert_eq!(
-            ContextMode::from(AuditMode::Production),
+            ContextMode::from(AuditMode::Shared),
             ContextMode::Shared
         );
     }
@@ -1981,7 +1994,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_context_creation() {
-        let config = AuditConfig::ci();
+        let config = AuditConfig::isolated();
         let client = crate::AuditClient::new_test(config);
 
         let ctx = TestContext::new(&client);

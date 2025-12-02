@@ -459,7 +459,7 @@ mod tests {
             .trim_end_matches('/')
             .to_string();
 
-        let config = AuditConfig::ci();
+        let config = AuditConfig::isolated();
         let client = AuditClient::new(&relay_url, config)
             .await
             .unwrap_or_else(|_| {

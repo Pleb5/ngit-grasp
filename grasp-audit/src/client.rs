@@ -199,7 +199,7 @@ impl AuditClient {
     /// ```no_run
     /// # use grasp_audit::*;
     /// # async fn example() -> anyhow::Result<()> {
-    /// let config = AuditConfig::ci();
+    /// let config = AuditConfig::shared();
     /// let client = AuditClient::new("ws://localhost:7000", config).await?;
     ///
     /// // Create event with automatic audit tags
@@ -221,8 +221,8 @@ impl AuditClient {
     pub async fn query(&self, mut filter: Filter) -> Result<Vec<Event>> {
         use nostr_sdk::prelude::{Alphabet, SingleLetterTag};
 
-        if self.config.mode == AuditMode::CI {
-            // In CI mode, only see our own audit events
+        if self.config.mode == AuditMode::Isolated {
+            // In Isolated mode, only see our own audit events
             // Filter by "t" tags (hashtags)
             let t_tag = SingleLetterTag::lowercase(Alphabet::T);
             filter = filter
@@ -505,7 +505,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_client_creation() {
-        let config = AuditConfig::ci();
+        let config = AuditConfig::isolated();
 
         // This will fail if no relay is running, which is expected in tests
         // In real usage, there should be a relay at the URL
@@ -514,13 +514,13 @@ mod tests {
         // We can't test connection without a running relay
         // But we can test that the client is created
         if let Ok(client) = result {
-            assert_eq!(client.config.mode, AuditMode::CI);
+            assert_eq!(client.config.mode, AuditMode::Isolated);
         }
     }
 
     #[test]
     fn test_event_builder() {
-        let config = AuditConfig::ci();
+        let config = AuditConfig::isolated();
         let keys = Keys::generate();
         let maintainer_keys = Keys::generate();
         let recursive_maintainer_keys = Keys::generate();
@@ -543,7 +543,7 @@ mod tests {
 
     #[test]
     fn test_audit_tags_automatically_added() {
-        let config = AuditConfig::ci();
+        let config = AuditConfig::isolated();
         let keys = Keys::generate();
         let maintainer_keys = Keys::generate();
         let recursive_maintainer_keys = Keys::generate();
@@ -585,8 +585,8 @@ mod tests {
             "Missing 'grasp-audit-test-event' tag"
         );
         assert!(
-            tag_contents.iter().any(|t| t.starts_with("audit-ci-")),
-            "Missing 'audit-ci-*' tag"
+            tag_contents.iter().any(|t| t.starts_with("audit-isolated-")),
+            "Missing 'audit-isolated-*' tag"
         );
         assert!(
             tag_contents
@@ -604,7 +604,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_repo_announcement_with_maintainers() {
-        let config = AuditConfig::ci();
+        let config = AuditConfig::isolated();
         let client = AuditClient::new_test(config);
 
         // Create test maintainer pubkeys (hex format)

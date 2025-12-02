@@ -18,37 +18,66 @@ pub struct AuditConfig {
     pub read_only: bool,
 }
 
-/// Audit mode
+/// Audit mode for fixture management
+///
+/// Controls how test fixtures are cached and shared between tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuditMode {
-    /// Isolated CI/CD tests - only see own events
-    CI,
+    /// Isolated mode - each test creates fresh fixtures
+    ///
+    /// Use this mode when running tests in parallel (e.g., `cargo test`)
+    /// where each test needs complete isolation from other tests.
+    /// Each TestContext gets its own local cache.
+    Isolated,
 
-    /// Production audit - see all events, minimal writes
-    Production,
+    /// Shared mode - fixtures are cached and reused across tests
+    ///
+    /// Use this mode when running the CLI audit tool where tests run
+    /// sequentially and build on each other's fixtures. This is more
+    /// efficient as it avoids re-creating the same prerequisite events.
+    /// All TestContexts share the client's cache.
+    Shared,
 }
 
 impl AuditConfig {
-    /// Create config for CI/CD testing
-    pub fn ci() -> Self {
-        let run_id = format!("ci-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    /// Create config for isolated testing (e.g., cargo test)
+    ///
+    /// Each test creates fresh fixtures for complete test isolation.
+    /// Use this when running tests in parallel.
+    pub fn isolated() -> Self {
+        let run_id = format!("isolated-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         Self {
             run_id,
-            mode: AuditMode::CI,
+            mode: AuditMode::Isolated,
             cleanup_after: Timestamp::now() + 3600, // 1 hour from now
             read_only: false,
         }
     }
 
-    /// Create config for production audit
-    pub fn production() -> Self {
-        let run_id = format!("prod-audit-{}", Timestamp::now().as_u64());
+    /// Create config for shared fixture mode (default for CLI)
+    ///
+    /// Fixtures are cached and reused across tests. Use this when
+    /// running the CLI audit tool where tests run sequentially.
+    pub fn shared() -> Self {
+        let run_id = format!("audit-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         Self {
             run_id,
-            mode: AuditMode::Production,
-            cleanup_after: Timestamp::now() + 300, // 5 minutes from now
-            read_only: true,                       // Default to read-only for production
+            mode: AuditMode::Shared,
+            cleanup_after: Timestamp::now() + 3600, // 1 hour from now
+            read_only: false,
         }
+    }
+
+    /// Alias for isolated() - for backwards compatibility
+    #[deprecated(since = "0.2.0", note = "Use isolated() instead")]
+    pub fn ci() -> Self {
+        Self::isolated()
+    }
+
+    /// Alias for shared() - for backwards compatibility
+    #[deprecated(since = "0.2.0", note = "Use shared() instead")]
+    pub fn production() -> Self {
+        Self::shared()
     }
 
     /// Create config with custom run ID
@@ -57,7 +86,7 @@ impl AuditConfig {
             run_id,
             mode,
             cleanup_after: Timestamp::now() + 3600,
-            read_only: mode == AuditMode::Production,
+            read_only: false,
         }
     }
 
@@ -72,11 +101,10 @@ impl AuditConfig {
     ///
     /// 1. `["t", "grasp-audit-test-event"]` - Identifies all audit-related events
     /// 2. `["t", "audit-{run_id}"]` - Unique identifier for this audit run
-    ///    - CI mode: `audit-ci-{uuid}`
-    ///    - Production mode: `audit-prod-audit-{timestamp}`
+    ///    - Isolated mode: `audit-isolated-{uuid}`
+    ///    - Shared mode: `audit-audit-{uuid}`
     /// 3. `["t", "audit-cleanup-after-{unix_timestamp}"]` - Cleanup timestamp
-    ///    - CI mode: Current time + 3600 seconds (1 hour)
-    ///    - Production mode: Current time + 300 seconds (5 minutes)
+    ///    - Default: Current time + 3600 seconds (1 hour)
     ///
     /// # Purpose
     ///
@@ -90,7 +118,7 @@ impl AuditConfig {
     /// ```rust
     /// use grasp_audit::AuditConfig;
     ///
-    /// let config = AuditConfig::ci();
+    /// let config = AuditConfig::isolated();
     /// let tags = config.audit_tags();
     ///
     /// // Tags will look like:
@@ -168,7 +196,7 @@ impl AuditEventBuilder {
     /// use nostr_sdk::prelude::*;
     /// use grasp_audit::{AuditConfig, AuditEventBuilder};
     ///
-    /// let config = AuditConfig::ci();
+    /// let config = AuditConfig::isolated();
     /// let keys = Keys::generate();
     ///
     /// // Create an event with a past timestamp
@@ -209,26 +237,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_ci_config() {
-        let config = AuditConfig::ci();
-        assert_eq!(config.mode, AuditMode::CI);
+    fn test_isolated_config() {
+        let config = AuditConfig::isolated();
+        assert_eq!(config.mode, AuditMode::Isolated);
         assert!(!config.read_only);
-        assert!(config.run_id.starts_with("ci-"));
+        assert!(config.run_id.starts_with("isolated-"));
     }
 
     #[test]
-    fn test_production_config() {
-        let config = AuditConfig::production();
-        assert_eq!(config.mode, AuditMode::Production);
-        assert!(config.read_only);
-        assert!(config.run_id.starts_with("prod-audit-"));
+    fn test_shared_config() {
+        let config = AuditConfig::shared();
+        assert_eq!(config.mode, AuditMode::Shared);
+        assert!(!config.read_only);
+        assert!(config.run_id.starts_with("audit-"));
     }
 
     #[test]
     fn test_audit_tags() {
         use nostr_sdk::prelude::{Alphabet, SingleLetterTag};
 
-        let config = AuditConfig::ci();
+        let config = AuditConfig::isolated();
         let tags = config.audit_tags();
 
         assert_eq!(tags.len(), 3);
@@ -252,7 +280,7 @@ mod tests {
         // Check for "t" tag with "audit-{run_id}"
         assert!(tags.iter().any(|t| {
             t.content()
-                .map(|c| c.starts_with("audit-ci-"))
+                .map(|c| c.starts_with("audit-isolated-"))
                 .unwrap_or(false)
         }));
 
@@ -266,7 +294,7 @@ mod tests {
 
     #[test]
     fn test_audit_event_builder() {
-        let config = AuditConfig::ci();
+        let config = AuditConfig::isolated();
         let keys = Keys::generate();
 
         let event = AuditEventBuilder::new(Kind::TextNote, "test", config.clone())
@@ -283,7 +311,7 @@ mod tests {
 
     #[test]
     fn test_custom_timestamp_applied() {
-        let config = AuditConfig::ci();
+        let config = AuditConfig::isolated();
         let keys = Keys::generate();
         let custom_ts = Timestamp::from(1700000000);
 
@@ -302,7 +330,7 @@ mod tests {
 
     #[test]
     fn test_default_timestamp_uses_current_time() {
-        let config = AuditConfig::ci();
+        let config = AuditConfig::isolated();
         let keys = Keys::generate();
 
         let before = Timestamp::now();

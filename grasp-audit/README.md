@@ -4,8 +4,8 @@ A reusable audit and compliance testing tool for GRASP protocol implementations.
 
 ## Features
 
-- ✅ **Isolated Testing**: Tests run in parallel with unique audit IDs
-- ✅ **Production Audit**: Test live services with minimal impact
+- ✅ **Shared Fixtures**: Fixtures cached and reused across tests (default for CLI)
+- ✅ **Isolated Testing**: Fresh fixtures per test for parallel test isolation
 - ✅ **Clean Audit Events**: Special tags for easy cleanup (no deletion trails)
 - ✅ **Spec-Mirrored Tests**: Test structure matches GRASP protocol exactly
 - ✅ **Reusable**: Can test any GRASP implementation (Rust, Go, Python, etc.)
@@ -41,8 +41,8 @@ use grasp_audit::*;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Create audit client for CI testing
-    let config = AuditConfig::ci();
+    // Create audit client with shared fixtures (default for CLI)
+    let config = AuditConfig::shared();
     let client = AuditClient::new("ws://localhost:7000", config).await?;
 
     // Run NIP-01 smoke tests
@@ -63,11 +63,11 @@ async fn main() -> Result<()> {
 # Install
 cargo install --path .
 
-# Run smoke tests against local relay
-grasp-audit audit --relay ws://localhost:7000 --mode ci --spec nip01-smoke
+# Run smoke tests against local relay (shared fixtures - default)
+grasp-audit audit --relay ws://localhost:7000 --spec nip01-smoke
 
-# Audit production server
-grasp-audit audit --relay wss://grasp.example.com --mode production --spec all
+# Run with isolated fixtures (each test gets fresh fixtures)
+grasp-audit audit --relay ws://localhost:7000 --mode isolated --spec all
 ```
 
 ## Test Specifications
@@ -110,11 +110,10 @@ All audit events automatically include special tags for isolation and cleanup:
 
 - `["t", "grasp-audit-test-event"]` - Identifies all audit-related events
 - `["t", "audit-{run_id}"]` - Unique identifier for each audit run
-  - CI mode: `audit-ci-{uuid}`
-  - Production mode: `audit-prod-audit-{timestamp}`
+  - Shared mode: `audit-audit-{uuid}`
+  - Isolated mode: `audit-isolated-{uuid}`
 - `["t", "audit-cleanup-after-{unix_timestamp}"]` - Cleanup scheduling
-  - CI mode: Current time + 3600 seconds (1 hour)
-  - Production mode: Current time + 300 seconds (5 minutes)
+  - Default: Current time + 3600 seconds (1 hour)
 
 **Benefits:**
 
@@ -124,27 +123,40 @@ All audit events automatically include special tags for isolation and cleanup:
 - **No deletion trails**: No NIP-09 deletion events needed
 - **Discovery**: Easy to query all audit events via hashtag
 
-## Modes
+## Fixture Modes
 
-### CI Mode (Default)
+The audit tool supports two fixture caching modes that control how test prerequisites are managed.
 
-- Tests are isolated by unique run ID
-- Tests only see their own events
-- Full read/write access
-- Cleanup after 1 hour
+### Shared Mode (Default for CLI)
+
+Fixtures are cached and reused across all tests. Use this when:
+- Running the CLI audit tool sequentially
+- Tests build on each other's fixtures
+- You want efficient resource usage
 
 ```rust
-let config = AuditConfig::ci();
+let config = AuditConfig::shared();
 ```
 
-### Production Mode
+### Isolated Mode (For Parallel Tests)
 
-- Tests see all events (including real ones)
-- Read-only by default (minimal impact)
-- Cleanup after 5 minutes
+Each test creates fresh fixtures for complete isolation. Use this when:
+- Running `cargo test` in parallel
+- Tests must not interfere with each other
+- Testing the fixture system itself
 
 ```rust
-let config = AuditConfig::production();
+let config = AuditConfig::isolated();
+```
+
+### CLI Usage
+
+```bash
+# Default: shared fixtures (efficient for sequential CLI runs)
+grasp-audit audit --relay ws://localhost:7000 --spec all
+
+# Isolated fixtures (for testing)
+grasp-audit audit --relay ws://localhost:7000 --mode isolated --spec all
 ```
 
 ## Examples
