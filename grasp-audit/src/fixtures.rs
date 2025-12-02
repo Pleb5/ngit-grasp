@@ -1756,7 +1756,7 @@ pub fn create_commit(clone_path: &Path, message: &str) -> Result<String, String>
     }
 
     let output = Command::new("git")
-        .args(["commit", "-m", message])
+        .args(["-c", "commit.gpgsign=false", "commit", "-m", message])
         .current_dir(clone_path)
         .output()
         .map_err(|e| format!("Git commit failed: {}", e))?;
