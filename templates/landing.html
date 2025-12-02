@@ -220,7 +220,7 @@
             
             <p class="subtitle">{relay_description}</p>
             
-            <a href="https://gitworkshop.dev/relay/{domain}" class="browse-link" target="_blank">
+            <a id="browse-link" href="https://gitworkshop.dev" class="browse-link" target="_blank">
                 Browse Repositories on GitWorkshop.dev &rarr;
             </a>
             
@@ -295,5 +295,18 @@
             Powered by <strong>ngit-grasp</strong>
         </div>
     </main>
+    <script>
+        // Detect protocol and construct gitworkshop relay link
+        const protocol = window.location.protocol; // 'http:' or 'https:'
+        const host = window.location.host; // 'domain.com' or 'domain.com:port'
+        
+        // For http, use ws:// prefix and URL encode; for https, just use host (implies wss://)
+        let relayref = host;
+        if (protocol === 'http:') relayref = encodeURIComponent("ws://" + host);
+        
+        // Update the browse link to point to the relay on gitworkshop
+        const browseLink = document.getElementById('browse-link');
+        browseLink.setAttribute('href', 'https://gitworkshop.dev/relay/' + relayref);
+    </script>
 </body>
 </html>

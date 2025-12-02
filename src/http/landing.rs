@@ -51,7 +51,6 @@ pub fn get_html(config: &Config) -> String {
         base_css = get_base_css(),
         relay_name = config.relay_name,
         relay_description = config.relay_description,
-        domain = config.domain,
     )
 }
 
@@ -323,7 +322,7 @@ pub fn get_repo_html(config: &Config, npub: &str, identifier: &str) -> String {
                     <span class="client-name">gitworkshop.dev</span>
                     <span class="client-desc">Web-based repository browser</span>
                 </div>
-                <a href="https://gitworkshop.dev" target="_blank">Visit &rarr;</a>
+                <a id="gitworkshop-link" href="https://gitworkshop.dev" target="_blank">Visit &rarr;</a>
             </div>
             <div class="card client-card">
                 <div class="client-info">
@@ -342,6 +341,19 @@ pub fn get_repo_html(config: &Config, npub: &str, identifier: &str) -> String {
         </div>
         <div class="footer">Powered by <strong>ngit-grasp</strong></div>
     </div>
+    <script>
+        // Detect protocol and construct gitworkshop link
+        const protocol = window.location.protocol; // 'http:' or 'https:'
+        const host = window.location.host; // 'domain.com' or 'domain.com:port'
+        
+        // For http, use ws:// prefix and URL encode; for https, just use host (implies wss://)
+        let relayref = host;
+        if (protocol === 'http:') relayref = encodeURIComponent("ws://" + host);
+        
+        // Construct gitworkshop link: gitworkshop.dev/npub/relayref/identifier
+        const gitworkshopLink = document.getElementById('gitworkshop-link');
+        gitworkshopLink.setAttribute('href', 'https://gitworkshop.dev/{npub}/' + relayref + '/{identifier}');
+    </script>
 </body>
 </html>"##,
         base_css = get_base_css(),
