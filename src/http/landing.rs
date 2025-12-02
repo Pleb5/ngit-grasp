@@ -3,6 +3,27 @@
 /// Generates HTML landing page for the Nostr relay.
 use crate::config::Config;
 
+/// Get the software version string (version + optional git commit)
+fn get_version() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    match option_env!("GIT_COMMIT_SHORT") {
+        Some(commit) if !commit.is_empty() => format!("v{}-{}", version, commit),
+        _ => format!("v{}", version),
+    }
+}
+
+/// Generate the footer JavaScript that sets the domain dynamically
+fn get_footer_script() -> &'static str {
+    r#"<script>
+        (function() {
+            var footerDomain = document.getElementById('footer-domain');
+            if (footerDomain) {
+                footerDomain.textContent = window.location.host;
+            }
+        })();
+    </script>"#
+}
+
 /// Generate the common base CSS used across all pages
 fn get_base_css() -> &'static str {
     r#":root {
@@ -41,6 +62,10 @@ fn get_base_css() -> &'static str {
             text-align: center;
             color: var(--text-muted);
             font-size: 0.875rem;
+        }
+        .footer-separator {
+            margin: 0 0.5em;
+            opacity: 0.5;
         }
         .software-box {
             display: flex;
@@ -93,11 +118,16 @@ fn get_software_box_html() -> &'static str {
 
 /// Generate the HTML landing page
 pub fn get_html(config: &Config) -> String {
+    // Curation matches NIP-11 document - currently None for this relay
+    let curation = "None".to_string();
+
     format!(
         include_str!("../../templates/landing.html"),
         base_css = get_base_css(),
         relay_name = config.relay_name,
         relay_description = config.relay_description,
+        version = get_version(),
+        curation = curation,
     )
 }
 
@@ -146,6 +176,7 @@ pub fn get_generic_404_html(config: &Config, path: &str) -> String {
         }}
         code {{ word-break: break-all; }}
         .footer {{ margin-top: 48px; }}
+        .footer-separator {{ margin: 0 0.5em; opacity: 0.5; }}
     </style>
 </head>
 <body>
@@ -158,13 +189,16 @@ pub fn get_generic_404_html(config: &Config, path: &str) -> String {
             <code>{path}</code>
         </div>
         <a href="/">&larr; Back to {relay_name}</a>
-        <div class="footer">Powered by <a href="https://gitworkshop.dev/danconwaydev.com/ngit-grasp"><strong>ngit-grasp</strong></a></div>
+        <div class="footer"><span id="footer-domain"></span><span class="footer-separator">•</span>powered by <a href="https://gitworkshop.dev/danconwaydev.com/ngit-grasp"><strong>ngit-grasp</strong></a><span class="footer-separator">•</span>{version}<span class="footer-separator">•</span>MIT Licensed</div>
     </div>
+    {footer_script}
 </body>
 </html>"##,
         base_css = get_base_css(),
         relay_name = config.relay_name,
         path = path,
+        version = get_version(),
+        footer_script = get_footer_script(),
     )
 }
 
@@ -230,6 +264,7 @@ pub fn get_404_html(config: &Config, npub: &str, identifier: &str) -> String {
             color: var(--text-muted);
         }}
         .footer {{ margin-top: 48px; }}
+        .footer-separator {{ margin: 0 0.5em; opacity: 0.5; }}
     </style>
 </head>
 <body>
@@ -249,14 +284,17 @@ pub fn get_404_html(config: &Config, npub: &str, identifier: &str) -> String {
         </div>
         <div class="hint">The repository may not have been announced to this server, or the URL may be incorrect.</div>
         <a href="/">&larr; Back to {relay_name}</a>
-        <div class="footer">Powered by <a href="https://gitworkshop.dev/danconwaydev.com/ngit-grasp"><strong>ngit-grasp</strong></a></div>
+        <div class="footer"><span id="footer-domain"></span><span class="footer-separator">•</span>powered by <a href="https://gitworkshop.dev/danconwaydev.com/ngit-grasp"><strong>ngit-grasp</strong></a><span class="footer-separator">•</span>{version}<span class="footer-separator">•</span>MIT Licensed</div>
     </div>
+    {footer_script}
 </body>
 </html>"##,
         base_css = get_base_css(),
         relay_name = config.relay_name,
         npub = npub,
         identifier = identifier,
+        version = get_version(),
+        footer_script = get_footer_script(),
     )
 }
 
@@ -363,7 +401,7 @@ pub fn get_repo_html(config: &Config, npub: &str, identifier: &str) -> String {
                 </div>
             </div>
         </div>
-        <div class="footer">Powered by <a href="https://gitworkshop.dev/danconwaydev.com/ngit-grasp"><strong>ngit-grasp</strong></a></div>
+        <div class="footer"><span id="footer-domain"></span><span class="footer-separator">•</span>powered by <a href="https://gitworkshop.dev/danconwaydev.com/ngit-grasp"><strong>ngit-grasp</strong></a><span class="footer-separator">•</span>{version}<span class="footer-separator">•</span>MIT Licensed</div>
     </div>
     <script>
         // Detect protocol and construct relayref
@@ -380,6 +418,12 @@ pub fn get_repo_html(config: &Config, npub: &str, identifier: &str) -> String {
         // Construct gitworkshop link: gitworkshop.dev/npub/relayref/identifier
         const gitworkshopLink = document.getElementById('gitworkshop-link');
         gitworkshopLink.setAttribute('href', 'https://gitworkshop.dev/{npub}/' + relayref + '/{identifier}');
+        
+        // Set footer domain
+        var footerDomain = document.getElementById('footer-domain');
+        if (footerDomain) {{
+            footerDomain.textContent = host;
+        }}
     </script>
 </body>
 </html>"##,
@@ -387,5 +431,6 @@ pub fn get_repo_html(config: &Config, npub: &str, identifier: &str) -> String {
         relay_name = config.relay_name,
         npub = npub,
         identifier = identifier,
+        version = get_version(),
     )
 }

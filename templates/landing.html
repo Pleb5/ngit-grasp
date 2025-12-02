@@ -125,7 +125,7 @@
         }}
         code {{ padding: 2px 8px; }}
         .tag-container {{
-            margin: 24px 0;
+            margin: 16px 0;
             display: flex;
             flex-wrap: wrap;
             gap: 8px;
@@ -170,6 +170,7 @@
             text-decoration: none;
         }}
         .footer {{ margin-top: 64px; }}
+        .footer-separator {{ margin: 0 0.5em; opacity: 0.5; }}
     </style>
 </head>
 <body>
@@ -184,14 +185,20 @@
             <a id="browse-link" href="https://gitworkshop.dev" class="browse-link" target="_blank">
                 Browse Repositories on GitWorkshop.dev &rarr;
             </a>
-            
-            <div class="tag-container">
+
+            <div class="tag-container" style="margin-bottom: 12px;">
+                <span class="tag-label">Curation:</span>
+                <span class="tag-label">{curation}</span>
+            </div>
+
+            <div class="tag-container" style="margin-top: 12px;">
                 <span class="tag-label">Supports:</span>
                 <span class="tag tag-grasp">GRASP-01</span>
                 <span class="tag tag-nip">NIP-01</span>
                 <span class="tag tag-nip">NIP-11</span>
                 <span class="tag tag-nip">NIP-34</span>
             </div>
+
             
             <div class="card">
                 <div class="software-box">
@@ -244,7 +251,7 @@
         </div>
         
         <div class="footer">
-            Powered by <a href="https://gitworkshop.dev/danconwaydev.com/ngit-grasp"><strong>ngit-grasp</strong></a>
+            <span id="footer-domain"></span><span class="footer-separator">•</span>powered by <a href="https://gitworkshop.dev/danconwaydev.com/ngit-grasp"><strong>ngit-grasp</strong></a><span class="footer-separator">•</span>{version}<span class="footer-separator">•</span>MIT Licensed
         </div>
     </main>
     <script>
@@ -259,6 +266,12 @@
         // Update the browse link to point to the relay on gitworkshop
         const browseLink = document.getElementById('browse-link');
         browseLink.setAttribute('href', 'https://gitworkshop.dev/relay/' + relayref);
+        
+        // Set footer domain
+        var footerDomain = document.getElementById('footer-domain');
+        if (footerDomain) {{
+            footerDomain.textContent = host;
+        }}
     </script>
 </body>
 </html>

@@ -62,8 +62,11 @@ impl RelayInformationDocument {
                 11, // NIP-11: Relay information document (this!)
                 34, // NIP-34: Git repository announcements
             ],
-            software: env!("CARGO_PKG_NAME").to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            software: "https://gitworkshop.dev/danconwaydev.com/ngit-grasp".to_string(),
+            version: match option_env!("GIT_COMMIT_SHORT") {
+                Some(commit) => format!("{}-{}", env!("CARGO_PKG_VERSION"), commit),
+                None => env!("CARGO_PKG_VERSION").to_string(),
+            },
 
             // GRASP-01 Extensions
             supported_grasps: vec!["GRASP-01".to_string()],
