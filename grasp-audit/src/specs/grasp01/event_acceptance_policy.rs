@@ -138,7 +138,7 @@ impl EventAcceptancePolicyTests {
 
     /// Test: Accept valid repository announcements
     ///
-    /// Spec: Lines 3-5 of ../grasp/01.md
+    /// Spec: Line 7 of ../grasp/01.md
     /// Requirement: MUST accept repo announcements listing service in clone & relays tags
     ///
     /// **Using TestContext pattern:**
@@ -147,7 +147,7 @@ impl EventAcceptancePolicyTests {
     pub async fn test_accept_valid_repo_announcement(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_valid_repo_announcement",
-            "GRASP-01:nostr-relay:3-5",
+            "GRASP-01:nostr-relay:7",
             "Accept valid repository announcements with service in clone and relays tags",
         )
         .run(|| async {
@@ -245,14 +245,14 @@ impl EventAcceptancePolicyTests {
 
     /// Test: Reject repo announcements not listing service in clone tag
     ///
-    /// Spec: Line 5 of ../grasp/01.md
+    /// Spec: Line 9 of ../grasp/01.md
     /// Requirement: MUST reject announcements not listing service (unless GRASP-05)
     pub async fn test_reject_repo_announcement_missing_clone_tag(
         client: &AuditClient,
     ) -> TestResult {
         TestResult::new(
             "reject_repo_announcement_missing_clone_tag",
-            "GRASP-01:nostr-relay:5",
+            "GRASP-01:nostr-relay:9",
             "Reject repository announcements without service in clone tag",
         )
         .run(|| async {
@@ -321,14 +321,14 @@ impl EventAcceptancePolicyTests {
 
     /// Test: Reject repo announcements not listing service in relays tag
     ///
-    /// Spec: Line 5 of ../grasp/01.md
+    /// Spec: Line 9 of ../grasp/01.md
     /// Requirement: MUST reject announcements not listing service in relays
     pub async fn test_reject_repo_announcement_missing_relays_tag(
         client: &AuditClient,
     ) -> TestResult {
         TestResult::new(
             "reject_repo_announcement_missing_relays_tag",
-            "GRASP-01:nostr-relay:5",
+            "GRASP-01:nostr-relay:9",
             "Reject repository announcements without service in relays tag",
         )
         .run(|| async {
@@ -410,7 +410,7 @@ impl EventAcceptancePolicyTests {
 
     /// Test: Accept valid repository state announcements
     ///
-    /// Spec: Lines 6-7 of ../grasp/01.md
+    /// Spec: Line 7 of ../grasp/01.md
     /// Requirement: MUST accept repo state announcements with d, maintainers, and r tags
     ///
     /// **EXAMPLE: Using TestContext pattern for fixture management**
@@ -420,7 +420,7 @@ impl EventAcceptancePolicyTests {
     pub async fn test_accept_valid_repo_state_announcement(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_valid_repo_state_announcement",
-            "GRASP-01:nostr-relay:6-7",
+            "GRASP-01:nostr-relay:7",
             "Accept valid state announcements after repo announcement accepted",
         )
         .run(|| async {
@@ -526,12 +526,13 @@ impl EventAcceptancePolicyTests {
 
     /// Test 1.1: Issue referencing repo via `a` tag should be accepted
     ///
+    /// Spec: Line 13 of ../grasp/01.md
     /// **EXAMPLE: Using TestContext for prerequisite events**
     /// Demonstrates how TestContext simplifies test setup while supporting dual modes
     pub async fn test_accept_issue_via_a_tag(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_issue_via_a_tag",
-            "GRASP-01:event-acceptance:1.1",
+            "GRASP-01:nostr-relay:13",
             "Accept issue referencing repo via 'a' tag",
         )
         .run(|| async {
@@ -559,13 +560,14 @@ impl EventAcceptancePolicyTests {
 
     /// Test 1.2: NIP-22 comment with root `A` tag referencing repo should be accepted
     ///
+    /// Spec: Line 13 of ../grasp/01.md
     /// **Using TestContext pattern:**
     /// - In CI mode: Creates fresh repo for full isolation
     /// - In Production mode: Reuses cached repo to minimize events
     pub async fn test_accept_comment_via_capital_a_tag(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_comment_via_A_tag",
-            "GRASP-01:event-acceptance:1.2",
+            "GRASP-01:nostr-relay:13",
             "Accept NIP-22 comment with root 'A' tag referencing repo",
         )
         .run(|| async {
@@ -611,13 +613,14 @@ impl EventAcceptancePolicyTests {
 
     /// Test 1.3: Kind 1 text note quoting repo via `q` tag should be accepted
     ///
+    /// Spec: Line 13 of ../grasp/01.md
     /// **Using TestContext pattern:**
     /// - In CI mode: Creates fresh repo for full isolation
     /// - In Production mode: Reuses cached repo to minimize events
     pub async fn test_accept_kind1_via_q_tag(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_kind1_via_q_tag",
-            "GRASP-01:event-acceptance:1.3",
+            "GRASP-01:nostr-relay:13",
             "Accept kind 1 note quoting repo via 'q' tag",
         )
         .run(|| async {
@@ -660,13 +663,14 @@ impl EventAcceptancePolicyTests {
 
     /// Test 2.1: Issue quoting another accepted issue should be accepted (transitive)
     ///
+    /// Spec: Line 13 of ../grasp/01.md
     /// **Using TestContext pattern:**
     /// - In CI mode: Creates fresh repo+issue for full isolation
     /// - In Production mode: Reuses cached repo+issue to minimize events
     pub async fn test_accept_issue_quoting_issue_via_q(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_issue_quoting_issue_via_q",
-            "GRASP-01:event-acceptance:2.1",
+            "GRASP-01:nostr-relay:13",
             "Accept issue quoting accepted issue (transitive)",
         )
         .run(|| async {
@@ -705,13 +709,14 @@ impl EventAcceptancePolicyTests {
 
     /// Test 2.2: NIP-22 comment with root 'E' tag to accepted issue should be accepted
     ///
+    /// Spec: Line 13 of ../grasp/01.md
     /// **Using TestContext pattern:**
     /// - In CI mode: Creates fresh repo+issue for full isolation
     /// - In Production mode: Reuses cached repo+issue to minimize events
     pub async fn test_accept_comment_via_capital_e_tag(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_comment_via_E_tag",
-            "GRASP-01:event-acceptance:2.2",
+            "GRASP-01:nostr-relay:13",
             "Accept NIP-22 comment with root 'E' tag to accepted issue",
         )
         .run(|| async {
@@ -743,13 +748,14 @@ impl EventAcceptancePolicyTests {
 
     /// Test 2.3: Kind 1 note with 'e' tag reply to accepted kind 1 should be accepted
     ///
+    /// Spec: Line 13 of ../grasp/01.md
     /// **Using TestContext pattern:**
     /// - In CI mode: Creates fresh repo for full isolation
     /// - In Production mode: Reuses cached repo to minimize events
     pub async fn test_accept_kind1_via_e_tag(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_kind1_via_e_tag",
-            "GRASP-01:event-acceptance:2.3",
+            "GRASP-01:nostr-relay:13",
             "Accept kind 1 reply via 'e' tag to accepted kind 1",
         )
         .run(|| async {
@@ -798,13 +804,14 @@ impl EventAcceptancePolicyTests {
 
     /// Test 3.1: Kind 1 note should be accepted when referenced by an accepted issue (forward ref)
     ///
+    /// Spec: Line 13 of ../grasp/01.md
     /// **Using TestContext pattern:**
     /// - In CI mode: Creates fresh repo for full isolation
     /// - In Production mode: Reuses cached repo to minimize events
     pub async fn test_accept_kind1_referenced_in_issue(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_kind1_referenced_in_issue",
-            "GRASP-01:event-acceptance:3.1",
+            "GRASP-01:nostr-relay:13",
             "Accept kind 1 referenced in accepted issue (forward ref)",
         )
         .run(|| async {
@@ -889,13 +896,14 @@ impl EventAcceptancePolicyTests {
 
     /// Test 3.2: Comment should be accepted when referenced by another accepted comment (forward ref)
     ///
+    /// Spec: Line 13 of ../grasp/01.md
     /// **Using TestContext pattern:**
     /// - In CI mode: Creates fresh repo+issue for full isolation
     /// - In Production mode: Reuses cached repo+issue to minimize events
     pub async fn test_accept_comment_referenced_in_comment(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_comment_referenced_in_comment",
-            "GRASP-01:event-acceptance:3.2",
+            "GRASP-01:nostr-relay:13",
             "Accept comment referenced in another accepted comment (forward ref)",
         )
         .run(|| async {
@@ -949,13 +957,14 @@ impl EventAcceptancePolicyTests {
 
     /// Test 3.3: Kind 1 note should be accepted when referenced by another accepted kind 1 (forward ref)
     ///
+    /// Spec: Line 13 of ../grasp/01.md
     /// **Using TestContext pattern:**
     /// - In CI mode: Creates fresh repo for full isolation
     /// - In Production mode: Reuses cached repo to minimize events
     pub async fn test_accept_kind1_referenced_in_kind1(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_kind1_referenced_in_kind1",
-            "GRASP-01:event-acceptance:3.3",
+            "GRASP-01:nostr-relay:13",
             "Accept kind 1 referenced in another accepted kind 1 (forward ref)",
         )
         .run(|| async {
@@ -1007,10 +1016,13 @@ impl EventAcceptancePolicyTests {
     // ============================================================
 
     /// Test 4.1: Issue referencing unaccepted repo should be rejected
+    ///
+    /// Spec: Line 18 of ../grasp/01.md
+    /// (Rejecting non-git-related events falls under MAY reject for curation)
     pub async fn test_reject_orphan_issue(client: &AuditClient) -> TestResult {
         TestResult::new(
             "reject_orphan_issue",
-            "GRASP-01:event-acceptance:4.1",
+            "GRASP-01:nostr-relay:18",
             "Reject issue referencing unaccepted repo",
         )
         .run(|| async {
@@ -1031,10 +1043,13 @@ impl EventAcceptancePolicyTests {
     }
 
     /// Test 4.2: Generic kind 1 note with no repo references should be rejected
+    ///
+    /// Spec: Line 18 of ../grasp/01.md
+    /// (Rejecting non-git-related events falls under MAY reject for curation)
     pub async fn test_reject_orphan_kind1(client: &AuditClient) -> TestResult {
         TestResult::new(
             "reject_orphan_kind1",
-            "GRASP-01:event-acceptance:4.2",
+            "GRASP-01:nostr-relay:18",
             "Reject kind 1 with no repo references",
         )
         .run(|| async {
@@ -1054,6 +1069,8 @@ impl EventAcceptancePolicyTests {
 
     /// Test 4.3: Comment quoting unaccepted repo should be rejected
     ///
+    /// Spec: Line 18 of ../grasp/01.md
+    /// (Rejecting non-git-related events falls under MAY reject for curation)
     /// **Using TestContext pattern:**
     /// - In CI mode: Creates fresh accepted repo for full isolation
     /// - In Production mode: Reuses cached accepted repo to minimize events
@@ -1061,7 +1078,7 @@ impl EventAcceptancePolicyTests {
     pub async fn test_reject_comment_quoting_other_repo(client: &AuditClient) -> TestResult {
         TestResult::new(
             "reject_comment_quoting_other_repo",
-            "GRASP-01:event-acceptance:4.3",
+            "GRASP-01:nostr-relay:18",
             "Reject comment quoting unaccepted repo",
         )
         .run(|| async {

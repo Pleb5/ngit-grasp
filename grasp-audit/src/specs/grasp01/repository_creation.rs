@@ -36,6 +36,7 @@ impl RepositoryCreationTests {
     /// Test that a bare repository is created when a valid announcement is accepted
     /// and is accessible via Smart HTTP service
     ///
+    /// Spec: Line 28 of ../grasp/01.md
     /// This test verifies:
     /// 1. Sends a valid repository announcement via TestContext
     /// 2. Verifies the announcement was accepted
@@ -54,7 +55,7 @@ impl RepositoryCreationTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01",
+                    "GRASP-01:git-http:28",
                     "Bare repository must be created and accessible via Smart HTTP when announcement is accepted",
                 )
                 .fail(format!("Failed to create repo fixture: {}", e))
@@ -75,7 +76,7 @@ impl RepositoryCreationTests {
             None => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01",
+                    "GRASP-01:git-http:28",
                     "Bare repository must be created and accessible via Smart HTTP when announcement is accepted",
                 )
                 .fail("Repository announcement missing d tag")
@@ -87,7 +88,7 @@ impl RepositoryCreationTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01",
+                    "GRASP-01:git-http:28",
                     "Bare repository must be created and accessible via Smart HTTP when announcement is accepted",
                 )
                 .fail(format!("Failed to convert pubkey to npub: {}", e))
@@ -98,7 +99,7 @@ impl RepositoryCreationTests {
         if let Err(e) = check_repo_accessible_via_http(relay_domain, &npub, &repo_id).await {
             return TestResult::new(
                 test_name,
-                "GRASP-01",
+                "GRASP-01:git-http:28",
                 "Bare repository must be created and accessible via Smart HTTP when announcement is accepted",
             )
             .fail(format!("Repository not accessible via HTTP: {}", e));
@@ -106,7 +107,7 @@ impl RepositoryCreationTests {
 
         TestResult::new(
             test_name,
-            "GRASP-01",
+            "GRASP-01:git-http:28",
             "Bare repository must be created and accessible via Smart HTTP when announcement is accepted",
         )
         .pass()
@@ -114,6 +115,7 @@ impl RepositoryCreationTests {
 
     /// Test that a webpage is served for an existing repository
     ///
+    /// Spec: Line 38 of ../grasp/01.md
     /// This test verifies:
     /// 1. Creates a valid repository announcement
     /// 2. Accesses the repository URL without git service parameters
@@ -133,7 +135,7 @@ impl RepositoryCreationTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01",
+                    "GRASP-01:git-http:38",
                     "Relay SHOULD serve a webpage for existing repositories",
                 )
                 .fail(format!("Failed to create repo fixture: {}", e))
@@ -154,7 +156,7 @@ impl RepositoryCreationTests {
             None => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01",
+                    "GRASP-01:git-http:38",
                     "Relay SHOULD serve a webpage for existing repositories",
                 )
                 .fail("Repository announcement missing d tag")
@@ -166,7 +168,7 @@ impl RepositoryCreationTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01",
+                    "GRASP-01:git-http:38",
                     "Relay SHOULD serve a webpage for existing repositories",
                 )
                 .fail(format!("Failed to convert pubkey to npub: {}", e))
@@ -177,7 +179,7 @@ impl RepositoryCreationTests {
         if let Err(e) = check_webpage_served(relay_domain, &npub, &repo_id).await {
             return TestResult::new(
                 test_name,
-                "GRASP-01",
+                "GRASP-01:git-http:38",
                 "Relay SHOULD serve a webpage for existing repositories",
             )
             .fail(format!("Webpage not served: {}", e));
@@ -185,7 +187,7 @@ impl RepositoryCreationTests {
 
         TestResult::new(
             test_name,
-            "GRASP-01",
+            "GRASP-01:git-http:38",
             "Relay SHOULD serve a webpage for existing repositories",
         )
         .pass()
@@ -193,6 +195,7 @@ impl RepositoryCreationTests {
 
     /// Test that 404 is returned for non-existent repositories
     ///
+    /// Spec: Line 38 of ../grasp/01.md
     /// This test verifies:
     /// 1. Accesses a URL for a repository that doesn't exist
     /// 2. Verifies a 404 status is returned
@@ -211,8 +214,8 @@ impl RepositoryCreationTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01",
-                    "Relay SHOULD serve a webpage for existing repositories",
+                    "GRASP-01:git-http:38",
+                    "Relay SHOULD return 404 for repositories it doesn't host",
                 )
                 .fail(format!("Failed to create repo fixture: {}", e))
             }
@@ -223,8 +226,8 @@ impl RepositoryCreationTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01",
-                    "Relay SHOULD serve a webpage for existing repositories",
+                    "GRASP-01:git-http:38",
+                    "Relay SHOULD return 404 for repositories it doesn't host",
                 )
                 .fail(format!("Failed to convert pubkey to npub: {}", e))
             }
@@ -236,7 +239,7 @@ impl RepositoryCreationTests {
         if let Err(e) = check_404_for_nonexistent_repo(relay_domain, &npub, fake_repo_id).await {
             return TestResult::new(
                 test_name,
-                "GRASP-01",
+                "GRASP-01:git-http:38",
                 "Relay SHOULD return 404 for repositories it doesn't host",
             )
             .fail(format!("Expected 404, got: {}", e));
@@ -244,7 +247,7 @@ impl RepositoryCreationTests {
 
         TestResult::new(
             test_name,
-            "GRASP-01",
+            "GRASP-01:git-http:38",
             "Relay SHOULD return 404 for repositories it doesn't host",
         )
         .pass()

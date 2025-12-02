@@ -32,12 +32,12 @@ impl Nip11DocumentTests {
 
     /// Test: Serve NIP-11 document
     ///
-    /// Spec: Line 11 of ../grasp/01.md
+    /// Spec: Line 20 of ../grasp/01.md
     /// Requirement: MUST serve NIP-11 document
     pub async fn test_nip11_document_exists(client: &AuditClient) -> TestResult {
         TestResult::new(
             "nip11_document_exists",
-            "GRASP-01:nostr-relay:11",
+            "GRASP-01:nostr-relay:20",
             "Serve NIP-11 relay information document",
         )
         .run(|| async {
@@ -91,12 +91,12 @@ impl Nip11DocumentTests {
 
     /// Test: NIP-11 includes supported_grasps field
     ///
-    /// Spec: Line 12 of ../grasp/01.md
+    /// Spec: Line 22 of ../grasp/01.md
     /// Requirement: MUST list supported GRASPs as string array
     pub async fn test_nip11_supported_grasps_field(client: &AuditClient) -> TestResult {
         TestResult::new(
             "nip11_supported_grasps_field",
-            "GRASP-01:nostr-relay:12",
+            "GRASP-01:nostr-relay:22",
             "NIP-11 document includes supported_grasps field with GRASP-01",
         )
         .run(|| async {
@@ -167,12 +167,12 @@ impl Nip11DocumentTests {
 
     /// Test: NIP-11 includes repo_acceptance_criteria field
     ///
-    /// Spec: Line 13 of ../grasp/01.md
+    /// Spec: Line 23 of ../grasp/01.md
     /// Requirement: MUST list repository acceptance criteria
     pub async fn test_nip11_repo_acceptance_criteria_field(client: &AuditClient) -> TestResult {
         TestResult::new(
             "nip11_repo_acceptance_criteria_field",
-            "GRASP-01:nostr-relay:13",
+            "GRASP-01:nostr-relay:23",
             "NIP-11 document includes repo_acceptance_criteria field",
         )
         .run(|| async {
@@ -222,12 +222,12 @@ impl Nip11DocumentTests {
 
     /// Test: NIP-11 curation field handling
     ///
-    /// Spec: Line 14 of ../grasp/01.md
+    /// Spec: Line 24 of ../grasp/01.md
     /// Requirement: MUST include curation if curated, omit otherwise
     pub async fn test_nip11_curation_field(client: &AuditClient) -> TestResult {
         TestResult::new(
             "nip11_curation_field",
-            "GRASP-01:nostr-relay:14",
+            "GRASP-01:nostr-relay:24",
             "NIP-11 curation field present if curated, absent otherwise",
         )
         .run(|| async {

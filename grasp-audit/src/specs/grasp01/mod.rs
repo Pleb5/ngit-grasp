@@ -19,6 +19,7 @@ pub mod nip01_smoke;
 pub mod nip11_document;
 pub mod push_authorization;
 pub mod repository_creation;
+pub mod spec_requirements;
 
 pub use cors::CorsTests;
 pub use event_acceptance_policy::EventAcceptancePolicyTests;
@@ -27,3 +28,7 @@ pub use nip01_smoke::Nip01SmokeTests;
 pub use nip11_document::Nip11DocumentTests;
 pub use push_authorization::PushAuthorizationTests;
 pub use repository_creation::RepositoryCreationTests;
+pub use spec_requirements::{
+    get_requirement, get_requirements_for_section, get_sections, RequirementLevel,
+    SpecRequirement, GRASP_01_REQUIREMENTS, GRASP_COMMIT_ID,
+};

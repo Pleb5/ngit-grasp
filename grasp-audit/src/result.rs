@@ -1,35 +1,56 @@
 //! Test result types
 
+use crate::specs::grasp01::{get_sections, GRASP_01_REQUIREMENTS, GRASP_COMMIT_ID};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 // ANSI color codes
 const GREEN: &str = "\x1b[32m";
 const RED: &str = "\x1b[31m";
+const YELLOW: &str = "\x1b[33m";
+const BLUE: &str = "\x1b[34m";
+const CYAN: &str = "\x1b[36m";
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
 
-/// Extract spec category from a spec_ref by removing trailing test number
-/// e.g., "GRASP-01:event-acceptance:1.1" -> "GRASP-01:event-acceptance"
-/// e.g., "NIP-01:basic:2" -> "NIP-01:basic"
-fn extract_spec_category(spec_ref: &str) -> String {
+/// Parse line number(s) from a spec_ref string
+/// Returns a vector of line numbers that this spec_ref covers
+///
+/// Examples:
+/// - "GRASP-01:nostr-relay:7" -> [7]
+/// - "GRASP-01:nostr-relay:7-9" -> [7, 8, 9]
+/// - "NIP-01:basic:2" -> []  (not a GRASP-01 ref)
+fn parse_spec_lines(spec_ref: &str) -> Vec<u32> {
+    // Only parse GRASP-01 refs
+    if !spec_ref.starts_with("GRASP-01:") {
+        return vec![];
+    }
+
+    // Get the last part after the last colon
     let parts: Vec<&str> = spec_ref.split(':').collect();
-    if parts.len() >= 2 {
-        // Check if the last part looks like a test number (starts with digit)
-        if let Some(last) = parts.last() {
-            if last
-                .chars()
-                .next()
-                .map(|c| c.is_ascii_digit())
-                .unwrap_or(false)
-            {
-                // Remove the trailing number part
-                return parts[..parts.len() - 1].join(":");
+    if parts.len() < 3 {
+        return vec![];
+    }
+
+    let line_part = parts.last().unwrap();
+
+    // Handle range format like "7-9"
+    if line_part.contains('-') {
+        let range_parts: Vec<&str> = line_part.split('-').collect();
+        if range_parts.len() == 2 {
+            if let (Ok(start), Ok(end)) = (range_parts[0].parse::<u32>(), range_parts[1].parse::<u32>()) {
+                return (start..=end).collect();
             }
         }
+        return vec![];
     }
-    // Return as-is if no trailing number found
-    spec_ref.to_string()
+
+    // Handle single line number
+    if let Ok(line) = line_part.parse::<u32>() {
+        return vec![line];
+    }
+
+    vec![]
 }
 
 /// Result of a single test
@@ -138,53 +159,100 @@ impl AuditResult {
         self.results.len()
     }
 
-    /// Print a detailed report with tests grouped by spec_ref
+    /// Print a detailed report aligned to GRASP-01 specification
     pub fn print_report(&self) {
-        println!("\n{}{}{}", BOLD, self.spec, RESET);
-        println!("{}", "═".repeat(60));
+        println!();
+        println!("{}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{}", BOLD, RESET);
+        println!("{}GRASP-01 Compliance Report{}", BOLD, RESET);
+        println!("Source: github.com/nostr-protocol/grasp (commit: {})", GRASP_COMMIT_ID);
+        println!("{}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{}", BOLD, RESET);
 
-        let passed = self.passed_count();
-        let total = self.total_count();
-
-        // Group results by spec category (strip trailing test number like ":1.1")
-        let mut grouped: BTreeMap<String, Vec<&TestResult>> = BTreeMap::new();
+        // Build a map of spec line -> tests that cover it
+        let mut tests_by_line: BTreeMap<u32, Vec<&TestResult>> = BTreeMap::new();
         for result in &self.results {
-            // Extract category from spec_ref (e.g., "GRASP-01:event-acceptance:1.1" -> "GRASP-01:event-acceptance")
-            let category = extract_spec_category(&result.spec_ref);
-            grouped.entry(category).or_default().push(result);
+            let lines = parse_spec_lines(&result.spec_ref);
+            for line in lines {
+                tests_by_line.entry(line).or_default().push(result);
+            }
         }
 
-        // Print grouped results
-        for (category, results) in &grouped {
-            println!("\n{}[{}]{}", BOLD, category, RESET);
+        // Track how many spec requirements have tests
+        let mut tested_requirements = 0;
+        let total_requirements = GRASP_01_REQUIREMENTS.len();
 
-            for result in results {
-                let (color, status) = if result.passed {
-                    (GREEN, "✓")
+        // Print results organized by section and spec line
+        for section in get_sections() {
+            println!();
+            println!("{}{}## {}{}", CYAN, BOLD, section, RESET);
+
+            for req in GRASP_01_REQUIREMENTS.iter().filter(|r| r.section == section) {
+                println!();
+                // Print spec requirement in blue
+                println!("{}📘 Line {}: {}{}", BLUE, req.line, req.text, RESET);
+
+                // Get tests for this line
+                if let Some(tests) = tests_by_line.get(&req.line) {
+                    tested_requirements += 1;
+                    for test in tests {
+                        let (color, status) = if test.passed {
+                            (GREEN, "✓")
+                        } else {
+                            (RED, "✗")
+                        };
+                        println!("  {}{} {}{}", color, status, test.name, RESET);
+
+                        if let Some(error) = &test.error {
+                            // Truncate long errors
+                            let error_display = if error.len() > 100 {
+                                format!("{}...", &error[..100])
+                            } else {
+                                error.clone()
+                            };
+                            println!("    {}Error: {}{}", RED, error_display, RESET);
+                        }
+                    }
                 } else {
-                    (RED, "✗")
-                };
-
-                println!("  {}{} {}{}", color, status, result.name, RESET);
-
-                if let Some(error) = &result.error {
-                    println!("    {}Error: {}{}", RED, error, RESET);
+                    println!("  {}⚠️  No Tests Implemented{}", YELLOW, RESET);
                 }
             }
         }
 
         println!();
-        let pass_rate = if total > 0 {
-            (passed as f64 / total as f64) * 100.0
+        println!("{}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{}", BOLD, RESET);
+
+        // Summary statistics
+        let passed = self.passed_count();
+        let total_tests = self.total_count();
+
+        let spec_coverage = if total_requirements > 0 {
+            (tested_requirements as f64 / total_requirements as f64) * 100.0
         } else {
             0.0
         };
 
-        let summary_color = if passed == total { GREEN } else { RED };
+        let pass_rate = if total_tests > 0 {
+            (passed as f64 / total_tests as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let summary_color = if passed == total_tests && tested_requirements == total_requirements {
+            GREEN
+        } else if passed == total_tests {
+            YELLOW
+        } else {
+            RED
+        };
+
         println!(
-            "{}Results: {}/{} passed ({:.1}%){}",
-            summary_color, passed, total, pass_rate, RESET
+            "{}Spec coverage: {}/{} requirements tested ({:.1}%){}",
+            summary_color, tested_requirements, total_requirements, spec_coverage, RESET
         );
+        println!(
+            "{}Test results:  {}/{} tests passed ({:.1}%){}",
+            summary_color, passed, total_tests, pass_rate, RESET
+        );
+        println!("{}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{}", BOLD, RESET);
         println!();
     }
 
@@ -234,5 +302,29 @@ mod tests {
         assert_eq!(audit.passed_count(), 1);
         assert_eq!(audit.failed_count(), 1);
         assert!(!audit.all_passed());
+    }
+
+    #[test]
+    fn test_parse_spec_lines_single() {
+        assert_eq!(parse_spec_lines("GRASP-01:nostr-relay:7"), vec![7]);
+        assert_eq!(parse_spec_lines("GRASP-01:git-http:28"), vec![28]);
+    }
+
+    #[test]
+    fn test_parse_spec_lines_range() {
+        assert_eq!(parse_spec_lines("GRASP-01:nostr-relay:7-9"), vec![7, 8, 9]);
+        assert_eq!(parse_spec_lines("GRASP-01:cors:44-47"), vec![44, 45, 46, 47]);
+    }
+
+    #[test]
+    fn test_parse_spec_lines_non_grasp() {
+        assert_eq!(parse_spec_lines("NIP-01:basic:1"), Vec::<u32>::new());
+        assert_eq!(parse_spec_lines("OTHER:spec:5"), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn test_parse_spec_lines_invalid() {
+        assert_eq!(parse_spec_lines("GRASP-01:invalid"), Vec::<u32>::new());
+        assert_eq!(parse_spec_lines("GRASP-01:test:abc"), Vec::<u32>::new());
     }
 }

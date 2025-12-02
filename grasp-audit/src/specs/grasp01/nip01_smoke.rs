@@ -32,7 +32,7 @@ impl Nip01SmokeTests {
     pub async fn test_websocket_connection(client: &AuditClient) -> TestResult {
         TestResult::new(
             "websocket_connection",
-            "NIP-01",
+            "GRASP-01:nostr-relay:7",
             "Can establish WebSocket connection to /",
         )
         .run(|| async {
@@ -61,7 +61,7 @@ impl Nip01SmokeTests {
     pub async fn test_send_receive_event(client: &AuditClient) -> TestResult {
         TestResult::new(
             "send_receive_event",
-            "NIP-01",
+            "GRASP-01:nostr-relay:7",
             "Can send EVENT and receive OK response",
         )
         .run(|| async {
@@ -127,7 +127,7 @@ impl Nip01SmokeTests {
     pub async fn test_create_subscription(client: &AuditClient) -> TestResult {
         TestResult::new(
             "create_subscription",
-            "NIP-01",
+            "GRASP-01:nostr-relay:7",
             "Can create subscription with REQ and receive EOSE",
         )
         .run(|| async {
@@ -163,7 +163,7 @@ impl Nip01SmokeTests {
     /// Spec: NIP-01 CLOSE message
     /// Requirement: Relay MUST support CLOSE to end subscriptions
     pub async fn test_close_subscription(client: &AuditClient) -> TestResult {
-        TestResult::new("close_subscription", "NIP-01", "Can close subscriptions")
+        TestResult::new("close_subscription", "GRASP-01:nostr-relay:7", "Can close subscriptions")
             .run(|| async {
                 // For now, we just verify we can query events
                 // Full subscription management with CLOSE would require
@@ -189,7 +189,7 @@ impl Nip01SmokeTests {
     pub async fn test_reject_invalid_signature(client: &AuditClient) -> TestResult {
         TestResult::new(
             "reject_invalid_signature",
-            "NIP-01",
+            "GRASP-01:nostr-relay:7",
             "Rejects events with invalid signatures",
         )
         .run(|| async {
@@ -243,7 +243,7 @@ impl Nip01SmokeTests {
     pub async fn test_reject_invalid_event_id(client: &AuditClient) -> TestResult {
         TestResult::new(
             "reject_invalid_event_id",
-            "NIP-01",
+            "GRASP-01:nostr-relay:7",
             "Rejects events with invalid event IDs",
         )
         .run(|| async {
