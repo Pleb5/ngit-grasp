@@ -24,9 +24,92 @@ fn get_footer_script() -> &'static str {
     </script>"#
 }
 
+/// Generate the theme toggle HTML button
+fn get_theme_toggle_html() -> &'static str {
+    r##"<button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark mode">
+        <svg class="sun-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M12 7c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zM2 13h2c.55 0 1-.45 1-1s-.45-1-1-1H2c-.55 0-1 .45-1 1s.45 1 1 1zm18 0h2c.55 0 1-.45 1-1s-.45-1-1-1h-2c-.55 0-1 .45-1 1s.45 1 1 1zM11 2v2c0 .55.45 1 1 1s1-.45 1-1V2c0-.55-.45-1-1-1s-1 .45-1 1zm0 18v2c0 .55.45 1 1 1s1-.45 1-1v-2c0-.55-.45-1-1-1s-1 .45-1 1zM5.99 4.58a.996.996 0 00-1.41 0 .996.996 0 000 1.41l1.06 1.06c.39.39 1.03.39 1.41 0s.39-1.03 0-1.41L5.99 4.58zm12.37 12.37a.996.996 0 00-1.41 0 .996.996 0 000 1.41l1.06 1.06c.39.39 1.03.39 1.41 0a.996.996 0 000-1.41l-1.06-1.06zm1.06-10.96a.996.996 0 000-1.41.996.996 0 00-1.41 0l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 1.41 0l1.06-1.06zM7.05 18.36a.996.996 0 000-1.41.996.996 0 00-1.41 0l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 1.41 0l1.06-1.06z"/>
+        </svg>
+        <svg class="moon-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M12 3a9 9 0 109 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 01-4.4 2.26 5.403 5.403 0 01-3.14-9.8c-.44-.06-.9-.1-1.36-.1z"/>
+        </svg>
+    </button>"##
+}
+
+/// Generate the theme toggle JavaScript
+fn get_theme_script() -> &'static str {
+    r#"<script>
+        (function() {
+            const THEME_KEY = 'grasp-theme';
+            const toggle = document.getElementById('theme-toggle');
+            
+            // Get saved theme or null (use system preference)
+            function getSavedTheme() {
+                try {
+                    return localStorage.getItem(THEME_KEY);
+                } catch (e) {
+                    return null;
+                }
+            }
+            
+            // Save theme preference
+            function saveTheme(theme) {
+                try {
+                    if (theme) {
+                        localStorage.setItem(THEME_KEY, theme);
+                    } else {
+                        localStorage.removeItem(THEME_KEY);
+                    }
+                } catch (e) {}
+            }
+            
+            // Get current effective theme
+            function getCurrentTheme() {
+                const saved = getSavedTheme();
+                if (saved) return saved;
+                return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+            }
+            
+            // Apply theme to document
+            function applyTheme(theme) {
+                if (theme) {
+                    document.documentElement.setAttribute('data-theme', theme);
+                } else {
+                    document.documentElement.removeAttribute('data-theme');
+                }
+            }
+            
+            // Initialize theme on page load
+            const savedTheme = getSavedTheme();
+            if (savedTheme) {
+                applyTheme(savedTheme);
+            }
+            
+            // Toggle theme on button click
+            if (toggle) {
+                toggle.addEventListener('click', function() {
+                    const current = getCurrentTheme();
+                    const newTheme = current === 'dark' ? 'light' : 'dark';
+                    applyTheme(newTheme);
+                    saveTheme(newTheme);
+                });
+            }
+            
+            // Listen for system theme changes
+            window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', function(e) {
+                // Only react if no manual preference is set
+                if (!getSavedTheme()) {
+                    // Theme will auto-update via CSS, no JS needed
+                }
+            });
+        })();
+    </script>"#
+}
+
 /// Generate the common base CSS used across all pages
 fn get_base_css() -> &'static str {
-    r#":root {
+    r#"/* Dark mode (default) */
+        :root {
             --brand: #4434FF;
             --brand-light: #6b5fff;
             --bg: #0a0a0f;
@@ -36,6 +119,52 @@ fn get_base_css() -> &'static str {
             --text-muted: #a8a8bd;
             --error: #ff4444;
             --success: #22c55e;
+            --logo-bg: #4434FF;
+            --logo-icon: white;
+        }
+        /* Light mode - system preference */
+        @media (prefers-color-scheme: light) {
+            :root:not([data-theme="dark"]) {
+                --brand: #4434FF;
+                --brand-light: #3525cc;
+                --bg: #f8f9fa;
+                --surface: #ffffff;
+                --border: #e1e4e8;
+                --text: #1a1a2e;
+                --text-muted: #586069;
+                --error: #dc3545;
+                --success: #28a745;
+                --logo-bg: #4434FF;
+                --logo-icon: white;
+            }
+        }
+        /* Manual light mode override */
+        :root[data-theme="light"] {
+            --brand: #4434FF;
+            --brand-light: #3525cc;
+            --bg: #f8f9fa;
+            --surface: #ffffff;
+            --border: #e1e4e8;
+            --text: #1a1a2e;
+            --text-muted: #586069;
+            --error: #dc3545;
+            --success: #28a745;
+            --logo-bg: #4434FF;
+            --logo-icon: white;
+        }
+        /* Manual dark mode override */
+        :root[data-theme="dark"] {
+            --brand: #4434FF;
+            --brand-light: #6b5fff;
+            --bg: #0a0a0f;
+            --surface: #12121a;
+            --border: #1e1e2e;
+            --text: #e4e4eb;
+            --text-muted: #a8a8bd;
+            --error: #ff4444;
+            --success: #22c55e;
+            --logo-bg: #4434FF;
+            --logo-icon: white;
         }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -44,6 +173,7 @@ fn get_base_css() -> &'static str {
             background: var(--bg);
             color: var(--text);
             min-height: 100vh;
+            transition: background-color 0.3s ease, color 0.3s ease;
         }
         a { color: var(--brand-light); text-decoration: none; }
         a:hover { text-decoration: underline; }
@@ -54,6 +184,44 @@ fn get_base_css() -> &'static str {
             font-family: 'SF Mono', 'Consolas', monospace;
             font-size: 0.875rem;
             color: var(--brand-light);
+        }
+        /* Theme toggle button */
+        .theme-toggle {
+            position: fixed;
+            top: 16px;
+            right: 16px;
+            z-index: 1000;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 50%;
+            width: 44px;
+            height: 44px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s ease;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }
+        .theme-toggle:hover {
+            transform: scale(1.1);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        }
+        .theme-toggle svg {
+            width: 20px;
+            height: 20px;
+            fill: var(--text);
+            transition: fill 0.3s ease;
+        }
+        .theme-toggle .sun-icon { display: none; }
+        .theme-toggle .moon-icon { display: block; }
+        :root[data-theme="light"] .theme-toggle .sun-icon,
+        :root:not([data-theme="dark"]) .theme-toggle .sun-icon { display: block; }
+        :root[data-theme="light"] .theme-toggle .moon-icon,
+        :root:not([data-theme="dark"]) .theme-toggle .moon-icon { display: none; }
+        @media (prefers-color-scheme: dark) {
+            :root:not([data-theme="light"]) .theme-toggle .sun-icon { display: none; }
+            :root:not([data-theme="light"]) .theme-toggle .moon-icon { display: block; }
         }
         .footer {
             margin-top: 48px;
@@ -78,6 +246,12 @@ fn get_base_css() -> &'static str {
             height: 48px;
             flex-shrink: 0;
         }
+        .software-logo rect {
+            fill: var(--logo-bg);
+        }
+        .software-logo path {
+            fill: var(--logo-icon);
+        }
         .software-content {
             flex: 1;
         }
@@ -100,22 +274,6 @@ fn get_base_css() -> &'static str {
         }"#
 }
 
-/// Generate the software-box HTML component
-fn get_software_box_html() -> &'static str {
-    r##"<div class="card">
-                <div class="software-box">
-                    <svg class="software-logo" viewBox="0 0 38 38" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <rect width="38" height="38" rx="12" fill="#4434FF"/>
-                        <path d="M10.6731 30.6348C8.83687 30.6346 7.34885 29.1458 7.34885 27.3096C7.34891 26.2473 7.84783 25.303 8.62326 24.6943C8.21265 23.3055 7.86571 22.049 7.45334 20.6758C6.90247 18.8412 7.4492 16.8197 8.93576 15.5605L15.7512 9.78906C15.6931 9.54286 15.6614 9.28642 15.6613 9.02246C15.6613 7.51617 16.6628 6.24465 18.0363 5.83594L18.0363 -1.11215e-06C18.511 0.000462658 18.4612 0.000975391 18.9856 0.000975533C19.5102 0.000975578 19.5802 -1.11589e-06 19.9367 -9.46012e-07L19.9367 5.83594C21.3097 6.24503 22.3108 7.5166 22.3108 9.02246C22.3107 9.29118 22.2792 9.55249 22.219 9.80273L29.0783 15.6123C30.5229 16.8359 31.1022 18.8013 30.5539 20.6133L29.3254 24.6758C30.1142 25.2837 30.6232 26.2367 30.6233 27.3096C30.6233 29.1459 29.1344 30.6348 27.2981 30.6348C25.4619 30.6346 23.9738 29.1458 23.9738 27.3096C23.974 25.4734 25.4619 23.9846 27.2981 23.9844C27.3814 23.9844 27.4643 23.9891 27.5461 23.9951L28.7356 20.0625C29.0645 18.9753 28.7166 17.7966 27.8498 17.0625L21.2424 11.4648C20.8746 11.8048 20.4294 12.0622 19.9367 12.209L19.9367 18.9258C21.0425 19.3175 21.836 20.3694 21.8362 21.6094C21.8362 23.1834 20.5596 24.46 18.9856 24.46C17.4117 24.4598 16.136 23.1833 16.136 21.6094C16.1361 20.3689 16.93 19.3172 18.0363 18.9258L18.0363 12.21C17.5395 12.0622 17.0916 11.801 16.7219 11.457L10.1643 17.0107C9.27919 17.7605 8.93068 18.9867 9.27365 20.1289C9.68708 21.5056 10.0175 22.7009 10.3986 23.998C10.4892 23.9906 10.5806 23.9844 10.6731 23.9844C12.5093 23.9844 13.9981 25.4733 13.9983 27.3096C13.9983 29.1459 12.5094 30.6348 10.6731 30.6348Z" fill="white"/>
-                    </svg>
-                    <div class="software-content">
-                        <h3 class="software-heading"><a href="https://gitworkshop.dev/danconwaydev.com/ngit-grasp">Grasp Server</a> Powered by <a href="https://gitworkshop.dev/danconwaydev.com/ngit-grasp">ngit-grasp</a></h3>
-                        <p class="software-desc">Git hosting distributed across relays using Nostr for authorization. <a href="https://ngit.dev/grasp">Find out more...</a></p>
-                    </div>
-                </div>
-            </div>"##
-}
-
 /// Generate the HTML landing page
 pub fn get_html(config: &Config) -> String {
     // Curation matches NIP-11 document - currently None for this relay
@@ -128,6 +286,8 @@ pub fn get_html(config: &Config) -> String {
         relay_description = config.relay_description,
         version = get_version(),
         curation = curation,
+        theme_toggle = get_theme_toggle_html(),
+        theme_script = get_theme_script(),
     )
 }
 
@@ -180,6 +340,7 @@ pub fn get_generic_404_html(config: &Config, path: &str) -> String {
     </style>
 </head>
 <body>
+    {theme_toggle}
     <div class="container">
         <div class="error-code">404</div>
         <h2>Page Not Found</h2>
@@ -192,6 +353,7 @@ pub fn get_generic_404_html(config: &Config, path: &str) -> String {
         <div class="footer"><span id="footer-domain"></span><span class="footer-separator">•</span>powered by <a href="https://gitworkshop.dev/danconwaydev.com/ngit-grasp"><strong>ngit-grasp</strong></a><span class="footer-separator">•</span>{version}<span class="footer-separator">•</span>MIT Licensed</div>
     </div>
     {footer_script}
+    {theme_script}
 </body>
 </html>"##,
         base_css = get_base_css(),
@@ -199,6 +361,8 @@ pub fn get_generic_404_html(config: &Config, path: &str) -> String {
         path = path,
         version = get_version(),
         footer_script = get_footer_script(),
+        theme_toggle = get_theme_toggle_html(),
+        theme_script = get_theme_script(),
     )
 }
 
@@ -268,6 +432,7 @@ pub fn get_404_html(config: &Config, npub: &str, identifier: &str) -> String {
     </style>
 </head>
 <body>
+    {theme_toggle}
     <div class="container">
         <div class="error-code">404</div>
         <h2>Repository Not Found</h2>
@@ -287,6 +452,7 @@ pub fn get_404_html(config: &Config, npub: &str, identifier: &str) -> String {
         <div class="footer"><span id="footer-domain"></span><span class="footer-separator">•</span>powered by <a href="https://gitworkshop.dev/danconwaydev.com/ngit-grasp"><strong>ngit-grasp</strong></a><span class="footer-separator">•</span>{version}<span class="footer-separator">•</span>MIT Licensed</div>
     </div>
     {footer_script}
+    {theme_script}
 </body>
 </html>"##,
         base_css = get_base_css(),
@@ -295,6 +461,8 @@ pub fn get_404_html(config: &Config, npub: &str, identifier: &str) -> String {
         identifier = identifier,
         version = get_version(),
         footer_script = get_footer_script(),
+        theme_toggle = get_theme_toggle_html(),
+        theme_script = get_theme_script(),
     )
 }
 
@@ -377,6 +545,7 @@ pub fn get_repo_html(config: &Config, npub: &str, identifier: &str) -> String {
     </style>
 </head>
 <body>
+    {theme_toggle}
     <div class="container">
         <div class="back-link">
             <a href="/">&larr; {relay_name}</a>
@@ -425,6 +594,7 @@ pub fn get_repo_html(config: &Config, npub: &str, identifier: &str) -> String {
             footerDomain.textContent = host;
         }}
     </script>
+    {theme_script}
 </body>
 </html>"##,
         base_css = get_base_css(),
@@ -432,5 +602,7 @@ pub fn get_repo_html(config: &Config, npub: &str, identifier: &str) -> String {
         npub = npub,
         identifier = identifier,
         version = get_version(),
+        theme_toggle = get_theme_toggle_html(),
+        theme_script = get_theme_script(),
     )
 }
