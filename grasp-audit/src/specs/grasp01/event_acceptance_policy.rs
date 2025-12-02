@@ -424,29 +424,31 @@ impl EventAcceptancePolicyTests {
             "Accept valid state announcements after repo announcement accepted",
         )
         .run(|| async {
-            // NEW: Create TestContext for mode-aware fixture management
+            // Create TestContext for mode-aware fixture management
             let ctx = TestContext::new(client);
 
-            // NEW: Request repository fixture - behavior depends on mode
-            // CI mode: Creates fresh repo for this test
-            // Production mode: Returns cached repo if available
-            let repo_event = ctx.get_fixture(FixtureKind::RepoState).await.map_err(|e| {
+            // Use OwnerStateDataPushed which handles the complete flow:
+            // 1. Creates repo announcement
+            // 2. Pushes git data with the deterministic commit
+            // 3. Sends the state announcement
+            // This ensures the state event references a commit that actually exists
+            let state_event = ctx.get_fixture(FixtureKind::OwnerStateDataPushed).await.map_err(|e| {
                 format!(
                     "Test setup failed: could not get repository state fixture: {}",
                     e
                 )
             })?;
 
-            // Extract repo_id from the repository announcement
-            let repo_id = repo_event
+            // Extract repo_id from the state event
+            let repo_id = state_event
                 .tags
                 .iter()
                 .find(|t| t.kind() == TagKind::d())
                 .and_then(|t| t.content())
-                .ok_or("Missing d tag in repository announcement")?
+                .ok_or("Missing d tag in state announcement")?
                 .to_string();
 
-            let event_id = repo_event.id;
+            let event_id = state_event.id;
 
             // Query back to verify it was accepted and stored
             let filter = Filter::new()
