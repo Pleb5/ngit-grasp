@@ -293,19 +293,23 @@ impl Service<Request<Incoming>> for HttpService {
                 if repo_path.exists() {
                     // Serve repository webpage
                     let html = landing::get_repo_html(&config, &npub, &identifier);
-                    Ok(add_cors_headers(Response::builder().header("server", "ngit-grasp"))
-                        .status(200)
-                        .header("content-type", "text/html; charset=utf-8")
-                        .body(Full::new(Bytes::from(html)))
-                        .unwrap())
+                    Ok(
+                        add_cors_headers(Response::builder().header("server", "ngit-grasp"))
+                            .status(200)
+                            .header("content-type", "text/html; charset=utf-8")
+                            .body(Full::new(Bytes::from(html)))
+                            .unwrap(),
+                    )
                 } else {
                     // Serve 404 page for non-existent repository
                     let html = landing::get_404_html(&config, &npub, &identifier);
-                    Ok(add_cors_headers(Response::builder().header("server", "ngit-grasp"))
-                        .status(404)
-                        .header("content-type", "text/html; charset=utf-8")
-                        .body(Full::new(Bytes::from(html)))
-                        .unwrap())
+                    Ok(
+                        add_cors_headers(Response::builder().header("server", "ngit-grasp"))
+                            .status(404)
+                            .header("content-type", "text/html; charset=utf-8")
+                            .body(Full::new(Bytes::from(html)))
+                            .unwrap(),
+                    )
                 }
             });
         }
@@ -361,19 +365,23 @@ impl Service<Request<Incoming>> for HttpService {
             if path == "/" {
                 // Serve landing page for root
                 let html = landing::get_html(&config);
-                Ok(add_cors_headers(Response::builder().header("server", "ngit-grasp"))
-                    .status(200)
-                    .header("content-type", "text/html; charset=utf-8")
-                    .body(Full::new(Bytes::from(html)))
-                    .unwrap())
+                Ok(
+                    add_cors_headers(Response::builder().header("server", "ngit-grasp"))
+                        .status(200)
+                        .header("content-type", "text/html; charset=utf-8")
+                        .body(Full::new(Bytes::from(html)))
+                        .unwrap(),
+                )
             } else {
                 // Serve generic 404 for unknown paths
                 let html = landing::get_generic_404_html(&config, &path);
-                Ok(add_cors_headers(Response::builder().header("server", "ngit-grasp"))
-                    .status(404)
-                    .header("content-type", "text/html; charset=utf-8")
-                    .body(Full::new(Bytes::from(html)))
-                    .unwrap())
+                Ok(
+                    add_cors_headers(Response::builder().header("server", "ngit-grasp"))
+                        .status(404)
+                        .header("content-type", "text/html; charset=utf-8")
+                        .body(Full::new(Bytes::from(html)))
+                        .unwrap(),
+                )
             }
         })
     }

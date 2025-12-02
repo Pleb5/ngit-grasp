@@ -650,7 +650,7 @@ impl PushAuthorizationTests {
     ///
     /// This test uses the MaintainerStateDataPushed fixture which handles all 4 stages:
     /// 1. **Generated**: Creates ValidRepo (owner's announcement with maintainer in maintainers tag)
-    ///                   + MaintainerState (maintainer's state event ONLY - no announcement)
+    ///    + MaintainerState (maintainer's state event ONLY - no announcement)
     /// 2. **Sent**: Sends events to relay
     /// 3. **Verified**: Confirms events accepted by relay
     /// 4. **DataPushed**: Clones repo, creates maintainer deterministic commit, pushes to relay
@@ -692,8 +692,8 @@ impl PushAuthorizationTests {
     ///
     /// This test uses the RecursiveMaintainerStateDataPushed fixture which handles all 4 stages:
     /// 1. **Generated**: Creates MaintainerStateDataPushed (owner's + maintainer's data pushed)
-    ///                   + MaintainerAnnouncement (maintainer lists recursive maintainer)
-    ///                   + RecursiveMaintainerState (recursive maintainer's state event)
+    ///    + MaintainerAnnouncement (maintainer lists recursive maintainer)
+    ///    + RecursiveMaintainerState (recursive maintainer's state event)
     /// 2. **Sent**: Sends events to relay
     /// 3. **Verified**: Confirms events accepted by relay
     /// 4. **DataPushed**: Clones repo, creates recursive maintainer deterministic commit, pushes to relay
