@@ -347,7 +347,7 @@ pub fn get_repo_html(config: &Config, npub: &str, identifier: &str) -> String {
             <h1>{identifier}</h1>
             <h3 class="subtitle">by {npub}</h3>
         </div>
-        <p class="subtitle">Git repository hosted on <a href="https://ngit.dev/grasp">Grasp Server</a> {relay_name}</p>
+        <p class="subtitle">Git repository hosted using the <a href="https://ngit.dev/grasp">Grasp Protocol</a></p>
         
         <a id="gitworkshop-link" href="https://gitworkshop.dev" class="browse-link" target="_blank">
             <span class="browse-identifier">Browse Repository</span>
@@ -363,7 +363,6 @@ pub fn get_repo_html(config: &Config, npub: &str, identifier: &str) -> String {
                 </div>
             </div>
         </div>
-        {software_box}
         <div class="footer">Powered by <a href="https://gitworkshop.dev/danconwaydev.com/ngit-grasp"><strong>ngit-grasp</strong></a></div>
     </div>
     <script>
@@ -388,6 +387,5 @@ pub fn get_repo_html(config: &Config, npub: &str, identifier: &str) -> String {
         relay_name = config.relay_name,
         npub = npub,
         identifier = identifier,
-        software_box = get_software_box_html(),
     )
 }
