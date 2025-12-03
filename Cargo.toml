@@ -21,6 +21,7 @@ nostr-relay-builder = "0.44"
 
 # Nostr
 nostr-sdk = "0.44"
+nostr-lmdb = "0.44"
 
 # Utilities
 futures-util = "0.3"

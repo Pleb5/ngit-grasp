@@ -31,9 +31,9 @@ use anyhow::{anyhow, Result};
 use nostr_relay_builder::prelude::*;
 use nostr_sdk::{EventId, ToBech32};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use tracing::debug;
 
+use crate::nostr::builder::SharedDatabase;
 use crate::nostr::events::{
     RepositoryAnnouncement, RepositoryState, KIND_PR, KIND_PR_UPDATE, KIND_REPOSITORY_ANNOUNCEMENT,
     KIND_REPOSITORY_STATE,
@@ -56,7 +56,7 @@ pub struct RepositoryData {
 /// This performs a single database query to fetch both announcement and state events,
 /// which is more efficient than separate queries.
 pub async fn fetch_repository_data(
-    database: &Arc<MemoryDatabase>,
+    database: &SharedDatabase,
     identifier: &str,
 ) -> Result<RepositoryData> {
     let filter = Filter::new()
@@ -284,7 +284,7 @@ pub fn is_latest_state(
 ///
 /// Returns an `AuthorizationResult` that indicates whether a push is authorized.
 pub async fn get_authorization_from_db(
-    database: &Arc<MemoryDatabase>,
+    database: &SharedDatabase,
     identifier: &str,
 ) -> Result<AuthorizationResult> {
     // Fetch all repository data with a single query
@@ -340,7 +340,7 @@ pub async fn get_authorization_from_db(
 ///
 /// Returns an `AuthorizationResult` that indicates whether a push is authorized.
 pub async fn get_authorization_for_owner(
-    database: &Arc<MemoryDatabase>,
+    database: &SharedDatabase,
     identifier: &str,
     owner_pubkey: &str,
 ) -> Result<AuthorizationResult> {
@@ -817,7 +817,7 @@ pub fn npub_to_pubkey(npub: &str) -> Result<String> {
 /// - `Ok(None)` if the event doesn't exist (push should be allowed)
 /// - `Err(_)` on database errors
 pub async fn get_event_commit_tag(
-    database: &Arc<MemoryDatabase>,
+    database: &SharedDatabase,
     event_id: &EventId,
 ) -> Result<Option<String>> {
     // Query for PR (1618) and PR Update (1619) events with this ID
@@ -872,7 +872,7 @@ pub async fn get_event_commit_tag(
 /// * `Ok(())` if all refs/nostr/ pushes are valid
 /// * `Err(_)` if any ref has invalid event ID format or fails commit validation
 pub async fn validate_nostr_ref_pushes(
-    database: &Arc<MemoryDatabase>,
+    database: &SharedDatabase,
     pushed_refs: &[(String, String, String)],
 ) -> Result<()> {
     for (_, new_oid, ref_name) in pushed_refs {

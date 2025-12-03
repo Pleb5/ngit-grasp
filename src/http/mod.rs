@@ -7,7 +7,6 @@ pub mod nip11;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use base64::Engine;
 use http_body_util::{BodyExt, Full};
@@ -17,7 +16,6 @@ use hyper::server::conn::http1;
 use hyper::service::Service;
 use hyper::{Method, Request, Response};
 use hyper_util::rt::TokioIo;
-use nostr_relay_builder::prelude::MemoryDatabase;
 use nostr_relay_builder::LocalRelay;
 use nostr_sdk::hashes::sha1::Hash as Sha1Hash;
 use nostr_sdk::hashes::{Hash, HashEngine};
@@ -26,6 +24,7 @@ use tokio::net::TcpListener;
 
 use crate::config::Config;
 use crate::git;
+use crate::nostr::builder::SharedDatabase;
 
 /// CORS headers required by GRASP-01 specification (lines 40-47)
 const CORS_ALLOW_ORIGIN: &str = "*";
@@ -90,7 +89,7 @@ struct HttpService {
     config: Config,
     remote: SocketAddr,
     /// Database reference for direct queries (e.g., push authorization)
-    database: Arc<MemoryDatabase>,
+    database: SharedDatabase,
 }
 
 impl HttpService {
@@ -98,7 +97,7 @@ impl HttpService {
         relay: LocalRelay,
         config: Config,
         remote: SocketAddr,
-        database: Arc<MemoryDatabase>,
+        database: SharedDatabase,
     ) -> Self {
         Self {
             relay,
@@ -423,7 +422,7 @@ fn derive_accept_key(request_key: &[u8]) -> String {
 pub async fn run_server(
     config: Config,
     relay: LocalRelay,
-    database: Arc<MemoryDatabase>,
+    database: SharedDatabase,
 ) -> anyhow::Result<()> {
     let bind_addr: SocketAddr = config.bind_address.parse()?;
 

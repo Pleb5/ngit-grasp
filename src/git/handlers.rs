@@ -4,9 +4,7 @@
 
 use http_body_util::Full;
 use hyper::{body::Bytes, Response, StatusCode};
-use nostr_relay_builder::prelude::MemoryDatabase;
 use std::path::PathBuf;
-use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, info, warn};
 
@@ -18,6 +16,7 @@ use super::protocol::{GitService, PktLine};
 use super::subprocess::GitSubprocess;
 use super::try_set_head_if_available;
 
+use crate::nostr::builder::SharedDatabase;
 use crate::nostr::events::RepositoryState;
 
 /// Handle GET /info/refs?service=git-{upload,receive}-pack
@@ -178,7 +177,7 @@ pub async fn handle_upload_pack(
 pub async fn handle_receive_pack(
     repo_path: PathBuf,
     request_body: Bytes,
-    database: Option<Arc<MemoryDatabase>>,
+    database: Option<SharedDatabase>,
     identifier: &str,
     owner_pubkey: &str,
 ) -> Result<Response<Full<Bytes>>, GitError> {
@@ -310,7 +309,7 @@ pub async fn handle_receive_pack(
 /// 5. Validates that pushed refs match the state
 /// 6. Validates refs/nostr/<event-id> has valid event id and if event exists, `c` tag matches ref
 async fn authorize_push(
-    database: &Arc<MemoryDatabase>,
+    database: &SharedDatabase,
     identifier: &str,
     owner_pubkey: &str,
     request_body: &Bytes,

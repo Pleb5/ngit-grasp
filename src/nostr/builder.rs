@@ -9,6 +9,7 @@ use std::sync::Arc;
 use nostr::nips::nip19::ToBech32;
 use nostr::prelude::{Alphabet, SingleLetterTag};
 use nostr::{EventId, Filter, Kind, PublicKey};
+use nostr_lmdb::NostrLMDB;
 use nostr_relay_builder::prelude::*;
 
 use crate::config::{Config, DatabaseBackend};
@@ -17,6 +18,9 @@ use crate::nostr::events::{
     validate_announcement, validate_state, RepositoryAnnouncement, RepositoryState, KIND_PR,
     KIND_PR_UPDATE, KIND_REPOSITORY_ANNOUNCEMENT, KIND_REPOSITORY_STATE,
 };
+
+/// Type alias for the shared database used by the relay
+pub type SharedDatabase = Arc<dyn NostrDatabase>;
 
 /// Result of aligning a repository with authorized state
 #[derive(Debug, Default)]
@@ -35,23 +39,33 @@ struct AlignmentResult {
 ///
 /// Validates all events according to GRASP-01 specification:
 /// - Repository announcements must list service in clone and relays tags
-/// - Repository state announcements must have valid structure  
+/// - Repository state announcements must have valid structure
 /// - Other events must reference accepted repositories or events
 /// - Forward references are supported (events referenced by accepted events)
 /// - Orphan events with no valid references are rejected
 ///
 /// Uses stateful database queries to check event relationships.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Nip34WritePolicy {
     domain: String,
-    database: Arc<MemoryDatabase>,
+    database: SharedDatabase,
     git_data_path: PathBuf,
+}
+
+impl std::fmt::Debug for Nip34WritePolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Nip34WritePolicy")
+            .field("domain", &self.domain)
+            .field("git_data_path", &self.git_data_path)
+            .field("database", &"<database>")
+            .finish()
+    }
 }
 
 impl Nip34WritePolicy {
     pub fn new(
         domain: impl Into<String>,
-        database: Arc<MemoryDatabase>,
+        database: SharedDatabase,
         git_data_path: impl Into<PathBuf>,
     ) -> Self {
         Self {
@@ -104,7 +118,7 @@ impl Nip34WritePolicy {
     /// The authorized_pubkeys should be the owner and maintainers of a specific
     /// announcement, so different owners with the same identifier don't interfere.
     async fn is_latest_state_for_identifier(
-        database: &Arc<MemoryDatabase>,
+        database: &SharedDatabase,
         state: &RepositoryState,
         authorized_pubkeys: &[PublicKey],
     ) -> Result<bool, String> {
@@ -155,7 +169,7 @@ impl Nip34WritePolicy {
     /// should update HEAD in the repository of the announcement owner,
     /// not in the maintainer's own (possibly non-existent) repository.
     async fn find_authorized_announcements(
-        database: &Arc<MemoryDatabase>,
+        database: &SharedDatabase,
         identifier: &str,
         state_author: &PublicKey,
     ) -> Result<Vec<RepositoryAnnouncement>, String> {
@@ -205,7 +219,7 @@ impl Nip34WritePolicy {
     /// - This state event is the latest for the identifier in that context
     async fn identify_owner_repositories(
         &self,
-        database: &Arc<MemoryDatabase>,
+        database: &SharedDatabase,
         state: &RepositoryState,
     ) -> Result<Vec<(RepositoryAnnouncement, std::path::PathBuf)>, String> {
         // Find all announcements where state author is authorized
@@ -485,7 +499,7 @@ impl Nip34WritePolicy {
     /// Ok(Some(n)) if n refs were deleted, Ok(None) if no action taken, Err on failure
     async fn validate_pr_nostr_ref(
         &self,
-        database: &Arc<MemoryDatabase>,
+        database: &SharedDatabase,
         event: &Event,
     ) -> Result<Option<usize>, String> {
         let event_id = event.id.to_hex();
@@ -651,7 +665,7 @@ impl Nip34WritePolicy {
     /// Check if any addressable events (repositories) exist in database
     /// Returns the first matching addressable reference found, or None if none match
     async fn find_accepted_repository(
-        database: &Arc<MemoryDatabase>,
+        database: &SharedDatabase,
         addressables: &[String],
     ) -> Result<Option<String>, String> {
         if addressables.is_empty() {
@@ -724,7 +738,7 @@ impl Nip34WritePolicy {
     /// Check if any events exist in database
     /// Returns the first matching event ID found, or None if none match
     async fn find_accepted_event(
-        database: &Arc<MemoryDatabase>,
+        database: &SharedDatabase,
         event_ids: &[EventId],
     ) -> Result<Option<EventId>, String> {
         if event_ids.is_empty() {
@@ -752,7 +766,7 @@ impl Nip34WritePolicy {
     /// This optimization recognizes that replaceable events are referenced by coordinate address,
     /// while regular events are referenced by event ID.
     async fn is_referenced_by_accepted(
-        database: &Arc<MemoryDatabase>,
+        database: &SharedDatabase,
         event: &Event,
     ) -> Result<bool, String> {
         let kind_u16 = event.kind.as_u16();
@@ -1152,14 +1166,14 @@ pub struct RelayWithDatabase {
     /// The local relay instance
     pub relay: LocalRelay,
     /// The database Arc that can be used for direct queries
-    pub database: Arc<MemoryDatabase>,
+    pub database: SharedDatabase,
 }
 
 /// Create a configured LocalRelay with full GRASP-01 validation
 ///
 /// Returns a `RelayWithDatabase` struct containing:
 /// - The `LocalRelay` for handling WebSocket connections
-/// - The `Arc<MemoryDatabase>` for direct database queries (e.g., push authorization)
+/// - The `SharedDatabase` for direct database queries (e.g., push authorization)
 pub fn create_relay(config: &Config) -> Result<RelayWithDatabase> {
     tracing::info!("Configuring nostr relay with GRASP-01 validation...");
 
@@ -1167,7 +1181,7 @@ pub fn create_relay(config: &Config) -> Result<RelayWithDatabase> {
     let db_path = Path::new(&config.relay_data_path);
 
     // Create database based on configuration
-    let database = match config.database_backend {
+    let database: SharedDatabase = match config.database_backend {
         DatabaseBackend::Memory => {
             tracing::info!("Using in-memory database (no persistence)");
             Arc::new(MemoryDatabase::with_opts(MemoryDatabaseOptions {
@@ -1187,13 +1201,13 @@ pub fn create_relay(config: &Config) -> Result<RelayWithDatabase> {
         }
         DatabaseBackend::Lmdb => {
             tracing::info!("Using LMDB backend at: {}", db_path.display());
-            // TODO: Implement LMDB backend once nostr-relay-builder supports it
-            // For now, fall back to memory database
-            tracing::warn!("LMDB backend not yet implemented, using in-memory database");
-            Arc::new(MemoryDatabase::with_opts(MemoryDatabaseOptions {
-                events: true,
-                max_events: Some(100_000),
-            }))
+            // Ensure the database directory exists
+            std::fs::create_dir_all(db_path).map_err(|e| {
+                anyhow::anyhow!("Failed to create LMDB directory {}: {}", db_path.display(), e)
+            })?;
+            Arc::new(NostrLMDB::open(db_path).map_err(|e| {
+                anyhow::anyhow!("Failed to open LMDB database at {}: {}", db_path.display(), e)
+            })?)
         }
     };
 
