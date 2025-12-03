@@ -5,6 +5,9 @@
 //! This file validates that a GRASP-01 compliant relay:
 //! - Accepts valid NIP-34 repository announcements listing the service
 //! - Rejects announcements that don't list the service in clone and relays tags
+//!   EXCEPTION: maintainer announcements (from authors in the maintainer chain)
+//!   MUST be accepted even without listing the service - this enables recursive maintainer
+//!   chain discovery and more reliable GRASP-02 sync capabilities
 //! - Accepts repository state announcements
 //! - Accepts events that TAG accepted repositories
 //! - Accepts events that ARE TAGGED BY accepted events (transitive)
@@ -90,7 +93,7 @@
 
 use crate::fixtures::{send_and_verify_accepted, send_and_verify_rejected};
 use crate::{AuditClient, AuditResult, FixtureKind, TestContext, TestResult};
-use nostr_sdk::{Event, Filter, Kind, Tag, TagKind, Timestamp};
+use nostr_sdk::{Event, Filter, Kind, Tag, TagKind, Timestamp, ToBech32};
 use std::time::Duration;
 
 /// Test suite for GRASP-01 event acceptance policy
@@ -105,6 +108,7 @@ impl EventAcceptancePolicyTests {
         results.add(Self::test_accept_valid_repo_announcement(client).await);
         results.add(Self::test_reject_repo_announcement_missing_clone_tag(client).await);
         results.add(Self::test_reject_repo_announcement_missing_relays_tag(client).await);
+        results.add(Self::test_accept_maintainer_announcement_without_service_listed(client).await);
 
         // Repository State Announcement Tests
         results.add(Self::test_accept_valid_repo_state_announcement(client).await);
@@ -404,6 +408,134 @@ impl EventAcceptancePolicyTests {
         .await
     }
 
+    /// Test: Accept recursive maintainer announcement without service in clone tag
+    ///
+    /// Spec: Line 9 of ../grasp/01.md (EXCEPTION to rejection rule)
+    /// Requirement: MUST accept recursive maintainer announcements for chain discovery
+    ///
+    /// GRASP-01: "respecting the recursive maintainer set"
+    ///
+    /// When a recursive maintainer is listed in a maintainer's announcement, they may
+    /// publish their own announcement for the same repo (with their own maintainers).
+    /// The relay MUST accept this recursive maintainer's announcement even if it doesn't
+    /// list this GRASP server in its clone tag - because the relay needs it to discover
+    /// the full recursive maintainer chain.
+    ///
+    /// This also enables GRASP-02 to sync state events and git data when authoritative
+    /// users publish them to other relays/git servers, keeping repos up-to-date.
+    pub async fn test_accept_maintainer_announcement_without_service_listed(
+        client: &AuditClient,
+    ) -> TestResult {
+        TestResult::new(
+            "accept_recursive_maintainer_announcement_without_service",
+            "GRASP-01:nostr-relay:9",
+            "Accept recursive maintainer announcement for chain discovery (even without GRASP server in clone)",
+        )
+        .run(|| async {
+            // Create TestContext for mode-aware fixture management
+            let ctx = TestContext::new(client);
+
+            // Step 1: Get RecursiveMaintainerStateDataPushed fixture
+            // This establishes: Owner -> Maintainer -> RecursiveMaintainer chain
+            // with all git data pushed. The recursive maintainer is already listed
+            // in maintainer's announcement (and maintainer in owner's announcement).
+            let recursive_state = ctx
+                .get_fixture(FixtureKind::RecursiveMaintainerStateDataPushed)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Test setup failed: could not get RecursiveMaintainerStateDataPushed fixture: {}",
+                        e
+                    )
+                })?;
+
+            // Extract repo_id from the recursive maintainer's state event
+            let repo_id = recursive_state
+                .tags
+                .iter()
+                .find(|t| t.kind() == TagKind::d())
+                .and_then(|t| t.content())
+                .ok_or("Missing d tag in recursive maintainer state")?
+                .to_string();
+
+            // Step 2: Build a recursive maintainer announcement that DOES NOT include
+            // this GRASP server in its clone tag - simulating an announcement pointing
+            // to a different server (e.g., another GRASP server)
+            let recursive_maintainer_npub = client
+                .recursive_maintainer_keys()
+                .public_key()
+                .to_bech32()
+                .map_err(|e| format!("Failed to convert recursive maintainer pubkey: {}", e))?;
+
+            // Create announcement with external clone URL (not this server)
+            let recursive_maintainer_announcement = client
+                .event_builder(
+                    Kind::GitRepoAnnouncement,
+                    format!(
+                        "Recursive maintainer announcement for {} (external clone)",
+                        repo_id
+                    ),
+                )
+                .tag(Tag::identifier(&repo_id))
+                .tag(Tag::custom(
+                    TagKind::custom("name"),
+                    vec![format!("{} (recursive maintainer view)", repo_id)],
+                ))
+                // Clone points to another server, NOT the GRASP server
+                .tag(Tag::custom(
+                    TagKind::custom("clone"),
+                    vec![format!(
+                        "https://another-grasp-server.com/{}/{}.git",
+                        recursive_maintainer_npub, repo_id
+                    )],
+                ))
+                // Relays also points elsewhere (not this server)
+                .tag(Tag::custom(
+                    TagKind::custom("relays"),
+                    vec!["wss://relay.damus.io"],
+                ))
+                .build(client.recursive_maintainer_keys())
+                .map_err(|e| format!("Failed to build recursive maintainer announcement: {}", e))?;
+
+            let event_id = recursive_maintainer_announcement.id;
+
+            // Step 3: Send the recursive maintainer announcement
+            client
+                .send_event(recursive_maintainer_announcement)
+                .await
+                .map_err(|e| format!("Failed to send recursive maintainer announcement: {}", e))?;
+
+            // Wait for propagation
+            tokio::time::sleep(Duration::from_millis(200)).await;
+
+            // Step 4: Query to verify it was accepted
+            let filter = Filter::new()
+                .kind(Kind::GitRepoAnnouncement)
+                .author(client.recursive_maintainer_keys().public_key())
+                .identifier(&repo_id);
+
+            let events = client
+                .query(filter)
+                .await
+                .map_err(|e| format!("Failed to query events: {}", e))?;
+
+            // Verify the recursive maintainer's announcement was stored
+            if !events.iter().any(|e| e.id == event_id) {
+                return Err(format!(
+                    "Recursive maintainer announcement was NOT accepted by relay. \
+                    The recursive maintainer (listed in maintainer's announcement, which is \
+                    listed in owner's announcement) published their own announcement for \
+                    repo {} with an external clone URL. The relay should accept this to \
+                    enable full recursive maintainer chain discovery. Event ID: {}",
+                    repo_id, event_id
+                ));
+            }
+
+            Ok(())
+        })
+        .await
+    }
+
     // ============================================================
     // Repository State Announcement Tests
     // ============================================================
@@ -432,12 +564,15 @@ impl EventAcceptancePolicyTests {
             // 2. Pushes git data with the deterministic commit
             // 3. Sends the state announcement
             // This ensures the state event references a commit that actually exists
-            let state_event = ctx.get_fixture(FixtureKind::OwnerStateDataPushed).await.map_err(|e| {
-                format!(
-                    "Test setup failed: could not get repository state fixture: {}",
-                    e
-                )
-            })?;
+            let state_event = ctx
+                .get_fixture(FixtureKind::OwnerStateDataPushed)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Test setup failed: could not get repository state fixture: {}",
+                        e
+                    )
+                })?;
 
             // Extract repo_id from the state event
             let repo_id = state_event

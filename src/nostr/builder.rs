@@ -39,6 +39,8 @@ struct AlignmentResult {
 ///
 /// Validates all events according to GRASP-01 specification:
 /// - Repository announcements must list service in clone and relays tags
+///   EXCEPTION: Recursive maintainer announcements are accepted even without
+///   listing the service, to enable maintainer chain discovery and GRASP-02 sync
 /// - Repository state announcements must have valid structure
 /// - Other events must reference accepted repositories or events
 /// - Forward references are supported (events referenced by accepted events)
@@ -440,6 +442,57 @@ impl Nip34WritePolicy {
         }
 
         result
+    }
+
+    /// Check if a pubkey is listed as a maintainer in any announcement for this identifier
+    ///
+    /// A pubkey is considered a maintainer if:
+    /// 1. They are the owner (pubkey) of an accepted announcement with this identifier, OR
+    /// 2. They are listed in the maintainers tag of ANY announcement with this identifier
+    ///
+    /// This enables accepting announcements from maintainers even when they don't list
+    /// this GRASP server, for maintainer chain discovery and GRASP-02 sync.
+    async fn is_maintainer_in_any_announcement(
+        database: &SharedDatabase,
+        identifier: &str,
+        author: &PublicKey,
+    ) -> Result<bool, String> {
+        // Query all announcements with this identifier that are already in the database
+        let filter = Filter::new()
+            .kind(Kind::from(KIND_REPOSITORY_ANNOUNCEMENT))
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::D),
+                identifier.to_string(),
+            );
+
+        let announcements: Vec<Event> = match database.query(filter).await {
+            Ok(events) => events.into_iter().collect(),
+            Err(e) => return Err(format!("Database query failed: {}", e)),
+        };
+
+        if announcements.is_empty() {
+            // No existing announcements for this identifier - author cannot be a maintainer
+            return Ok(false);
+        }
+
+        let author_hex = author.to_hex();
+
+        // Check each announcement to see if author is listed as a maintainer
+        for event in &announcements {
+            // Check if author is the owner of this announcement
+            if event.pubkey == *author {
+                return Ok(true);
+            }
+
+            // Check if author is listed in the maintainers tag
+            if let Ok(announcement) = RepositoryAnnouncement::from_event(event.clone()) {
+                if announcement.maintainers.contains(&author_hex) {
+                    return Ok(true);
+                }
+            }
+        }
+
+        Ok(false)
     }
 
     /// Extract all reference tags from an event (a, A, q, e, E)
@@ -862,43 +915,102 @@ impl WritePolicy for Nip34WritePolicy {
             let event_id_str = event.id.to_bech32().unwrap_or_else(|_| event.id.to_hex());
 
             match event.kind.as_u16() {
-                KIND_REPOSITORY_ANNOUNCEMENT => match validate_announcement(event, &domain) {
-                    Ok(_) => {
-                        // Parse announcement to get repository details
-                        match RepositoryAnnouncement::from_event(event.clone()) {
-                            Ok(announcement) => {
-                                // Try to create bare repository if it doesn't exist
-                                if let Err(e) = self.ensure_bare_repository(&announcement) {
+                KIND_REPOSITORY_ANNOUNCEMENT => {
+                    // First, try normal validation (announcement lists service)
+                    match validate_announcement(event, &domain) {
+                        Ok(_) => {
+                            // Parse announcement to get repository details
+                            match RepositoryAnnouncement::from_event(event.clone()) {
+                                Ok(announcement) => {
+                                    // Try to create bare repository if it doesn't exist
+                                    if let Err(e) = self.ensure_bare_repository(&announcement) {
+                                        tracing::warn!(
+                                            "Failed to create bare repository for {}: {}",
+                                            event_id_str,
+                                            e
+                                        );
+                                        // Note: We still accept the event even if repo creation fails
+                                        // The git operation failure shouldn't prevent event acceptance
+                                    }
+
+                                    tracing::debug!(
+                                        "Accepted repository announcement: {}",
+                                        event_id_str
+                                    );
+                                    PolicyResult::Accept
+                                }
+                                Err(e) => {
                                     tracing::warn!(
-                                        "Failed to create bare repository for {}: {}",
+                                        "Failed to parse repository announcement {}: {}",
                                         event_id_str,
                                         e
                                     );
-                                    // Note: We still accept the event even if repo creation fails
-                                    // The git operation failure shouldn't prevent event acceptance
+                                    PolicyResult::Reject(format!(
+                                        "Failed to parse announcement: {}",
+                                        e
+                                    ))
                                 }
-
-                                tracing::debug!(
-                                    "Accepted repository announcement: {}",
-                                    event_id_str
-                                );
-                                PolicyResult::Accept
                             }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to parse repository announcement {}: {}",
-                                    event_id_str,
-                                    e
-                                );
-                                PolicyResult::Reject(format!("Failed to parse announcement: {}", e))
+                        }
+                        Err(validation_err) => {
+                            // Validation failed - check if this is a recursive maintainer announcement
+                            // GRASP-01 Exception: Accept announcements from recursive maintainers
+                            // even without listing the service, for chain discovery and GRASP-02 sync
+                            
+                            // Try to parse the announcement to get identifier
+                            match RepositoryAnnouncement::from_event(event.clone()) {
+                                Ok(announcement) => {
+                                    // Check if author is listed as maintainer in any existing announcement
+                                    match Self::is_maintainer_in_any_announcement(
+                                        &database,
+                                        &announcement.identifier,
+                                        &event.pubkey,
+                                    )
+                                    .await
+                                    {
+                                        Ok(true) => {
+                                            tracing::info!(
+                                                "Accepted maintainer announcement {} (author {} is listed as maintainer for {})",
+                                                event_id_str,
+                                                event.pubkey.to_hex(),
+                                                announcement.identifier
+                                            );
+                                            // Don't create bare repository for external announcements
+                                            // (they point to other servers)
+                                            PolicyResult::Accept
+                                        }
+                                        Ok(false) => {
+                                            tracing::warn!(
+                                                "Rejected repository announcement {}: {} (not a maintainer)",
+                                                event_id_str,
+                                                validation_err
+                                            );
+                                            PolicyResult::Reject(validation_err.to_string())
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "Failed to check maintainer status for {}: {}",
+                                                event_id_str,
+                                                e
+                                            );
+                                            // Fail-secure: reject on database errors
+                                            PolicyResult::Reject(validation_err.to_string())
+                                        }
+                                    }
+                                }
+                                Err(parse_err) => {
+                                    tracing::warn!(
+                                        "Rejected repository announcement {}: {} (parse error: {})",
+                                        event_id_str,
+                                        validation_err,
+                                        parse_err
+                                    );
+                                    PolicyResult::Reject(validation_err.to_string())
+                                }
                             }
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!("Rejected repository announcement {}: {}", event_id_str, e);
-                        PolicyResult::Reject(e.to_string())
-                    }
-                },
+                }
                 KIND_REPOSITORY_STATE => match validate_state(event) {
                     Ok(_) => {
                         // Parse state to get HEAD and branch info

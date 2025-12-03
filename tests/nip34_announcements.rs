@@ -59,6 +59,7 @@ macro_rules! isolated_test {
 isolated_test!(test_accept_valid_repo_announcement);
 isolated_test!(test_reject_repo_announcement_missing_clone_tag);
 isolated_test!(test_reject_repo_announcement_missing_relays_tag);
+isolated_test!(test_accept_maintainer_announcement_without_service_listed);
 isolated_test!(test_accept_valid_repo_state_announcement);
 isolated_test!(test_accept_issue_via_a_tag);
 isolated_test!(test_accept_comment_via_capital_a_tag);
