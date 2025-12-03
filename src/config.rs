@@ -1,74 +1,205 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
+use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
-use std::env;
 
 /// Database backend type for the relay
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, ValueEnum)]
 #[serde(rename_all = "lowercase")]
-#[derive(Default)]
 pub enum DatabaseBackend {
-    /// In-memory database (default, fastest, no persistence)
+    /// LMDB backend (persistent, general purpose)
     #[default]
-    Memory,
+    Lmdb,
     /// NostrDB backend (persistent, optimized for Nostr)
     NostrDb,
-    /// LMDB backend (persistent, general purpose)
-    Lmdb,
+    /// In-memory database (fastest, no persistence - uses temp directory for git data)
+    Memory,
 }
 
-impl std::str::FromStr for DatabaseBackend {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self> {
-        match s.to_lowercase().as_str() {
-            "memory" => Ok(Self::Memory),
-            "nostrdb" => Ok(Self::NostrDb),
-            "lmdb" => Ok(Self::Lmdb),
-            _ => Err(anyhow::anyhow!(
-                "Invalid database backend: {}. Valid options: memory, nostrdb, lmdb",
-                s
-            )),
+impl std::fmt::Display for DatabaseBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Memory => write!(f, "memory"),
+            Self::NostrDb => write!(f, "nostrdb"),
+            Self::Lmdb => write!(f, "lmdb"),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// ngit-grasp - A GRASP (Git Relays Authorized via Signed-Nostr Proofs) implementation
+///
+/// Configuration is loaded with the following priority (highest to lowest):
+/// 1. CLI flags (e.g., --domain example.com)
+/// 2. Environment variables (e.g., NGIT_DOMAIN=example.com)
+/// 3. .env file (loaded automatically if present)
+/// 4. Built-in defaults
+#[derive(Debug, Clone, Serialize, Deserialize, Parser)]
+#[command(author, version, about, long_about = None)]
+#[command(propagate_version = true)]
 pub struct Config {
+    /// Domain where this instance is hosted (required, used in GRASP validation)
+    #[arg(long, env = "NGIT_DOMAIN")]
     pub domain: String,
-    pub owner_npub: String,
-    pub relay_name: String,
+
+    /// Owner's npub (optional, for relay info in NIP-11)
+    #[arg(long, env = "NGIT_OWNER_NPUB")]
+    pub owner_npub: Option<String>,
+
+    /// Relay name for NIP-11 information document (defaults to "${domain} grasp relay")
+    #[arg(long = "relay-name", env = "NGIT_RELAY_NAME")]
+    pub relay_name_override: Option<String>,
+
+    /// Relay description for NIP-11 information document
+    #[arg(
+        long,
+        env = "NGIT_RELAY_DESCRIPTION",
+        default_value = "Git Nostr Relay - a grasp implementation"
+    )]
     pub relay_description: String,
+
+    /// Path to store Git repositories
+    #[arg(long, env = "NGIT_GIT_DATA_PATH", default_value = "./data/git")]
     pub git_data_path: String,
+
+    /// Path to store Nostr relay data
+    #[arg(long, env = "NGIT_RELAY_DATA_PATH", default_value = "./data/relay")]
     pub relay_data_path: String,
+
+    /// Server bind address (IP:PORT)
+    #[arg(long, env = "NGIT_BIND_ADDRESS", default_value = "127.0.0.1:8080")]
     pub bind_address: String,
+
+    /// Database backend type
+    #[arg(long, env = "NGIT_DATABASE_BACKEND", value_enum, default_value_t = DatabaseBackend::Lmdb)]
     pub database_backend: DatabaseBackend,
 }
 
 impl Config {
-    pub fn from_env() -> Result<Self> {
-        // Load .env file if present
+    /// Load configuration from CLI args, environment variables, and defaults.
+    ///
+    /// Priority (highest to lowest):
+    /// 1. CLI flags
+    /// 2. Environment variables
+    /// 3. .env file
+    /// 4. Built-in defaults
+    pub fn load() -> Result<Self> {
+        // Load .env file if present (before clap parses, so env vars are available)
         dotenvy::dotenv().ok();
 
-        // Parse database backend from environment
-        let database_backend = env::var("NGIT_DATABASE_BACKEND")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_default();
+        // Parse CLI args (clap automatically handles env var fallback)
+        let config = Self::parse();
 
-        Ok(Config {
-            domain: env::var("NGIT_DOMAIN").unwrap_or_else(|_| "localhost:8080".to_string()),
-            owner_npub: env::var("NGIT_OWNER_NPUB").context("NGIT_OWNER_NPUB must be set")?,
-            relay_name: env::var("NGIT_RELAY_NAME")
-                .unwrap_or_else(|_| "ngit-grasp relay".to_string()),
-            relay_description: env::var("NGIT_RELAY_DESCRIPTION")
-                .unwrap_or_else(|_| "A GRASP-compliant Nostr relay for Git".to_string()),
-            git_data_path: env::var("NGIT_GIT_DATA_PATH")
-                .unwrap_or_else(|_| "./data/git".to_string()),
-            relay_data_path: env::var("NGIT_RELAY_DATA_PATH")
-                .unwrap_or_else(|_| "./data/relay".to_string()),
-            bind_address: env::var("NGIT_BIND_ADDRESS")
-                .unwrap_or_else(|_| "127.0.0.1:8080".to_string()),
-            database_backend,
-        })
+        Ok(config)
+    }
+
+    /// Get relay name (defaults to "${domain} grasp relay" if not set)
+    pub fn relay_name(&self) -> String {
+        self.relay_name_override
+            .clone()
+            .unwrap_or_else(|| format!("{} grasp relay", self.domain))
+    }
+
+    /// Get effective git data path
+    /// Returns a temp directory when using memory backend, otherwise the configured path
+    pub fn effective_git_data_path(&self) -> String {
+        if self.database_backend == DatabaseBackend::Memory {
+            std::env::temp_dir()
+                .join("ngit-grasp-git")
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            self.git_data_path.clone()
+        }
+    }
+
+    /// Create config for testing
+    #[cfg(test)]
+    pub fn for_testing() -> Self {
+        Self {
+            domain: "localhost:8080".to_string(),
+            owner_npub: Some("npub1test".to_string()),
+            relay_name_override: Some("test relay".to_string()),
+            relay_description: "test description".to_string(),
+            git_data_path: "./test_data/git".to_string(),
+            relay_data_path: "./test_data/relay".to_string(),
+            bind_address: "127.0.0.1:8080".to_string(),
+            database_backend: DatabaseBackend::Memory,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_values() {
+        let config = Config::for_testing();
+        assert_eq!(config.domain, "localhost:8080");
+        assert_eq!(config.bind_address, "127.0.0.1:8080");
+        // for_testing() uses Memory, but the actual default is Lmdb
+        assert_eq!(config.database_backend, DatabaseBackend::Memory);
+    }
+
+    #[test]
+    fn test_lmdb_is_default() {
+        // Verify the actual default via the enum's Default trait
+        assert_eq!(DatabaseBackend::default(), DatabaseBackend::Lmdb);
+    }
+
+    #[test]
+    fn test_memory_backend_uses_temp_dir() {
+        let config = Config {
+            database_backend: DatabaseBackend::Memory,
+            ..Config::for_testing()
+        };
+        let git_path = config.effective_git_data_path();
+        assert!(git_path.contains("ngit-grasp-git"));
+    }
+
+    #[test]
+    fn test_lmdb_backend_uses_configured_path() {
+        let config = Config {
+            database_backend: DatabaseBackend::Lmdb,
+            git_data_path: "./my/git/path".to_string(),
+            relay_data_path: "./my/relay/path".to_string(),
+            ..Config::for_testing()
+        };
+        assert_eq!(config.effective_git_data_path(), "./my/git/path");
+    }
+
+    #[test]
+    fn test_database_backend_display() {
+        assert_eq!(DatabaseBackend::Memory.to_string(), "memory");
+        assert_eq!(DatabaseBackend::NostrDb.to_string(), "nostrdb");
+        assert_eq!(DatabaseBackend::Lmdb.to_string(), "lmdb");
+    }
+
+    #[test]
+    fn test_relay_name_default() {
+        let config = Config {
+            domain: "example.com".to_string(),
+            relay_name_override: None,
+            ..Config::for_testing()
+        };
+        assert_eq!(config.relay_name(), "example.com grasp relay");
+    }
+
+    #[test]
+    fn test_relay_name_override() {
+        let config = Config {
+            domain: "example.com".to_string(),
+            relay_name_override: Some("My Custom Relay".to_string()),
+            ..Config::for_testing()
+        };
+        assert_eq!(config.relay_name(), "My Custom Relay");
+    }
+
+    #[test]
+    fn test_owner_npub_optional() {
+        let config = Config {
+            owner_npub: None,
+            ..Config::for_testing()
+        };
+        assert!(config.owner_npub.is_none());
     }
 }

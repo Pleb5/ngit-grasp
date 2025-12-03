@@ -118,7 +118,7 @@ impl Service<Request<Incoming>> for HttpService {
         let path = req.uri().path().to_string();
         let query = req.uri().query().map(|s| s.to_string());
         let method = req.method().clone();
-        let git_data_path = self.config.git_data_path.clone();
+        let git_data_path = self.config.effective_git_data_path();
         let database = self.database.clone();
 
         // Handle OPTIONS preflight requests (CORS)
@@ -427,7 +427,7 @@ pub async fn run_server(
     let bind_addr: SocketAddr = config.bind_address.parse()?;
 
     tracing::info!("Starting HTTP server on {}", bind_addr);
-    tracing::info!("Relay name: {}", config.relay_name);
+    tracing::info!("Relay name: {}", config.relay_name());
     tracing::info!("Domain: {}", config.domain);
 
     let listener = TcpListener::bind(&bind_addr).await?;

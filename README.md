@@ -100,15 +100,71 @@ nix develop -c cargo test --lib
 
 ## Configuration
 
-Environment variables (see `.env.example`):
+Configuration is loaded with the following priority (highest to lowest):
 
-- `NGIT_DOMAIN`: Your domain (e.g., `gitnostr.com`)
-- `NGIT_OWNER_NPUB`: Relay owner's npub
-- `NGIT_RELAY_NAME`: Relay name for NIP-11
-- `NGIT_RELAY_DESCRIPTION`: Relay description
-- `NGIT_GIT_DATA_PATH`: Path to store Git repositories
-- `NGIT_RELAY_DATA_PATH`: Path to store Nostr events
-- `NGIT_BIND_ADDRESS`: Server bind address (default: `127.0.0.1:8080`)
+1. **CLI flags** (e.g., `--domain example.com`)
+2. **Environment variables** (e.g., `NGIT_DOMAIN=example.com`)
+3. **.env file** (loaded automatically if present)
+4. **Built-in defaults**
+
+This means CLI flags always take precedence over environment variables, which take precedence over `.env` file values.
+
+### CLI Usage
+
+```bash
+# View all options with defaults
+ngit-grasp --help
+
+# Run with CLI flags (override everything else)
+ngit-grasp --domain relay.example.com --owner-npub npub1... --bind-address 0.0.0.0:8080
+
+# Mix CLI flags with environment variables
+NGIT_OWNER_NPUB=npub1... ngit-grasp --domain relay.example.com
+```
+
+### Configuration Options
+
+| Option            | CLI Flag              | Environment Variable     | Default                                      |
+| ----------------- | --------------------- | ------------------------ | -------------------------------------------- |
+| Domain            | `--domain`            | `NGIT_DOMAIN`            | (required)                                   |
+| Owner npub        | `--owner-npub`        | `NGIT_OWNER_NPUB`        | (optional)                                   |
+| Relay name        | `--relay-name`        | `NGIT_RELAY_NAME`        | `${domain} grasp relay`                      |
+| Relay description | `--relay-description` | `NGIT_RELAY_DESCRIPTION` | `Git Nostr Relay - a grasp implementation`   |
+| Git data path     | `--git-data-path`     | `NGIT_GIT_DATA_PATH`     | `./data/git` (temp dir for memory backend)   |
+| Relay data path   | `--relay-data-path`   | `NGIT_RELAY_DATA_PATH`   | `./data/relay` (temp dir for memory backend) |
+| Bind address      | `--bind-address`      | `NGIT_BIND_ADDRESS`      | `127.0.0.1:8080`                             |
+| Database backend  | `--database-backend`  | `NGIT_DATABASE_BACKEND`  | `lmdb`                                       |
+
+### Database Backends
+
+- `lmdb`: LMDB backend (default, persistent, general purpose)
+- `memory`: In-memory database (fastest, no persistence - uses temp directories)
+- `nostrdb`: NostrDB backend (persistent, optimized for Nostr) [Not yet implemented]
+
+> **Note:** When using the `memory` backend, git data are automatically stored in temporary directories for ephemeral testing. This is useful for development and CI/CD pipelines.
+
+### Example: Production Deployment
+
+```bash
+# Using environment variables (recommended for production)
+export NGIT_DOMAIN=gitnostr.com
+export NGIT_OWNER_NPUB=npub1...
+export NGIT_BIND_ADDRESS=0.0.0.0:8080
+export NGIT_DATABASE_BACKEND=lmdb
+ngit-grasp
+```
+
+### Example: Development
+
+```bash
+# Using .env file
+cp .env.example .env
+# Edit .env with your settings
+ngit-grasp
+
+# Or override specific values with CLI flags
+ngit-grasp --domain localhost:3000 --bind-address 127.0.0.1:3000
+```
 
 ## Documentation
 

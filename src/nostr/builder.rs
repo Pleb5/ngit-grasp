@@ -1203,22 +1203,31 @@ pub fn create_relay(config: &Config) -> Result<RelayWithDatabase> {
             tracing::info!("Using LMDB backend at: {}", db_path.display());
             // Ensure the database directory exists
             std::fs::create_dir_all(db_path).map_err(|e| {
-                anyhow::anyhow!("Failed to create LMDB directory {}: {}", db_path.display(), e)
+                anyhow::anyhow!(
+                    "Failed to create LMDB directory {}: {}",
+                    db_path.display(),
+                    e
+                )
             })?;
             Arc::new(NostrLMDB::open(db_path).map_err(|e| {
-                anyhow::anyhow!("Failed to open LMDB database at {}: {}", db_path.display(), e)
+                anyhow::anyhow!(
+                    "Failed to open LMDB database at {}: {}",
+                    db_path.display(),
+                    e
+                )
             })?)
         }
     };
 
     // Build relay with GRASP-01 validation
     // Clone Arc for the write policy so both relay and policy can access the database
+    let git_data_path = config.effective_git_data_path();
     let builder = RelayBuilder::default()
         .database(database.clone())
         .write_policy(Nip34WritePolicy::new(
             &config.domain,
             database.clone(),
-            &config.git_data_path,
+            &git_data_path,
         ));
 
     tracing::info!(

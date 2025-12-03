@@ -57,9 +57,9 @@ impl RelayInformationDocument {
     /// Create NIP-11 relay information document from configuration
     pub fn from_config(config: &Config) -> Self {
         Self {
-            name: config.relay_name.clone(),
+            name: config.relay_name(),
             description: config.relay_description.clone(),
-            pubkey: Some(config.owner_npub.clone()),
+            pubkey: config.owner_npub.clone(),
             contact: None, // Could be added to config if needed
             supported_nips: vec![
                 1,  // NIP-01: Basic protocol flow
@@ -98,8 +98,8 @@ mod tests {
     fn test_relay_information_document_structure() {
         let config = Config {
             domain: "relay.example.com".to_string(),
-            owner_npub: "npub1test".to_string(),
-            relay_name: "Test Relay".to_string(),
+            owner_npub: Some("npub1test".to_string()),
+            relay_name_override: Some("Test Relay".to_string()),
             relay_description: "A test relay".to_string(),
             git_data_path: "./data/git".to_string(),
             relay_data_path: "./data/relay".to_string(),
@@ -128,8 +128,8 @@ mod tests {
     fn test_relay_information_document_json() {
         let config = Config {
             domain: "relay.example.com".to_string(),
-            owner_npub: "npub1test".to_string(),
-            relay_name: "Test Relay".to_string(),
+            owner_npub: Some("npub1test".to_string()),
+            relay_name_override: Some("Test Relay".to_string()),
             relay_description: "A test relay".to_string(),
             git_data_path: "./data/git".to_string(),
             relay_data_path: "./data/relay".to_string(),

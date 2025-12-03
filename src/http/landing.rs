@@ -282,7 +282,7 @@ pub fn get_html(config: &Config) -> String {
     format!(
         include_str!("../../templates/landing.html"),
         base_css = get_base_css(),
-        relay_name = config.relay_name,
+        relay_name = config.relay_name(),
         relay_description = config.relay_description,
         version = get_version(),
         curation = curation,
@@ -357,7 +357,7 @@ pub fn get_generic_404_html(config: &Config, path: &str) -> String {
 </body>
 </html>"##,
         base_css = get_base_css(),
-        relay_name = config.relay_name,
+        relay_name = config.relay_name(),
         path = path,
         version = get_version(),
         footer_script = get_footer_script(),
@@ -456,7 +456,7 @@ pub fn get_404_html(config: &Config, npub: &str, identifier: &str) -> String {
 </body>
 </html>"##,
         base_css = get_base_css(),
-        relay_name = config.relay_name,
+        relay_name = config.relay_name(),
         npub = npub,
         identifier = identifier,
         version = get_version(),
@@ -598,7 +598,7 @@ pub fn get_repo_html(config: &Config, npub: &str, identifier: &str) -> String {
 </body>
 </html>"##,
         base_css = get_base_css(),
-        relay_name = config.relay_name,
+        relay_name = config.relay_name(),
         npub = npub,
         identifier = identifier,
         version = get_version(),

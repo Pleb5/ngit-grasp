@@ -2,7 +2,10 @@ use anyhow::Result;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use ngit_grasp::{config::Config, http, nostr};
+use ngit_grasp::{
+    config::{Config, DatabaseBackend},
+    http, nostr,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -14,10 +17,17 @@ async fn main() -> Result<()> {
 
     info!("Starting ngit-grasp with nostr-relay-builder...");
 
-    // Load configuration
-    let config = Config::from_env()?;
+    // Load configuration (priority: CLI flags > env vars > .env file > defaults)
+    let config = Config::load()?;
+
     info!("Configuration loaded: {}", config.bind_address);
-    info!("Git data directory: {}", config.git_data_path);
+    info!("Domain: {}", config.domain);
+    info!("Relay name: {}", config.relay_name());
+    info!("Git data directory: {}", config.effective_git_data_path());
+    if config.database_backend != DatabaseBackend::Memory {
+        info!("Relay data directory: {}", config.relay_data_path);
+    }
+    info!("Database backend: {}", config.database_backend);
 
     // Create Nostr relay with NIP-34 validation
     // Returns both the relay and database for direct queries in handlers
