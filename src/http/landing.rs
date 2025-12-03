@@ -398,7 +398,7 @@ fn generate_nip_cards(nip11: &RelayInformationDocument) -> String {
         if let Some(meta) = metadata.get(nip) {
             html.push_str(&format!(
                 r#"<div class="card">
-                <div class="card-title"><span class="badge">NIP-{:02}</span> {}</div>
+                <div class="card-title"><span class="badge badge-nip">NIP-{:02}</span> {}</div>
                 <div class="card-desc">{}</div>
             </div>"#,
                 nip, meta.title, meta.description
@@ -407,7 +407,7 @@ fn generate_nip_cards(nip11: &RelayInformationDocument) -> String {
             // Fallback for unknown NIPs - still show them
             html.push_str(&format!(
                 r#"<div class="card">
-                <div class="card-title"><span class="badge">NIP-{:02}</span></div>
+                <div class="card-title"><span class="badge badge-nip">NIP-{:02}</span></div>
             </div>"#,
                 nip
             ));
@@ -416,6 +416,129 @@ fn generate_nip_cards(nip11: &RelayInformationDocument) -> String {
     }
 
     html
+}
+
+/// Escape HTML special characters
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+/// Generate table rows for NIP-11 relay information
+fn generate_relay_info_rows(nip11: &RelayInformationDocument) -> String {
+    let mut html = String::new();
+
+    // Follow NIP-11 document order:
+    // name
+    html.push_str(&format!(
+        r#"<tr><th>name</th><td>{}</td></tr>"#,
+        escape_html(&nip11.name)
+    ));
+    html.push('\n');
+
+    // description
+    html.push_str(&format!(
+        r#"<tr><th>description</th><td>{}</td></tr>"#,
+        escape_html(&nip11.description)
+    ));
+    html.push('\n');
+
+    // pubkey (if present)
+    if let Some(ref pubkey) = nip11.pubkey {
+        html.push_str(&format!(
+            r#"<tr><th>pubkey</th><td><code>{}</code></td></tr>"#,
+            escape_html(pubkey)
+        ));
+        html.push('\n');
+    }
+
+    // contact (if present)
+    if let Some(ref contact) = nip11.contact {
+        html.push_str(&format!(
+            r#"<tr><th>contact</th><td>{}</td></tr>"#,
+            escape_html(contact)
+        ));
+        html.push('\n');
+    }
+
+    // supported_nips
+    let nips_str = nip11
+        .supported_nips
+        .iter()
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    html.push_str(&format!(
+        r#"<tr><th>supported_nips</th><td>{}</td></tr>"#,
+        nips_str
+    ));
+    html.push('\n');
+
+    // software
+    html.push_str(&format!(
+        r#"<tr><th>software</th><td><a href="{}">{}</a></td></tr>"#,
+        escape_html(&nip11.software),
+        escape_html(&nip11.software)
+    ));
+    html.push('\n');
+
+    // version
+    html.push_str(&format!(
+        r#"<tr><th>version</th><td>{}</td></tr>"#,
+        escape_html(&nip11.version)
+    ));
+    html.push('\n');
+
+    // icon (if present)
+    if let Some(ref icon) = nip11.icon {
+        html.push_str(&format!(
+            r#"<tr><th>icon</th><td><a href="{}">{}</a></td></tr>"#,
+            escape_html(icon),
+            escape_html(icon)
+        ));
+        html.push('\n');
+    }
+
+    // GRASP-01 Extensions:
+    // supported_grasps
+    let grasps_str = nip11.supported_grasps.join(", ");
+    html.push_str(&format!(
+        r#"<tr><th>supported_grasps</th><td>{}</td></tr>"#,
+        escape_html(&grasps_str)
+    ));
+    html.push('\n');
+
+    // repo_acceptance_criteria
+    html.push_str(&format!(
+        r#"<tr><th>repo_acceptance_criteria</th><td>{}</td></tr>"#,
+        escape_html(&nip11.repo_acceptance_criteria)
+    ));
+    html.push('\n');
+
+    // curation (if present)
+    if let Some(ref curation) = nip11.curation {
+        html.push_str(&format!(
+            r#"<tr><th>curation</th><td>{}</td></tr>"#,
+            escape_html(curation)
+        ));
+        html.push('\n');
+    }
+
+    html
+}
+
+/// Generate the relay icon HTML for the header
+fn generate_relay_icon_html(nip11: &RelayInformationDocument) -> String {
+    match &nip11.icon {
+        Some(icon_url) => format!(
+            r#"<img src="{}" alt="Relay Icon" class="relay-icon">"#,
+            escape_html(icon_url)
+        ),
+        None => String::new(),
+    }
 }
 
 /// Generate the HTML landing page
@@ -430,6 +553,8 @@ pub fn get_html(config: &Config) -> String {
     let hero_tags = generate_hero_tags(&nip11);
     let grasp_cards = generate_grasp_cards(&nip11);
     let nip_cards = generate_nip_cards(&nip11);
+    let relay_info_rows = generate_relay_info_rows(&nip11);
+    let relay_icon = generate_relay_icon_html(&nip11);
 
     format!(
         include_str!("../../templates/landing.html"),
@@ -437,12 +562,16 @@ pub fn get_html(config: &Config) -> String {
         relay_name = config.relay_name(),
         relay_description = config.relay_description,
         version = get_version(),
+        nip11_version = escape_html(&nip11.version),
         curation = curation,
+        repo_acceptance_criteria = escape_html(&nip11.repo_acceptance_criteria),
         theme_toggle = get_theme_toggle_html(),
         theme_script = get_theme_script(),
         hero_tags = hero_tags,
         grasp_cards = grasp_cards,
         nip_cards = nip_cards,
+        relay_info_rows = relay_info_rows,
+        relay_icon = relay_icon,
     )
 }
 

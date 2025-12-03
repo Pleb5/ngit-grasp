@@ -76,11 +76,7 @@ impl RelayInformationDocument {
 
             // GRASP-01 Extensions
             supported_grasps: vec!["GRASP-01".to_string()],
-            repo_acceptance_criteria: format!(
-                "Repositories must list this relay ({}) in both 'clone' and 'relays' tags of kind 30617 announcements. \
-                 All other events must reference accepted repositories or accepted events.",
-                config.domain
-            ),
+            repo_acceptance_criteria: "None".to_string(),
             curation: None, // Not a curated relay - only SPAM prevention via GRASP-01 policy
         }
     }
@@ -118,7 +114,7 @@ mod tests {
         assert!(doc.supported_nips.contains(&34));
         assert!(doc.supported_nips.contains(&77));
         assert_eq!(doc.supported_grasps, vec!["GRASP-01"]);
-        assert!(doc.repo_acceptance_criteria.contains("relay.example.com"));
+        assert!(doc.repo_acceptance_criteria.contains("None"));
         assert!(doc.curation.is_none());
         assert_eq!(
             doc.icon,
