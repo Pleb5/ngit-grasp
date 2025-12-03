@@ -65,6 +65,7 @@ impl RelayInformationDocument {
                 1,  // NIP-01: Basic protocol flow
                 11, // NIP-11: Relay information document (this!)
                 34, // NIP-34: Git repository announcements
+                77, // NIP-77: Negentropy sync (reconciliation protocol)
             ],
             software: "https://gitworkshop.dev/danconwaydev.com/ngit-grasp".to_string(),
             version: match option_env!("GIT_COMMIT_SHORT") {
@@ -115,6 +116,7 @@ mod tests {
         assert!(doc.supported_nips.contains(&1));
         assert!(doc.supported_nips.contains(&11));
         assert!(doc.supported_nips.contains(&34));
+        assert!(doc.supported_nips.contains(&77));
         assert_eq!(doc.supported_grasps, vec!["GRASP-01"]);
         assert!(doc.repo_acceptance_criteria.contains("relay.example.com"));
         assert!(doc.curation.is_none());
