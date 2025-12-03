@@ -18,6 +18,7 @@
 **Decision:** Build `grasp-audit` as a separate crate from `ngit-grasp`
 
 **Why:**
+
 1. **Parallel Development**: Can build tests before implementation
 2. **Isolated Testing**: Tests run in isolation (CI/CD safe)
 3. **Production Auditing**: Can audit live production services
@@ -43,6 +44,7 @@
 ```
 
 **Benefits:**
+
 - ✅ **Queryable**: Can find all audit events via tag filter
 - ✅ **Isolated**: Each test run has unique run ID
 - ✅ **Self-cleaning**: Cleanup timestamp indicates when to delete
@@ -56,10 +58,12 @@
 ### Standard "t" Tags vs Custom Tags
 
 **Evolution:**
+
 1. **Original**: Custom single-letter tags (`g`, `r`, `c`)
 2. **Current**: Standard NIP-01 "t" tags with prefixed values
 
 **Why we changed:**
+
 - ❌ Custom tags could conflict with other systems
 - ✅ "t" tag is standard for categorization/topics
 - ✅ Multiple "t" tags are expected and supported
@@ -78,17 +82,18 @@
 use grasp_audit::audit::AuditConfig;
 
 // CI mode - isolated test runs
-let config = AuditConfig::ci();
+let config = AuditConfig::isolated();
 // Generates UUID run ID: "ci-{uuid}"
 // Cleanup after 1 hour
 
 // Production mode - persistent run ID
-let config = AuditConfig::production("prod-server-1");
+let config = AuditConfig::shared();
 // Uses provided run ID
 // Cleanup after 24 hours
 ```
 
 **When to use:**
+
 - **CI mode**: Automated testing, parallel runs, temporary
 - **Production mode**: Manual audits, monitoring, persistent
 
@@ -100,7 +105,7 @@ let config = AuditConfig::production("prod-server-1");
 use grasp_audit::audit::{AuditConfig, AuditEventBuilder};
 use nostr_sdk::prelude::*;
 
-let config = AuditConfig::ci();
+let config = AuditConfig::isolated();
 let keys = Keys::generate();
 
 // Create audit event
@@ -121,7 +126,7 @@ let event = AuditEventBuilder::new(&config, Kind::TextNote, "test content")
 use grasp_audit::client::AuditClient;
 use grasp_audit::audit::AuditConfig;
 
-let config = AuditConfig::ci();
+let config = AuditConfig::isolated();
 let client = AuditClient::new(config, keys);
 
 // Connect to relay
@@ -144,14 +149,15 @@ let events = client.query().await?;
 
 ```rust
 // CI mode generates unique UUID per run
-let config1 = AuditConfig::ci();
-let config2 = AuditConfig::ci();
+let config1 = AuditConfig::isolated();
+let config2 = AuditConfig::isolated();
 
 // config1.run_id != config2.run_id
 // Tests won't interfere with each other
 ```
 
 **Benefits:**
+
 - ✅ Parallel CI/CD runs don't conflict
 - ✅ Can run multiple test suites simultaneously
 - ✅ Easy to identify which run created which events
@@ -194,18 +200,20 @@ grasp-audit/src/specs/
 ### Unit vs Integration Tests
 
 **Unit Tests** (no relay required):
+
 ```rust
 #[cfg(test)]
 mod tests {
     #[test]
     fn test_audit_config() {
-        let config = AuditConfig::ci();
+        let config = AuditConfig::isolated();
         assert!(config.run_id.starts_with("ci-"));
     }
 }
 ```
 
 **Integration Tests** (relay required):
+
 ```rust
 #[cfg(test)]
 mod tests {
@@ -218,6 +226,7 @@ mod tests {
 ```
 
 **Running tests:**
+
 ```bash
 # Unit tests (fast, no dependencies)
 cargo test --lib
@@ -248,7 +257,7 @@ for result in &results {
 // Summary
 let passed = results.iter().filter(|r| r.is_pass()).count();
 let total = results.len();
-println!("Results: {}/{} passed ({:.1}%)", 
+println!("Results: {}/{} passed ({:.1}%)",
     passed, total, (passed as f64 / total as f64) * 100.0);
 ```
 
@@ -300,6 +309,7 @@ grasp-audit audit --relay ws://localhost:7000
 **Impact:** Events created with old tags won't be found by new queries.
 
 **Mitigation:**
+
 - ✅ Accept breaking changes in alpha stage
 - ✅ Document migration clearly
 - ✅ Old events auto-expire via cleanup
@@ -316,6 +326,7 @@ grasp-audit audit --relay ws://localhost:7000
 **Solution:** Built-in cleanup strategy from day one.
 
 **Implementation:**
+
 - Every event has cleanup timestamp
 - Relay can cleanup expired events
 - No deletion event pollution (direct DB cleanup)
@@ -329,9 +340,10 @@ grasp-audit audit --relay ws://localhost:7000
 **Benefit:** CI/CD can run multiple test suites simultaneously.
 
 **Pattern:**
+
 ```rust
 // Each CI run gets unique ID
-let config = AuditConfig::ci();
+let config = AuditConfig::isolated();
 // run_id = "ci-{uuid}"
 
 // Tests isolated by run ID
@@ -346,6 +358,7 @@ let events = client.query().await?;
 **Lesson:** Using standard NIP-01 "t" tags instead of custom tags.
 
 **Benefits:**
+
 - ✅ No conflicts with other systems
 - ✅ Standard relay filtering works
 - ✅ Better interoperability
@@ -382,11 +395,13 @@ let events = client.query().await?;
 **Symptoms:** Tests timeout or fail to connect
 
 **Causes:**
+
 1. No relay running
 2. Wrong relay URL
 3. Firewall blocking connection
 
 **Solution:**
+
 ```bash
 # Start relay
 docker run --rm -p 7000:7000 scsibug/nostr-rs-relay
@@ -405,14 +420,16 @@ cargo test -- --ignored
 **Symptoms:** Query returns empty even though events were sent
 
 **Causes:**
+
 1. Wrong run ID (querying different run)
 2. Connection timing (query before event propagated)
 3. Tag mismatch (uppercase vs lowercase)
 
 **Solution:**
+
 ```rust
 // Use same config for send and query
-let config = AuditConfig::ci();
+let config = AuditConfig::isolated();
 
 // Wait for event to propagate
 tokio::time::sleep(Duration::from_millis(500)).await;
@@ -430,6 +447,7 @@ let t_tag = SingleLetterTag::lowercase(Alphabet::T);  // Lowercase!
 **Cause:** Not in Nix dev environment
 
 **Solution:**
+
 ```bash
 # Enter Nix environment first
 cd grasp-audit
@@ -447,10 +465,10 @@ cargo build
 
 ```rust
 // CI mode
-let config = AuditConfig::ci();
+let config = AuditConfig::isolated();
 
 // Production mode
-let config = AuditConfig::production("run-id");
+let config = AuditConfig::shared();
 ```
 
 ### Event Creation
@@ -494,5 +512,5 @@ cargo run -- audit --relay ws://localhost:7000
 
 ---
 
-*Last updated: November 4, 2025*  
-*Status: Living document - update as grasp-audit evolves*
+_Last updated: November 4, 2025_  
+_Status: Living document - update as grasp-audit evolves_

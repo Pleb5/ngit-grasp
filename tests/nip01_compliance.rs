@@ -36,7 +36,7 @@ macro_rules! isolated_test {
         #[tokio::test]
         async fn $test_name() {
             let relay = TestRelay::start().await;
-            let config = AuditConfig::ci();
+            let config = AuditConfig::isolated();
             let client = AuditClient::new(relay.url(), config)
                 .await
                 .expect("Failed to create audit client");
@@ -73,7 +73,7 @@ async fn test_relay_lifecycle() {
     let url = relay.url().to_string();
 
     // Verify we can connect
-    let config = AuditConfig::ci();
+    let config = AuditConfig::isolated();
     let client = AuditClient::new(&url, config)
         .await
         .expect("Failed to connect to relay");
@@ -101,7 +101,7 @@ async fn test_parallel_relays() {
     );
 
     // Both should be connectable
-    let config = AuditConfig::ci();
+    let config = AuditConfig::isolated();
 
     let client1 = AuditClient::new(relay1.url(), config.clone())
         .await

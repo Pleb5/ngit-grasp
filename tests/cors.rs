@@ -36,7 +36,7 @@ macro_rules! isolated_cors_test {
         #[tokio::test]
         async fn $test_name() {
             let relay = TestRelay::start().await;
-            let config = AuditConfig::ci();
+            let config = AuditConfig::isolated();
             let client = AuditClient::new(relay.url(), config)
                 .await
                 .expect("Failed to create audit client");

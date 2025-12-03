@@ -68,18 +68,6 @@ impl AuditConfig {
         }
     }
 
-    /// Alias for isolated() - for backwards compatibility
-    #[deprecated(since = "0.2.0", note = "Use isolated() instead")]
-    pub fn ci() -> Self {
-        Self::isolated()
-    }
-
-    /// Alias for shared() - for backwards compatibility
-    #[deprecated(since = "0.2.0", note = "Use shared() instead")]
-    pub fn production() -> Self {
-        Self::shared()
-    }
-
     /// Create config with custom run ID
     pub fn with_run_id(run_id: String, mode: AuditMode) -> Self {
         Self {

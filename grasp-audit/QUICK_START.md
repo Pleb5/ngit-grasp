@@ -108,21 +108,21 @@ use grasp_audit::*;
 #[tokio::main]
 async fn main() -> Result<()> {
     // Create audit client
-    let config = AuditConfig::ci();
+    let config = AuditConfig::isolated();
     let client = AuditClient::new("ws://localhost:7000", config).await?;
-    
+
     // Run smoke tests
     let results = specs::Nip01SmokeTests::run_all(&client).await;
-    
+
     // Print results
     results.print_report();
-    
+
     // Check if passed
     if !results.all_passed() {
         eprintln!("Some tests failed!");
         std::process::exit(1);
     }
-    
+
     Ok(())
 }
 ```
@@ -134,17 +134,20 @@ async fn main() -> Result<()> {
 **Error:** `linker 'cc' not found`
 
 **Solution (NixOS):**
+
 ```bash
 nix develop  # Use the provided flake.nix
 ```
 
 **Solution (Other Linux):**
+
 ```bash
 sudo apt-get install build-essential  # Debian/Ubuntu
 sudo yum install gcc                   # RedHat/CentOS
 ```
 
 **Solution (macOS):**
+
 ```bash
 xcode-select --install
 ```
@@ -154,6 +157,7 @@ xcode-select --install
 **Error:** `Failed to connect to relay`
 
 **Solutions:**
+
 1. Make sure a relay is running at the specified URL
 2. Check firewall settings
 3. Try a different relay URL
@@ -164,6 +168,7 @@ xcode-select --install
 **Error:** Tests fail with timeout
 
 **Solutions:**
+
 1. Increase timeout in test code
 2. Check relay is responding (try with `websocat`)
 3. Check network connectivity
@@ -216,6 +221,7 @@ xcode-select --install
 ## Support
 
 For issues or questions:
+
 1. Check the documentation in this directory
 2. Review the examples
 3. Check the test code for usage patterns

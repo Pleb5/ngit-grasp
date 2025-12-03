@@ -56,14 +56,18 @@ async fn main() -> Result<()> {
             spec,
             git_data_dir,
         } => {
-            #[allow(deprecated)]
             let mut config = match mode.as_str() {
                 "shared" => AuditConfig::shared(),
                 "isolated" => AuditConfig::isolated(),
                 // Backwards compatibility aliases
-                "ci" => AuditConfig::ci(),
-                "production" => AuditConfig::production(),
-                _ => return Err(anyhow!("Invalid mode: {}. Use 'shared' or 'isolated'", mode)),
+                "ci" => AuditConfig::isolated(),
+                "production" => AuditConfig::shared(),
+                _ => {
+                    return Err(anyhow!(
+                        "Invalid mode: {}. Use 'shared' or 'isolated'",
+                        mode
+                    ))
+                }
             };
 
             // Audit needs to create events to test the relay, so disable read-only mode
