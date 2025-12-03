@@ -194,10 +194,7 @@
 
             <div class="tag-container" style="margin-top: 12px;">
                 <span class="tag-label">Supports:</span>
-                <span class="tag tag-grasp">GRASP-01</span>
-                <span class="tag tag-nip">NIP-01</span>
-                <span class="tag tag-nip">NIP-11</span>
-                <span class="tag tag-nip">NIP-34</span>
+                {hero_tags}
             </div>
 
             
@@ -229,26 +226,12 @@
     <main class="container" id="content">
         <div class="section">
             <div class="section-title">Supported GRASPs</div>
-            <div class="card">
-                <div class="card-title"><span class="badge">GRASP-01</span>Nostr Authorised HTTP Git Server</div>
-                <div class="card-desc">with embedded Nostr Relay</div>
-            </div>
+            {grasp_cards}
         </div>
         
         <div class="section">
             <div class="section-title">Supported NIPs</div>
-            <div class="card">
-                <div class="card-title"><span class="badge">NIP-01</span> Basic Protocol</div>
-                <div class="card-desc">Core Nostr protocol flow and event structure</div>
-            </div>
-            <div class="card">
-                <div class="card-title"><span class="badge">NIP-11</span> Relay Information</div>
-                <div class="card-desc">Relay metadata and capabilities document</div>
-            </div>
-            <div class="card">
-                <div class="card-title"><span class="badge">NIP-34</span> Git Events</div>
-                <div class="card-desc">Repository announcements and state tracking</div>
-            </div>
+            {nip_cards}
         </div>
         
         <div class="footer">

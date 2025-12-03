@@ -2,6 +2,8 @@
 ///
 /// Generates HTML landing page for the Nostr relay.
 use crate::config::Config;
+use crate::http::nip11::RelayInformationDocument;
+use std::collections::HashMap;
 
 /// Get the software version string (version + optional git commit)
 fn get_version() -> String {
@@ -274,10 +276,160 @@ fn get_base_css() -> &'static str {
         }"#
 }
 
+/// Metadata for a NIP (title and description for the landing page)
+struct NipMetadata {
+    title: &'static str,
+    description: &'static str,
+}
+
+/// Metadata for a GRASP (title and description for the landing page)
+struct GraspMetadata {
+    title: &'static str,
+    description: &'static str,
+}
+
+/// Get known NIP metadata for landing page display
+fn get_nip_metadata() -> HashMap<u16, NipMetadata> {
+    let mut map = HashMap::new();
+    map.insert(
+        1,
+        NipMetadata {
+            title: "Basic Protocol",
+            description: "Core Nostr protocol flow and event structure",
+        },
+    );
+    map.insert(
+        11,
+        NipMetadata {
+            title: "Relay Information",
+            description: "Relay metadata and capabilities document",
+        },
+    );
+    map.insert(
+        34,
+        NipMetadata {
+            title: "Git Events",
+            description: "Repository announcements and state tracking",
+        },
+    );
+    map.insert(
+        77,
+        NipMetadata {
+            title: "Negentropy Sync",
+            description: "Efficient set reconciliation protocol",
+        },
+    );
+    map
+}
+
+/// Get known GRASP metadata for landing page display
+fn get_grasp_metadata() -> HashMap<&'static str, GraspMetadata> {
+    let mut map = HashMap::new();
+    map.insert(
+        "GRASP-01",
+        GraspMetadata {
+            title: "Nostr Authorised HTTP Git Server",
+            description: "with embedded Nostr Relay",
+        },
+    );
+    map
+}
+
+/// Generate hero section tags HTML from NIP-11 document
+fn generate_hero_tags(nip11: &RelayInformationDocument) -> String {
+    let mut html = String::new();
+
+    // Add GRASP tags
+    for grasp in &nip11.supported_grasps {
+        html.push_str(&format!(
+            r#"<span class="tag tag-grasp">{}</span>"#,
+            grasp
+        ));
+        html.push('\n');
+    }
+
+    // Add NIP tags
+    for nip in &nip11.supported_nips {
+        html.push_str(&format!(
+            r#"<span class="tag tag-nip">NIP-{:02}</span>"#,
+            nip
+        ));
+        html.push('\n');
+    }
+
+    html
+}
+
+/// Generate detailed GRASP cards HTML from NIP-11 document
+fn generate_grasp_cards(nip11: &RelayInformationDocument) -> String {
+    let metadata = get_grasp_metadata();
+    let mut html = String::new();
+
+    for grasp in &nip11.supported_grasps {
+        if let Some(meta) = metadata.get(grasp.as_str()) {
+            html.push_str(&format!(
+                r#"<div class="card">
+                <div class="card-title"><span class="badge">{}</span>{}</div>
+                <div class="card-desc">{}</div>
+            </div>"#,
+                grasp, meta.title, meta.description
+            ));
+        } else {
+            // Fallback for unknown GRASPs - still show them
+            html.push_str(&format!(
+                r#"<div class="card">
+                <div class="card-title"><span class="badge">{}</span>{}</div>
+            </div>"#,
+                grasp, grasp
+            ));
+        }
+        html.push('\n');
+    }
+
+    html
+}
+
+/// Generate detailed NIP cards HTML from NIP-11 document
+fn generate_nip_cards(nip11: &RelayInformationDocument) -> String {
+    let metadata = get_nip_metadata();
+    let mut html = String::new();
+
+    for nip in &nip11.supported_nips {
+        if let Some(meta) = metadata.get(nip) {
+            html.push_str(&format!(
+                r#"<div class="card">
+                <div class="card-title"><span class="badge">NIP-{:02}</span> {}</div>
+                <div class="card-desc">{}</div>
+            </div>"#,
+                nip, meta.title, meta.description
+            ));
+        } else {
+            // Fallback for unknown NIPs - still show them
+            html.push_str(&format!(
+                r#"<div class="card">
+                <div class="card-title"><span class="badge">NIP-{:02}</span></div>
+            </div>"#,
+                nip
+            ));
+        }
+        html.push('\n');
+    }
+
+    html
+}
+
 /// Generate the HTML landing page
 pub fn get_html(config: &Config) -> String {
-    // Curation matches NIP-11 document - currently None for this relay
-    let curation = "None".to_string();
+    // Get NIP-11 document for supported NIPs and GRASPs
+    let nip11 = RelayInformationDocument::from_config(config);
+
+    // Curation matches NIP-11 document
+    let curation = nip11.curation.as_deref().unwrap_or("None").to_string();
+
+    // Generate dynamic HTML for NIPs and GRASPs
+    let hero_tags = generate_hero_tags(&nip11);
+    let grasp_cards = generate_grasp_cards(&nip11);
+    let nip_cards = generate_nip_cards(&nip11);
 
     format!(
         include_str!("../../templates/landing.html"),
@@ -288,6 +440,9 @@ pub fn get_html(config: &Config) -> String {
         curation = curation,
         theme_toggle = get_theme_toggle_html(),
         theme_script = get_theme_script(),
+        hero_tags = hero_tags,
+        grasp_cards = grasp_cards,
+        nip_cards = nip_cards,
     )
 }
 
