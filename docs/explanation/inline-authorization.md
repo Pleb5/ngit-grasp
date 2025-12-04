@@ -150,13 +150,16 @@ rm -rf /tmp/test-repo
 ```rust
 #[tokio::test]
 async fn test_unauthorized_push() {
-    let state = create_test_state().await;
+    let relay = TestRelay::start().await;
     let result = validate_push(&state, "refs/heads/main", alice_pubkey).await;
     assert!(result.is_err());
+    relay.stop().await;
 }
 ```
 
 **Result:** Pure Rust unit tests, no shell scripts, no Git setup.
+
+See [`tests/push_authorization.rs`](tests/push_authorization.rs) for actual test examples.
 
 ### 4. Shared State and Types
 
@@ -168,19 +171,17 @@ async fn test_unauthorized_push() {
 
 **With inline authorization:**
 ```rust
-pub struct GitHandler {
-    nostr_relay: Arc<NostrRelay>,  // Shared!
-    state_cache: Arc<StateCache>,   // Shared!
-}
-
-impl GitHandler {
-    async fn validate_push(&self, refs: &[RefUpdate]) -> Result<()> {
-        // Direct access to Nostr state
-        let state = self.state_cache.get_latest().await?;
-        // Validate using shared types
-        state.validate_refs(refs)?;
-        Ok(())
-    }
+// From src/git/handlers.rs
+pub async fn handle_receive_pack(
+    repo_path: PathBuf,
+    body: Bytes,
+    database: SharedDatabase,  // Shared with Nostr relay!
+    npub: &str,
+    identifier: &str,
+) -> Result<Response<Full<Bytes>>, GitError> {
+    // Direct database access for authorization
+    let auth = get_authorization_for_owner(&database, pubkey, identifier).await?;
+    // ...
 }
 ```
 
@@ -208,9 +209,9 @@ Setup steps:
 **With inline authorization (ngit-grasp):**
 ```
 Single Rust binary:
-  - HTTP server (actix-web)
+  - HTTP server (Hyper)
   - Git protocol handler
-  - Nostr relay
+  - Nostr relay (nostr-relay-builder)
   - Authorization logic
   
 Setup steps:
@@ -235,44 +236,38 @@ Content-Type: application/x-git-receive-pack-request
 0000000000000000000000000000000000000000 abc123... refs/heads/main\0 report-status
 ```
 
-We parse this **before** spawning Git:
+We parse this **before** spawning Git. See [`src/git/authorization.rs`](src/git/authorization.rs) for the implementation:
 
 ```rust
-pub async fn git_receive_pack(
-    req: HttpRequest,
-    body: web::Bytes,
-) -> Result<HttpResponse, Error> {
-    // 1. Parse ref updates from request body
-    let ref_updates = parse_ref_updates(&body)?;
-    
-    // 2. Validate against Nostr state
-    let state = get_latest_state(&repo).await?;
-    validate_push(&state, &ref_updates).await?;
-    
-    // 3. If valid, spawn git-receive-pack
-    spawn_git_receive_pack(req, body).await
+/// Parse ref updates from git-receive-pack request body
+pub fn parse_pushed_refs(body: &[u8]) -> Result<Vec<PushedRef>, AuthorizationError> {
+    // Parse pkt-line format
+    // Extract ref updates
+    // Return structured data
 }
 ```
 
 ### How We Validate
 
-Validation checks:
+Validation checks (from [`src/git/authorization.rs`](src/git/authorization.rs)):
+
 1. Does pusher's pubkey have write access?
 2. Are they listed as a maintainer in the latest state event?
-3. Do maintainer sets form a valid chain?
+3. Do the refs match the state event?
 
 ```rust
-async fn validate_push(
-    state: &RepoState,
-    refs: &[RefUpdate],
-) -> Result<()> {
-    for ref_update in refs {
-        // Check if pusher is authorized for this ref
-        if !state.is_authorized(&ref_update.name, pusher_pubkey) {
-            return Err(Error::Unauthorized {
-                ref_name: ref_update.name.clone(),
-                pubkey: pusher_pubkey,
-            });
+/// Validate that pushed refs match the authorized state
+pub fn validate_push_refs(
+    pushed_refs: &[PushedRef],
+    state: &RepositoryState,
+) -> Result<(), AuthorizationError> {
+    for pushed_ref in pushed_refs {
+        if pushed_ref.ref_name.starts_with("refs/heads/") {
+            // Validate branch against state
+        } else if pushed_ref.ref_name.starts_with("refs/tags/") {
+            // Validate tag against state
+        } else if pushed_ref.ref_name.starts_with("refs/nostr/") {
+            // Allow refs/nostr/<event-id> for PRs
         }
     }
     Ok(())
@@ -291,7 +286,7 @@ async fn validate_push(
 | **Performance** | Spawns Git first | Validates first |
 | **Testing** | Shell scripts + Go tests | Pure Rust tests |
 | **Deployment** | Docker + supervisord | Single binary |
-| **State sharing** | WebSocket query | Direct memory access |
+| **State sharing** | WebSocket query | Direct database access |
 
 Both are GRASP-compliant, but inline authorization is simpler and more efficient.
 
@@ -314,34 +309,25 @@ Both are GRASP-compliant, but inline authorization is simpler and more efficient
 ### Is It Worth It?
 
 **Yes**, because:
-1. The `git-http-backend` crate handles protocol parsing
+1. We handle protocol parsing in [`src/git/protocol.rs`](src/git/protocol.rs)
 2. GRASP is already non-standard (Nostr authorization)
 3. Benefits far outweigh the coupling cost
 4. We can still add hook support later if needed
 
 ---
 
-## Alternative Considered: Hybrid Approach
+## Implementation References
 
-We could use **both** inline validation and hooks:
+Key files in the ngit-grasp implementation:
 
-```rust
-// Inline: Fast path for common cases
-if !quick_validate(pusher).await? {
-    return Err(Error::Unauthorized);
-}
-
-// Hook: Detailed validation
-spawn_git_with_hook().await?;
-```
-
-**Why we didn't choose this:**
-- Added complexity
-- Redundant validation
-- Slower (two validation steps)
-- Harder to maintain
-
-If inline validation is sufficient, why add hooks?
+| Component | Location |
+|-----------|----------|
+| HTTP routing | [`src/http/mod.rs`](src/http/mod.rs) |
+| Git handlers | [`src/git/handlers.rs`](src/git/handlers.rs) |
+| Push authorization | [`src/git/authorization.rs`](src/git/authorization.rs) |
+| Git protocol parsing | [`src/git/protocol.rs`](src/git/protocol.rs) |
+| Subprocess management | [`src/git/subprocess.rs`](src/git/subprocess.rs) |
+| Event acceptance policy | [`src/nostr/builder.rs:51`](src/nostr/builder.rs:51) - `Nip34WritePolicy` |
 
 ---
 
@@ -365,9 +351,8 @@ This would allow:
 
 ### If Git Protocol Changes
 
-The `git-http-backend` crate abstracts protocol details. If the Git protocol changes:
-- Update the crate dependency
-- Adjust our ref parsing if needed
+The protocol parsing is isolated in [`src/git/protocol.rs`](src/git/protocol.rs). If the Git protocol changes:
+- Update the protocol module
 - Tests will catch any breakage
 
 ---
@@ -380,11 +365,11 @@ The `git-http-backend` crate abstracts protocol details. If the Git protocol cha
 2. It's more performant (early rejection)
 3. It's easier to test (pure Rust)
 4. It's simpler to deploy (single binary)
-5. It enables better integration (shared state)
+5. It enables better integration (shared database)
 
 The trade-off (coupling to Git HTTP protocol) is acceptable because:
 - The protocol is stable and well-specified
-- The `git-http-backend` crate abstracts details
+- Protocol handling is isolated in one module
 - Benefits far outweigh the cost
 
 This decision aligns with our goal of creating a **developer-friendly, production-ready GRASP implementation**.
@@ -397,6 +382,7 @@ This decision aligns with our goal of creating a **developer-friendly, productio
 - [Design Decisions](decisions.md) - All architectural choices
 - [Comparison with ngit-relay](comparison.md) - Detailed comparison
 - [Git Protocol Reference](../reference/git-protocol.md) - Protocol details
+- [Test Strategy](../reference/test-strategy.md) - How we test this
 
 ---
 

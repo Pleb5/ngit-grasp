@@ -1,13 +1,13 @@
 # GRASP Audit Tool - Patterns and Learnings
 
 **Purpose:** Document grasp-audit architecture, patterns, and lessons learned  
-**Last Updated:** November 4, 2025
+**Last Updated:** December 4, 2025
 
 ---
 
 ## Overview
 
-`grasp-audit` is a compliance testing tool for GRASP (Git Relays Authorized via Signed-Nostr Proofs) protocol implementations. It tests both Nostr relay compliance (NIP-01) and GRASP-specific functionality.
+`grasp-audit` is a **fully implemented** compliance testing tool for GRASP (Git Relays Authorized via Signed-Nostr Proofs) protocol implementations. It tests both Nostr relay compliance (NIP-01) and GRASP-specific functionality.
 
 ---
 
@@ -32,10 +32,10 @@
 
 **Problem:** Test events pollute the relay and need cleanup without deletion events.
 
-**Solution:** Use special tags to mark audit events:
+**Solution:** Use special tags to mark audit events (implemented in [`grasp-audit/src/audit.rs`](grasp-audit/src/audit.rs)):
 
 ```rust
-// Every audit event includes these tags
+// Every audit event includes these tags (added automatically)
 [
     ["t", "grasp-audit-test-event"],           // Marker
     ["t", "audit-{run-id}"],                   // Run isolation
@@ -78,6 +78,8 @@
 
 ### Audit Configuration
 
+From [`grasp-audit/src/audit.rs`](grasp-audit/src/audit.rs):
+
 ```rust
 use grasp_audit::audit::AuditConfig;
 
@@ -101,100 +103,41 @@ let config = AuditConfig::shared();
 
 ### Creating Audit Events
 
-```rust
-use grasp_audit::audit::{AuditConfig, AuditEventBuilder};
-use nostr_sdk::prelude::*;
-
-let config = AuditConfig::isolated();
-let keys = Keys::generate();
-
-// Create audit event
-let event = AuditEventBuilder::new(&config, Kind::TextNote, "test content")
-    .build(&keys)?;
-
-// Event automatically includes:
-// - Audit marker tag
-// - Run ID tag
-// - Cleanup timestamp tag
-```
-
----
-
-### Querying Audit Events
+From [`grasp-audit/src/client.rs`](grasp-audit/src/client.rs):
 
 ```rust
 use grasp_audit::client::AuditClient;
 use grasp_audit::audit::AuditConfig;
 
 let config = AuditConfig::isolated();
-let client = AuditClient::new(config, keys);
+let client = AuditClient::new("ws://localhost:8080", config).await?;
 
-// Connect to relay
-client.add_relay("ws://localhost:7000").await?;
-client.connect().await;
+// Create and send an event - cleanup tags are added automatically
+let event = client.event_builder()
+    .kind(Kind::TextNote)
+    .content("test content")
+    .build(&keys)?;
 
-// Query audit events for this run
-let events = client.query().await?;
-
-// Events are filtered by:
-// - "grasp-audit-test-event" marker
-// - Current run ID
+client.send_event(event).await?;
 ```
 
 ---
 
-### Test Isolation
+### Test Suites
 
-**Each test run is isolated by unique run ID:**
-
-```rust
-// CI mode generates unique UUID per run
-let config1 = AuditConfig::isolated();
-let config2 = AuditConfig::isolated();
-
-// config1.run_id != config2.run_id
-// Tests won't interfere with each other
-```
-
-**Benefits:**
-
-- ✅ Parallel CI/CD runs don't conflict
-- ✅ Can run multiple test suites simultaneously
-- ✅ Easy to identify which run created which events
-- ✅ Cleanup can target specific runs
-
----
-
-### Cleanup Strategy
-
-**Two-phase cleanup:**
-
-1. **Automatic expiry** via cleanup timestamp tag
-2. **Manual cleanup** by querying and deleting
-
-```rust
-// Events include cleanup timestamp
-["t", "audit-cleanup-after-1730707200"]
-
-// Cleanup process:
-// 1. Query events with expired cleanup timestamp
-// 2. Delete from database directly (no KIND 5)
-// 3. Avoid deletion event pollution
-```
-
-**Implementation:** To be built in relay (not in audit tool)
-
----
-
-## Testing Strategy
-
-### Test Organization
+From [`grasp-audit/src/specs/grasp01/mod.rs`](grasp-audit/src/specs/grasp01/mod.rs):
 
 ```
-grasp-audit/src/specs/
-├── nip01_smoke.rs      # NIP-01 basic functionality
-├── grasp_01_relay.rs   # GRASP-01 relay requirements (planned)
-└── mod.rs              # Test suite registry
+grasp-audit/src/specs/grasp01/
+├── mod.rs                    # Module exports
+├── nip01_smoke.rs            # NIP-01 basic functionality
+├── nip11_document.rs         # NIP-11 document tests
+├── event_acceptance_policy.rs # GRASP-01 event rules
+├── cors.rs                   # CORS header tests
+├── git_clone.rs              # Git clone operations
+├── push_authorization.rs     # Push validation tests
+├── repository_creation.rs    # Repository lifecycle
+└── spec_requirements.rs      # Requirement definitions
 ```
 
 ### Unit vs Integration Tests
@@ -229,16 +172,17 @@ mod tests {
 
 ```bash
 # Unit tests (fast, no dependencies)
-cargo test --lib
+cd grasp-audit && nix develop -c cargo test --lib
 
-# Integration tests (requires relay)
-docker run --rm -p 7000:7000 scsibug/nostr-rs-relay
-cargo test -- --ignored
+# Integration tests (requires relay via test-ngit-relay.sh)
+cd grasp-audit && nix develop -c bash test-ngit-relay.sh --mode test
 ```
 
 ---
 
 ### Test Result Reporting
+
+From [`grasp-audit/src/result.rs`](grasp-audit/src/result.rs):
 
 ```rust
 use grasp_audit::result::AuditResult;
@@ -255,7 +199,7 @@ for result in &results {
 }
 
 // Summary
-let passed = results.iter().filter(|r| r.is_pass()).count();
+let passed = results.iter().filter(|r| r.passed).count();
 let total = results.len();
 println!("Results: {}/{} passed ({:.1}%)",
     passed, total, (passed as f64 / total as f64) * 100.0);
@@ -291,7 +235,7 @@ grasp-audit audit \
 grasp-audit audit \
   --relay wss://relay.example.com \
   --mode production \
-  --run-id "audit-2025-11-04" \
+  --run-id "audit-2025-12-04" \
   --verbose
 
 # Test all specs
@@ -366,25 +310,23 @@ let events = client.query().await?;
 
 ---
 
-## Future Enhancements
+## What's Implemented
 
-### Planned Features
+### Completed Features
 
-- [ ] **GRASP-01 Test Suite**: Repository announcement and state event tests
-- [ ] **Test Report Generation**: JSON/HTML output for CI/CD
+- ✅ **GRASP-01 Test Suites**: All NIP-01, NIP-11, CORS, event acceptance tests
+- ✅ **Spec Requirements Database**: Machine-readable requirements in [`spec_requirements.rs`](grasp-audit/src/specs/grasp01/spec_requirements.rs)
+- ✅ **Automatic Cleanup Tags**: Production-safe event tagging
+- ✅ **Test Isolation**: UUID run IDs for parallel execution
+- ✅ **AuditClient**: Nostr client wrapper with audit features
+- ✅ **Fixture Helpers**: Event creation helpers in [`fixtures.rs`](grasp-audit/src/fixtures.rs)
+
+### Future Enhancements
+
+- [ ] **GRASP-02 Test Suite**: Proactive sync tests
+- [ ] **HTML Report Generation**: Rich CI/CD reports
 - [ ] **Performance Benchmarks**: Measure relay performance
 - [ ] **Relay Comparison**: Side-by-side compliance comparison
-- [ ] **Continuous Monitoring**: Periodic production audits
-
----
-
-### Possible Improvements
-
-- [ ] **Parallel Test Execution**: Run specs in parallel
-- [ ] **Retry Logic**: Handle transient failures
-- [ ] **Custom Assertions**: Domain-specific test helpers
-- [ ] **Event Diff Tool**: Compare expected vs actual events
-- [ ] **Cleanup Automation**: Auto-cleanup after tests
 
 ---
 
@@ -403,14 +345,12 @@ let events = client.query().await?;
 **Solution:**
 
 ```bash
-# Start relay
-docker run --rm -p 7000:7000 scsibug/nostr-rs-relay
+# Use test-ngit-relay.sh for automated relay management
+cd grasp-audit && nix develop -c bash test-ngit-relay.sh --mode test
 
-# Verify relay is running
-curl http://localhost:7000
-
-# Run tests
-cargo test -- --ignored
+# Or manually:
+docker run --rm -p 18081:8081 ghcr.io/danconwaydev/ngit-relay:latest
+RELAY_URL="ws://localhost:18081" nix develop -c cargo test --lib -- --ignored
 ```
 
 ---
@@ -471,46 +411,39 @@ let config = AuditConfig::isolated();
 let config = AuditConfig::shared();
 ```
 
-### Event Creation
-
-```rust
-let event = AuditEventBuilder::new(&config, kind, content)
-    .build(&keys)?;
-```
-
 ### Client Usage
 
 ```rust
-let client = AuditClient::new(config, keys);
-client.add_relay("ws://localhost:7000").await?;
-client.connect().await;
-let events = client.query().await?;
+let client = AuditClient::new("ws://localhost:7000", config).await?;
+assert!(client.is_connected().await);
 ```
 
 ### Running Tests
 
 ```bash
-# Unit tests
-cargo test --lib
+# Unit tests (from grasp-audit/)
+nix develop -c cargo test --lib
 
-# Integration tests
-cargo test -- --ignored
+# Integration tests with ngit-relay
+nix develop -c bash test-ngit-relay.sh --mode test
 
-# CLI
-cargo run -- audit --relay ws://localhost:7000
+# CLI audit
+nix develop -c cargo run -- audit --relay ws://localhost:7000
 ```
 
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| [`grasp-audit/src/lib.rs`](grasp-audit/src/lib.rs) | Public API |
+| [`grasp-audit/src/client.rs`](grasp-audit/src/client.rs) | AuditClient implementation |
+| [`grasp-audit/src/audit.rs`](grasp-audit/src/audit.rs) | AuditConfig, cleanup tags |
+| [`grasp-audit/src/specs/grasp01/mod.rs`](grasp-audit/src/specs/grasp01/mod.rs) | Test suite registry |
+| [`grasp-audit/src/specs/grasp01/spec_requirements.rs`](grasp-audit/src/specs/grasp01/spec_requirements.rs) | Requirement database |
+
 ---
 
-## References
+## Related Documentation
 
-- **GRASP Protocol**: https://gitworkshop.dev/danconwaydev.com/grasp
-- **NIP-01**: https://github.com/nostr-protocol/nips/blob/master/01.md
-- **NIP-34**: https://github.com/nostr-protocol/nips/blob/master/34.md
-- **grasp-audit README**: `grasp-audit/README.md`
-- **Tag Migration**: `docs/archive/2025-11-04-tag-migration.md`
-
----
-
-_Last updated: November 4, 2025_  
-_Status: Living document - update as grasp-audit evolves_
+- [Test Strategy](../reference/test-strategy.md) - Overall testing approach
+- [GRASP-01 Implementation](grasp-01-implementation.md) - Main project learnings

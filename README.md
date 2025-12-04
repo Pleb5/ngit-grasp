@@ -14,8 +14,6 @@ Unlike the reference implementation ([ngit-relay](https://gitworkshop.dev/npub15
 
 ## Status
 
-**ALPHA** - Under active development. API and architecture subject to change.
-
 ## Key Features
 
 - **Pure Rust Implementation**: Single binary, no external dependencies beyond Git itself
