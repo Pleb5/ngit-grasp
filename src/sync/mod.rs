@@ -21,10 +21,12 @@ mod connection;
 mod filter;
 pub mod health;
 mod manager;
+mod subscription;
 
 pub use filter::FilterService;
 pub use health::{HealthState, RelayHealth, RelayHealthTracker};
 pub use manager::SyncManager;
+pub use subscription::SubscriptionManager;
 
 use std::net::SocketAddr;
 

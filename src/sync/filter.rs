@@ -24,6 +24,7 @@ const KIND_MAINTAINER_LIST: u16 = 30618;
 /// 1. Layer 1: Discover new repository announcements and maintainer metadata
 /// 2. Layer 2: Sync events directly related to repositories we track
 /// 3. Layer 3: Sync discussions and updates related to Layer 2 events
+#[derive(Debug)]
 pub struct FilterService {
     database: SharedDatabase,
     /// Our relay's domain for filtering
