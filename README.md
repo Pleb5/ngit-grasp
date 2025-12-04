@@ -64,6 +64,59 @@ This approach provides:
 - 🔄 Accept repositories not listing this instance
 - 🔄 Backup/mirror mode operation
 
+## Roadmap
+
+### Purgatory
+
+State events / PR / PR Update events without git data should be accepted with msg: "won't be served until git data arrives" or "in puratory awaiting git data" and not served by the main relay.
+When the git data arrives, they get released from puratory. If git data doesn't arrive within 1 day, the events get deleted.
+
+This ensures the grasp serve only serves these events when it can provide the git data to support them.
+
+Why this is useful:
+
+1. owner submits updated state event but loses connectivity before sending the new git data. The relay causing ngit-cli to fail to clone and other clients to show a warning that the git servers state doesn't align with nostr as relays only serve the latest state event (as its addressable).
+   a. clients could be made more resilient if they know older versions of the state event served by a grasp server relate to the state they are currently storing.
+   b. if clients just start using grasp servers (instead of other relays) then they will always be able to find the git data related to the latest versin of the event servered by a grasp server
+
+2. serving PR events where the git data isn't accessable isn't useful.
+
+### GRASP-02 (Proactive Sync)
+
+- websockets to other grasp servers listening for our repo.
+- negentropy catchup
+- look for missing data (from state or PR / PR update) then try and fetch from other grasp servers. for efficency look for it from other repos (ie repos of other maintainers). Do this on new state event / PR / PR update evnet and on a timer for events we know we don't have the data for.
+
+#### Proactive Sync +
+
+. look for announcement events on other relays / grasp servers that list our service.
+. look on read/write relays of repo / PR / Patch / Issue author to get related comments. pass through stricter anti SPAM mechanism?
+
+### Data effiency
+
+dedupe git data = shared object database or (GIT_ALTERNATE_OBJECT_DIRECTORIES or .git/objects/info/alternates)
+
+### Logging
+
+- look into prometheus and the best way to log to get useful info
+- look into the best way of monitoring livness
+
+### Delete Events
+
+Git data related to deleted Repositories should be archvied (and deleted after 90 days), also events related to ONLY this repository.
+
+### Grasp Server Removed from Announcement Event
+
+Unless GRASP-05, This should cause the git data and events related ONLY to this repository to be archived (and deleted after 90 days).
+
+### Mitigate DoS attack vector
+
+Grasp servers can be DoS by pushing large amounts of git data to `refs/nostr/<event-id>` without having to first submit a signed nostr event. operators must temporarily disable pushes to `refs/nostr/*` without having recieved a signed event. This breaks the flow of sending PR / Update events in NIP-34 as the client doesnt know if the grasp server will accept git data / event so might include it as a server hint in `clone` without knowing whether the server will accept the data. Could an ephemeral event be sent to authorise or is that too complicated? Maybe require NIP-42 auth and authorise that IP address for the push based on WoT?
+
+### Reject Commits with Secrets
+
+This a useful feature of other git servers.
+
 ## Technology Stack
 
 - **Rust**: Core language
@@ -141,7 +194,7 @@ NGIT_OWNER_NPUB=npub1... ngit-grasp --domain relay.example.com
 - `memory`: In-memory database (fastest, no persistence - uses temp directories)
 - `nostrdb`: NostrDB backend (persistent, optimized for Nostr) [Not yet implemented]
 
-> **Note:** When using the `memory` backend, git data are automatically stored in temporary directories for ephemeral testing. This is useful for development and CI/CD pipelines.
+> **Note:** When using the `memory` backend, git data are automatically stored in temporary directories for ephemeral testing.
 
 ### Example: Production Deployment
 
