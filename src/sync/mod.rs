@@ -3,10 +3,18 @@
 //! This module implements proactive synchronization of kind 30617 (repository state)
 //! events from configured relay(s). Events are validated through the same write policy
 //! as directly-submitted events.
+//!
+//! ## Three-Layer Filter Strategy (Phase 2)
+//!
+//! - **Layer 1**: Announcement discovery (kinds 30617 + 30618)
+//! - **Layer 2**: Repository events (A/a tags for shared repos)
+//! - **Layer 3**: Related events (E/e tags for discussions, reviews)
 
 mod connection;
+mod filter;
 mod manager;
 
+pub use filter::FilterService;
 pub use manager::SyncManager;
 
 use std::net::SocketAddr;

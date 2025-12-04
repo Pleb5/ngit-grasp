@@ -51,20 +51,24 @@ async fn main() -> Result<()> {
             config.domain
         );
 
-        // Start SyncManager if sync_relay_url is configured
-        if let Some(ref sync_url) = config.sync_relay_url {
-            info!("Starting proactive sync from: {}", sync_url);
-            let sync_manager = SyncManager::new(
-                sync_url.clone(),
-                relay_with_db.database.clone(),
-                relay_with_db.write_policy.clone(),
-            );
-            tokio::spawn(async move {
-                sync_manager.run().await;
-            });
+        // Start SyncManager for proactive sync (Phase 2: multi-relay support)
+        // Even without initial sync_relay_url, SyncManager can discover relays from stored announcements
+        let sync_manager = SyncManager::new(
+            config.sync_relay_url.clone(),
+            config.domain.clone(),
+            relay_with_db.database.clone(),
+            relay_with_db.write_policy.clone(),
+        );
+
+        if config.sync_relay_url.is_some() {
+            info!("Starting proactive sync from: {:?}", config.sync_relay_url);
         } else {
-            info!("Proactive sync disabled (no NGIT_SYNC_RELAY_URL configured)");
+            info!("Proactive sync enabled (will discover relays from stored announcements)");
         }
+
+        tokio::spawn(async move {
+            sync_manager.run().await;
+        });
 
         // Start HTTP server with integrated relay and database
         info!("Starting HTTP server on {}", config.bind_address);
