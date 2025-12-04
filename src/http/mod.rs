@@ -7,6 +7,7 @@ pub mod nip11;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use base64::Engine;
 use http_body_util::{BodyExt, Full};
@@ -24,6 +25,7 @@ use tokio::net::TcpListener;
 
 use crate::config::Config;
 use crate::git;
+use crate::metrics::Metrics;
 use crate::nostr::builder::SharedDatabase;
 
 /// CORS headers required by GRASP-01 specification (lines 40-47)
@@ -90,6 +92,8 @@ struct HttpService {
     remote: SocketAddr,
     /// Database reference for direct queries (e.g., push authorization)
     database: SharedDatabase,
+    /// Optional metrics for Prometheus endpoint
+    metrics: Option<Arc<Metrics>>,
 }
 
 impl HttpService {
@@ -98,12 +102,14 @@ impl HttpService {
         config: Config,
         remote: SocketAddr,
         database: SharedDatabase,
+        metrics: Option<Arc<Metrics>>,
     ) -> Self {
         Self {
             relay,
             config,
             remote,
             database,
+            metrics,
         }
     }
 }
@@ -150,6 +156,7 @@ impl Service<Request<Incoming>> for HttpService {
             );
 
             let repo_path = git::resolve_repo_path(&git_data_path, &npub, &identifier);
+            let metrics_clone = self.metrics.clone();
 
             return Box::pin(async move {
                 // Collect request body once before the match statement
@@ -170,14 +177,31 @@ impl Service<Request<Incoming>> for HttpService {
                             .and_then(git::protocol::GitService::from_query_param);
 
                         match service {
-                            Some(svc) => git::handlers::handle_info_refs(repo_path, svc).await,
+                            Some(svc) => {
+                                let result = git::handlers::handle_info_refs(repo_path, svc).await;
+                                // Track operation
+                                if let Some(ref m) = metrics_clone {
+                                    let status = if result.is_ok() { "success" } else { "error" };
+                                    let operation = match svc {
+                                        git::protocol::GitService::UploadPack => "fetch",
+                                        git::protocol::GitService::ReceivePack => "push",
+                                    };
+                                    m.record_git_operation(operation, status);
+                                }
+                                result
+                            }
                             None => Err(git::handlers::GitError::RepositoryNotFound),
                         }
                     }
 
                     // POST /git-upload-pack (clone/fetch)
                     (m, "git-upload-pack") if m == Method::POST => {
-                        git::handlers::handle_upload_pack(repo_path, body_bytes).await
+                        let result = git::handlers::handle_upload_pack(repo_path, body_bytes).await;
+                        if let Some(ref m) = metrics_clone {
+                            let status = if result.is_ok() { "success" } else { "error" };
+                            m.record_git_operation("clone", status);
+                        }
+                        result
                     }
 
                     // POST /git-receive-pack (push) - with GRASP authorization via database
@@ -187,6 +211,10 @@ impl Service<Request<Incoming>> for HttpService {
                             Ok(pk) => pk.to_hex(),
                             Err(e) => {
                                 tracing::warn!("Invalid npub in URL {}: {}", npub, e);
+                                // Track failed push due to invalid npub
+                                if let Some(ref m) = metrics_clone {
+                                    m.record_git_operation("push", "error");
+                                }
                                 return Ok(add_cors_headers(Response::builder())
                                     .status(hyper::StatusCode::BAD_REQUEST)
                                     .body(Full::new(Bytes::from(format!("Invalid npub: {}", e))))
@@ -194,14 +222,21 @@ impl Service<Request<Incoming>> for HttpService {
                             }
                         };
 
-                        git::handlers::handle_receive_pack(
+                        let result = git::handlers::handle_receive_pack(
                             repo_path,
                             body_bytes.clone(),
                             Some(database.clone()),
                             &identifier,
                             &owner_pubkey_hex,
                         )
-                        .await
+                        .await;
+
+                        if let Some(ref m) = metrics_clone {
+                            let status = if result.is_ok() { "success" } else { "error" };
+                            m.record_git_operation("push", status);
+                        }
+
+                        result
                     }
 
                     _ => Err(git::handlers::GitError::RepositoryNotFound),
@@ -333,17 +368,27 @@ impl Service<Request<Incoming>> for HttpService {
 
                 let addr = self.remote;
                 let relay = self.relay.clone();
+                let metrics_clone = self.metrics.clone();
 
                 tokio::spawn(async move {
                     match hyper::upgrade::on(req).await {
                         Ok(upgraded) => {
                             tracing::info!("WebSocket connection established from {}", addr);
+                            // Track connection
+                            if let Some(ref m) = metrics_clone {
+                                m.connection_tracker().on_connect(addr.ip());
+                                m.record_websocket_connection();
+                            }
                             if let Err(e) =
                                 relay.take_connection(TokioIo::new(upgraded), addr).await
                             {
                                 tracing::error!("Relay error for {}: {}", addr, e);
                             }
                             tracing::info!("WebSocket connection closed for {}", addr);
+                            // Untrack connection
+                            if let Some(ref m) = metrics_clone {
+                                m.connection_tracker().on_disconnect(addr.ip());
+                            }
                         }
                         Err(e) => tracing::error!("Upgrade error: {}", e),
                     }
@@ -357,6 +402,33 @@ impl Service<Request<Incoming>> for HttpService {
                         .header(SEC_WEBSOCKET_ACCEPT, derived.unwrap())
                         .body(Full::new(Bytes::new()))
                         .unwrap())
+                });
+            }
+        }
+
+        // Serve Prometheus metrics if enabled
+        if path == "/metrics" {
+            if let Some(ref metrics) = self.metrics {
+                let metrics = metrics.clone();
+                return Box::pin(async move {
+                    let output = metrics.render();
+                    Ok(
+                        add_cors_headers(Response::builder().header("server", "ngit-grasp"))
+                            .status(200)
+                            .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
+                            .body(Full::new(Bytes::from(output)))
+                            .unwrap(),
+                    )
+                });
+            } else {
+                // Metrics disabled
+                return Box::pin(async move {
+                    Ok(
+                        add_cors_headers(Response::builder().header("server", "ngit-grasp"))
+                            .status(404)
+                            .body(Full::new(Bytes::from("Metrics disabled")))
+                            .unwrap(),
+                    )
                 });
             }
         }
@@ -419,10 +491,12 @@ fn derive_accept_key(request_key: &[u8]) -> String {
 /// * `config` - Server configuration
 /// * `relay` - The LocalRelay for WebSocket connections
 /// * `database` - The database for direct queries (e.g., push authorization)
+/// * `metrics` - Optional metrics for Prometheus endpoint
 pub async fn run_server(
     config: Config,
     relay: LocalRelay,
     database: SharedDatabase,
+    metrics: Option<Arc<Metrics>>,
 ) -> anyhow::Result<()> {
     let bind_addr: SocketAddr = config.bind_address.parse()?;
 
@@ -435,7 +509,7 @@ pub async fn run_server(
     loop {
         let (socket, addr) = listener.accept().await?;
         let io = TokioIo::new(socket);
-        let service = HttpService::new(relay.clone(), config.clone(), addr, database.clone());
+        let service = HttpService::new(relay.clone(), config.clone(), addr, database.clone(), metrics.clone());
 
         tokio::spawn(async move {
             if let Err(e) = http1::Builder::new()

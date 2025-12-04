@@ -102,6 +102,9 @@ mod tests {
             relay_data_path: "./data/relay".to_string(),
             bind_address: "127.0.0.1:8080".to_string(),
             database_backend: crate::config::DatabaseBackend::Memory,
+            metrics_enabled: true,
+            metrics_connection_per_ip_abuse_threshold: 10,
+            metrics_top_n_repos: 10,
         };
 
         let doc = RelayInformationDocument::from_config(&config);
@@ -133,6 +136,9 @@ mod tests {
             relay_data_path: "./data/relay".to_string(),
             bind_address: "127.0.0.1:8080".to_string(),
             database_backend: crate::config::DatabaseBackend::Memory,
+            metrics_enabled: true,
+            metrics_connection_per_ip_abuse_threshold: 10,
+            metrics_top_n_repos: 10,
         };
 
         let doc = RelayInformationDocument::from_config(&config);

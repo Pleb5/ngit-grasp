@@ -94,9 +94,27 @@ Why this is useful:
 
 dedupe git data = shared object database or (GIT_ALTERNATE_OBJECT_DIRECTORIES or .git/objects/info/alternates)
 
-### Logging
+### Monitoring
 
-See [docs/explanation/monitoring-strategy.md](docs/monitoring-strategy.md). Note: this needs refinement.
+ngit-grasp exposes Prometheus metrics at `/metrics` for connection tracking, Git operations, and Nostr events.
+
+**Configuration Options:**
+
+| Option | CLI Flag | Environment Variable | Default |
+|--------|----------|---------------------|---------|
+| Metrics enabled | `--metrics-enabled` | `NGIT_METRICS_ENABLED` | `true` |
+| Connection abuse threshold | `--metrics-connection-per-ip-abuse-threshold` | `NGIT_METRICS_CONNECTION_PER_IP_ABUSE_THRESHOLD` | `10` |
+| Top N repos | `--metrics-top-n-repos` | `NGIT_METRICS_TOP_N_REPOS` | `10` |
+
+**Key Metrics:**
+- WebSocket connections (active, unique IPs, flagged abusers)
+- Git operations (clone/fetch/push rates, bandwidth, authorization results)
+- Nostr events (received, stored, rejected by kind)
+- Top N repositories by bandwidth
+
+**Privacy:** IP addresses are never exposed in metrics - only aggregate counts.
+
+See [Monitoring Overview](docs/explanation/monitoring.md) and [Prometheus Setup Guide](docs/how-to/prometheus-setup.md) for deployment.
 
 ### Delete Events
 

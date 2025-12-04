@@ -1,10 +1,14 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use ngit_grasp::{
     config::{Config, DatabaseBackend},
-    http, nostr,
+    http,
+    metrics::Metrics,
+    nostr,
 };
 
 #[tokio::main]
@@ -29,6 +33,15 @@ async fn main() -> Result<()> {
     }
     info!("Database backend: {}", config.database_backend);
 
+    // Initialize metrics if enabled
+    let metrics = if config.metrics_enabled {
+        info!("Metrics enabled on /metrics endpoint");
+        Some(Arc::new(Metrics::new(config.metrics_connection_per_ip_abuse_threshold)))
+    } else {
+        info!("Metrics disabled");
+        None
+    };
+
     // Create Nostr relay with NIP-34 validation
     // Returns both the relay and database for direct queries in handlers
     if let Ok(relay_with_db) = nostr::builder::create_relay(&config) {
@@ -39,7 +52,7 @@ async fn main() -> Result<()> {
 
         // Start HTTP server with integrated relay and database
         info!("Starting HTTP server on {}", config.bind_address);
-        http::run_server(config, relay_with_db.relay, relay_with_db.database).await?;
+        http::run_server(config, relay_with_db.relay, relay_with_db.database, metrics).await?;
     }
 
     Ok(())

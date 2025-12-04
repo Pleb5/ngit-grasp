@@ -71,6 +71,18 @@ pub struct Config {
     /// Database backend type
     #[arg(long, env = "NGIT_DATABASE_BACKEND", value_enum, default_value_t = DatabaseBackend::Lmdb)]
     pub database_backend: DatabaseBackend,
+
+    /// Enable Prometheus metrics endpoint
+    #[arg(long, env = "NGIT_METRICS_ENABLED", default_value_t = true)]
+    pub metrics_enabled: bool,
+
+    /// Connections per IP before flagging as potential abuse in metrics (display only, no rate limiting)
+    #[arg(long = "metrics-connection-per-ip-abuse-threshold", env = "NGIT_METRICS_CONNECTION_PER_IP_ABUSE_THRESHOLD", default_value_t = 10)]
+    pub metrics_connection_per_ip_abuse_threshold: u32,
+
+    /// Number of top bandwidth repos to track in metrics
+    #[arg(long = "metrics-top-n-repos", env = "NGIT_METRICS_TOP_N_REPOS", default_value_t = 10)]
+    pub metrics_top_n_repos: usize,
 }
 
 impl Config {
@@ -123,6 +135,9 @@ impl Config {
             relay_data_path: "./test_data/relay".to_string(),
             bind_address: "127.0.0.1:8080".to_string(),
             database_backend: DatabaseBackend::Memory,
+            metrics_enabled: true,
+            metrics_connection_per_ip_abuse_threshold: 10,
+            metrics_top_n_repos: 10,
         }
     }
 }
@@ -201,5 +216,26 @@ mod tests {
             ..Config::for_testing()
         };
         assert!(config.owner_npub.is_none());
+    }
+
+    #[test]
+    fn test_metrics_config_defaults() {
+        let config = Config::for_testing();
+        assert!(config.metrics_enabled);
+        assert_eq!(config.metrics_connection_per_ip_abuse_threshold, 10);
+        assert_eq!(config.metrics_top_n_repos, 10);
+    }
+
+    #[test]
+    fn test_metrics_config_custom_values() {
+        let config = Config {
+            metrics_enabled: false,
+            metrics_connection_per_ip_abuse_threshold: 50,
+            metrics_top_n_repos: 25,
+            ..Config::for_testing()
+        };
+        assert!(!config.metrics_enabled);
+        assert_eq!(config.metrics_connection_per_ip_abuse_threshold, 50);
+        assert_eq!(config.metrics_top_n_repos, 25);
     }
 }
