@@ -5,6 +5,7 @@
 //! - Git operation metrics (clone, fetch, push)
 //! - Repository bandwidth tracking (top-N only for cardinality control)
 //! - Nostr event metrics
+//! - Sync metrics (GRASP-02 proactive sync)
 //!
 //! # Privacy
 //! IP addresses are NEVER exposed in metrics. The `ConnectionTracker` maintains
@@ -13,6 +14,8 @@
 
 pub mod bandwidth;
 pub mod connection;
+
+pub use crate::sync::SyncMetrics;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -45,6 +48,9 @@ struct MetricsInner {
 
     /// Repository bandwidth tracking (top-N only)
     pub bandwidth_tracker: BandwidthTracker,
+
+    /// Sync metrics (GRASP-02 proactive sync)
+    pub sync_metrics: Option<crate::sync::SyncMetrics>,
 
     // === WebSocket Metrics ===
     /// Total WebSocket connections since startup
@@ -95,6 +101,11 @@ impl Metrics {
         Self {
             inner: Arc::new(inner),
         }
+    }
+
+    /// Returns the sync metrics if registered.
+    pub fn sync_metrics(&self) -> Option<&crate::sync::SyncMetrics> {
+        self.inner.sync_metrics.as_ref()
     }
 
     /// Returns the connection tracker for WebSocket connection management.
@@ -248,6 +259,12 @@ impl MetricsInner {
         // Create bandwidth tracker
         let bandwidth_tracker = BandwidthTracker::new(&REGISTRY);
 
+        // Create sync metrics (may fail if already registered in tests)
+        let sync_metrics = crate::sync::SyncMetrics::register(&REGISTRY).ok();
+        if sync_metrics.is_some() {
+            tracing::info!("Sync metrics registered with Prometheus");
+        }
+
         // WebSocket metrics
         let websocket_connections_total = Counter::with_opts(
             Opts::new(
@@ -377,6 +394,7 @@ impl MetricsInner {
         Self {
             connection_tracker,
             bandwidth_tracker,
+            sync_metrics,
             websocket_connections_total,
             websocket_connection_duration,
             websocket_messages_received,

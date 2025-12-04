@@ -21,12 +21,14 @@ mod connection;
 mod filter;
 pub mod health;
 mod manager;
+pub mod metrics;
 pub mod negentropy;
 mod subscription;
 
 pub use filter::FilterService;
 pub use health::{HealthState, RelayHealth, RelayHealthTracker};
 pub use manager::SyncManager;
+pub use metrics::SyncMetrics;
 pub use negentropy::NegentropyService;
 pub use subscription::SubscriptionManager;
 

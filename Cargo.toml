@@ -61,6 +61,7 @@ tokio-test = "0.4"
 grasp-audit = { path = "grasp-audit" }
 url = "2.5"
 tempfile = "3"
+reqwest = "0.12"
 
 [lib]
 name = "ngit_grasp"

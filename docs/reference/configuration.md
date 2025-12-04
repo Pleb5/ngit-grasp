@@ -265,6 +265,143 @@ NGIT_DATABASE_BACKEND=lmdb
 
 ---
 
+### Proactive Sync Configuration (GRASP-02)
+
+These options configure the proactive sync feature that synchronizes events from other relays.
+
+#### `NGIT_SYNC_RELAY_URL`
+
+**Description:** URL of the primary relay to sync events from
+**Type:** String (WebSocket URL)
+**Default:** None (sync disabled)
+**Required:** No
+
+**Examples:**
+```bash
+# Sync from a public relay
+NGIT_SYNC_RELAY_URL=wss://relay.example.com
+
+# Sync from another GRASP relay
+NGIT_SYNC_RELAY_URL=wss://git.nostr.dev
+
+# Local testing
+NGIT_SYNC_RELAY_URL=ws://127.0.0.1:8081
+```
+
+**Notes:**
+- When set, enables proactive sync feature
+- The relay will discover additional relays from repository announcements
+- Synced events go through the same validation as directly-submitted events
+- Use WebSocket protocol (`ws://` or `wss://`)
+
+---
+
+#### `NGIT_SYNC_MAX_BACKOFF_SECS`
+
+**Description:** Maximum backoff time in seconds for sync relay reconnection
+**Type:** Integer (seconds)
+**Default:** `3600` (1 hour)
+**Required:** No
+
+**Examples:**
+```bash
+# Default: 1 hour max backoff
+NGIT_SYNC_MAX_BACKOFF_SECS=3600
+
+# Aggressive: 5 minute max backoff
+NGIT_SYNC_MAX_BACKOFF_SECS=300
+
+# Conservative: 2 hour max backoff
+NGIT_SYNC_MAX_BACKOFF_SECS=7200
+```
+
+**Notes:**
+- Backoff starts at 5 seconds and doubles on each failure
+- Capped at this maximum value
+- After 24 hours of failures, relay is marked "dead" and retried daily
+- Lower values mean more reconnection attempts
+
+---
+
+#### `NGIT_SYNC_STARTUP_DELAY_SECS`
+
+**Description:** Delay in seconds before running startup catchup
+**Type:** Integer (seconds)
+**Default:** `30`
+**Required:** No
+
+**Examples:**
+```bash
+# Default: 30 second delay
+NGIT_SYNC_STARTUP_DELAY_SECS=30
+
+# Quick startup (testing)
+NGIT_SYNC_STARTUP_DELAY_SECS=5
+
+# Production: longer warm-up
+NGIT_SYNC_STARTUP_DELAY_SECS=60
+```
+
+**Notes:**
+- Allows connections to stabilize before catchup
+- Reduces load on remote relays at startup
+- Set to 0 for immediate catchup (not recommended)
+
+---
+
+#### `NGIT_SYNC_RECONNECT_DELAY_SECS`
+
+**Description:** Delay in seconds before running catchup after reconnection
+**Type:** Integer (seconds)
+**Default:** `10`
+**Required:** No
+
+**Examples:**
+```bash
+# Default: 10 second delay
+NGIT_SYNC_RECONNECT_DELAY_SECS=10
+
+# Quick reconnect catchup
+NGIT_SYNC_RECONNECT_DELAY_SECS=5
+
+# Conservative
+NGIT_SYNC_RECONNECT_DELAY_SECS=30
+```
+
+**Notes:**
+- Prevents rate limiting from remote relays
+- Applied after each successful reconnection
+- Only catches up on recent events (see lookback days)
+
+---
+
+#### `NGIT_SYNC_RECONNECT_LOOKBACK_DAYS`
+
+**Description:** Number of days to look back for reconnect catchup
+**Type:** Integer (days)
+**Default:** `3`
+**Required:** No
+
+**Examples:**
+```bash
+# Default: 3 days lookback
+NGIT_SYNC_RECONNECT_LOOKBACK_DAYS=3
+
+# Short lookback (frequent reconnects expected)
+NGIT_SYNC_RECONNECT_LOOKBACK_DAYS=1
+
+# Extended lookback
+NGIT_SYNC_RECONNECT_LOOKBACK_DAYS=7
+```
+
+**Notes:**
+- Limits catchup queries to recent events only
+- Reduces load compared to full historical sync
+- Balance between completeness and performance
+- Longer lookback useful for less reliable connections
+
+---
+
 ### Logging Configuration
 
 #### `RUST_LOG`

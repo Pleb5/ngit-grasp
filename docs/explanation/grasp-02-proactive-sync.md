@@ -745,3 +745,131 @@ pub struct SyncConfig {
 8. **Dynamic subscription addition** with periodic consolidation
 9. **Custom acceptance policy** excluding rate limiting defaults
 10. **Catchup as failure signal** - events found during catchup/daily indicate live sync gaps, tracked in Prometheus
+
+---
+
+## Implementation Notes (Phase 6)
+
+This section documents the final implementation as of Phase 6 (Observability & Production Readiness).
+
+### What Was Actually Built
+
+The implementation closely follows the design document with the following completed components:
+
+#### Phase 1: Basic Sync (commit b167f1b)
+- [`SyncManager`](../../src/sync/manager.rs) - Main coordinator for proactive sync
+- Single relay sync via `NGIT_SYNC_RELAY_URL` configuration
+- Event validation through existing [`Nip34WritePolicy`](../../src/nostr/builder.rs)
+
+#### Phase 2: Three-Layer Filters (commit bf558b0)
+- [`FilterService`](../../src/sync/filter.rs) - Builds three-layer filter strategy
+- Layer 1: All kind 30617+30618 (announcements)
+- Layer 2: A/a tag filters for repository events
+- Layer 3: E/e tag filters for related events (PRs, Issues)
+- Multi-relay discovery from stored announcements
+
+#### Phase 3: Health Tracking (commit f639ecf)
+- [`RelayHealthTracker`](../../src/sync/health.rs) - DashMap-based health tracking
+- Three states: Healthy → Degraded → Dead
+- Exponential backoff: 5s → 10s → 20s → ... → max (default 1h)
+- Dead relay detection after 24h continuous failures
+- Startup jitter (0-10s) to prevent thundering herd
+
+#### Phase 4: Dynamic Subscriptions (commit a19ff57)
+- [`SubscriptionManager`](../../src/sync/subscription.rs) - Per-connection subscription tracking
+- Dynamic Layer 2 subscriptions when new announcements arrive
+- Dynamic Layer 3 subscriptions when new PRs/Issues arrive
+- Filter consolidation at threshold (150 filters)
+
+#### Phase 5: Catchup & Gap Detection (commit 950c2e4)
+- [`NegentropyService`](../../src/sync/negentropy.rs) - Gap-filling catchup operations
+- Startup catchup (configurable delay)
+- Reconnection catchup (limited lookback)
+- Daily catchup (not yet implemented - placeholder)
+
+#### Phase 6: Observability (this phase)
+- [`SyncMetrics`](../../src/sync/metrics.rs) - Full Prometheus integration
+- Grafana dashboard panels for sync monitoring
+- Documentation updates
+
+### Differences from Original Design
+
+1. **Negentropy (NIP-77)**: Simplified gap-filling was used instead of full NIP-77 negentropy reconciliation, as nostr-sdk 0.44 lacks built-in negentropy support. The current implementation uses timestamp-based catchup queries.
+
+2. **Filter Consolidation Threshold**: Set at 150 filters (as designed) based on typical relay filter limits.
+
+3. **Health Tracking**: Implemented exactly as designed - in-memory only (not persisted to database), which is acceptable for production as health state rebuilds quickly on restart.
+
+4. **Metric Label Strategy**: Used simpler numeric encoding for health status (1=healthy, 2=degraded, 3=dead) instead of multiple label values per relay, reducing cardinality.
+
+5. **Event Source Tracking**: Implemented four source types (`live`, `startup`, `reconnect`, `daily`) instead of the original (`direct`, `live_sync`, `catchup`, `daily_catchup`).
+
+### Three-Layer Filter Strategy (As Implemented)
+
+```
+Layer 1: Discovery Layer
+├── Query: kinds [30617, 30618] (announcements)
+├── Applied: At startup and during sync
+└── Purpose: Discover all repositories across network
+
+Layer 2: Repository Events
+├── Query: Events with A/a tags pointing to tracked repos
+├── Format: A tag = "30617:<pubkey>:<identifier>"
+├── Triggered: When new announcement is accepted
+└── Purpose: Get PRs, issues, patches for repositories
+
+Layer 3: Related Events
+├── Query: Events with E/e tags pointing to tracked PRs/Issues
+├── Triggered: When new PR/Issue is accepted
+└── Purpose: Get comments, reviews, status updates
+```
+
+### Prometheus Metrics (As Implemented)
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `ngit_sync_relay_connected` | Gauge | relay | Connection status (1/0) |
+| `ngit_sync_connection_attempts_total` | Counter | relay, result | Attempts by outcome |
+| `ngit_sync_relay_status` | Gauge | relay | Health state (1/2/3) |
+| `ngit_sync_relay_failures` | Gauge | relay | Consecutive failures |
+| `ngit_sync_events_total` | Counter | source | Events by source type |
+| `ngit_sync_gap_events_total` | Counter | relay | Gap events filled |
+| `ngit_sync_relays_tracked_total` | Gauge | - | Total relays discovered |
+| `ngit_sync_relays_connected_total` | Gauge | - | Currently connected |
+| `ngit_sync_relays_dead_total` | Gauge | - | Dead relay count |
+
+### Configuration Options (As Implemented)
+
+All configuration via environment variables or CLI flags:
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `NGIT_SYNC_RELAY_URL` | String | None | Primary sync relay URL |
+| `NGIT_SYNC_MAX_BACKOFF_SECS` | u64 | 3600 | Max backoff delay (seconds) |
+| `NGIT_SYNC_STARTUP_DELAY_SECS` | u64 | 30 | Catchup delay after startup |
+| `NGIT_SYNC_RECONNECT_DELAY_SECS` | u64 | 10 | Catchup delay after reconnect |
+| `NGIT_SYNC_RECONNECT_LOOKBACK_DAYS` | u64 | 3 | Days to look back on reconnect |
+
+### Module Structure (As Implemented)
+
+```
+src/sync/
+├── mod.rs              # Module exports, constants
+├── manager.rs          # SyncManager - orchestrates sync
+├── connection.rs       # SyncConnection - per-relay WebSocket
+├── filter.rs           # FilterService - three-layer filters
+├── health.rs           # RelayHealthTracker - health states
+├── metrics.rs          # SyncMetrics - Prometheus integration
+├── negentropy.rs       # NegentropyService - gap-filling
+└── subscription.rs     # SubscriptionManager - dynamic subs
+```
+
+### Production Readiness Checklist
+
+- [x] All metrics exposed at `/metrics` endpoint
+- [x] Health state tracking with configurable backoff
+- [x] Dead relay detection and minimal retry
+- [x] Startup jitter to prevent thundering herd
+- [x] Grafana dashboard with sync panels
+- [x] Configuration documented
+- [x] Integration tests passing
