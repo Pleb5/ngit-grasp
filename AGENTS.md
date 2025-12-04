@@ -172,6 +172,17 @@ fn test_audit_tags_automatically_added() {
 
 ## Documentation
 
+**⚠️ CRITICAL: Keep Architecture Docs Updated**
+
+Architecture and design documents are LIVING DOCUMENTS. When implementation diverges from the documented plan:
+
+1. **Update the doc IMMEDIATELY** - Don't wait until "later"
+2. **Document what was actually built**, not what was originally planned
+3. **Note why decisions changed** - Future readers need this context
+4. **Files to watch:** `docs/explanation/architecture.md`, `docs/explanation/decisions.md`
+
+This was a key learning from GRASP-01: docs described plans, not implementation, causing confusion.
+
 **Diátaxis Framework Used:**
 
 - `docs/tutorials/` - Learning-oriented

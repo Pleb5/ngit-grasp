@@ -150,11 +150,13 @@ This enables parallel CI runs without interference.
 
 ## What I'd Do Differently
 
-### 1. Keep Architecture Docs Updated
+### 1. ~~Keep Architecture Docs Updated~~ ✅ FIXED
 
 **What happened:** Architecture design docs were essential to start - they guided the implementation. But as we made decisions (e.g., hyper instead of actix-web), the docs weren't updated to reflect reality.
 
 **Better approach:** Treat architecture docs as living documents. When implementation diverges from the plan, update the doc immediately. The initial design document was valuable and should remain, but it should reflect what was built.
+
+**Resolution:** Added prominent warning to [`AGENTS.md`](../../AGENTS.md) with explicit guidance to keep architecture docs updated as living documents.
 
 ### 2. ~~Smaller Nip34WritePolicy~~ ✅ DONE
 
@@ -192,7 +194,7 @@ The main [`Nip34WritePolicy`](src/nostr/builder.rs:51) now delegates to these su
 
 1. ~~**Split `Nip34WritePolicy`**~~ ✅ DONE - Split into sub-policies in [`src/nostr/policy/`](src/nostr/policy/mod.rs:1)
 2. **Add unit tests for policy logic** - Currently relies on integration tests
-3. **Document actual architecture** - Docs describe plans, not implementation
+3. ~~**Document actual architecture**~~ ✅ FIXED - Added guidance to AGENTS.md to keep docs updated as living documents
 
 ### Medium Priority
 
