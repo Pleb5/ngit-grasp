@@ -96,8 +96,7 @@ dedupe git data = shared object database or (GIT_ALTERNATE_OBJECT_DIRECTORIES or
 
 ### Logging
 
-- look into prometheus and the best way to log to get useful info
-- look into the best way of monitoring livness
+See [docs/explanation/monitoring-strategy.md](docs/monitoring-strategy.md). Note: this needs refinement.
 
 ### Delete Events
 
