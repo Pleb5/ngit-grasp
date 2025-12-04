@@ -91,6 +91,18 @@ pub struct Config {
     /// Maximum backoff time in seconds for sync relay reconnection (default: 3600 = 1 hour)
     #[arg(long, env = "NGIT_SYNC_MAX_BACKOFF_SECS", default_value_t = 3600)]
     pub sync_max_backoff_secs: u64,
+
+    /// Delay in seconds before running startup catchup (default: 30)
+    #[arg(long, env = "NGIT_SYNC_STARTUP_DELAY_SECS", default_value_t = 30)]
+    pub sync_startup_delay_secs: u64,
+
+    /// Delay in seconds before running reconnect catchup (default: 10)
+    #[arg(long, env = "NGIT_SYNC_RECONNECT_DELAY_SECS", default_value_t = 10)]
+    pub sync_reconnect_delay_secs: u64,
+
+    /// Number of days to look back for reconnect catchup (default: 3)
+    #[arg(long, env = "NGIT_SYNC_RECONNECT_LOOKBACK_DAYS", default_value_t = 3)]
+    pub sync_reconnect_lookback_days: u64,
 }
 
 impl Config {
@@ -148,6 +160,9 @@ impl Config {
             metrics_top_n_repos: 10,
             sync_relay_url: None,
             sync_max_backoff_secs: 3600,
+            sync_startup_delay_secs: 30,
+            sync_reconnect_delay_secs: 10,
+            sync_reconnect_lookback_days: 3,
         }
     }
 }

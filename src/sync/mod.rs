@@ -21,11 +21,13 @@ mod connection;
 mod filter;
 pub mod health;
 mod manager;
+pub mod negentropy;
 mod subscription;
 
 pub use filter::FilterService;
 pub use health::{HealthState, RelayHealth, RelayHealthTracker};
 pub use manager::SyncManager;
+pub use negentropy::NegentropyService;
 pub use subscription::SubscriptionManager;
 
 use std::net::SocketAddr;
