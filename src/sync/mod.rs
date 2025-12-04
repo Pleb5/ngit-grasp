@@ -9,12 +9,21 @@
 //! - **Layer 1**: Announcement discovery (kinds 30617 + 30618)
 //! - **Layer 2**: Repository events (A/a tags for shared repos)
 //! - **Layer 3**: Related events (E/e tags for discussions, reviews)
+//!
+//! ## Resilience & Health Tracking (Phase 3)
+//!
+//! - **Health tracking**: Per-relay connection health states (Healthy, Degraded, Dead)
+//! - **Exponential backoff**: Smart retry delays on failures (5s -> 1h max)
+//! - **Dead relay handling**: Minimal retry for 24h+ failed relays
+//! - **Startup jitter**: Prevent thundering herd on launch (0-10s random delay)
 
 mod connection;
 mod filter;
+pub mod health;
 mod manager;
 
 pub use filter::FilterService;
+pub use health::{HealthState, RelayHealth, RelayHealthTracker};
 pub use manager::SyncManager;
 
 use std::net::SocketAddr;

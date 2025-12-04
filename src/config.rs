@@ -87,6 +87,10 @@ pub struct Config {
     /// URL of relay to sync kind 30617 events from (optional, enables proactive sync)
     #[arg(long, env = "NGIT_SYNC_RELAY_URL")]
     pub sync_relay_url: Option<String>,
+
+    /// Maximum backoff time in seconds for sync relay reconnection (default: 3600 = 1 hour)
+    #[arg(long, env = "NGIT_SYNC_MAX_BACKOFF_SECS", default_value_t = 3600)]
+    pub sync_max_backoff_secs: u64,
 }
 
 impl Config {
@@ -143,6 +147,7 @@ impl Config {
             metrics_connection_per_ip_abuse_threshold: 10,
             metrics_top_n_repos: 10,
             sync_relay_url: None,
+            sync_max_backoff_secs: 3600,
         }
     }
 }

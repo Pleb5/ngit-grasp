@@ -106,6 +106,7 @@ mod tests {
             metrics_connection_per_ip_abuse_threshold: 10,
             metrics_top_n_repos: 10,
             sync_relay_url: None,
+            sync_max_backoff_secs: 3600,
         };
 
         let doc = RelayInformationDocument::from_config(&config);
@@ -141,6 +142,7 @@ mod tests {
             metrics_connection_per_ip_abuse_threshold: 10,
             metrics_top_n_repos: 10,
             sync_relay_url: None,
+            sync_max_backoff_secs: 3600,
         };
 
         let doc = RelayInformationDocument::from_config(&config);
