@@ -326,23 +326,35 @@ nix develop -c cargo tarpaulin --out Html
 ngit-grasp/
 ├── src/
 │   ├── main.rs              # Entry point, server setup
+│   ├── lib.rs               # Library exports
+│   ├── config.rs            # Configuration
 │   ├── git/
-│   │   ├── mod.rs           # Git module
-│   │   ├── handler.rs       # Git HTTP handlers
-│   │   └── authorization.rs # Push validation logic
+│   │   ├── mod.rs           # Git module + repository operations
+│   │   ├── handlers.rs      # Git HTTP handlers
+│   │   ├── authorization.rs # Push validation logic
+│   │   ├── protocol.rs      # Git protocol encoding
+│   │   └── subprocess.rs    # Git subprocess management
 │   ├── nostr/
 │   │   ├── mod.rs           # Nostr module
-│   │   ├── relay.rs         # Relay setup and policies
-│   │   └── events.rs        # Event handlers
-│   ├── storage/
-│   │   ├── mod.rs           # Storage abstraction
-│   │   └── repository.rs    # Repository management
-│   └── config.rs            # Configuration
-├── docs/
-│   └── ARCHITECTURE.md      # Detailed architecture
-├── tests/
-│   ├── integration/         # Integration tests
-│   └── fixtures/            # Test data
+│   │   ├── builder.rs       # Relay builder + Nip34WritePolicy
+│   │   ├── events.rs        # Event parsing and validation
+│   │   └── policy/          # Sub-policies (split for maintainability)
+│   │       ├── mod.rs       # Policy module exports
+│   │       ├── announcement.rs  # Repository announcement validation
+│   │       ├── state.rs     # State event validation + ref alignment
+│   │       ├── pr_event.rs  # PR/PR Update validation
+│   │       └── related.rs   # Forward/backward reference checking
+│   ├── http/
+│   │   ├── mod.rs           # HTTP module
+│   │   ├── landing.rs       # Landing page handler
+│   │   └── nip11.rs         # NIP-11 relay info document
+│   └── metrics/
+│       ├── mod.rs           # Prometheus metrics
+│       ├── bandwidth.rs     # Bandwidth tracking
+│       └── connection.rs    # Connection tracking
+├── docs/                    # Documentation (Diátaxis framework)
+├── tests/                   # Integration tests
+├── grasp-audit/             # Compliance audit subproject
 └── README.md
 ```
 

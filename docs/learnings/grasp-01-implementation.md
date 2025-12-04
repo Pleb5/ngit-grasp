@@ -156,17 +156,17 @@ This enables parallel CI runs without interference.
 
 **Better approach:** Treat architecture docs as living documents. When implementation diverges from the plan, update the doc immediately. The initial design document was valuable and should remain, but it should reflect what was built.
 
-### 2. Smaller Nip34WritePolicy
+### 2. ~~Smaller Nip34WritePolicy~~ ✅ DONE
 
-**What happened:** The [`Nip34WritePolicy`](src/nostr/builder.rs:51) grew to ~900 lines handling all event types.
+**What happened:** The `Nip34WritePolicy` grew to ~900 lines handling all event types.
 
-**Better approach:** Split into:
-- `AnnouncementPolicy` - Repository announcement validation
-- `StatePolicy` - State event validation + ref alignment
-- `RelatedEventPolicy` - Forward/backward reference checking
-- `PrEventPolicy` - PR/PR Update validation
+**Resolution:** Split into focused sub-policies in [`src/nostr/policy/`](src/nostr/policy/mod.rs:1):
+- [`AnnouncementPolicy`](src/nostr/policy/announcement.rs:1) - Repository announcement validation
+- [`StatePolicy`](src/nostr/policy/state.rs:1) - State event validation + ref alignment
+- [`RelatedEventPolicy`](src/nostr/policy/related.rs:1) - Forward/backward reference checking
+- [`PrEventPolicy`](src/nostr/policy/pr_event.rs:1) - PR/PR Update validation
 
-This would improve testability and readability.
+The main [`Nip34WritePolicy`](src/nostr/builder.rs:51) now delegates to these sub-policies, improving testability and readability.
 
 ### 3. Git Operations Module Organization
 
@@ -190,7 +190,7 @@ This would improve testability and readability.
 
 ### High Priority
 
-1. **Split `Nip34WritePolicy`** - Too large, hard to test/maintain
+1. ~~**Split `Nip34WritePolicy`**~~ ✅ DONE - Split into sub-policies in [`src/nostr/policy/`](src/nostr/policy/mod.rs:1)
 2. **Add unit tests for policy logic** - Currently relies on integration tests
 3. **Document actual architecture** - Docs describe plans, not implementation
 
