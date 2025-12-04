@@ -83,7 +83,7 @@ Why this is useful:
 
 ### GRASP-02 (Proactive Sync)
 
-- websockets to other grasp servers listening for our repo.
+- rust-nostr client websocket connection to other grasp servers listening for our repo.
 - negentropy catchup
 - look for missing data (from state or PR / PR update) then try and fetch from other grasp servers. for efficency look for it from other repos (ie repos of other maintainers). Do this on new state event / PR / PR update evnet and on a timer for events we know we don't have the data for.
 
@@ -116,6 +116,10 @@ Grasp servers can be DoS by pushing large amounts of git data to `refs/nostr/<ev
 ### Reject Commits with Secrets
 
 This a useful feature of other git servers.
+
+### Store all user grasp lists (for better grasp discovery)
+
+do this. should we also accept (and weekly sync) 10002 and 0 for all authors of accepted events?
 
 ## Technology Stack
 
