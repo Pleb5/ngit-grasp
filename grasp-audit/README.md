@@ -4,7 +4,7 @@ A reusable audit and compliance testing tool for GRASP protocol implementations.
 
 ## Features
 
-- ✅ **Shared Fixtures**: Fixtures cached and reused across tests (default for CLI)
+- ✅ **Shared Fixtures**: Fixtures cached and reused across tests (default for CLI) to reduce rate-limitting
 - ✅ **Isolated Testing**: Fresh fixtures per test for parallel test isolation
 - ✅ **Clean Audit Events**: Special tags for easy cleanup (no deletion trails)
 - ✅ **Spec-Mirrored Tests**: Test structure matches GRASP protocol exactly
@@ -12,27 +12,37 @@ A reusable audit and compliance testing tool for GRASP protocol implementations.
 
 ## Quick Start
 
-The fastest way to run GRASP-01 compliance tests:
+Run GRASP compliance tests against any GRASP relay:
 
 ```bash
-# Run the test suite against ngit-relay
+# Install
 cd grasp-audit
-nix develop -c bash test-ngit-relay.sh --mode test
-```
+cargo install --path .
 
-This automatically:
+# Audit a production relay
+grasp-audit audit --relay wss://relay.ngit.dev
 
-- ✅ Starts ngit-relay in an isolated Docker container
-- ✅ Runs all GRASP-01 compliance tests
-- ✅ Cleans up resources when finished
-
-For more options:
-
-```bash
-./test-ngit-relay.sh --help
+# Or audit a local development relay
+grasp-audit audit --relay ws://localhost:7000
 ```
 
 ## Usage Examples
+
+### As a CLI Tool
+
+```bash
+# Install
+cargo install --path .
+
+# Audit a production GRASP relay (shared fixtures - default)
+grasp-audit audit --relay wss://relay.ngit.dev
+
+# Audit local development relay
+grasp-audit audit --relay ws://localhost:7000 --spec nip01-smoke
+
+# Run with isolated fixtures (for testing/debugging)
+grasp-audit audit --relay ws://localhost:7000 --mode isolated --spec push-auth
+```
 
 ### As a Library
 
@@ -41,8 +51,9 @@ use grasp_audit::*;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Create audit client with shared fixtures (default for CLI)
-    let config = AuditConfig::shared();
+    // Create audit client with isolated fixtures (recommended for library use)
+    let config = AuditConfig::isolated();
+    // let config = AuditConfig::shared();  // Alternative: shared fixtures
     let client = AuditClient::new("ws://localhost:7000", config).await?;
 
     // Run NIP-01 smoke tests
@@ -57,24 +68,25 @@ async fn main() -> Result<()> {
 }
 ```
 
-### As a CLI Tool
-
-```bash
-# Install
-cargo install --path .
-
-# Run smoke tests against local relay (shared fixtures - default)
-grasp-audit audit --relay ws://localhost:7000 --spec nip01-smoke
-
-# Run with isolated fixtures (each test gets fresh fixtures)
-grasp-audit audit --relay ws://localhost:7000 --mode isolated --spec all
-```
-
 ## Test Specifications
+
+The audit tool provides **good test coverage of GRASP-01** requirements, with additional smoke tests for basic Nostr relay functionality and git over HTTP.
+
+### GRASP-01 Tests
+
+Test coverage of GRASP-01 specification:
+
+- Repository announcement acceptance
+- State event handling
+- Push authorization (owner, maintainer, recursive maintainer)
+- Event acceptance policy
+- Git clone over HTTP
+- CORS headers
+- NIP-11 relay information document
 
 ### NIP-01 Smoke Tests (6 tests)
 
-Basic Nostr relay functionality:
+Basic Nostr relay functionality validation:
 
 1. `websocket_connection` - Can connect to /
 2. `send_receive_event` - Can send EVENT, get OK
@@ -85,12 +97,60 @@ Basic Nostr relay functionality:
 
 **Why only smoke tests?** rust-nostr already has 1000+ tests for NIP-01 compliance. We focus on GRASP-specific behavior.
 
-### GRASP-01 Tests (Coming Soon)
+### Git over HTTP Smoke Tests
 
-- Repository announcement acceptance
-- State event handling
-- Policy enforcement
-- And more...
+Basic validation that git clone works over HTTP.
+
+## Fixture Modes
+
+The audit tool supports two fixture caching modes that control how test prerequisites are managed. This is a key feature for controlling test isolation and resource efficiency.
+
+### Shared Mode (Default for CLI)
+
+**Default for CLI usage.** Fixtures are cached and reused across all tests for efficiency.
+
+Use this when:
+
+- Auditing production or development relays
+
+```bash
+# CLI uses shared mode by default
+grasp-audit audit --relay wss://relay.ngit.dev
+```
+
+```rust
+let config = AuditConfig::shared();
+```
+
+### Isolated Mode (Recommended for Library)
+
+**Recommended for library/test usage.** Each test creates fresh fixtures for complete isolation.
+
+Use this when:
+
+- Using grasp-audit as a library
+- Running `cargo test` in parallel
+- Tests must not interfere with each other
+- Debugging test failures
+
+```bash
+# Use isolated mode explicitly
+grasp-audit audit --relay ws://localhost:7000 --mode isolated
+```
+
+```rust
+let config = AuditConfig::isolated();
+```
+
+### When to Use Each Mode
+
+| Scenario                      | Recommended Mode |
+| ----------------------------- | ---------------- |
+| CLI auditing production relay | Shared (default) |
+| CLI auditing local relay      | Shared (default) |
+| Library usage / `cargo test`  | Isolated         |
+| CI/CD pipeline                | Isolated         |
+| Debugging a single test       | Isolated         |
 
 ## Audit Event Strategy
 
@@ -123,106 +183,59 @@ All audit events automatically include special tags for isolation and cleanup:
 - **No deletion trails**: No NIP-09 deletion events needed
 - **Discovery**: Easy to query all audit events via hashtag
 
-## Fixture Modes
+## Architecture
 
-The audit tool supports two fixture caching modes that control how test prerequisites are managed.
-
-### Shared Mode (Default for CLI)
-
-Fixtures are cached and reused across all tests. Use this when:
-- Running the CLI audit tool sequentially
-- Tests build on each other's fixtures
-- You want efficient resource usage
-
-```rust
-let config = AuditConfig::shared();
+```
+grasp-audit/
+├── src/
+│   ├── lib.rs              # Public API
+│   ├── audit.rs            # Audit config and event tagging
+│   ├── client.rs           # Audit client
+│   ├── fixtures.rs         # TestContext and FixtureKind
+│   ├── result.rs           # Test result types
+│   ├── isolation.rs        # Test isolation utilities
+│   └── specs/
+│       ├── mod.rs
+│       ├── nip01_smoke.rs  # NIP-01 smoke tests
+│       └── grasp01/        # GRASP-01 compliance tests
+└── bin/
+    └── grasp-audit.rs      # CLI tool
 ```
 
-### Isolated Mode (For Parallel Tests)
+## Roadmap
 
-Each test creates fresh fixtures for complete isolation. Use this when:
-- Running `cargo test` in parallel
-- Tests must not interfere with each other
-- Testing the fixture system itself
+Planned features and improvements:
 
-```rust
-let config = AuditConfig::isolated();
-```
+### Near-term
 
-### CLI Usage
+- [ ] **Configurable backoffs for rate limiting** - Allow configuring retry delays when relays rate-limit requests
+- [ ] **Delete events per pubkey** - Send NIP-09 deletion events grouped by pubkey for better cleanup on relays that support it
+- [ ] **Delete event handling** - Respect NIP-09 support flagged in NIP-11 relay information document
 
-```bash
-# Default: shared fixtures (efficient for sequential CLI runs)
-grasp-audit audit --relay ws://localhost:7000 --spec all
+### Future
 
-# Isolated fixtures (for testing)
-grasp-audit audit --relay ws://localhost:7000 --mode isolated --spec all
-```
+- [ ] **GRASP-05 support** - Add test coverage for GRASP-05 specification
 
-## Examples
+### Out of Scope
 
-See `examples/` directory:
+- **GRASP-02 (Proactive Sync)** - Testing proactive synchronization behavior is inherently difficult due to its asynchronous nature and reliance on external state. This specification is out of scope for automated compliance testing.
 
-```bash
-# Simple audit example
-cargo run --example simple_audit
-```
+## Development
 
-## Testing
+This section covers patterns and guidelines for contributing new audit tests.
 
-> **TL;DR:** See the [Quick Start](#quick-start) section for the fastest way to run tests.
-
-### Unit Tests
-
-```bash
-# Enter dev environment (NixOS)
-nix develop
-
-# Run unit tests (no relay required)
-cargo test
-```
-
-### Integration Tests
-
-The recommended approach is [`test-ngit-relay.sh`](test-ngit-relay.sh), which handles all relay lifecycle management automatically.
-
-See the [Quick Start](#quick-start) section for common usage patterns.
-
-**Advanced: Manual Relay Setup**
-
-<details>
-<summary>Click to expand manual testing instructions</summary>
-
-For advanced use cases where you need direct control over the relay:
-
-```bash
-# Start relay on a specific port (example uses 18081)
-docker run --rm -p 18081:8081 ghcr.io/danconwaydev/ngit-relay:latest
-
-# In another terminal, run tests with RELAY_URL
-grasp-audit audit --relay ws://localhost:18081 --mode ci
-
-# or run all ignored tests via cargo
-RELAY_URL="ws://localhost:18081" cargo test --lib -- --ignored --nocapture
-
-# or run specific test via cargo
-RELAY_URL="ws://localhost:18081" cargo test --lib test_grasp01_nostr_relay_against_relay -- --ignored --nocapture
-```
-
-</details>
-
-## Test Design Pattern: Fixture-First
+### Test Design Pattern: Fixture-First
 
 To prevent rate-limiting from production relays during testing, we use a **fixture-first** approach that minimizes relay interactions.
 
-### Quick Start for New Tests
+#### Quick Start for New Tests
 
 1. Create TestContext at test start
 2. Get prerequisites via `ctx.get_fixture(FixtureKind::...)`
 3. Build test-specific events using fixtures as base
 4. Verify outcomes via `send_and_verify_accepted/rejected`
 
-### Pattern Template
+#### Pattern Template
 
 ```rust
 pub async fn test_something(client: &AuditClient) -> TestResult {
@@ -246,7 +259,7 @@ pub async fn test_something(client: &AuditClient) -> TestResult {
 }
 ```
 
-### Three-Layer Architecture
+#### Three-Layer Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -262,35 +275,35 @@ pub async fn test_something(client: &AuditClient) -> TestResult {
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Available Fixtures
+#### Available Fixtures
 
-| FixtureKind | Provides | Use When |
-| ----------- | -------- | -------- |
-| `ValidRepo` | Accepted repo announcement (kind 30617). Signed by owner keys, lists maintainer in maintainers tag. | Need a repo as prerequisite |
-| `RepoWithIssue` | Repo + accepted issue (kind 1621) | Testing issue-dependent events |
-| `RepoWithComment` | Repo + issue + comment (kind 1111) | Testing comment-dependent events |
-| `RepoState` | Repo + state event (kind 30618). Signed by owner, points to `DETERMINISTIC_COMMIT_HASH`. | Testing owner state events |
-| `PREvent` | Repo + PR event (kind 1618). Signed by PR author, points to `PR_TEST_COMMIT_HASH`. | Testing PR-dependent events |
-| `PREventGenerated` | PR event built but NOT sent to relay. | Need PR event ID before publishing |
-| `PRWrongCommitPushedBeforeEvent` | Wrong commit pushed to `refs/nostr/<pr-event-id>` before PR event sent. Returns unsent PR event. | Testing pre-event ref cleanup |
-| `PREventSentAfterWrongPush` | PR event sent after wrong commit was pushed. Tests cleanup behavior. | Testing post-event ref cleanup |
-| `OwnerStateDataPushed` | Full owner push flow: state event + git data pushed. Points to `DETERMINISTIC_COMMIT_HASH`. | Testing owner push authorization |
-| `MaintainerStateDataPushed` | Full maintainer push flow: force-pushes over owner's data. Points to `MAINTAINER_DETERMINISTIC_COMMIT_HASH`. | Testing maintainer push authorization |
+| FixtureKind                          | Provides                                                                                                                                         | Use When                                   |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------ |
+| `ValidRepo`                          | Accepted repo announcement (kind 30617). Signed by owner keys, lists maintainer in maintainers tag.                                              | Need a repo as prerequisite                |
+| `RepoWithIssue`                      | Repo + accepted issue (kind 1621)                                                                                                                | Testing issue-dependent events             |
+| `RepoWithComment`                    | Repo + issue + comment (kind 1111)                                                                                                               | Testing comment-dependent events           |
+| `RepoState`                          | Repo + state event (kind 30618). Signed by owner, points to `DETERMINISTIC_COMMIT_HASH`.                                                         | Testing owner state events                 |
+| `PREvent`                            | Repo + PR event (kind 1618). Signed by PR author, points to `PR_TEST_COMMIT_HASH`.                                                               | Testing PR-dependent events                |
+| `PREventGenerated`                   | PR event built but NOT sent to relay.                                                                                                            | Need PR event ID before publishing         |
+| `PRWrongCommitPushedBeforeEvent`     | Wrong commit pushed to `refs/nostr/<pr-event-id>` before PR event sent. Returns unsent PR event.                                                 | Testing pre-event ref cleanup              |
+| `PREventSentAfterWrongPush`          | PR event sent after wrong commit was pushed. Tests cleanup behavior.                                                                             | Testing post-event ref cleanup             |
+| `OwnerStateDataPushed`               | Full owner push flow: state event + git data pushed. Points to `DETERMINISTIC_COMMIT_HASH`.                                                      | Testing owner push authorization           |
+| `MaintainerStateDataPushed`          | Full maintainer push flow: force-pushes over owner's data. Points to `MAINTAINER_DETERMINISTIC_COMMIT_HASH`.                                     | Testing maintainer push authorization      |
 | `RecursiveMaintainerStateDataPushed` | Full recursive maintainer push flow: Owner → Maintainer → RecursiveMaintainer chain. Points to `RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH`. | Testing recursive maintainer authorization |
-| `HeadSetToDevelopBranch` | State event with HEAD=refs/heads/develop. Depends on RecursiveMaintainerStateDataPushed. | Testing HEAD branch switching |
+| `HeadSetToDevelopBranch`             | State event with HEAD=refs/heads/develop. Depends on RecursiveMaintainerStateDataPushed.                                                         | Testing HEAD branch switching              |
 
-### Deterministic Commit Hashes
+#### Deterministic Commit Hashes
 
 Fixtures use deterministic commit hashes for reproducible testing:
 
-| Constant | Hash | Used By |
-| -------- | ---- | ------- |
-| `DETERMINISTIC_COMMIT_HASH` | `64ea71d79a57a7acb334cd9651f8aec067c0ce5d` | Owner fixtures (RepoState, OwnerStateDataPushed) |
-| `MAINTAINER_DETERMINISTIC_COMMIT_HASH` | `1c2d472c9b71ed51968a66500281a3c4a6840464` | MaintainerStateDataPushed |
-| `RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH` | `05939b82de66fbdb9c077d0a64fc68522f3cb8e0` | RecursiveMaintainerStateDataPushed |
-| `PR_TEST_COMMIT_HASH` | `5d40fb1555a0c28bf4d650515a73aaa54d4d9bfb` | PR fixtures (PREvent, PREventGenerated) |
+| Constant                                         | Hash                                       | Used By                                          |
+| ------------------------------------------------ | ------------------------------------------ | ------------------------------------------------ |
+| `DETERMINISTIC_COMMIT_HASH`                      | `64ea71d79a57a7acb334cd9651f8aec067c0ce5d` | Owner fixtures (RepoState, OwnerStateDataPushed) |
+| `MAINTAINER_DETERMINISTIC_COMMIT_HASH`           | `1c2d472c9b71ed51968a66500281a3c4a6840464` | MaintainerStateDataPushed                        |
+| `RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH` | `05939b82de66fbdb9c077d0a64fc68522f3cb8e0` | RecursiveMaintainerStateDataPushed               |
+| `PR_TEST_COMMIT_HASH`                            | `5d40fb1555a0c28bf4d650515a73aaa54d4d9bfb` | PR fixtures (PREvent, PREventGenerated)          |
 
-### Fixture Dependencies
+#### Fixture Dependencies
 
 Fixtures automatically resolve their dependencies:
 
@@ -306,7 +319,7 @@ ValidRepo (base)
             └── HeadSetToDevelopBranch
 ```
 
-### Fixture Lifecycle: Generate → Send → Verify → DataPushed
+#### Fixture Lifecycle: Generate → Send → Verify → DataPushed
 
 Every fixture follows a lifecycle (some stop earlier):
 
@@ -319,7 +332,7 @@ Caching happens after the fixture completes - same fixture request returns cache
 
 **Note:** Some fixtures handle their own event sending (e.g., `OwnerStateDataPushed`, `MaintainerStateDataPushed`). These are marked with `sends_own_events() -> true`.
 
-### How TestContext Correlates Events
+#### How TestContext Correlates Events
 
 Each TestContext shares a `run_id` with all events:
 
@@ -336,7 +349,7 @@ This enables:
 - Production relay cleanup scripts
 - Test isolation between runs
 
-### When NOT to Use Fixtures
+#### When NOT to Use Fixtures
 
 Use direct event building (NOT fixtures) when:
 
@@ -354,7 +367,7 @@ let invalid_event = client.event_builder(Kind::GitRepoAnnouncement, "")
 send_and_verify_rejected(client, invalid_event, "missing clone tag").await?;
 ```
 
-### Anti-Patterns to Avoid
+#### Anti-Patterns to Avoid
 
 ❌ **Creating TestContext inside helper functions** - Tests lose cache control
 
@@ -367,34 +380,6 @@ send_and_verify_rejected(client, invalid_event, "missing clone tag").await?;
 ✅ **Use fixtures for prerequisites** - Caching minimizes relay calls
 
 ✅ **Build invalid events directly** - Only for rejection tests
-
-## Architecture
-
-```
-grasp-audit/
-├── src/
-│   ├── lib.rs              # Public API
-│   ├── audit.rs            # Audit config and event tagging
-│   ├── client.rs           # Audit client
-│   ├── fixtures.rs         # TestContext and FixtureKind
-│   ├── result.rs           # Test result types
-│   ├── isolation.rs        # Test isolation utilities
-│   └── specs/
-│       ├── mod.rs
-│       └── nip01_smoke.rs  # NIP-01 smoke tests
-├── examples/
-│   └── simple_audit.rs     # Example usage
-└── bin/
-    └── grasp-audit.rs      # CLI tool
-```
-
-## Development Status
-
-- ✅ Audit framework
-- ✅ NIP-01 smoke tests (6 tests)
-- 🚧 GRASP-01 relay tests (planned)
-- 🚧 GRASP-01 git tests (planned)
-- 🚧 Cleanup utilities (planned)
 
 ## Contributing
 
