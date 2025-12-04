@@ -9,6 +9,7 @@ use ngit_grasp::{
     http,
     metrics::Metrics,
     nostr,
+    sync::SyncManager,
 };
 
 #[tokio::main]
@@ -49,6 +50,21 @@ async fn main() -> Result<()> {
             "Relay created with NIP-34 validation for domain: {}",
             config.domain
         );
+
+        // Start SyncManager if sync_relay_url is configured
+        if let Some(ref sync_url) = config.sync_relay_url {
+            info!("Starting proactive sync from: {}", sync_url);
+            let sync_manager = SyncManager::new(
+                sync_url.clone(),
+                relay_with_db.database.clone(),
+                relay_with_db.write_policy.clone(),
+            );
+            tokio::spawn(async move {
+                sync_manager.run().await;
+            });
+        } else {
+            info!("Proactive sync disabled (no NGIT_SYNC_RELAY_URL configured)");
+        }
 
         // Start HTTP server with integrated relay and database
         info!("Starting HTTP server on {}", config.bind_address);

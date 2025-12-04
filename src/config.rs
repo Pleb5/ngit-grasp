@@ -83,6 +83,10 @@ pub struct Config {
     /// Number of top bandwidth repos to track in metrics
     #[arg(long = "metrics-top-n-repos", env = "NGIT_METRICS_TOP_N_REPOS", default_value_t = 10)]
     pub metrics_top_n_repos: usize,
+
+    /// URL of relay to sync kind 30617 events from (optional, enables proactive sync)
+    #[arg(long, env = "NGIT_SYNC_RELAY_URL")]
+    pub sync_relay_url: Option<String>,
 }
 
 impl Config {
@@ -138,6 +142,7 @@ impl Config {
             metrics_enabled: true,
             metrics_connection_per_ip_abuse_threshold: 10,
             metrics_top_n_repos: 10,
+            sync_relay_url: None,
         }
     }
 }

@@ -269,12 +269,14 @@ impl WritePolicy for Nip34WritePolicy {
     }
 }
 
-/// Result of creating a relay - includes both the relay and database
+/// Result of creating a relay - includes relay, database, and write policy
 pub struct RelayWithDatabase {
     /// The local relay instance
     pub relay: LocalRelay,
     /// The database Arc that can be used for direct queries
     pub database: SharedDatabase,
+    /// The write policy used for event validation
+    pub write_policy: Nip34WritePolicy,
 }
 
 /// Create a configured LocalRelay with full GRASP-01 validation
@@ -330,13 +332,11 @@ pub fn create_relay(config: &Config) -> Result<RelayWithDatabase> {
     // Build relay with GRASP-01 validation
     // Clone Arc for the write policy so both relay and policy can access the database
     let git_data_path = config.effective_git_data_path();
+    let write_policy = Nip34WritePolicy::new(&config.domain, database.clone(), &git_data_path);
+
     let builder = RelayBuilder::default()
         .database(database.clone())
-        .write_policy(Nip34WritePolicy::new(
-            &config.domain,
-            database.clone(),
-            &git_data_path,
-        ));
+        .write_policy(write_policy.clone());
 
     tracing::info!(
         "Relay configured with GRASP-01 validation for domain: {}",
@@ -346,5 +346,6 @@ pub fn create_relay(config: &Config) -> Result<RelayWithDatabase> {
     Ok(RelayWithDatabase {
         relay: LocalRelay::new(builder),
         database,
+        write_policy,
     })
 }

@@ -33,11 +33,36 @@ impl TestRelay {
     /// }
     /// ```
     pub async fn start() -> Self {
-        Self::start_with_port(Self::find_free_port()).await
+        Self::start_with_options(Self::find_free_port(), None).await
     }
 
     /// Start relay on a specific port
     pub async fn start_with_port(port: u16) -> Self {
+        Self::start_with_options(port, None).await
+    }
+
+    /// Start relay with sync from another relay
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use common::TestRelay;
+    ///
+    /// #[tokio::test]
+    /// async fn test_sync() {
+    ///     let source = TestRelay::start().await;
+    ///     let syncing = TestRelay::start_with_sync(source.url()).await;
+    ///     // ... test sync behavior ...
+    ///     syncing.stop().await;
+    ///     source.stop().await;
+    /// }
+    /// ```
+    pub async fn start_with_sync(sync_relay_url: &str) -> Self {
+        Self::start_with_options(Self::find_free_port(), Some(sync_relay_url.to_string())).await
+    }
+
+    /// Start relay with options
+    async fn start_with_options(port: u16, sync_relay_url: Option<String>) -> Self {
         let bind_address = format!("127.0.0.1:{}", port);
         let url = format!("ws://127.0.0.1:{}", port);
 
@@ -62,16 +87,21 @@ impl TestRelay {
             .expect("Failed to generate test npub");
 
         // Start the relay process
-        let process = Command::new(&binary_path)
-            .env("NGIT_BIND_ADDRESS", &bind_address)
+        let mut cmd = Command::new(&binary_path);
+        cmd.env("NGIT_BIND_ADDRESS", &bind_address)
             .env("NGIT_DOMAIN", &bind_address) // Set domain to match bind address
             .env("NGIT_GIT_DATA_PATH", git_data_dir.path())
             .env("NGIT_OWNER_NPUB", &test_npub)
             .env("RUST_LOG", "warn") // Less logging during tests
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("Failed to start relay process");
+            .stderr(Stdio::null());
+
+        // Add sync relay URL if provided
+        if let Some(ref sync_url) = sync_relay_url {
+            cmd.env("NGIT_SYNC_RELAY_URL", sync_url);
+        }
+
+        let process = cmd.spawn().expect("Failed to start relay process");
 
         let relay = Self { process, url, port };
 

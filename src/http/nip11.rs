@@ -105,6 +105,7 @@ mod tests {
             metrics_enabled: true,
             metrics_connection_per_ip_abuse_threshold: 10,
             metrics_top_n_repos: 10,
+            sync_relay_url: None,
         };
 
         let doc = RelayInformationDocument::from_config(&config);
@@ -139,6 +140,7 @@ mod tests {
             metrics_enabled: true,
             metrics_connection_per_ip_abuse_threshold: 10,
             metrics_top_n_repos: 10,
+            sync_relay_url: None,
         };
 
         let doc = RelayInformationDocument::from_config(&config);
