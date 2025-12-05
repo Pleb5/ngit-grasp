@@ -58,7 +58,11 @@ impl TestRelay {
     /// }
     /// ```
     pub async fn start_with_sync(bootstrap_relay_url: &str) -> Self {
-        Self::start_with_options(Self::find_free_port(), Some(bootstrap_relay_url.to_string())).await
+        Self::start_with_options(
+            Self::find_free_port(),
+            Some(bootstrap_relay_url.to_string()),
+        )
+        .await
     }
 
     /// Start relay with options
@@ -91,11 +95,12 @@ impl TestRelay {
         cmd.env("NGIT_BIND_ADDRESS", &bind_address)
             .env("NGIT_DOMAIN", &bind_address) // Set domain to match bind address
             .env("NGIT_GIT_DATA_PATH", git_data_dir.path())
+            .env("NGIT_DATABASE_BACKEND", "memory") // Force in-memory database for isolation
             .env("NGIT_OWNER_NPUB", &test_npub)
             .env("NGIT_SYNC_STARTUP_JITTER_MS", "0") // Disable jitter for tests
             .env("RUST_LOG", "warn") // Less logging during tests
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stderr(Stdio::null()); // Disable stderr for cleaner test output
 
         // Add bootstrap relay URL if provided
         if let Some(ref bootstrap_url) = bootstrap_relay_url {
