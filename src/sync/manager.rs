@@ -25,6 +25,7 @@
 //! - Consolidation when filter count exceeds 150
 
 use std::collections::HashSet;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,12 +37,28 @@ use super::connection::{connect_with_retry, SyncedEvent};
 use super::filter::FilterService;
 use super::health::RelayHealthTracker;
 use super::metrics::SyncMetrics;
-use super::SYNC_SOURCE_ADDR;
 use crate::config::Config;
 use crate::nostr::builder::{Nip34WritePolicy, SharedDatabase};
 
 /// Maximum startup jitter in milliseconds (10 seconds)
 const MAX_STARTUP_JITTER_MS: u64 = 10_000;
+
+/// Default fallback address for sync source when bind_address cannot be parsed
+///
+/// This distinguishes synced events from directly-submitted events in logs and metrics.
+/// Uses 127.0.0.1:8080 as a recognizable default "synced event" marker.
+pub const DEFAULT_SYNC_SOURCE_ADDR: SocketAddr =
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
+
+/// Derive sync source address from config bind_address
+///
+/// Parses the bind_address string and returns a SocketAddr.
+/// Falls back to 127.0.0.1:8080 if parsing fails.
+fn get_sync_source_addr(bind_address: &str) -> SocketAddr {
+    bind_address
+        .parse()
+        .unwrap_or(DEFAULT_SYNC_SOURCE_ADDR)
+}
 
 /// Coordinates proactive sync from configured and discovered relays
 pub struct SyncManager {
@@ -57,6 +74,8 @@ pub struct SyncManager {
     health_tracker: Arc<RelayHealthTracker>,
     /// Sync metrics for Prometheus
     metrics: Option<SyncMetrics>,
+    /// Source address for synced events (derived from config.bind_address)
+    sync_source_addr: SocketAddr,
 }
 
 impl SyncManager {
@@ -82,6 +101,7 @@ impl SyncManager {
             write_policy,
             health_tracker: Arc::new(RelayHealthTracker::new(config)),
             metrics: None,
+            sync_source_addr: get_sync_source_addr(&config.bind_address),
         }
     }
 
@@ -109,6 +129,7 @@ impl SyncManager {
             write_policy,
             health_tracker: Arc::new(RelayHealthTracker::new(config)),
             metrics: Some(metrics),
+            sync_source_addr: get_sync_source_addr(&config.bind_address),
         }
     }
 
@@ -127,6 +148,7 @@ impl SyncManager {
             write_policy,
             health_tracker: Arc::new(RelayHealthTracker::with_defaults()),
             metrics: None,
+            sync_source_addr: DEFAULT_SYNC_SOURCE_ADDR,
         }
     }
 
@@ -320,8 +342,8 @@ impl SyncManager {
             _ => {}
         }
 
-        // Validate through write policy using SYNC_SOURCE_ADDR
-        let result = self.write_policy.admit_event(event, &SYNC_SOURCE_ADDR).await;
+        // Validate through write policy using sync_source_addr derived from config
+        let result = self.write_policy.admit_event(event, &self.sync_source_addr).await;
 
         match result {
             PolicyResult::Accept => {

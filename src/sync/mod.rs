@@ -32,14 +32,9 @@ pub use metrics::SyncMetrics;
 pub use negentropy::NegentropyService;
 pub use subscription::SubscriptionManager;
 
-use std::net::SocketAddr;
-
-/// Synthetic source address used for synced events
-///
-/// This distinguishes synced events from directly-submitted events in logs and metrics.
-/// Uses 127.0.0.2:0 as a recognizable "synced event" marker.
-pub const SYNC_SOURCE_ADDR: SocketAddr =
-    SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)), 0);
+// Re-export default sync source address for backward compatibility with modules like negentropy.rs
+// Manager.rs derives sync_source_addr from config.bind_address at runtime
+pub use manager::DEFAULT_SYNC_SOURCE_ADDR as SYNC_SOURCE_ADDR;
 
 /// Kind for repository state events (NIP-34)
 pub const KIND_REPOSITORY_STATE: u16 = 30617;

@@ -19,7 +19,6 @@ use crate::nostr::policy::{
     AnnouncementPolicy, AnnouncementResult, PolicyContext, PrEventPolicy, RelatedEventPolicy,
     ReferenceResult, StatePolicy, StateResult,
 };
-use crate::sync::SYNC_SOURCE_ADDR;
 
 /// Type alias for the shared database used by the relay
 pub type SharedDatabase = Arc<dyn NostrDatabase>;
@@ -69,39 +68,9 @@ impl Nip34WritePolicy {
     }
 
     /// Handle repository announcement event
-    ///
-    /// # Arguments
-    /// * `event` - The announcement event to validate
-    /// * `from_sync` - Whether this event came from GRASP-02 sync (bypasses domain validation)
-    async fn handle_announcement(&self, event: &Event, from_sync: bool) -> PolicyResult {
+    async fn handle_announcement(&self, event: &Event) -> PolicyResult {
         let event_id_str = event.id.to_bech32().unwrap_or_else(|_| event.id.to_hex());
 
-        // GRASP-02: Accept Layer 1 events from sync without domain validation
-        // This enables relay discovery chain - synced announcements are stored
-        // for relay URL extraction even if they don't list our domain
-        if from_sync {
-            // Still validate basic structure
-            match RepositoryAnnouncement::from_event(event.clone()) {
-                Ok(_announcement) => {
-                    tracing::debug!(
-                        "Accepted synced repository announcement: {} (domain validation bypassed)",
-                        event_id_str
-                    );
-                    // Don't create bare repository for external announcements
-                    return PolicyResult::Accept;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Rejected malformed synced announcement {}: {}",
-                        event_id_str,
-                        e
-                    );
-                    return PolicyResult::Reject(format!("Failed to parse announcement: {}", e));
-                }
-            }
-        }
-
-        // Normal validation path - requires domain to be listed
         match self.announcement_policy.validate(event).await {
             AnnouncementResult::Accept => {
                 // Parse announcement to get repository details
@@ -287,15 +256,11 @@ impl WritePolicy for Nip34WritePolicy {
     fn admit_event<'a>(
         &'a self,
         event: &'a nostr_relay_builder::prelude::Event,
-        addr: &'a SocketAddr,
+        _addr: &'a SocketAddr,
     ) -> BoxedFuture<'a, PolicyResult> {
         Box::pin(async move {
-            // GRASP-02: Detect sync source for Layer 1 domain validation bypass
-            // Synced events use SYNC_SOURCE_ADDR (127.0.0.2:0) to identify them
-            let from_sync = *addr == SYNC_SOURCE_ADDR;
-
             match event.kind.as_u16() {
-                KIND_REPOSITORY_ANNOUNCEMENT => self.handle_announcement(event, from_sync).await,
+                KIND_REPOSITORY_ANNOUNCEMENT => self.handle_announcement(event).await,
                 KIND_REPOSITORY_STATE => self.handle_state(event).await,
                 KIND_PR | KIND_PR_UPDATE => self.handle_pr_event(event).await,
                 _ => self.handle_related_event(event, "Event").await,
