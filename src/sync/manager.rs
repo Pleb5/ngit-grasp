@@ -40,8 +40,6 @@ use super::metrics::SyncMetrics;
 use crate::config::Config;
 use crate::nostr::builder::{Nip34WritePolicy, SharedDatabase};
 
-/// Maximum startup jitter in milliseconds (10 seconds)
-const MAX_STARTUP_JITTER_MS: u64 = 10_000;
 
 /// Default fallback address for sync source when bind_address cannot be parsed
 ///
@@ -76,6 +74,8 @@ pub struct SyncManager {
     metrics: Option<SyncMetrics>,
     /// Source address for synced events (derived from config.bind_address)
     sync_source_addr: SocketAddr,
+    /// Maximum startup jitter in milliseconds (from config)
+    startup_jitter_ms: u64,
 }
 
 impl SyncManager {
@@ -102,6 +102,7 @@ impl SyncManager {
             health_tracker: Arc::new(RelayHealthTracker::new(config)),
             metrics: None,
             sync_source_addr: get_sync_source_addr(&config.bind_address),
+            startup_jitter_ms: config.sync_startup_jitter_ms,
         }
     }
 
@@ -130,6 +131,7 @@ impl SyncManager {
             health_tracker: Arc::new(RelayHealthTracker::new(config)),
             metrics: Some(metrics),
             sync_source_addr: get_sync_source_addr(&config.bind_address),
+            startup_jitter_ms: config.sync_startup_jitter_ms,
         }
     }
 
@@ -149,6 +151,7 @@ impl SyncManager {
             health_tracker: Arc::new(RelayHealthTracker::with_defaults()),
             metrics: None,
             sync_source_addr: DEFAULT_SYNC_SOURCE_ADDR,
+            startup_jitter_ms: 10_000, // Default 10 seconds
         }
     }
 
@@ -265,8 +268,9 @@ impl SyncManager {
 
     /// Spawn a connection task for a relay with startup jitter
     ///
-    /// Adds a random delay (0-10s) before connecting to prevent thundering herd
-    /// on startup when multiple relays are configured.
+    /// Adds a random delay (0 to startup_jitter_ms) before connecting to prevent
+    /// thundering herd on startup when multiple relays are configured.
+    /// Set startup_jitter_ms to 0 to disable jitter (useful for testing).
     fn spawn_connection_with_jitter(
         &self,
         url: String,
@@ -276,16 +280,19 @@ impl SyncManager {
         let domain = self.relay_domain.clone();
         let health_tracker = self.health_tracker.clone();
         let metrics = self.metrics.clone();
+        let max_jitter = self.startup_jitter_ms;
 
         tokio::spawn(async move {
-            // Apply startup jitter
-            let jitter_ms = rand::thread_rng().gen_range(0..MAX_STARTUP_JITTER_MS);
-            tracing::debug!(
-                "Applying {}ms startup jitter before connecting to {}",
-                jitter_ms,
-                url
-            );
-            tokio::time::sleep(Duration::from_millis(jitter_ms)).await;
+            // Apply startup jitter (if configured)
+            if max_jitter > 0 {
+                let jitter_ms = rand::thread_rng().gen_range(0..max_jitter);
+                tracing::debug!(
+                    "Applying {}ms startup jitter before connecting to {}",
+                    jitter_ms,
+                    url
+                );
+                tokio::time::sleep(Duration::from_millis(jitter_ms)).await;
+            }
 
             connect_with_retry(&url, tx, filter_service, &domain, health_tracker, metrics).await;
         });

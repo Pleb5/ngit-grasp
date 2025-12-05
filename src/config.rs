@@ -103,6 +103,11 @@ pub struct Config {
     /// Number of days to look back for reconnect catchup (default: 3)
     #[arg(long, env = "NGIT_SYNC_RECONNECT_LOOKBACK_DAYS", default_value_t = 3)]
     pub sync_reconnect_lookback_days: u64,
+
+    /// Maximum startup jitter in milliseconds for sync connections (default: 10000 = 10 seconds)
+    /// Set to 0 to disable jitter (useful for testing)
+    #[arg(long, env = "NGIT_SYNC_STARTUP_JITTER_MS", default_value_t = 10_000)]
+    pub sync_startup_jitter_ms: u64,
 }
 
 impl Config {
