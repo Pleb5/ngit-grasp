@@ -84,9 +84,10 @@ pub struct Config {
     #[arg(long = "metrics-top-n-repos", env = "NGIT_METRICS_TOP_N_REPOS", default_value_t = 10)]
     pub metrics_top_n_repos: usize,
 
-    /// URL of relay to sync kind 30617 events from (optional, enables proactive sync)
-    #[arg(long, env = "NGIT_SYNC_RELAY_URL")]
-    pub sync_relay_url: Option<String>,
+    /// URL of bootstrap relay to sync from on startup (optional)
+    /// Sync discovers additional relays from repository announcements that list our service
+    #[arg(long, env = "NGIT_SYNC_BOOTSTRAP_RELAY_URL")]
+    pub sync_bootstrap_relay_url: Option<String>,
 
     /// Maximum backoff time in seconds for sync relay reconnection (default: 3600 = 1 hour)
     #[arg(long, env = "NGIT_SYNC_MAX_BACKOFF_SECS", default_value_t = 3600)]
@@ -163,11 +164,12 @@ impl Config {
             metrics_enabled: true,
             metrics_connection_per_ip_abuse_threshold: 10,
             metrics_top_n_repos: 10,
-            sync_relay_url: None,
+            sync_bootstrap_relay_url: None,
             sync_max_backoff_secs: 3600,
             sync_startup_delay_secs: 30,
             sync_reconnect_delay_secs: 10,
             sync_reconnect_lookback_days: 3,
+            sync_startup_jitter_ms: 10_000,
         }
     }
 }

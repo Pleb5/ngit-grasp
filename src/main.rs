@@ -52,17 +52,17 @@ async fn main() -> Result<()> {
         );
 
         // Start SyncManager for proactive sync (Phase 2: multi-relay support, Phase 3: health tracking)
-        // Even without initial sync_relay_url, SyncManager can discover relays from stored announcements
+        // Even without bootstrap relay, SyncManager discovers relays from stored announcements
         let sync_manager = SyncManager::new(
-            config.sync_relay_url.clone(),
+            config.sync_bootstrap_relay_url.clone(),
             config.domain.clone(),
             relay_with_db.database.clone(),
             relay_with_db.write_policy.clone(),
             &config,
         );
 
-        if config.sync_relay_url.is_some() {
-            info!("Starting proactive sync from: {:?}", config.sync_relay_url);
+        if config.sync_bootstrap_relay_url.is_some() {
+            info!("Starting proactive sync with bootstrap relay: {:?}", config.sync_bootstrap_relay_url);
         } else {
             info!("Proactive sync enabled (will discover relays from stored announcements)");
         }

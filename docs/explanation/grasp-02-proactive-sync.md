@@ -758,7 +758,8 @@ The implementation closely follows the design document with the following comple
 
 #### Phase 1: Basic Sync (commit b167f1b)
 - [`SyncManager`](../../src/sync/manager.rs) - Main coordinator for proactive sync
-- Single relay sync via `NGIT_SYNC_RELAY_URL` configuration
+- Bootstrap relay sync via `NGIT_SYNC_BOOTSTRAP_RELAY_URL` configuration
+- Dynamic relay discovery from repository announcements that list our service
 - Event validation through existing [`Nip34WritePolicy`](../../src/nostr/builder.rs)
 
 #### Phase 2: Three-Layer Filters (commit bf558b0)
@@ -844,11 +845,13 @@ All configuration via environment variables or CLI flags:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `NGIT_SYNC_RELAY_URL` | String | None | Primary sync relay URL |
+| `NGIT_SYNC_BOOTSTRAP_RELAY_URL` | String | None | Bootstrap relay URL for initial sync |
 | `NGIT_SYNC_MAX_BACKOFF_SECS` | u64 | 3600 | Max backoff delay (seconds) |
 | `NGIT_SYNC_STARTUP_DELAY_SECS` | u64 | 30 | Catchup delay after startup |
 | `NGIT_SYNC_RECONNECT_DELAY_SECS` | u64 | 10 | Catchup delay after reconnect |
 | `NGIT_SYNC_RECONNECT_LOOKBACK_DAYS` | u64 | 3 | Days to look back on reconnect |
+
+**Note:** Additional relays are automatically discovered from repository announcements (kind 30617) that list our service domain. The bootstrap relay provides an initial sync source but is not required - sync will discover relays from stored announcements.
 
 ### Module Structure (As Implemented)
 

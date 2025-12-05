@@ -41,7 +41,7 @@ impl TestRelay {
         Self::start_with_options(port, None).await
     }
 
-    /// Start relay with sync from another relay
+    /// Start relay with sync from another relay (bootstrap relay)
     ///
     /// # Example
     ///
@@ -57,12 +57,12 @@ impl TestRelay {
     ///     source.stop().await;
     /// }
     /// ```
-    pub async fn start_with_sync(sync_relay_url: &str) -> Self {
-        Self::start_with_options(Self::find_free_port(), Some(sync_relay_url.to_string())).await
+    pub async fn start_with_sync(bootstrap_relay_url: &str) -> Self {
+        Self::start_with_options(Self::find_free_port(), Some(bootstrap_relay_url.to_string())).await
     }
 
     /// Start relay with options
-    async fn start_with_options(port: u16, sync_relay_url: Option<String>) -> Self {
+    async fn start_with_options(port: u16, bootstrap_relay_url: Option<String>) -> Self {
         let bind_address = format!("127.0.0.1:{}", port);
         let url = format!("ws://127.0.0.1:{}", port);
 
@@ -97,9 +97,9 @@ impl TestRelay {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 
-        // Add sync relay URL if provided
-        if let Some(ref sync_url) = sync_relay_url {
-            cmd.env("NGIT_SYNC_RELAY_URL", sync_url);
+        // Add bootstrap relay URL if provided
+        if let Some(ref bootstrap_url) = bootstrap_relay_url {
+            cmd.env("NGIT_SYNC_BOOTSTRAP_RELAY_URL", bootstrap_url);
         }
 
         let process = cmd.spawn().expect("Failed to start relay process");

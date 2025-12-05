@@ -269,28 +269,29 @@ NGIT_DATABASE_BACKEND=lmdb
 
 These options configure the proactive sync feature that synchronizes events from other relays.
 
-#### `NGIT_SYNC_RELAY_URL`
+#### `NGIT_SYNC_BOOTSTRAP_RELAY_URL`
 
-**Description:** URL of the primary relay to sync events from
+**Description:** URL of the bootstrap relay to initially sync events from
 **Type:** String (WebSocket URL)
-**Default:** None (sync disabled)
+**Default:** None (relay discovery only)
 **Required:** No
 
 **Examples:**
 ```bash
 # Sync from a public relay
-NGIT_SYNC_RELAY_URL=wss://relay.example.com
+NGIT_SYNC_BOOTSTRAP_RELAY_URL=wss://relay.example.com
 
 # Sync from another GRASP relay
-NGIT_SYNC_RELAY_URL=wss://git.nostr.dev
+NGIT_SYNC_BOOTSTRAP_RELAY_URL=wss://git.nostr.dev
 
 # Local testing
-NGIT_SYNC_RELAY_URL=ws://127.0.0.1:8081
+NGIT_SYNC_BOOTSTRAP_RELAY_URL=ws://127.0.0.1:8081
 ```
 
 **Notes:**
-- When set, enables proactive sync feature
-- The relay will discover additional relays from repository announcements
+- Bootstrap relay provides initial sync source on startup
+- Additional relays are **automatically discovered** from repository announcements that list our service
+- Even without a bootstrap relay, sync will discover relays from stored announcements
 - Synced events go through the same validation as directly-submitted events
 - Use WebSocket protocol (`ws://` or `wss://`)
 

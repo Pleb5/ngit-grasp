@@ -60,8 +60,9 @@ fn get_sync_source_addr(bind_address: &str) -> SocketAddr {
 
 /// Coordinates proactive sync from configured and discovered relays
 pub struct SyncManager {
-    /// Initial relay URL to sync from (from config)
-    initial_relay_url: Option<String>,
+    /// Bootstrap relay URL for initial sync (from config)
+    /// Additional relays are discovered from repository announcements that list our service
+    bootstrap_relay_url: Option<String>,
     /// Our relay's domain (for filtering)
     relay_domain: String,
     /// Database for storing accepted events
@@ -82,20 +83,20 @@ impl SyncManager {
     /// Create a new SyncManager
     ///
     /// # Arguments
-    /// * `initial_relay_url` - Optional initial relay URL from config
+    /// * `bootstrap_relay_url` - Optional bootstrap relay URL from config
     /// * `relay_domain` - Our relay's domain (used to exclude self from sync)
     /// * `database` - Shared database for storing events and querying announcements
     /// * `write_policy` - Write policy for validating synced events
     /// * `config` - Configuration for health tracking settings
     pub fn new(
-        initial_relay_url: Option<String>,
+        bootstrap_relay_url: Option<String>,
         relay_domain: String,
         database: SharedDatabase,
         write_policy: Nip34WritePolicy,
         config: &Config,
     ) -> Self {
         Self {
-            initial_relay_url,
+            bootstrap_relay_url,
             relay_domain,
             database,
             write_policy,
@@ -109,14 +110,14 @@ impl SyncManager {
     /// Create a new SyncManager with metrics
     ///
     /// # Arguments
-    /// * `initial_relay_url` - Optional initial relay URL from config
+    /// * `bootstrap_relay_url` - Optional bootstrap relay URL from config
     /// * `relay_domain` - Our relay's domain (used to exclude self from sync)
     /// * `database` - Shared database for storing events and querying announcements
     /// * `write_policy` - Write policy for validating synced events
     /// * `config` - Configuration for health tracking settings
     /// * `metrics` - Sync metrics for Prometheus
     pub fn with_metrics(
-        initial_relay_url: Option<String>,
+        bootstrap_relay_url: Option<String>,
         relay_domain: String,
         database: SharedDatabase,
         write_policy: Nip34WritePolicy,
@@ -124,7 +125,7 @@ impl SyncManager {
         metrics: SyncMetrics,
     ) -> Self {
         Self {
-            initial_relay_url,
+            bootstrap_relay_url,
             relay_domain,
             database,
             write_policy,
@@ -137,14 +138,14 @@ impl SyncManager {
 
     /// Create a SyncManager with a single relay URL (Phase 1 compatibility)
     pub fn with_single_relay(
-        sync_relay_url: String,
+        bootstrap_url: String,
         database: SharedDatabase,
         write_policy: Nip34WritePolicy,
     ) -> Self {
         // Extract domain from URL for filtering
-        let relay_domain = extract_domain_from_url(&sync_relay_url).unwrap_or_default();
+        let relay_domain = extract_domain_from_url(&bootstrap_url).unwrap_or_default();
         Self {
-            initial_relay_url: Some(sync_relay_url),
+            bootstrap_relay_url: Some(bootstrap_url),
             relay_domain,
             database,
             write_policy,
@@ -176,9 +177,9 @@ impl SyncManager {
     /// and processes incoming events. Runs indefinitely until cancelled.
     pub async fn run(self) {
         tracing::info!(
-            "Starting SyncManager (domain: {}, initial relay: {:?})",
+            "Starting SyncManager (domain: {}, bootstrap relay: {:?})",
             self.relay_domain,
-            self.initial_relay_url
+            self.bootstrap_relay_url
         );
 
         // Create the filter service
@@ -196,13 +197,13 @@ impl SyncManager {
         // Collect all relays to connect to
         let mut relays_to_connect: Vec<String> = Vec::new();
 
-        // Start with initial relay if configured
-        if let Some(ref url) = self.initial_relay_url {
+        // Start with bootstrap relay if configured
+        if let Some(ref url) = self.bootstrap_relay_url {
             if !self.is_own_relay(url) {
                 relays_to_connect.push(url.clone());
                 active_relays.insert(url.clone());
             } else {
-                tracing::info!("Skipping initial relay (is our own relay): {}", url);
+                tracing::info!("Skipping bootstrap relay (is our own relay): {}", url);
             }
         }
 

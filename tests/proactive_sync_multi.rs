@@ -170,7 +170,7 @@ async fn test_sync_configuration_applied() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Both relays should be running
-    // The sync relay has NGIT_SYNC_RELAY_URL set (verified by relay starting)
+    // The sync relay has NGIT_SYNC_BOOTSTRAP_RELAY_URL set (verified by relay starting)
     
     let client_source = Client::default();
     client_source
