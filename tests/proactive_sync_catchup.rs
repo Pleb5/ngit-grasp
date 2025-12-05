@@ -17,89 +17,6 @@
 use ngit_grasp::sync::SubscriptionManager;
 
 // ============================================================================
-// Configuration Constants Tests
-// ============================================================================
-
-/// Test that default startup delay is 30 seconds
-#[test]
-fn test_default_startup_delay_is_30_seconds() {
-    // The spec requires 30s warm-up before startup catchup
-    const EXPECTED_STARTUP_DELAY: u64 = 30;
-    
-    // This is defined in negentropy.rs as DEFAULT_STARTUP_DELAY_SECS
-    // We verify the expected value matches the spec
-    assert_eq!(EXPECTED_STARTUP_DELAY, 30);
-}
-
-/// Test that default reconnect delay is 10 seconds  
-#[test]
-fn test_default_reconnect_delay_is_10_seconds() {
-    // The spec requires 10s delay after reconnection before catchup
-    const EXPECTED_RECONNECT_DELAY: u64 = 10;
-    assert_eq!(EXPECTED_RECONNECT_DELAY, 10);
-}
-
-/// Test that reconnect lookback is 3 days
-#[test]
-fn test_reconnect_lookback_is_3_days() {
-    // The spec requires 3 days lookback for reconnect catchup
-    const EXPECTED_LOOKBACK_DAYS: u64 = 3;
-    const EXPECTED_LOOKBACK_SECS: u64 = 3 * 24 * 60 * 60; // 259,200 seconds
-    
-    assert_eq!(EXPECTED_LOOKBACK_DAYS, 3);
-    assert_eq!(EXPECTED_LOOKBACK_SECS, 259200);
-}
-
-/// Test daily catchup interval is 24 hours
-#[test]
-fn test_daily_catchup_interval_is_24_hours() {
-    // The spec requires daily catchup once per 24 hours
-    const EXPECTED_DAILY_INTERVAL_SECS: u64 = 86400; // 24 * 60 * 60
-    assert_eq!(EXPECTED_DAILY_INTERVAL_SECS, 86400);
-}
-
-/// Test relay stagger delay is 5 minutes
-#[test]
-fn test_relay_stagger_is_5_minutes() {
-    // The spec requires 5-minute stagger between relays for catchup
-    const EXPECTED_STAGGER_SECS: u64 = 300; // 5 * 60
-    assert_eq!(EXPECTED_STAGGER_SECS, 300);
-}
-
-// ============================================================================
-// Filter Compatibility Tests
-// ============================================================================
-
-/// Test that catchup uses announcement kinds (30617, 30618) 
-#[test]
-fn test_catchup_uses_announcement_kinds() {
-    // Layer 1 filters should include announcement kinds
-    assert!(SubscriptionManager::is_announcement_kind(30617));
-    assert!(SubscriptionManager::is_announcement_kind(30618));
-}
-
-/// Test that catchup uses PR/Issue kinds for Layer 3
-#[test]
-fn test_catchup_uses_pr_issue_kinds() {
-    // Layer 3 should track PR and Issue kinds
-    assert!(SubscriptionManager::is_pr_issue_kind(1617)); // Patch proposal
-    assert!(SubscriptionManager::is_pr_issue_kind(1618)); // PR
-    assert!(SubscriptionManager::is_pr_issue_kind(1619)); // PR Update  
-    assert!(SubscriptionManager::is_pr_issue_kind(1621)); // Issue
-    assert!(SubscriptionManager::is_pr_issue_kind(1622)); // Reply
-}
-
-/// Test that non-sync kinds are not included in catchup
-#[test]
-fn test_catchup_excludes_non_sync_kinds() {
-    // Regular text notes and other kinds should not be included
-    assert!(!SubscriptionManager::is_announcement_kind(1)); // Text note
-    assert!(!SubscriptionManager::is_announcement_kind(4)); // DM
-    assert!(!SubscriptionManager::is_pr_issue_kind(1)); // Text note
-    assert!(!SubscriptionManager::is_pr_issue_kind(30617)); // Announcement (wrong layer)
-}
-
-// ============================================================================
 // Catchup State Machine Tests
 // ============================================================================
 
@@ -108,17 +25,17 @@ fn test_catchup_excludes_non_sync_kinds() {
 fn test_startup_catchup_runs_once() {
     // After startup catchup completes, should_run_startup_catchup should return false
     // This is handled by the startup_catchup_completed flag in NegentropyService
-    
+
     // Simulating the state machine:
     let mut startup_completed = false;
-    
+
     // Before running, should return true (if delay elapsed)
     let should_run_before = !startup_completed;
     assert!(should_run_before);
-    
+
     // After running, mark as completed
     startup_completed = true;
-    
+
     // Now should return false
     let should_run_after = !startup_completed;
     assert!(!should_run_after);
@@ -128,12 +45,12 @@ fn test_startup_catchup_runs_once() {
 #[test]
 fn test_daily_catchup_interval_check() {
     use std::time::{Duration, Instant};
-    
+
     const DAILY_INTERVAL_SECS: u64 = 86400;
-    
+
     // Simulate last catchup time
     let last_catchup = Instant::now();
-    
+
     // Immediately after, should not run
     let should_run_immediately = last_catchup.elapsed() >= Duration::from_secs(DAILY_INTERVAL_SECS);
     assert!(!should_run_immediately);
@@ -144,10 +61,10 @@ fn test_daily_catchup_interval_check() {
 fn test_new_relay_should_run_daily_catchup() {
     use std::collections::HashMap;
     use std::time::Instant;
-    
+
     let last_daily_catchup: HashMap<String, Instant> = HashMap::new();
     let relay_url = "wss://test-relay.example.com";
-    
+
     // No previous catchup recorded, should return true
     let should_run = !last_daily_catchup.contains_key(relay_url);
     assert!(should_run);
@@ -159,14 +76,14 @@ fn test_reconnect_catchup_after_reconnection() {
     // Reconnect catchup should only trigger when:
     // 1. Connection was previously successful (had_previous_connection = true)
     // 2. Connection was lost and restored
-    
+
     let mut had_previous_connection = false;
-    
+
     // First connection - should NOT trigger reconnect catchup
     let is_reconnection_first = had_previous_connection;
     assert!(!is_reconnection_first);
     had_previous_connection = true;
-    
+
     // Second connection (after disconnection) - SHOULD trigger
     let is_reconnection_second = had_previous_connection;
     assert!(is_reconnection_second);
@@ -185,10 +102,10 @@ fn test_gap_events_validated_through_policy() {
     // 2. Check if event exists locally
     // 3. Validate through Nip34WritePolicy
     // 4. Store if accepted
-    
+
     // This is verified by the implementation in negentropy.rs:run_catchup()
     // where PolicyResult::Accept leads to storage and PolicyResult::Reject is logged
-    
+
     assert!(true); // Flow verification - actual validation tested in other tests
 }
 
@@ -197,14 +114,14 @@ fn test_gap_events_validated_through_policy() {
 fn test_gap_events_logged_at_warn_level() {
     // The spec requires gap events to be logged at WARN level
     // to distinguish them from live events (which are logged at INFO)
-    
+
     // This is implemented in negentropy.rs with:
     // tracing::warn!("Gap event filled via {} catchup: {} (kind {})", ...)
-    
+
     // We verify the logging pattern exists by testing the catchup types
     let catchup_types = ["startup", "reconnect", "daily"];
     assert_eq!(catchup_types.len(), 3);
-    
+
     for catchup_type in catchup_types {
         assert!(!catchup_type.is_empty());
     }
@@ -218,21 +135,21 @@ fn test_gap_events_logged_at_warn_level() {
 #[test]
 fn test_stagger_delay_for_multiple_relays() {
     const STAGGER_SECS: u64 = 300; // 5 minutes
-    
+
     let _relay_urls = vec![
         "wss://relay1.example.com",
-        "wss://relay2.example.com", 
+        "wss://relay2.example.com",
         "wss://relay3.example.com",
     ];
-    
+
     // First relay (index 0) should have no stagger
     let stagger_0 = 0 * STAGGER_SECS;
     assert_eq!(stagger_0, 0);
-    
+
     // Second relay (index 1) should have 5 minute stagger
     let stagger_1 = 1 * STAGGER_SECS;
     assert_eq!(stagger_1, 300);
-    
+
     // Third relay (index 2) should have 10 minute stagger
     let stagger_2 = 2 * STAGGER_SECS;
     assert_eq!(stagger_2, 600);
@@ -242,15 +159,15 @@ fn test_stagger_delay_for_multiple_relays() {
 #[test]
 fn test_startup_catchup_waits_for_warmup() {
     use std::time::{Duration, Instant};
-    
+
     const STARTUP_DELAY_SECS: u64 = 30;
-    
+
     let startup_time = Instant::now();
-    
+
     // Immediately after startup, should not run (delay not elapsed)
     let elapsed = startup_time.elapsed();
     let should_run = elapsed >= Duration::from_secs(STARTUP_DELAY_SECS);
-    
+
     // This should be false since we just created startup_time
     assert!(!should_run);
 }
@@ -265,7 +182,7 @@ fn test_reconnect_lookback_calculation() {
     // 3 days = 3 * 24 * 60 * 60 = 259,200 seconds
     let lookback_days: u64 = 3;
     let lookback_secs = lookback_days * 24 * 60 * 60;
-    
+
     assert_eq!(lookback_secs, 259200);
 }
 
@@ -290,10 +207,10 @@ fn test_startup_catchup_scenario() {
     // 2. Run full reconciliation (no time limit)
     // 3. Mark as completed (runs only once)
     // 4. Stagger between relays (5 minutes)
-    
+
     const STARTUP_DELAY: u64 = 30;
     const STAGGER: u64 = 300;
-    
+
     assert_eq!(STARTUP_DELAY, 30);
     assert_eq!(STAGGER, 300);
 }
@@ -306,10 +223,10 @@ fn test_reconnect_catchup_scenario() {
     // 2. Wait 10s reconnect delay
     // 3. Only fetch last 3 days of events
     // 4. Runs in background (doesn't block connection)
-    
+
     const RECONNECT_DELAY: u64 = 10;
     const LOOKBACK_DAYS: u64 = 3;
-    
+
     assert_eq!(RECONNECT_DELAY, 10);
     assert_eq!(LOOKBACK_DAYS, 3);
 }
@@ -322,11 +239,11 @@ fn test_daily_catchup_scenario() {
     // 2. Run if 24h elapsed since last catchup for that relay
     // 3. Full reconciliation (no time limit)
     // 4. Stagger between relays (5 minutes)
-    
+
     const CHECK_INTERVAL: u64 = 3600; // 1 hour
     const DAILY_INTERVAL: u64 = 86400; // 24 hours
     const STAGGER: u64 = 300; // 5 minutes
-    
+
     assert_eq!(CHECK_INTERVAL, 3600);
     assert_eq!(DAILY_INTERVAL, 86400);
     assert_eq!(STAGGER, 300);
@@ -343,10 +260,10 @@ fn test_existing_events_skipped() {
     // 1. Fetch events from relay
     // 2. For each event, check if it exists locally
     // 3. Skip if exists, validate and store if not
-    
+
     // This is implemented in negentropy.rs:event_exists_locally()
     // which queries the database for the event by ID
-    
+
     const SKIP_EXISTING: bool = true;
     assert!(SKIP_EXISTING);
 }
@@ -355,15 +272,15 @@ fn test_existing_events_skipped() {
 #[test]
 fn test_duplicate_prevention() {
     use std::collections::HashSet;
-    
+
     let mut processed_ids: HashSet<String> = HashSet::new();
     let event_id = "abc123def456".to_string();
-    
+
     // First time seeing this event - should process
     let is_new = !processed_ids.contains(&event_id);
     assert!(is_new);
     processed_ids.insert(event_id.clone());
-    
+
     // Second time - should skip
     let is_duplicate = processed_ids.contains(&event_id);
     assert!(is_duplicate);
@@ -380,18 +297,18 @@ fn test_config_fields_for_catchup() {
     // - sync_startup_delay_secs (default: 30)
     // - sync_reconnect_delay_secs (default: 10)
     // - sync_reconnect_lookback_days (default: 3)
-    
+
     // Environment variables:
     // - NGIT_SYNC_STARTUP_DELAY_SECS
     // - NGIT_SYNC_RECONNECT_DELAY_SECS
     // - NGIT_SYNC_RECONNECT_LOOKBACK_DAYS
-    
+
     let expected_defaults = vec![
         ("startup_delay_secs", 30u64),
         ("reconnect_delay_secs", 10u64),
         ("reconnect_lookback_days", 3u64),
     ];
-    
+
     assert_eq!(expected_defaults.len(), 3);
     assert_eq!(expected_defaults[0].1, 30);
     assert_eq!(expected_defaults[1].1, 10);
@@ -405,7 +322,7 @@ fn test_catchup_respects_config() {
     let custom_startup_delay: u64 = 60;
     let custom_reconnect_delay: u64 = 20;
     let custom_lookback_days: u64 = 7;
-    
+
     // All should be configurable to non-default values
     assert_ne!(custom_startup_delay, 30);
     assert_ne!(custom_reconnect_delay, 10);

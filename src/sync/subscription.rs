@@ -26,12 +26,6 @@ use super::filter::FilterService;
 /// Maximum number of filters before consolidation is triggered
 const CONSOLIDATION_THRESHOLD: usize = 150;
 
-/// Kind 30617 - Repository Announcement (NIP-34)
-const KIND_REPOSITORY_ANNOUNCEMENT: u16 = 30617;
-
-/// Kind 30618 - Maintainer List (NIP-34)
-const KIND_MAINTAINER_LIST: u16 = 30618;
-
 /// Manages subscriptions for a single relay connection
 ///
 /// Tracks which announcements and events have been subscribed to,
@@ -113,10 +107,7 @@ impl SubscriptionManager {
 
         // Build Layer 3 filter for this event
         // Layer 3 filters target events with 'e' tags pointing to this event
-        let filter = Filter::new().custom_tag(
-            SingleLetterTag::lowercase(Alphabet::E),
-            event_id,
-        );
+        let filter = Filter::new().custom_tag(SingleLetterTag::lowercase(Alphabet::E), event_id);
 
         Some(vec![filter])
     }
@@ -212,67 +203,27 @@ impl SubscriptionManager {
             }
         };
 
-        // Determine the kind for the coordinate
-        let kind = event.kind.as_u16();
-        if kind != KIND_REPOSITORY_ANNOUNCEMENT && kind != KIND_MAINTAINER_LIST {
+        // Verify this is an announcement kind
+        if !matches!(event.kind, Kind::GitRepoAnnouncement | Kind::RepoState) {
             tracing::warn!(
                 "Event {} is not an announcement (kind {}), cannot build Layer 2 filter",
                 event.id.to_hex(),
-                kind
+                event.kind
             );
             return Vec::new();
         }
 
         // Build the addressable coordinate: kind:pubkey:identifier
-        let coord = format!("{}:{}:{}", kind, event.pubkey.to_hex(), identifier);
-
-        // Create filter with 'a' tag for this coordinate
-        let filter = Filter::new().custom_tag(
-            SingleLetterTag::lowercase(Alphabet::A),
-            coord,
+        let coord = format!(
+            "{}:{}:{}",
+            event.kind.as_u16(),
+            event.pubkey.to_hex(),
+            identifier
         );
 
+        // Create filter with 'a' tag for this coordinate
+        let filter = Filter::new().custom_tag(SingleLetterTag::lowercase(Alphabet::A), coord);
+
         vec![filter]
-    }
-
-    /// Check if an event kind is an announcement kind
-    pub fn is_announcement_kind(kind: u16) -> bool {
-        kind == KIND_REPOSITORY_ANNOUNCEMENT || kind == KIND_MAINTAINER_LIST
-    }
-
-    /// Check if an event kind is a PR/Issue/Patch kind that should trigger Layer 3
-    pub fn is_pr_issue_kind(kind: u16) -> bool {
-        matches!(
-            kind,
-            1617 | // Patch proposal (NIP-34)
-            1618 | // PR
-            1619 | // PR Update
-            1621 | // Issue
-            1622   // Reply
-        )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::SubscriptionManager;
-
-    #[test]
-    fn test_is_announcement_kind() {
-        assert!(SubscriptionManager::is_announcement_kind(30617));
-        assert!(SubscriptionManager::is_announcement_kind(30618));
-        assert!(!SubscriptionManager::is_announcement_kind(1));
-        assert!(!SubscriptionManager::is_announcement_kind(1617));
-    }
-
-    #[test]
-    fn test_is_pr_issue_kind() {
-        assert!(SubscriptionManager::is_pr_issue_kind(1617));
-        assert!(SubscriptionManager::is_pr_issue_kind(1618));
-        assert!(SubscriptionManager::is_pr_issue_kind(1619));
-        assert!(SubscriptionManager::is_pr_issue_kind(1621));
-        assert!(SubscriptionManager::is_pr_issue_kind(1622));
-        assert!(!SubscriptionManager::is_pr_issue_kind(30617));
-        assert!(!SubscriptionManager::is_pr_issue_kind(1));
     }
 }

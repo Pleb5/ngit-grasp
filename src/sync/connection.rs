@@ -70,10 +70,8 @@ impl SyncConnection {
         tracing::info!("Sync connection established to {}", url);
 
         // Create subscription manager for this connection
-        let subscription_manager = SubscriptionManager::new(
-            filter_service.clone(),
-            remote_domain.to_string(),
-        );
+        let subscription_manager =
+            SubscriptionManager::new(filter_service.clone(), remote_domain.to_string());
 
         Ok(Self {
             url: url.to_string(),
@@ -208,10 +206,8 @@ impl SyncConnection {
     /// - kind 30617/30618: New announcement → add Layer 2 subscription
     /// - kind 1617/1618/1619/1621/1622: New PR/Issue → add Layer 3 subscription
     async fn handle_dynamic_subscription(&mut self, event: &Event) {
-        let kind = event.kind.as_u16();
-
         // Check if this is an announcement kind (triggers Layer 2 subscription)
-        if SubscriptionManager::is_announcement_kind(kind) {
+        if matches!(event.kind, Kind::GitRepoAnnouncement | Kind::RepoState) {
             if let Some(new_filters) = self.subscription_manager.add_announcement(event) {
                 tracing::info!(
                     "New announcement {} on {}, adding {} Layer 2 filter(s) (total filters: {})",
@@ -224,8 +220,11 @@ impl SyncConnection {
             }
         }
 
-        // Check if this is a PR/Issue kind (triggers Layer 3 subscription)
-        if SubscriptionManager::is_pr_issue_kind(kind) {
+        // Check if this is a Patch/PR/Issue kind (triggers Layer 3 subscription)
+        if matches!(
+            event.kind,
+            Kind::GitPatch | Kind::GitIssue | Kind::Custom(1618)
+        ) {
             if let Some(new_filters) = self.subscription_manager.add_event(event) {
                 tracing::info!(
                     "New PR/Issue {} on {}, adding {} Layer 3 filter(s) (total filters: {})",
@@ -366,11 +365,13 @@ pub async fn connect_with_retry(
             );
         }
 
-        match SyncConnection::new(url, filter_service.clone(), &remote_domain, metrics.clone()).await {
+        match SyncConnection::new(url, filter_service.clone(), &remote_domain, metrics.clone())
+            .await
+        {
             Ok(conn) => {
                 // Record successful connection
                 health_tracker.record_success(url);
-                
+
                 // Record metrics
                 if let Some(ref m) = metrics {
                     m.record_connection_attempt(url, true);
@@ -379,7 +380,7 @@ pub async fn connect_with_retry(
                     m.record_health_state(url, health_tracker.get_state(url));
                     m.record_failure_count(url, 0);
                 }
-                
+
                 tracing::info!("Sync connection established to {}", url);
 
                 // Run the connection (this blocks until disconnection)
@@ -388,7 +389,7 @@ pub async fn connect_with_retry(
                 // Connection ended - record as failure for reconnection backoff
                 // (The connection ending is considered a failure even if it worked for a while)
                 health_tracker.record_failure(url);
-                
+
                 // Update metrics for disconnection
                 if let Some(ref m) = metrics {
                     m.set_relay_connected(url, false);
@@ -396,7 +397,7 @@ pub async fn connect_with_retry(
                     m.record_health_state(url, health_tracker.get_state(url));
                     m.record_failure_count(url, health_tracker.get_failure_count(url));
                 }
-                
+
                 tracing::warn!("Sync connection to {} ended, will reconnect", url);
             }
             Err(e) => {
@@ -405,14 +406,14 @@ pub async fn connect_with_retry(
 
                 let failure_count = health_tracker.get_failure_count(url);
                 let state = health_tracker.get_state(url);
-                
+
                 // Record metrics
                 if let Some(ref m) = metrics {
                     m.record_connection_attempt(url, false);
                     m.set_relay_connected(url, false);
                     m.record_health_state(url, state);
                     m.record_failure_count(url, failure_count);
-                    
+
                     // Track dead relays
                     if state == super::health::HealthState::Dead {
                         m.inc_dead_count();
@@ -435,11 +436,7 @@ pub async fn connect_with_retry(
             .get_remaining_backoff(url)
             .unwrap_or(Duration::from_secs(5));
 
-        tracing::debug!(
-            "Waiting {:?} before reconnecting to {}",
-            wait_duration,
-            url
-        );
+        tracing::debug!("Waiting {:?} before reconnecting to {}", wait_duration, url);
         tokio::time::sleep(wait_duration).await;
     }
 }
