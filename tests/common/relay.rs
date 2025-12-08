@@ -57,12 +57,8 @@ impl TestRelay {
     ///     source.stop().await;
     /// }
     /// ```
-    pub async fn start_with_sync(bootstrap_relay_url: &str) -> Self {
-        Self::start_with_options(
-            Self::find_free_port(),
-            Some(bootstrap_relay_url.to_string()),
-        )
-        .await
+    pub async fn start_with_sync(bootstrap_relay_url: Option<String>) -> Self {
+        Self::start_with_options(Self::find_free_port(), bootstrap_relay_url).await
     }
 
     /// Start relay with options

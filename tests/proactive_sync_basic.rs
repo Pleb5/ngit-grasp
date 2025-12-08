@@ -74,9 +74,7 @@ async fn check_event_syncs(
         .await
         .expect("Failed to connect to target relay");
 
-    let filter = Filter::new()
-        .kind(event.kind)
-        .author(keys.public_key());
+    let filter = Filter::new().kind(event.kind).author(keys.public_key());
 
     let events_on_target = client_target
         .fetch_events(filter, Duration::from_secs(3))
@@ -185,7 +183,7 @@ async fn test_sync_relay_connects_to_source() {
     let relay_a = TestRelay::start().await;
 
     // Start syncing relay (relay_b) configured to sync from relay_a
-    let relay_b = TestRelay::start_with_sync(relay_a.url()).await;
+    let relay_b = TestRelay::start_with_sync(Some(relay_a.url().into())).await;
 
     // Give some time for connection to establish
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -197,9 +195,9 @@ async fn test_sync_relay_connects_to_source() {
     relay_a.stop().await;
 }
 
-/// Test that valid events sync from source to syncing relay
+/// Test that valid events sync from source to bootstrap relay
 #[tokio::test]
-async fn test_valid_event_syncs_to_relay() {
+async fn announcement_listing_relay_syncs_from_bootstrap_relay() {
     // Start source relay (relay_a)
     let relay_a = TestRelay::start().await;
     println!(
@@ -209,7 +207,7 @@ async fn test_valid_event_syncs_to_relay() {
     );
 
     // Start syncing relay (relay_b) configured to sync from relay_a
-    let relay_b = TestRelay::start_with_sync(relay_a.url()).await;
+    let relay_b = TestRelay::start_with_sync(Some(relay_a.url().into())).await;
     println!(
         "relay_b started at {} (domain: {})",
         relay_b.url(),
@@ -226,11 +224,8 @@ async fn test_valid_event_syncs_to_relay() {
     // Create a repository announcement that lists BOTH relays
     // This is required for sync - the event must reference both the source relay
     // and the syncing relay for the write policy to accept it on both sides
-    let event = create_repo_announcement(
-        &keys,
-        &[&relay_a.domain(), &relay_b.domain()],
-        "test-repo",
-    );
+    let event =
+        create_repo_announcement(&keys, &[&relay_a.domain(), &relay_b.domain()], "test-repo");
     let event_id = event.id;
 
     // Print event details for debugging
@@ -263,7 +258,7 @@ async fn test_valid_event_syncs_to_relay() {
 /// This verifies that relay_b's write policy correctly rejects events during sync
 /// if they don't list relay_b as one of their relays.
 #[tokio::test]
-async fn test_event_not_listing_target_relay_is_not_synced() {
+async fn test_announcement_not_listing_relay_is_not_synced_from_boostrap_relay() {
     // Start source relay (relay_a)
     let relay_a = TestRelay::start().await;
     println!(
@@ -273,7 +268,7 @@ async fn test_event_not_listing_target_relay_is_not_synced() {
     );
 
     // Start syncing relay (relay_b) configured to sync from relay_a
-    let relay_b = TestRelay::start_with_sync(relay_a.url()).await;
+    let relay_b = TestRelay::start_with_sync(Some(relay_a.url().into())).await;
     println!(
         "relay_b started at {} (domain: {})",
         relay_b.url(),
@@ -319,5 +314,153 @@ async fn test_event_not_listing_target_relay_is_not_synced() {
         !result.synced_to_target,
         "Event {} should NOT have been synced to relay_b (it doesn't list relay_b)",
         event_id
+    );
+}
+
+fn create_kind_event_referencing_repo(keys: &Keys, repo_coord: &str) -> Event {
+    // TODO this breaks with kind 1
+    EventBuilder::new(Kind::Custom(1617), "Test patch proposal")
+        .tags(vec![Tag::custom(
+            TagKind::custom("a"),
+            vec![repo_coord.to_string()],
+        )])
+        .sign_with_keys(keys)
+        .expect("Failed to sign event")
+}
+
+/// Test that when a relay is discovered (via an announcement event), events are synced from it
+///
+/// This test verifies dynamic relay discovery from direct submissions:
+/// 1. relay_a has an announcement and a patch event
+/// 2. relay_b (sync enabled, NO bootstrap) receives the announcement directly
+/// 3. relay_b discovers relay_a from the announcement and connects to sync
+/// 4. relay_b syncs the patch event from relay_a
+///
+/// This tests the scenario where relays discover each other through announcements
+/// submitted by users, not through an existing sync connection.
+#[tokio::test]
+async fn repo_events_synced_from_discovered_relay_after_announcement_received() {
+    // relay_a: source relay with the patch event
+    let relay_a = TestRelay::start().await;
+    println!(
+        "relay_a started at {} (domain: {})",
+        relay_a.url(),
+        relay_a.domain()
+    );
+
+    // relay_b: sync enabled but NO bootstrap relay - will discover relay_a
+    let relay_b = TestRelay::start_with_sync(None).await;
+    println!(
+        "relay_b started at {} (domain: {})",
+        relay_b.url(),
+        relay_b.domain()
+    );
+
+    // Create test keys
+    let keys = Keys::generate();
+
+    // Create a repository announcement that lists BOTH relays
+    let announcement = create_repo_announcement(
+        &keys,
+        &[&relay_a.domain(), &relay_b.domain()],
+        "test-repo-discovery",
+    );
+    let announcement_id = announcement.id;
+
+    println!(
+        "Created announcement {} (kind {})",
+        announcement_id,
+        announcement.kind.as_u16()
+    );
+    for tag in announcement.tags.iter() {
+        println!("  Tag: {:?}", tag.as_slice());
+    }
+
+    // Build the repo coordinate for the 'a' tag in the patch
+    let repo_coord = format!(
+        "{}:{}:{}",
+        KIND_REPOSITORY_STATE,
+        keys.public_key().to_hex(),
+        "test-repo-discovery"
+    );
+
+    // Create a patch event that references the announcement
+    let patch = create_kind_event_referencing_repo(&keys, &repo_coord);
+    let patch_id = patch.id;
+
+    println!("Created patch {} (kind {})", patch_id, patch.kind.as_u16());
+    for tag in patch.tags.iter() {
+        println!("  Tag: {:?}", tag.as_slice());
+    }
+
+    // Step 1: Send announcement to relay_a
+    let client_a = create_connected_client(relay_a.url(), keys.clone())
+        .await
+        .expect("Failed to connect to relay_a");
+    send_event_reliably(&client_a, &announcement)
+        .await
+        .expect("Failed to send announcement to relay_a");
+    println!("Announcement sent to relay_a");
+
+    // Step 2: Send patch to relay_a ONLY
+    send_event_reliably(&client_a, &patch)
+        .await
+        .expect("Failed to send patch to relay_a");
+    println!("Patch sent to relay_a");
+    client_a.disconnect().await;
+
+    // Step 3: Send announcement to relay_b directly (this should trigger discovery of relay_a)
+    let client_b = create_connected_client(relay_b.url(), keys.clone())
+        .await
+        .expect("Failed to connect to relay_b");
+    send_event_reliably(&client_b, &announcement)
+        .await
+        .expect("Failed to send announcement to relay_b");
+    println!("Announcement sent to relay_b (should trigger discovery of relay_a)");
+    client_b.disconnect().await;
+
+    // Step 4: Wait for relay_b to discover relay_a and sync the patch
+    println!("Waiting 3s for relay_b to discover relay_a and sync patch...");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Step 5: Verify patch was synced to relay_b
+    let client_b_check = create_connected_client(relay_b.url(), Keys::generate())
+        .await
+        .expect("Failed to connect to relay_b for verification");
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(1617))
+        .author(keys.public_key());
+
+    let events_on_b = client_b_check
+        .fetch_events(filter, Duration::from_secs(3))
+        .await
+        .expect("Failed to fetch from relay_b");
+
+    let patch_synced = events_on_b.iter().any(|e| e.id == patch_id);
+
+    if patch_synced {
+        println!(
+            "Patch {} found on relay_b (synced from discovered relay_a)",
+            patch_id
+        );
+    } else {
+        println!("Patch {} NOT found on relay_b", patch_id);
+        println!(
+            "Events on relay_b: {:?}",
+            events_on_b.iter().map(|e| e.id).collect::<Vec<_>>()
+        );
+    }
+
+    client_b_check.disconnect().await;
+
+    // Clean up
+    relay_b.stop().await;
+    relay_a.stop().await;
+
+    assert!(
+        patch_synced,
+        "Patch {} should have been synced to relay_b from discovered relay_a",
+        patch_id
     );
 }

@@ -1,7 +1,7 @@
 //! GRASP-02 Phase 2: Multi-Relay Proactive Sync Integration Tests
 //!
 //! Tests the multi-relay proactive sync functionality.
-//! 
+//!
 //! Note: Integration tests for sync timing are inherently flaky due to
 //! subprocess communication latency. Unit tests for FilterService and
 //! SyncManager cover the core logic in src/sync/filter.rs and manager.rs.
@@ -32,7 +32,7 @@ async fn test_sync_relay_starts_with_source_url() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Start syncing relay (relay_sync) configured to sync from relay_a
-    let relay_sync = TestRelay::start_with_sync(relay_a.url()).await;
+    let relay_sync = TestRelay::start_with_sync(Some(relay_a.url().into())).await;
 
     // Give time for connection establishment
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -134,7 +134,7 @@ async fn test_event_submission_to_relay() {
     // Send event - it may or may not be accepted depending on validation
     // The point is the connection and submission work
     let result = client.send_event(&event).await;
-    
+
     // Clean up
     client.disconnect().await;
     relay.stop().await;
@@ -148,11 +148,11 @@ async fn test_event_submission_to_relay() {
 fn test_domain_extraction() {
     // This tests the domain() method of TestRelay indirectly
     // by verifying the format matches expectations
-    
+
     // Domain should be in format "127.0.0.1:PORT"
     let example_domain = "127.0.0.1:8080";
     assert!(example_domain.starts_with("127.0.0.1:"));
-    
+
     // URL should be in format "ws://127.0.0.1:PORT"
     let example_url = "ws://127.0.0.1:8080";
     assert!(example_url.starts_with("ws://127.0.0.1:"));
@@ -166,12 +166,12 @@ async fn test_sync_configuration_applied() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Start syncing relay with explicit sync URL
-    let relay_sync = TestRelay::start_with_sync(relay_source.url()).await;
+    let relay_sync = TestRelay::start_with_sync(Some(relay_source.url().into())).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Both relays should be running
     // The sync relay has NGIT_SYNC_BOOTSTRAP_RELAY_URL set (verified by relay starting)
-    
+
     let client_source = Client::default();
     client_source
         .add_relay(relay_source.url())
