@@ -11,6 +11,34 @@ This document presents a simplified redesign of the proactive sync module. The k
 3. **Efficiency**: Minimize connections and bandwidth through filter consolidation
 4. **Consistency**: Use unified filters for both live sync and catchup
 
+## Scale Targets & Upper Bounds
+
+This design targets the following scale:
+
+| Metric | Target | Notes |
+|--------|--------|-------|
+| **Repositories** | 1,000 | Repos we host/track |
+| **Root events per repo** | 50 (avg) | PRs, Issues, Patches per repo |
+| **Total relays in ecosystem** | 100 | Unique relays across all repos |
+| **Relays per repo** | 5 (avg) | Relays listed in each repo's announcement |
+| **Total root events** | ~50,000 | 1,000 repos × 50 events |
+| **Sync connections** | ~50-100 | Based on relay overlap |
+
+**Memory Estimate (in-memory HashMaps):**
+
+- `FollowingRepoRootEvents`: ~1,000 entries × 50 EventIds = ~3-5 MB
+- `SyncRelays`: ~100 entries × varying repo counts = ~2-3 MB
+- **Total in-memory state**: ~10 MB (well within acceptable limits)
+
+**Upper Bounds (redesign triggers):**
+
+- **10,000+ repos**: Consider database-backed state instead of in-memory HashMaps
+- **500+ sync relays**: Consider connection pooling or relay prioritization
+- **500+ root events per repo**: Consider per-repo pagination in Layer 3 filters
+- **Sustained >100 events/second**: Consider write batching to database
+
+Beyond these limits, the in-memory HashMap model may need to evolve to a database-backed approach with lazy loading.
+
 ## Core Data Structures
 
 The entire sync filter state is captured in two HashMaps, initialized from database queries at startup:
@@ -216,6 +244,8 @@ A single self-subscriber watches for new events from **our own relay** and updat
 
 The batch timer **starts only when the first event arrives**, not on a fixed interval. This prevents the scenario where an event arriving at second 4 of a 5-second interval only gets 1 second before the batch fires.
 
+**Important:** Once the batch timer starts, it does NOT reset when additional events arrive. The batch will fire exactly 5 seconds after the first event, regardless of how many subsequent events are queued. This ensures predictable latency and prevents indefinite batching during high-activity periods.
+
 ```rust
 impl SelfSubscriber {
     async fn run(&self) {
@@ -326,6 +356,9 @@ impl SelfSubscriber {
         let current_filter_count = self.get_filter_count_for_relay(relay_url).await;
         let new_filter_count = current_filter_count + incremental_filters.len();
 
+        // Note: 70 is a conservative threshold that may need tuning based on
+        // production observations. It was chosen to trigger consolidation earlier
+        // than v1's 150, but optimal value depends on relay behavior.
         if new_filter_count > 70 {
             // Consolidate: add incremental filters first (no since), wait for EOSE,
             // then close all and resubscribe with consolidated filters (with since)
@@ -424,6 +457,37 @@ async fn consolidate_relay_subscription(
     self.send_filters_to_relay(relay_url, filters_with_since).await;
 }
 ```
+
+## Daily Full Catchup
+
+To capture events that may have taken longer than 15 minutes to propagate through the nostr network, we perform a daily full catchup:
+
+```rust
+impl SyncManager {
+    /// Runs approximately every 24 hours per relay connection
+    async fn daily_catchup(&mut self, relay_url: &str) {
+        // Close all current subscriptions for this relay
+        self.close_all_subscriptions(relay_url).await;
+        
+        // Rebuild fresh filters from current HashMap state
+        let filters = self.build_three_layer_filters_for_relay(relay_url).await;
+        
+        // Subscribe WITHOUT since filter to get full historical sync
+        for filter in filters {
+            self.subscribe_to_relay(relay_url, filter).await;
+        }
+        
+        // After EOSE, switch back to live mode with since filter
+        self.wait_for_eose(relay_url).await;
+        
+        // Re-add since filter for ongoing live sync
+        let since = Timestamp::now() - 900; // 15 minutes ago
+        self.resubscribe_with_since(relay_url, since).await;
+    }
+}
+```
+
+**Rationale:** The 15-minute reconnection window is standard for nostr event propagation, but some events may take longer. Rather than increasing the window (which would cause more duplicate processing), we do a daily full catchup to ensure nothing is missed. This adds minimal complexity while providing comprehensive coverage.
 
 ## Sync Relay Connections
 
@@ -628,16 +692,18 @@ src/sync/
 
 1. **Single Source of Truth**: Two HashMaps represent all sync state, initialized from database
 2. **Event-Driven Updates**: Self-subscriber updates HashMaps; relay connections read from them
-3. **Batched Filter Updates**: 5-second window that starts on first event (not fixed interval)
+3. **Batched Filter Updates**: 5-second window that starts on first event (timer does NOT reset on subsequent events)
 4. **Uniform Reconnection**: Always use `since = last_successful - 15min`
 5. **No Jitter**: Trade-offs not worth it - orphan filters and inefficiency outweigh thundering herd concerns
-6. **Bootstrap Relay Protected**: Never removed from sync_relays; subscribes with Layer 1 even if empty
+6. **Bootstrap Relay Protected**: Never removed from sync_relays - ensures at least one sync connection exists even when no repositories currently list our service (cold start / recovery scenario)
 7. **30618 Remote-Only**: Maintainer state synced from remote relays, not self-subscribed
-8. **70 Filter Consolidation Threshold**: Lower than v1's 150 for earlier consolidation
+8. **70 Filter Consolidation Threshold**: Lower than v1's 150 for earlier consolidation (conservative value that may need tuning based on production observation)
 9. **100-Tag Batching**: Consistent batch size for Layer 2 and Layer 3 filters
 10. **Layer 2 All Kinds**: Subscribe to ALL events with 'a' tags, not just NIP-34 kinds
 11. **Two-Phase Consolidation**: Incremental filters WITHOUT since first, then consolidated WITH since
 12. **Multiple Repo Refs**: Handle events that tag multiple repos correctly
+13. **Daily Full Catchup**: Periodic sync restart without `since` filter (~24h) to catch slow-propagating events
+14. **Dual DB Queries at Startup**: Separate queries for root events and announcements. Could be combined into a single query, but some relays cache by kind which may make separate queries more efficient. Trade-off deferred for future optimization.
 
 ---
 
