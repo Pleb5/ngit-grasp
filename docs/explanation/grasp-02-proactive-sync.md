@@ -18,7 +18,11 @@ This document covers **event syncing only**. Git data syncing is out of scope fo
 ```mermaid
 flowchart TB
     subgraph ngit-grasp
-        SM[SyncManager]
+        subgraph SyncManager
+            SS[Self-Subscriber]
+            RC[Remote Connections]
+        end
+        WS[WebSocket Server]
         FS[FilterService]
         RH[RelayHealthTracker]
         DB[(Database)]
@@ -32,40 +36,87 @@ flowchart TB
         R3[nostr.land]
     end
 
-    SM -->|builds filters| FS
-    SM -->|tracks health| RH
-    SM -->|stores events| DB
-    SM -->|validates| AP
+    WS -->|broadcasts events| SS
+    SS -->|discovers relays| RC
+    RC -->|builds filters| FS
+    RC -->|tracks health| RH
+    RC -->|stores events| DB
+    RC -->|validates| AP
 
-    SM <-->|WebSocket + NEG| R1
-    SM <-->|WebSocket + NEG| R2
-    SM <-->|WebSocket + NEG| R3
+    RC <-->|WebSocket + NEG| R1
+    RC <-->|WebSocket + NEG| R2
+    RC <-->|WebSocket + NEG| R3
 
     RH -->|exposes state| MET
 ```
+
+**Key Insight: Self-Subscribe Architecture**
+
+The SyncManager uses a "self-subscribe" pattern for relay discovery. Rather than polling the database periodically, it connects to its own WebSocket server as a client and subscribes to kind 30617 events. When new announcements are saved (from any source), the self-subscriber receives them instantly and can spawn connections to newly discovered relays.
 
 ## Connection Management
 
 ### Relay Discovery
 
-Relays to connect to are discovered from **all stored repository announcements**:
+Relays to connect to are discovered using a **self-subscribe architecture** rather than periodic polling. The SyncManager connects to its own relay as a client and subscribes to kind 30617 (repository announcement) events. When a new announcement is saved to the database (from direct submission or sync), the self-subscriber receives it immediately and discovers new relays to connect to.
+
+```mermaid
+flowchart LR
+    subgraph Relay
+        WS[WebSocket Server]
+        DB[(Database)]
+    end
+    
+    subgraph SyncManager
+        SS[Self-Subscribe Client]
+        RC[Remote Connections]
+    end
+    
+    WS -->|broadcast| SS
+    SS -->|extract relay URLs| RC
+    RC -->|sync events| WS
+```
+
+**Why Self-Subscribe vs Polling?**
+
+| Approach | Latency | Complexity | Resource Use |
+|----------|---------|------------|--------------|
+| Self-Subscribe | Instant | Low | Minimal (1 WS connection) |
+| Periodic Polling | 30s+ delay | Higher | DB queries every N seconds |
+
+The self-subscribe approach provides:
+- **Immediate discovery**: New relays discovered instantly when announcement saved
+- **No polling overhead**: No periodic database queries
+- **Simple architecture**: Reuses existing WebSocket infrastructure
+
+**Implementation Pattern:**
 
 ```rust
-// Pseudocode for relay discovery
-fn discover_relays(database: &Database) -> HashSet<RelayUrl> {
-    let announcements = database.query(Filter::new().kind(30617));
-    let mut relays = HashSet::new();
+// In SyncManager::run()
+let self_client = Client::default();
+self_client.add_relay(&own_relay_url).await?;
+self_client.connect().await;
 
-    for announcement in announcements {
-        for relay_url in announcement.relays_tags() {
-            if relay_url != our_domain {  // Exclude ourselves
-                relays.insert(relay_url);
+let filter = Filter::new().kind(Kind::Custom(30617));
+self_client.subscribe(filter, None).await?;
+
+// Handle notifications - when announcement arrives, extract relay URLs
+client.handle_notifications(|notification| async {
+    if let RelayPoolNotification::Event { event, .. } = notification {
+        let new_urls = filter_service.extract_relay_urls_from_event(&event);
+        for url in new_urls {
+            if !active_relays.contains(&url) && !is_own_relay(&url) {
+                spawn_connection(url, tx.clone(), filter_service.clone());
             }
         }
     }
-    relays
-}
+    Ok(false) // Continue processing
+});
 ```
+
+**Startup Discovery:** At startup, existing announcements in the database are queried once to discover initial relays. After startup, all discovery is event-driven via self-subscribe.
+
+**Reconnection:** The self-subscriber has built-in exponential backoff reconnection (1s → 60s max) to handle temporary disconnections from our own relay.
 
 ### Connection Lifecycle
 
