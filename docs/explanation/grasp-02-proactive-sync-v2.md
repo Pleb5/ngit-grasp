@@ -15,14 +15,14 @@ This document presents a simplified redesign of the proactive sync module. The k
 
 This design targets the following scale:
 
-| Metric | Target | Notes |
-|--------|--------|-------|
-| **Repositories** | 1,000 | Repos we host/track |
-| **Root events per repo** | 50 (avg) | PRs, Issues, Patches per repo |
-| **Total relays in ecosystem** | 100 | Unique relays across all repos |
-| **Relays per repo** | 5 (avg) | Relays listed in each repo's announcement |
-| **Total root events** | ~50,000 | 1,000 repos × 50 events |
-| **Sync connections** | ~50-100 | Based on relay overlap |
+| Metric                        | Target   | Notes                                     |
+| ----------------------------- | -------- | ----------------------------------------- |
+| **Repositories**              | 1,000    | Repos we host/track                       |
+| **Root events per repo**      | 50 (avg) | PRs, Issues, Patches per repo             |
+| **Total relays in ecosystem** | 100      | Unique relays across all repos            |
+| **Relays per repo**           | 5 (avg)  | Relays listed in each repo's announcement |
+| **Total root events**         | ~50,000  | 1,000 repos × 50 events                   |
+| **Sync connections**          | ~50-100  | Based on relay overlap                    |
 
 **Memory Estimate (in-memory HashMaps):**
 
@@ -94,6 +94,21 @@ flowchart TB
     RN -->|events| AP
     AP -->|store| DB
 ```
+
+## Module Structure
+
+The sync module is organized following the pattern used by `src/http/mod.rs` and `src/metrics/mod.rs` where the primary struct lives in `mod.rs`:
+
+```
+src/sync/
+├── mod.rs              # SyncManager + state types (FollowingRepoRootEvents, SyncRelays)
+├── self_subscriber.rs  # SelfSubscriber struct and batching logic
+├── relay_connection.rs # Per-relay WebSocket connection management
+├── health.rs           # RelayHealthTracker for backoff and dead relay detection
+└── metrics.rs          # SyncMetrics for Prometheus integration
+```
+
+**Rationale:** The state type aliases (`FollowingRepoRootEvents`, `SyncRelays`) are simple `Arc<RwLock<HashMap<...>>>` wrappers owned by SyncManager. Rather than creating a separate `state.rs` for two type aliases, they are colocated with SyncManager in `mod.rs` to reduce file count while maintaining clarity.
 
 ## Design Decision: No Jitter
 
@@ -468,18 +483,18 @@ impl SyncManager {
     async fn daily_catchup(&mut self, relay_url: &str) {
         // Close all current subscriptions for this relay
         self.close_all_subscriptions(relay_url).await;
-        
+
         // Rebuild fresh filters from current HashMap state
         let filters = self.build_three_layer_filters_for_relay(relay_url).await;
-        
+
         // Subscribe WITHOUT since filter to get full historical sync
         for filter in filters {
             self.subscribe_to_relay(relay_url, filter).await;
         }
-        
+
         // After EOSE, switch back to live mode with since filter
         self.wait_for_eose(relay_url).await;
-        
+
         // Re-add since filter for ongoing live sync
         let since = Timestamp::now() - 900; // 15 minutes ago
         self.resubscribe_with_since(relay_url, since).await;
@@ -663,14 +678,14 @@ async fn check_relay_removal(&mut self) {
 
 ```
 src/sync/
-├── mod.rs              # Module exports, constants
-├── manager.rs          # SyncManager - orchestrates sync
-├── state.rs            # FollowingRepoRootEvents + SyncRelays HashMaps
-├── self_subscriber.rs  # Self-subscriber + batching logic
+├── mod.rs              # SyncManager + state types (FollowingRepoRootEvents, SyncRelays)
+├── self_subscriber.rs  # SelfSubscriber + batching logic
 ├── relay_connection.rs # Per-relay WebSocket + filters
 ├── health.rs           # RelayHealthTracker (reuse from v1)
 └── metrics.rs          # SyncMetrics (reuse from v1)
 ```
+
+> **Note:** SyncManager and state type aliases are colocated in `mod.rs` following the pattern of `src/http/mod.rs` (HttpService) and `src/metrics/mod.rs` (Metrics). See the earlier "Module Structure" section for rationale.
 
 ## Comparison: v1 vs v2
 
