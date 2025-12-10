@@ -15,11 +15,15 @@
 pub mod algorithms;
 pub mod filters;
 pub mod health;
+pub mod metrics;
 pub mod relay_connection;
 pub mod self_subscriber;
 
 // Re-export core algorithm types
 pub use algorithms::{AddFilters, RelaySyncNeeds};
+
+// Re-export metrics types
+pub use metrics::{event_source, SyncMetrics};
 
 // Re-export relay connection types
 pub use relay_connection::{RelayConnection, RelayEvent};
@@ -35,7 +39,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nostr_sdk::prelude::*;
-use prometheus::{IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry};
 use tokio::sync::{broadcast, Mutex, RwLock};
 
 use crate::config::Config;
@@ -154,168 +157,6 @@ pub struct PendingItems {
     pub repos: HashSet<String>,
     /// Root events being synced in this batch
     pub root_events: HashSet<EventId>,
-}
-
-// =============================================================================
-// SyncMetrics - Prometheus Metrics for Sync System
-// =============================================================================
-
-/// Prometheus metrics for the proactive sync system.
-///
-/// Tracks relay connections, sync progress, and operational statistics.
-/// Following the comprehensive v3 metrics design.
-#[derive(Clone)]
-pub struct SyncMetrics {
-    // === Connection metrics ===
-    /// Per-relay connection status (1=connected, 0=disconnected)
-    relay_connected: IntGaugeVec,
-    /// Connection attempts by relay and result (success/failure)
-    connection_attempts_total: IntCounterVec,
-
-    // === Event metrics ===
-    /// Events synced by source (live/startup/reconnect/daily)
-    events_total: IntCounterVec,
-
-    // === Summary metrics ===
-    /// Total relays discovered and tracked
-    relays_tracked_total: IntGauge,
-    /// Currently connected relay count
-    relays_connected_total: IntGauge,
-}
-
-impl SyncMetrics {
-    /// Register sync metrics with a Prometheus registry.
-    ///
-    /// Returns an error if metrics are already registered (e.g., in tests).
-    pub fn register(registry: &Registry) -> Result<Self, prometheus::Error> {
-        // Connection metrics
-        let relay_connected = IntGaugeVec::new(
-            Opts::new(
-                "ngit_sync_relay_connected",
-                "Relay connection status (1=connected, 0=disconnected)",
-            ),
-            &["relay"],
-        )?;
-        registry.register(Box::new(relay_connected.clone()))?;
-
-        let connection_attempts_total = IntCounterVec::new(
-            Opts::new(
-                "ngit_sync_connection_attempts_total",
-                "Total connection attempts by relay and result",
-            ),
-            &["relay", "result"],
-        )?;
-        registry.register(Box::new(connection_attempts_total.clone()))?;
-
-        // Event metrics
-        let events_total = IntCounterVec::new(
-            Opts::new(
-                "ngit_sync_events_total",
-                "Total events synced by source type",
-            ),
-            &["source"],
-        )?;
-        registry.register(Box::new(events_total.clone()))?;
-
-        // Summary metrics
-        let relays_tracked_total = IntGauge::with_opts(Opts::new(
-            "ngit_sync_relays_tracked_total",
-            "Total number of relays discovered and tracked",
-        ))?;
-        registry.register(Box::new(relays_tracked_total.clone()))?;
-
-        let relays_connected_total = IntGauge::with_opts(Opts::new(
-            "ngit_sync_relays_connected_total",
-            "Number of currently connected relays",
-        ))?;
-        registry.register(Box::new(relays_connected_total.clone()))?;
-
-        Ok(Self {
-            relay_connected,
-            connection_attempts_total,
-            events_total,
-            relays_tracked_total,
-            relays_connected_total,
-        })
-    }
-
-    // === Connection Recording Methods ===
-
-    /// Record a connection attempt (success or failure)
-    pub fn record_connection_attempt(&self, relay: &str, success: bool) {
-        let result = if success { "success" } else { "failure" };
-        self.connection_attempts_total
-            .with_label_values(&[relay, result])
-            .inc();
-    }
-
-    /// Set relay connection status
-    pub fn set_relay_connected(&self, relay: &str, connected: bool) {
-        self.relay_connected
-            .with_label_values(&[relay])
-            .set(if connected { 1 } else { 0 });
-    }
-
-    /// Increment connected count
-    pub fn inc_connected_count(&self) {
-        self.relays_connected_total.inc();
-    }
-
-    /// Decrement connected count
-    pub fn dec_connected_count(&self) {
-        self.relays_connected_total.dec();
-    }
-
-    // === Event Recording Methods ===
-
-    /// Record a synced event by source type
-    ///
-    /// Source types:
-    /// - "live" - Real-time subscription events
-    /// - "startup" - Events from startup catchup
-    /// - "reconnect" - Events from reconnection catchup
-    pub fn record_event(&self, source: &str) {
-        self.events_total.with_label_values(&[source]).inc();
-    }
-
-    /// Record multiple events synced by source type
-    pub fn record_events(&self, source: &str, count: u64) {
-        self.events_total
-            .with_label_values(&[source])
-            .inc_by(count);
-    }
-
-    // === Summary Recording Methods ===
-
-    /// Set the total tracked relay count
-    pub fn set_tracked_count(&self, count: i64) {
-        self.relays_tracked_total.set(count);
-    }
-
-    /// Increment tracked relay count
-    pub fn inc_tracked_count(&self) {
-        self.relays_tracked_total.inc();
-    }
-
-    /// Get current tracked relay count
-    pub fn get_tracked_count(&self) -> i64 {
-        self.relays_tracked_total.get()
-    }
-
-    /// Get current connected relay count
-    pub fn get_connected_count(&self) -> i64 {
-        self.relays_connected_total.get()
-    }
-}
-
-/// Event source types for metrics tracking
-pub mod event_source {
-    /// Real-time subscription events
-    pub const LIVE: &str = "live";
-    /// Events from startup catchup
-    pub const STARTUP: &str = "startup";
-    /// Events from reconnection catchup
-    pub const RECONNECT: &str = "reconnect";
 }
 
 // =============================================================================
