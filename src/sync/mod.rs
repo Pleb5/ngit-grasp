@@ -25,7 +25,7 @@ pub use algorithms::{AddFilters, RelaySyncNeeds};
 pub use relay_connection::{RelayConnection, RelayEvent};
 
 // Re-export self-subscriber types
-pub use self_subscriber::{RelayAction, SelfSubscriber};
+pub use self_subscriber::SelfSubscriber;
 
 // Re-export health tracking types
 pub use health::RelayHealthTracker;
@@ -702,7 +702,7 @@ impl SyncManager {
         );
 
         // 1. Create action channel for self-subscriber -> manager communication
-        let (action_tx, mut action_rx) = mpsc::channel::<RelayAction>(100);
+        let (action_tx, mut action_rx) = mpsc::channel::<AddFilters>(100);
 
         // 2. Create disconnect channel for spawned tasks -> manager communication
         let (disconnect_tx, mut disconnect_rx) = mpsc::channel::<DisconnectNotification>(100);
@@ -760,51 +760,10 @@ impl SyncManager {
             tokio::select! {
                 action = action_rx.recv() => {
                     match action {
-                        Some(RelayAction::SpawnRelay { relay_url, repos }) => {
-                            // Convert to AddFilters format and use unified handler
-                            let root_events: HashSet<EventId> = repos.values().flatten().cloned().collect();
-                            let repo_ids: HashSet<String> = repos.keys().cloned().collect();
-                            
-                            // Build filters for these repos
-                            let filters = crate::sync::filters::build_layer2_and_layer3_filters(
-                                &repo_ids,
-                                &root_events,
-                                None,
-                            );
-                            
-                            let action = AddFilters {
-                                relay_url,
-                                repos: repo_ids,
-                                root_events,
-                                filters,
-                            };
-                            
-                            // Acquire lock to process action
+                        Some(add_filters) => {
+                            // Process AddFilters action directly
                             let mut manager = sync_manager.lock().await;
-                            manager.handle_add_filters(action).await;
-                        }
-                        Some(RelayAction::AddFilters { relay_url, repos }) => {
-                            // Convert to AddFilters format and use unified handler
-                            let root_events: HashSet<EventId> = repos.values().flatten().cloned().collect();
-                            let repo_ids: HashSet<String> = repos.keys().cloned().collect();
-                            
-                            // Build filters for these repos
-                            let filters = crate::sync::filters::build_layer2_and_layer3_filters(
-                                &repo_ids,
-                                &root_events,
-                                None,
-                            );
-                            
-                            let action = AddFilters {
-                                relay_url,
-                                repos: repo_ids,
-                                root_events,
-                                filters,
-                            };
-                            
-                            // Acquire lock to process action
-                            let mut manager = sync_manager.lock().await;
-                            manager.handle_add_filters(action).await;
+                            manager.handle_add_filters(add_filters).await;
                         }
                         None => break,
                     }
