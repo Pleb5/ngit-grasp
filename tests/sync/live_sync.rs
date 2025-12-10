@@ -58,11 +58,8 @@ async fn test_live_sync_layer2_events() {
 
     // 4. Create a repository announcement that lists BOTH relays
     let repo_id = "test-repo-live-l2";
-    let announcement = create_repo_announcement(
-        &keys,
-        &[&relay_a.domain(), &relay_b.domain()],
-        repo_id,
-    );
+    let announcement =
+        create_repo_announcement(&keys, &[&relay_a.domain(), &relay_b.domain()], repo_id);
 
     println!(
         "Created announcement {} (kind {})",
@@ -123,7 +120,7 @@ async fn test_live_sync_layer2_events() {
         .id(issue_id);
 
     let synced = wait_for_event_on_relay(relay_b.url(), filter, Duration::from_secs(5)).await;
-    
+
     println!("Issue {} synced to relay_b: {}", issue_id, synced);
 
     // 10. Cleanup
@@ -150,15 +147,7 @@ async fn test_live_sync_layer2_events() {
 /// 6. Verify comment syncs to relay_b within 5 seconds
 /// 7. Verify comment has correct 'E' tag reference
 ///
-/// # Note
-/// This test is currently ignored because Layer 3 (comment) sync is tracked separately
-/// and may not be fully implemented yet. See discovery.rs for context:
-/// > "Note: Layer 3 (comments on issues) sync is tracked separately and may
-/// > be implemented in future phases."
-///
-/// TODO: Enable this test when Layer 3 sync is implemented.
 #[tokio::test]
-#[ignore = "Layer 3 sync not yet implemented - comments don't sync via discovery"]
 async fn test_live_sync_layer3_events() {
     // 1. Start relays
     let relay_a = TestRelay::start().await;
@@ -179,11 +168,8 @@ async fn test_live_sync_layer3_events() {
 
     // 2. Create and send repository announcement to both relays
     let repo_id = "test-repo-live-l3";
-    let announcement = create_repo_announcement(
-        &keys,
-        &[&relay_a.domain(), &relay_b.domain()],
-        repo_id,
-    );
+    let announcement =
+        create_repo_announcement(&keys, &[&relay_a.domain(), &relay_b.domain()], repo_id);
 
     let client_a = TestClient::new(relay_a.url(), keys.clone())
         .await
@@ -220,16 +206,8 @@ async fn test_live_sync_layer3_events() {
         .expect("Failed to send issue");
     println!("Layer 2 issue {} sent to relay_a", issue_id);
 
-    // 5. Wait for issue to sync to relay_b
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    let issue_filter = Filter::new()
-        .kind(Kind::Custom(KIND_ISSUE))
-        .id(issue_id);
-    let issue_synced = wait_for_event_on_relay(relay_b.url(), issue_filter, Duration::from_secs(3)).await;
-    println!("Issue synced to relay_b: {}", issue_synced);
-
-    // 6. Create and send Layer 3 comment (kind 1111, uppercase E tag)
+    // 5. Create and send Layer 3 comment IMMEDIATELY (before waiting for sync)
+    // This tests that subscriptions without 'since' will catch pre-existing events
     let comment = build_layer3_comment_with_uppercase_e_tag(
         &keys,
         &issue_id,
@@ -238,7 +216,11 @@ async fn test_live_sync_layer3_events() {
     .expect("Failed to create comment");
     let comment_id = comment.id;
 
-    println!("Created comment {} (kind {})", comment_id, comment.kind.as_u16());
+    println!(
+        "Created comment {} (kind {})",
+        comment_id,
+        comment.kind.as_u16()
+    );
     for tag in comment.tags.iter() {
         println!("  Tag: {:?}", tag.as_slice());
     }
@@ -247,7 +229,15 @@ async fn test_live_sync_layer3_events() {
         .send_event(&comment)
         .await
         .expect("Failed to send comment");
-    println!("Layer 3 comment {} sent to relay_a", comment_id);
+    println!("Layer 3 comment {} sent to relay_a BEFORE Layer 3 subscription established", comment_id);
+
+    // 6. Now wait for issue to sync to relay_b (this triggers Layer 3 filter creation)
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let issue_filter = Filter::new().kind(Kind::Custom(KIND_ISSUE)).id(issue_id);
+    let issue_synced =
+        wait_for_event_on_relay(relay_b.url(), issue_filter, Duration::from_secs(3)).await;
+    println!("Issue synced to relay_b: {}", issue_synced);
 
     client_a.disconnect().await;
     client_b.disconnect().await;
@@ -258,8 +248,12 @@ async fn test_live_sync_layer3_events() {
         .author(keys.public_key())
         .id(comment_id);
 
-    let comment_synced = wait_for_event_on_relay(relay_b.url(), comment_filter, Duration::from_secs(5)).await;
-    println!("Comment {} synced to relay_b: {}", comment_id, comment_synced);
+    let comment_synced =
+        wait_for_event_on_relay(relay_b.url(), comment_filter, Duration::from_secs(5)).await;
+    println!(
+        "Comment {} synced to relay_b: {}",
+        comment_id, comment_synced
+    );
 
     // 8. Verify the comment has correct 'E' tag reference
     let mut has_correct_ref = false;
@@ -269,12 +263,15 @@ async fn test_live_sync_layer3_events() {
         if client.add_relay(relay_b.url()).await.is_ok() {
             client.connect().await;
             tokio::time::sleep(Duration::from_millis(500)).await;
-            
+
             let fetch_filter = Filter::new()
                 .kind(Kind::Custom(KIND_COMMENT))
                 .id(comment_id);
-            
-            if let Ok(events) = client.fetch_events(fetch_filter, Duration::from_secs(2)).await {
+
+            if let Ok(events) = client
+                .fetch_events(fetch_filter, Duration::from_secs(2))
+                .await
+            {
                 if let Some(event) = events.first() {
                     // Check for 'E' tag with parent event ID
                     for tag in event.tags.iter() {
@@ -347,11 +344,8 @@ async fn test_live_sync_event_ordering() {
 
     // 2. Create and send repository announcement to both relays
     let repo_id = "test-repo-ordering";
-    let announcement = create_repo_announcement(
-        &keys,
-        &[&relay_a.domain(), &relay_b.domain()],
-        repo_id,
-    );
+    let announcement =
+        create_repo_announcement(&keys, &[&relay_a.domain(), &relay_b.domain()], repo_id);
 
     let client_a = TestClient::new(relay_a.url(), keys.clone())
         .await
@@ -387,12 +381,15 @@ async fn test_live_sync_event_ordering() {
             &format!("Ordering Test Issue {}", i),
         )
         .expect("Failed to create issue");
-        
+
         // Store the created_at timestamp for ordering verification
         expected_order_timestamps.push(issue.created_at);
         issue_ids.push(issue.id);
-        
-        println!("Created issue {} at timestamp {}", issue.id, issue.created_at);
+
+        println!(
+            "Created issue {} at timestamp {}",
+            issue.id, issue.created_at
+        );
 
         client_a
             .send_event(&issue)
@@ -412,7 +409,7 @@ async fn test_live_sync_event_ordering() {
     // 6. Fetch all events from relay_b
     let temp_keys = Keys::generate();
     let client = Client::new(temp_keys);
-    
+
     let events_found: Vec<Event>;
     if client.add_relay(relay_b.url()).await.is_ok() {
         client.connect().await;
@@ -446,7 +443,11 @@ async fn test_live_sync_event_ordering() {
         .filter(|e| issue_ids.contains(&e.id))
         .collect();
 
-    println!("Found {} test events (out of {} total)", test_events.len(), events_found.len());
+    println!(
+        "Found {} test events (out of {} total)",
+        test_events.len(),
+        events_found.len()
+    );
 
     // 8. Check ordering by created_at timestamp
     let mut ordered_correctly = true;
@@ -470,8 +471,7 @@ async fn test_live_sync_event_ordering() {
                 ordered_correctly = false;
                 println!(
                     "Order violation: {} ({}) > {} ({})",
-                    window[0].id, window[0].created_at,
-                    window[1].id, window[1].created_at
+                    window[0].id, window[0].created_at, window[1].id, window[1].created_at
                 );
             }
         }

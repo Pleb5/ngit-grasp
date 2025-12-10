@@ -329,14 +329,7 @@ async fn test_layer2_sync_with_q_tag() {
 /// tags sync correctly between relays when referencing a Layer 2 event.
 ///
 /// The lowercase 'e' tag is the standard NIP-01 way to reference events by ID.
-///
-/// # Note
-/// This test is currently ignored because Layer 3 sync is not yet implemented.
-/// The test logic is complete and will work when Layer 3 sync is enabled.
-///
-/// TODO: Enable this test when Layer 3 sync is implemented.
 #[tokio::test]
-#[ignore = "Layer 3 sync not yet implemented - comments don't sync via discovery"]
 async fn test_layer3_sync_with_lowercase_e_tag() {
     // 1. Start relays
     let relay_a = TestRelay::start().await;
@@ -406,6 +399,14 @@ async fn test_layer3_sync_with_lowercase_e_tag() {
     println!("Issue synced to relay_b: {}", issue_synced);
     assert!(issue_synced, "Layer 2 issue should sync first");
 
+    // Wait for Layer 3 subscriptions to be established
+    // After issue syncs, relay_b's SelfSubscriber needs time to:
+    // 1. Receive the synced issue via notify_event broadcast
+    // 2. Batch timer to tick (up to 200ms in tests)
+    // 3. Process batch and create Layer 3 filters
+    // 4. Subscribe to relay_a with Layer 3 filters
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
     // 6. Create and send Layer 3 reply with lowercase 'e' tag (kind 1)
     let reply = build_layer3_reply_with_e_tag(&keys, &issue_id, "Reply with lowercase e tag")
         .expect("Failed to create reply");
@@ -451,14 +452,7 @@ async fn test_layer3_sync_with_lowercase_e_tag() {
 /// tags sync correctly between relays when referencing a Layer 2 event.
 ///
 /// The uppercase 'E' tag is used in NIP-22 for comment events.
-///
-/// # Note
-/// This test is currently ignored because Layer 3 sync is not yet implemented.
-/// The test logic is complete and will work when Layer 3 sync is enabled.
-///
-/// TODO: Enable this test when Layer 3 sync is implemented.
 #[tokio::test]
-#[ignore = "Layer 3 sync not yet implemented - comments don't sync via discovery"]
 async fn test_layer3_sync_with_uppercase_e_tag() {
     // 1. Start relays
     let relay_a = TestRelay::start().await;
@@ -528,6 +522,14 @@ async fn test_layer3_sync_with_uppercase_e_tag() {
     println!("Issue synced to relay_b: {}", issue_synced);
     assert!(issue_synced, "Layer 2 issue should sync first");
 
+    // Wait for Layer 3 subscriptions to be established
+    // After issue syncs, relay_b's SelfSubscriber needs time to:
+    // 1. Receive the synced issue via notify_event broadcast
+    // 2. Batch timer to tick (up to 200ms in tests)
+    // 3. Process batch and create Layer 3 filters
+    // 4. Subscribe to relay_a with Layer 3 filters
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
     // 6. Create and send Layer 3 comment with uppercase 'E' tag (kind 1111)
     let comment = build_layer3_comment_with_uppercase_e_tag(&keys, &issue_id, "Comment with uppercase E tag")
         .expect("Failed to create comment");
@@ -573,14 +575,7 @@ async fn test_layer3_sync_with_uppercase_e_tag() {
 /// tags sync correctly between relays when referencing a Layer 2 event.
 ///
 /// The 'q' tag is used in NIP-18 for quotes/reposts.
-///
-/// # Note
-/// This test is currently ignored because Layer 3 sync is not yet implemented.
-/// The test logic is complete and will work when Layer 3 sync is enabled.
-///
-/// TODO: Enable this test when Layer 3 sync is implemented.
 #[tokio::test]
-#[ignore = "Layer 3 sync not yet implemented - comments don't sync via discovery"]
 async fn test_layer3_sync_with_q_tag() {
     // 1. Start relays
     let relay_a = TestRelay::start().await;
@@ -649,6 +644,14 @@ async fn test_layer3_sync_with_q_tag() {
     let issue_synced = wait_for_event_on_relay(relay_b.url(), issue_filter, Duration::from_secs(5)).await;
     println!("Issue synced to relay_b: {}", issue_synced);
     assert!(issue_synced, "Layer 2 issue should sync first");
+
+    // Wait for Layer 3 subscriptions to be established
+    // After issue syncs, relay_b's SelfSubscriber needs time to:
+    // 1. Receive the synced issue via notify_event broadcast
+    // 2. Batch timer to tick (up to 200ms in tests)
+    // 3. Process batch and create Layer 3 filters
+    // 4. Subscribe to relay_a with Layer 3 filters
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     // 6. Create and send Layer 3 quote with 'q' tag (kind 1)
     let quote = build_layer3_quote_with_q_tag(&keys, &issue_id, "Quote with q tag")
