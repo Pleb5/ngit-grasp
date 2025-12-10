@@ -93,7 +93,7 @@ impl TestRelay {
             .env("NGIT_GIT_DATA_PATH", git_data_dir.path())
             .env("NGIT_DATABASE_BACKEND", "memory") // Force in-memory database for isolation
             .env("NGIT_OWNER_NPUB", &test_npub)
-            .env("NGIT_SYNC_STARTUP_JITTER_MS", "0") // Disable jitter for tests
+            .env("NGIT_SYNC_BATCH_WINDOW_MS", "200") // Fast batch window for tests (200ms instead of 5s default)
             .env("RUST_LOG", "warn") // Less logging during tests
             .stdout(Stdio::null())
             .stderr(Stdio::null()); // Disable stderr for cleaner test output
