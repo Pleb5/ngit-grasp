@@ -17,29 +17,6 @@ use crate::common::{sync_helpers::*, TestRelay};
 /// Kind 1617 - Patch event (NIP-34)
 const KIND_PATCH: u16 = 1617;
 
-/// Create a valid repository announcement event for testing sync.
-///
-/// This creates a kind 30617 event with required clone and relays tags.
-fn create_repo_announcement(keys: &Keys, domains: &[&str], identifier: &str) -> Event {
-    let clone_urls: Vec<String> = domains
-        .iter()
-        .map(|d| format!("http://{}/{}.git", d, identifier))
-        .collect();
-
-    let relay_urls: Vec<String> = domains.iter().map(|d| format!("ws://{}", d)).collect();
-
-    let tags = vec![
-        Tag::identifier(identifier),
-        Tag::custom(TagKind::custom("clone"), clone_urls),
-        Tag::custom(TagKind::custom("relays"), relay_urls),
-    ];
-
-    EventBuilder::new(Kind::Custom(KIND_REPOSITORY_STATE), "Repository state")
-        .tags(tags)
-        .sign_with_keys(keys)
-        .expect("Failed to sign repo announcement")
-}
-
 /// Create an event referencing a repository coordinate via 'a' tag.
 ///
 /// Used to create Layer 2 events like patches that reference a repository.

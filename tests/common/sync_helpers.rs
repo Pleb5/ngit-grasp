@@ -325,6 +325,46 @@ pub fn build_layer3_quote_with_q_tag(
 }
 
 // ============================================================================
+// Repository Announcement Helper
+// ============================================================================
+
+/// Create a valid repository announcement event for testing sync.
+///
+/// This creates a kind 30617 event with required clone and relays tags.
+/// The event lists all provided domains so it will be accepted by each
+/// relay's write policy.
+///
+/// # Arguments
+/// * `keys` - Keys for signing
+/// * `domains` - Slice of domain strings (e.g., "127.0.0.1:8080")
+/// * `identifier` - Repository identifier (d-tag)
+///
+/// # Returns
+/// A signed repository announcement event ready to send.
+pub fn create_repo_announcement(keys: &Keys, domains: &[&str], identifier: &str) -> Event {
+    // Build clone URLs for all domains (with .git suffix)
+    let clone_urls: Vec<String> = domains
+        .iter()
+        .map(|d| format!("http://{}/{}.git", d, identifier))
+        .collect();
+
+    // Build relay URLs for all domains
+    let relay_urls: Vec<String> = domains.iter().map(|d| format!("ws://{}", d)).collect();
+
+    // Build tags for repository announcement
+    let tags = vec![
+        Tag::identifier(identifier),
+        Tag::custom(TagKind::custom("clone"), clone_urls),
+        Tag::custom(TagKind::custom("relays"), relay_urls),
+    ];
+
+    EventBuilder::new(Kind::Custom(KIND_REPOSITORY_STATE), "Repository state")
+        .tags(tags)
+        .sign_with_keys(keys)
+        .expect("Failed to sign repo announcement")
+}
+
+// ============================================================================
 // Assertion Helpers
 // ============================================================================
 
