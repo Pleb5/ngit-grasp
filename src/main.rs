@@ -58,6 +58,7 @@ async fn main() -> Result<()> {
             config.domain.clone(),
             relay_with_db.database.clone(),
             relay_with_db.write_policy.clone(),
+            relay_with_db.relay.clone(),
             &config,
         );
 

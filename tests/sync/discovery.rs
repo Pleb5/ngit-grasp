@@ -293,12 +293,7 @@ async fn test_layer2_discovery_with_chain() {
 /// 3. Discovers and connects to relay_c
 /// 4. Syncs announcement_y from relay_c
 ///
-/// NOTE: This test is ignored because recursive relay discovery from synced
-/// announcements is not yet implemented. Currently, discovery only triggers
-/// when an announcement is directly submitted to a relay, not when it's
-/// synced from a bootstrap relay.
 #[tokio::test]
-#[ignore = "Recursive relay discovery from bootstrap sync not yet implemented"]
 async fn test_recursive_relay_discovery_syncs_announcement() {
     // 1. Start all three relays
     
