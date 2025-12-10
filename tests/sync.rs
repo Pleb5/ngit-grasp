@@ -27,4 +27,5 @@ mod sync {
     pub mod bootstrap;
     pub mod discovery;
     pub mod live_sync;
+    pub mod tag_variations;
 }
