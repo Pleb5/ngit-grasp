@@ -14,6 +14,7 @@
 
 pub mod algorithms;
 pub mod filters;
+pub mod health;
 pub mod relay_connection;
 pub mod self_subscriber;
 
@@ -25,6 +26,9 @@ pub use relay_connection::{RelayConnection, RelayEvent};
 
 // Re-export self-subscriber types
 pub use self_subscriber::{RelayAction, SelfSubscriber};
+
+// Re-export health tracking types
+pub use health::RelayHealthTracker;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -339,6 +343,12 @@ pub struct SyncManager {
     relay_sync_index: RelaySyncIndex,
     /// In-flight subscription batches
     pending_sync_index: PendingSyncIndex,
+    /// Active relay connections - keyed by relay URL
+    connections: HashMap<String, RelayConnection>,
+    /// Health tracker for relay connection state
+    health_tracker: Arc<RelayHealthTracker>,
+    /// Counter for generating unique batch IDs
+    next_batch_id: u64,
 }
 
 impl SyncManager {
@@ -366,6 +376,9 @@ impl SyncManager {
             repo_sync_index: Arc::new(RwLock::new(HashMap::new())),
             relay_sync_index: Arc::new(RwLock::new(HashMap::new())),
             pending_sync_index: Arc::new(RwLock::new(HashMap::new())),
+            connections: HashMap::new(),
+            health_tracker: Arc::new(RelayHealthTracker::new(config)),
+            next_batch_id: 0,
         }
     }
 
