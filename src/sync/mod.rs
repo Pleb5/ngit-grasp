@@ -1062,6 +1062,18 @@ impl SyncManager {
                 "Quick reconnect - using since filter for incremental sync"
             );
 
+            // Subscribe to Layer 1 (announcements) with since filter to catch new repos
+            let layer1_filter = filters::build_announcement_filter(Some(since_ts));
+            if let Some(connection) = self.connections.get(relay_url) {
+                if let Err(e) = connection.subscribe_filter(layer1_filter).await {
+                    tracing::error!(
+                        relay = %relay_url,
+                        error = %e,
+                        "Failed to subscribe to Layer 1 filter on quick reconnect"
+                    );
+                }
+            }
+
             // Rebuild Layer 2 and Layer 3 with since filter
             self.rebuild_layer2_and_layer3(relay_url, Some(since_ts))
                 .await;
