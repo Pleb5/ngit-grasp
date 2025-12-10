@@ -336,6 +336,16 @@ pub struct EoseNotification {
     pub sub_id: SubscriptionId,
 }
 
+/// Notification from spawned tasks about successful connection
+#[derive(Debug)]
+pub struct ConnectNotification {
+    /// The relay URL that connected
+    pub relay_url: String,
+}
+
+/// Quick reconnect window in seconds (15 minutes)
+const QUICK_RECONNECT_WINDOW_SECS: u64 = 15 * 60;
+
 /// Manages proactive synchronization with external relays
 ///
 /// The SyncManager runs as a background task, subscribing to repository
@@ -526,7 +536,10 @@ impl SyncManager {
         // 3. Create EOSE channel for spawned tasks -> manager communication
         let (eose_tx, mut eose_rx) = mpsc::channel::<EoseNotification>(100);
 
-        // 4. Spawn self-subscriber
+        // 4. Create connect channel for spawned tasks -> manager communication
+        let (connect_tx, mut connect_rx) = mpsc::channel::<ConnectNotification>(100);
+
+        // 5. Spawn self-subscriber
         let self_subscriber = SelfSubscriber::new(
             format!("ws://{}", self.service_domain),
             self.service_domain.clone(),
@@ -535,17 +548,18 @@ impl SyncManager {
         );
         tokio::spawn(async move { self_subscriber.run().await });
 
-        // 5. Connect to bootstrap relay if configured
+        // 6. Connect to bootstrap relay if configured
         if let Some(ref bootstrap_url) = self.bootstrap_relay_url {
             self.spawn_relay_connection(
                 bootstrap_url.clone(),
                 disconnect_tx.clone(),
                 eose_tx.clone(),
+                connect_tx.clone(),
             )
             .await;
         }
 
-        // 6. Main loop - handle actions from self-subscriber, disconnect, and EOSE notifications
+        // 7. Main loop - handle actions from self-subscriber, disconnect, EOSE, and connect notifications
         loop {
             tokio::select! {
                 action = action_rx.recv() => {
@@ -563,6 +577,7 @@ impl SyncManager {
                                     repos,
                                     disconnect_tx.clone(),
                                     eose_tx.clone(),
+                                    connect_tx.clone(),
                                 ).await;
                             } else {
                                 tracing::debug!(
@@ -607,7 +622,235 @@ impl SyncManager {
                         }
                     }
                 }
+                connect = connect_rx.recv() => {
+                    match connect {
+                        Some(notification) => {
+                            self.handle_connect_or_reconnect(&notification.relay_url).await;
+                        }
+                        None => {
+                            // All connect senders dropped - unlikely but handle gracefully
+                            tracing::debug!("Connect channel closed");
+                        }
+                    }
+                }
             }
+        }
+    }
+
+    /// Handle a connection success (called when a relay connects or reconnects)
+    ///
+    /// This method implements smart reconnection logic:
+    /// - Fresh sync if never connected or >15 min since last connection
+    /// - Quick reconnect with since filter if <15 min since last connection
+    ///
+    /// For fresh sync:
+    /// - Clears any stale state
+    /// - Subscribes to Layer 1 without since filter
+    /// - Recomputes actions for new items
+    ///
+    /// For quick reconnect:
+    /// - Preserves existing state
+    /// - Subscribes to Layer 1 with since filter
+    /// - Rebuilds Layer 2 and Layer 3 with since filter
+    /// - Recomputes actions for new items
+    async fn handle_connect_or_reconnect(&mut self, relay_url: &str) {
+        let now = Timestamp::now();
+
+        // Get the relay state to determine reconnect type
+        let (is_fresh_sync, last_connected, is_bootstrap) = {
+            let index = self.relay_sync_index.read().await;
+            if let Some(state) = index.get(relay_url) {
+                let last_conn = state.last_connected;
+                let is_fresh = match last_conn {
+                    None => true, // Never connected before
+                    Some(last) => {
+                        let elapsed = now.as_secs().saturating_sub(last.as_secs());
+                        elapsed > QUICK_RECONNECT_WINDOW_SECS // Stale if > 15 min
+                    }
+                };
+                (is_fresh, last_conn, state.is_bootstrap)
+            } else {
+                (true, None, false) // No state found, treat as fresh
+            }
+        };
+
+        // If stale reconnect, clear state
+        if is_fresh_sync && last_connected.is_some() {
+            let mut index = self.relay_sync_index.write().await;
+            if let Some(state) = index.get_mut(relay_url) {
+                state.clear_sync_state();
+                tracing::info!(
+                    relay = %relay_url,
+                    "Cleared stale sync state (was disconnected > 15 min)"
+                );
+            }
+        }
+
+        // Update connection state
+        {
+            let mut index = self.relay_sync_index.write().await;
+            let state = index.entry(relay_url.to_string()).or_default();
+            state.connection_status = ConnectionStatus::Connected;
+            state.last_connected = Some(now);
+            state.disconnected_at = None;
+        }
+
+        // Record success in health tracker
+        self.health_tracker.record_success(relay_url);
+
+        // Subscribe based on reconnect type
+        if is_fresh_sync {
+            tracing::info!(
+                relay = %relay_url,
+                is_bootstrap = is_bootstrap,
+                "Fresh sync - subscribing to Layer 1 without since filter"
+            );
+            // Fresh sync: Layer 1 without since
+            // Layer 1 subscription is handled by the connection establishment
+            // Just recompute actions for new items
+            self.recompute_actions_for_relay(relay_url).await;
+        } else {
+            // Quick reconnect: use since filter
+            let since_ts = Timestamp::from(
+                last_connected
+                    .unwrap()
+                    .as_secs()
+                    .saturating_sub(QUICK_RECONNECT_WINDOW_SECS),
+            );
+
+            tracing::info!(
+                relay = %relay_url,
+                since = %since_ts,
+                "Quick reconnect - using since filter for incremental sync"
+            );
+
+            // Rebuild Layer 2 and Layer 3 with since filter
+            self.rebuild_layer2_and_layer3(relay_url, Some(since_ts))
+                .await;
+
+            // Recompute actions for any new items discovered while disconnected
+            self.recompute_actions_for_relay(relay_url).await;
+        }
+    }
+
+    /// Rebuild Layer 2 and Layer 3 subscriptions for a relay
+    ///
+    /// Uses the confirmed repos and root_events from RelayState to build filters.
+    /// If since is provided, applies it to all filters for incremental sync.
+    async fn rebuild_layer2_and_layer3(&self, relay_url: &str, since: Option<Timestamp>) {
+        use crate::sync::filters::build_layer2_and_layer3_filters;
+
+        // Get confirmed state from relay_sync_index
+        let (repos, root_events) = {
+            let index = self.relay_sync_index.read().await;
+            match index.get(relay_url) {
+                Some(state) => (state.repos.clone(), state.root_events.clone()),
+                None => {
+                    tracing::warn!(
+                        relay = %relay_url,
+                        "No RelayState found for rebuild_layer2_and_layer3"
+                    );
+                    return;
+                }
+            }
+        };
+
+        // Nothing to rebuild if no confirmed items
+        if repos.is_empty() && root_events.is_empty() {
+            tracing::debug!(
+                relay = %relay_url,
+                "No confirmed items to rebuild Layer 2/3 for"
+            );
+            return;
+        }
+
+        // Build Layer 2 and Layer 3 filters
+        let filters = build_layer2_and_layer3_filters(&repos, &root_events, since);
+
+        tracing::debug!(
+            relay = %relay_url,
+            filter_count = filters.len(),
+            repos_count = repos.len(),
+            root_events_count = root_events.len(),
+            since = ?since,
+            "Rebuilding Layer 2/3 filters"
+        );
+
+        // Subscribe to filters on the relay connection
+        if let Some(connection) = self.connections.get(relay_url) {
+            for filter in filters {
+                if let Err(e) = connection.subscribe_filter(filter).await {
+                    tracing::error!(
+                        relay = %relay_url,
+                        error = %e,
+                        "Failed to subscribe to Layer 2/3 filter during rebuild"
+                    );
+                }
+            }
+        } else {
+            tracing::warn!(
+                relay = %relay_url,
+                "No active connection found for Layer 2/3 rebuild"
+            );
+        }
+    }
+
+    /// Recompute sync actions for a specific relay
+    ///
+    /// Uses derive_relay_targets and compute_actions to find new items
+    /// that need to be synced. For Phase 4, this just logs the actions;
+    /// full handling will be implemented in Phase 5.
+    async fn recompute_actions_for_relay(&self, relay_url: &str) {
+        use crate::sync::algorithms::{compute_actions, derive_relay_targets};
+
+        // Get current state from indexes
+        let repo_index = self.repo_sync_index.read().await;
+        let pending_index = self.pending_sync_index.read().await;
+        let relay_index = self.relay_sync_index.read().await;
+
+        // Derive per-relay targets from repo index
+        let all_targets = derive_relay_targets(&repo_index);
+
+        // Filter to only targets for this specific relay
+        let relay_target = all_targets.get(relay_url);
+
+        if relay_target.is_none() {
+            tracing::debug!(
+                relay = %relay_url,
+                "No sync targets found for relay"
+            );
+            return;
+        }
+
+        // Build single-relay targets map for compute_actions
+        let mut single_relay_targets = std::collections::HashMap::new();
+        if let Some(target) = relay_target {
+            single_relay_targets.insert(relay_url.to_string(), target.clone());
+        }
+
+        // Compute actions for new items
+        let actions = compute_actions(
+            &single_relay_targets,
+            &pending_index,
+            &relay_index,
+        );
+
+        // Log the actions (Phase 5 will process them)
+        for action in &actions {
+            tracing::info!(
+                relay = %action.relay_url,
+                new_repos = action.repos.len(),
+                new_root_events = action.root_events.len(),
+                filters = action.filters.len(),
+                "Discovered new items to sync (Phase 5 will process)"
+            );
+        }
+
+        if actions.is_empty() {
+            tracing::debug!(
+                relay = %relay_url,
+                "No new items to sync for relay"
+            );
         }
     }
 
@@ -680,6 +923,7 @@ impl SyncManager {
         repos: HashMap<String, HashSet<EventId>>,
         disconnect_tx: tokio::sync::mpsc::Sender<DisconnectNotification>,
         eose_tx: tokio::sync::mpsc::Sender<EoseNotification>,
+        connect_tx: tokio::sync::mpsc::Sender<ConnectNotification>,
     ) {
         use crate::sync::filters::build_layer2_and_layer3_filters;
         use tokio::sync::mpsc;
@@ -712,6 +956,13 @@ impl SyncManager {
                 },
             );
         }
+
+        // Notify SyncManager of successful connection
+        let _ = connect_tx
+            .send(ConnectNotification {
+                relay_url: relay_url.clone(),
+            })
+            .await;
 
         // Subscribe to Layer 2+3 filters for the repos
         let repo_ids: HashSet<String> = repos.keys().cloned().collect();
@@ -801,6 +1052,7 @@ impl SyncManager {
         relay_url: String,
         disconnect_tx: tokio::sync::mpsc::Sender<DisconnectNotification>,
         eose_tx: tokio::sync::mpsc::Sender<EoseNotification>,
+        connect_tx: tokio::sync::mpsc::Sender<ConnectNotification>,
     ) {
         use tokio::sync::mpsc;
 
@@ -832,6 +1084,13 @@ impl SyncManager {
                 },
             );
         }
+
+        // Notify SyncManager of successful connection
+        let _ = connect_tx
+            .send(ConnectNotification {
+                relay_url: relay_url.clone(),
+            })
+            .await;
 
         // Create event channel
         let (event_tx, mut event_rx) = mpsc::channel::<RelayEvent>(1000);
