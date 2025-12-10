@@ -346,6 +346,12 @@ pub struct ConnectNotification {
 /// Quick reconnect window in seconds (15 minutes)
 const QUICK_RECONNECT_WINDOW_SECS: u64 = 15 * 60;
 
+/// Maximum filter count before triggering consolidation
+const CONSOLIDATION_THRESHOLD: usize = 70;
+
+/// Maximum time to wait for pending batches (30 seconds)
+const CONSOLIDATION_WAIT_TIMEOUT_SECS: u64 = 30;
+
 /// Manages proactive synchronization with external relays
 ///
 /// The SyncManager runs as a background task, subscribing to repository
@@ -708,8 +714,8 @@ impl SyncManager {
             }
         }
 
-        // Step 2: Check if consolidation is needed (Phase 6 will implement maybe_consolidate)
-        // self.maybe_consolidate(&action.relay_url, action.filters.len());
+        // Step 2: Check if consolidation is needed BEFORE adding new filters
+        self.maybe_consolidate(&action.relay_url, action.filters.len()).await;
 
         // Step 3: Get connection and subscribe to all filters
         let connection = match self.connections.get(&action.relay_url) {
@@ -1269,5 +1275,164 @@ impl SyncManager {
                 );
             }
         }
+    }
+
+    // =========================================================================
+    // Consolidation System (Phase 6)
+    // =========================================================================
+
+    /// Get the current filter count for a relay
+    ///
+    /// Counts all outstanding subscriptions in pending batches for this relay.
+    /// This is used to determine if consolidation is needed.
+    async fn get_filter_count(&self, relay_url: &str) -> usize {
+        let pending = self.pending_sync_index.read().await;
+        
+        let count = match pending.get(relay_url) {
+            Some(batches) => {
+                batches.iter().map(|b| b.outstanding_subs.len()).sum()
+            }
+            None => 0,
+        };
+
+        tracing::debug!(
+            relay = %relay_url,
+            filter_count = count,
+            "Counted active filters for relay"
+        );
+
+        count
+    }
+
+    /// Wait until all pending batches for a relay are complete
+    ///
+    /// Polls the pending_sync_index until the relay has no pending batches.
+    /// Returns error if timeout (30 seconds) is exceeded.
+    async fn wait_pending_complete(&self, relay_url: &str) -> Result<(), String> {
+        use std::time::Duration;
+        use tokio::time::{sleep, Instant};
+
+        let start = Instant::now();
+        let timeout = Duration::from_secs(CONSOLIDATION_WAIT_TIMEOUT_SECS);
+
+        tracing::debug!(
+            relay = %relay_url,
+            timeout_secs = CONSOLIDATION_WAIT_TIMEOUT_SECS,
+            "Waiting for pending batches to complete"
+        );
+
+        loop {
+            // Check if no pending batches
+            {
+                let pending = self.pending_sync_index.read().await;
+                if !pending.contains_key(relay_url) {
+                    tracing::debug!(
+                        relay = %relay_url,
+                        elapsed_ms = start.elapsed().as_millis(),
+                        "All pending batches complete"
+                    );
+                    return Ok(());
+                }
+            }
+
+            // Check timeout
+            if start.elapsed() > timeout {
+                tracing::warn!(
+                    relay = %relay_url,
+                    timeout_secs = CONSOLIDATION_WAIT_TIMEOUT_SECS,
+                    "Timeout waiting for pending batches"
+                );
+                return Err(format!(
+                    "Timeout waiting for pending batches on {} after {}s",
+                    relay_url, CONSOLIDATION_WAIT_TIMEOUT_SECS
+                ));
+            }
+
+            // Short poll interval
+            sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Check if consolidation is needed and trigger if threshold exceeded
+    ///
+    /// Compares current filter count + new filter count against the threshold.
+    /// If exceeded, triggers consolidation before adding new filters.
+    async fn maybe_consolidate(&mut self, relay_url: &str, new_count: usize) {
+        let current_count = self.get_filter_count(relay_url).await;
+
+        if current_count + new_count > CONSOLIDATION_THRESHOLD {
+            tracing::info!(
+                relay = %relay_url,
+                current_count = current_count,
+                new_count = new_count,
+                threshold = CONSOLIDATION_THRESHOLD,
+                "Filter count exceeds threshold, consolidating"
+            );
+            
+            if let Err(e) = self.consolidate(relay_url).await {
+                tracing::error!(
+                    relay = %relay_url,
+                    error = %e,
+                    "Consolidation failed"
+                );
+            }
+        }
+    }
+
+    /// Consolidate all subscriptions for a relay
+    ///
+    /// This method:
+    /// 1. Waits for all pending batches to complete
+    /// 2. Unsubscribes from all active subscriptions
+    /// 3. Rebuilds Layer 2 and Layer 3 with since filter
+    ///
+    /// Layer 1 (announcements) remains active and is NOT unsubscribed.
+    async fn consolidate(&mut self, relay_url: &str) -> Result<(), String> {
+        tracing::info!(
+            relay = %relay_url,
+            "Starting consolidation"
+        );
+
+        // Step 1: Wait for all pending batches to complete
+        self.wait_pending_complete(relay_url).await?;
+
+        // Step 2: Get connection and unsubscribe all
+        let connection = match self.connections.get(relay_url) {
+            Some(conn) => conn,
+            None => {
+                tracing::debug!(
+                    relay = %relay_url,
+                    "No connection found, skipping consolidation"
+                );
+                return Ok(()); // No connection, nothing to consolidate
+            }
+        };
+        
+        connection.unsubscribe_all().await;
+
+        // Step 3: Rebuild all subscriptions with since filter
+        let now = Timestamp::now();
+        let since = Timestamp::from(now.as_secs().saturating_sub(QUICK_RECONNECT_WINDOW_SECS));
+
+        // Re-subscribe to Layer 1 with since filter
+        let layer1_filter = filters::build_announcement_filter(Some(since));
+        if let Err(e) = connection.subscribe_filter(layer1_filter).await {
+            tracing::error!(
+                relay = %relay_url,
+                error = %e,
+                "Failed to re-subscribe to Layer 1 during consolidation"
+            );
+        }
+
+        // Rebuild Layer 2 and Layer 3 with since filter
+        self.rebuild_layer2_and_layer3(relay_url, Some(since)).await;
+
+        tracing::info!(
+            relay = %relay_url,
+            since = %since,
+            "Consolidation complete - filter count reset"
+        );
+
+        Ok(())
     }
 }

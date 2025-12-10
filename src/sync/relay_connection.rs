@@ -213,4 +213,14 @@ impl RelayConnection {
         self.client.disconnect().await;
         tracing::debug!(relay = %self.url, "Disconnected from relay");
     }
+
+    /// Unsubscribe from all active subscriptions
+    ///
+    /// Used during consolidation to reset all subscriptions before rebuilding
+    /// with consolidated filters. This sends CLOSE messages for all active
+    /// subscriptions on the relay.
+    pub async fn unsubscribe_all(&self) {
+        self.client.unsubscribe_all().await;
+        tracing::debug!(relay = %self.url, "Unsubscribed from all subscriptions");
+    }
 }
