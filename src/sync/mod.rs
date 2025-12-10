@@ -1300,25 +1300,12 @@ impl SyncManager {
             state.disconnected_at = None;
         }
 
-        // Store connection for later use (for subscribing to filters)
-        self.connections.insert(relay_url.clone(), connection);
-
         // Notify SyncManager of successful connection
         let _ = connect_tx
             .send(ConnectNotification {
                 relay_url: relay_url.clone(),
             })
             .await;
-
-        // Get the connection back for the event loop
-        // We need to take it out because run_event_loop consumes self
-        let connection = match self.connections.remove(&relay_url) {
-            Some(conn) => conn,
-            None => {
-                tracing::error!(relay = %relay_url, "Connection disappeared after insert");
-                return;
-            }
-        };
 
         // Create event channel
         let (event_tx, mut event_rx) = mpsc::channel::<RelayEvent>(1000);
