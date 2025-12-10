@@ -9,13 +9,13 @@
 //! - Tag variations (testing different Layer 2/3 tag types: a/A/q, e/E/q)
 //! - Catchup sync (events from disconnected period sync on reconnect)
 //!
-//! # Test Files (to be added in subsequent phases)
+//! # Test Files
 //!
 //! - `bootstrap.rs` - Tests 1, 4: sync from bootstrap relay
 //! - `discovery.rs` - Tests 2, 3: relay discovery from announcements
 //! - `live_sync.rs` - Tests 5, 6, 7: real-time sync after connection
 //! - `tag_variations.rs` - Tests 8, 9: Layer 2/3 tag type coverage
-//! - `catchup.rs` - Test 0: catchup after disconnect (stub)
+//! - `catchup.rs` - Test 0: catchup after disconnect (stub, `#[ignore]`)
 //!
 //! # Shared Imports
 //!
@@ -23,13 +23,10 @@
 //! - `TestClient` - Client with retry logic
 //! - Event builders for Layer 2/3 events
 //! - `wait_for_event_on_relay()` - Non-panicking assertion helper
-//!
-//! See `work/proactive-sync-test-implementation-plan.md` for full design.
 
-// Re-export sync helpers for convenient access in test files
-// Tests in this module can use:
-//   use super::*;
-// to get access to these helpers.
-
-// Note: The actual test file modules will be added in Phase 5+
-// For now, this module serves as the organizational root.
+// Test modules
+pub mod bootstrap;
+pub mod catchup;
+pub mod discovery;
+pub mod live_sync;
+pub mod tag_variations;

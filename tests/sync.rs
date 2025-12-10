@@ -5,6 +5,9 @@
 //!
 //! - `bootstrap` - Tests for sync from pre-configured bootstrap relay
 //! - `discovery` - Tests for relay discovery from announcement events
+//! - `live_sync` - Tests for real-time sync after connection established
+//! - `tag_variations` - Tests for different Layer 2/3 tag types
+//! - `catchup` - Tests for catchup sync after disconnect (not yet implemented)
 //!
 //! # Running Tests
 //!
@@ -17,6 +20,9 @@
 //!
 //! # Run specific test
 //! cargo test --test sync test_bootstrap_syncs -- --nocapture
+//!
+//! # Run ignored tests (like catchup)
+//! cargo test --test sync -- --ignored
 //! ```
 
 // Include the common test utilities
@@ -25,6 +31,7 @@ mod common;
 // Include sync test submodules (located in tests/sync/)
 mod sync {
     pub mod bootstrap;
+    pub mod catchup;
     pub mod discovery;
     pub mod live_sync;
     pub mod tag_variations;
