@@ -407,6 +407,32 @@ async fn run_daily_timer(sync_manager: Arc<Mutex<SyncManager>>) {
     }
 }
 
+// =============================================================================
+// Disconnect Checker (Phase 8)
+// =============================================================================
+
+/// Check interval for empty relay cleanup in seconds
+const DISCONNECT_CHECK_INTERVAL_SECS: u64 = 60;
+
+/// Run the disconnect checker for periodic cleanup of empty relays
+///
+/// This function runs in a loop, checking every 60 seconds for relays
+/// that have no repos or root events to sync. Non-bootstrap relays
+/// that are empty will be disconnected to free up resources.
+///
+/// Bootstrap relays are never disconnected, even if empty.
+async fn run_disconnect_checker(sync_manager: Arc<Mutex<SyncManager>>) {
+    loop {
+        // Check every 60 seconds
+        tokio::time::sleep(Duration::from_secs(DISCONNECT_CHECK_INTERVAL_SECS)).await;
+
+        tracing::debug!("Disconnect checker running");
+
+        let mut manager = sync_manager.lock().await;
+        manager.check_disconnects().await;
+    }
+}
+
 /// Manages proactive synchronization with external relays
 ///
 /// The SyncManager runs as a background task, subscribing to repository
@@ -693,7 +719,13 @@ impl SyncManager {
             run_daily_timer(timer_manager).await;
         });
 
-        // 9. Main loop - handle actions from self-subscriber, disconnect, EOSE, and connect notifications
+        // 9. Spawn disconnect checker task
+        let checker_manager = Arc::clone(&sync_manager);
+        tokio::spawn(async move {
+            run_disconnect_checker(checker_manager).await;
+        });
+
+        // 10. Main loop - handle actions from self-subscriber, disconnect, EOSE, and connect notifications
         loop {
             // Wait for an event without holding the lock
             tokio::select! {
@@ -1565,5 +1597,96 @@ impl SyncManager {
         );
 
         Ok(())
+    }
+
+    /// Check for relays that should be disconnected
+    ///
+    /// This method is called periodically by run_disconnect_checker.
+    /// It identifies non-bootstrap relays that have no repos or root events
+    /// to sync and disconnects them to free up resources.
+    ///
+    /// Bootstrap relays are NEVER disconnected, even if empty.
+    async fn check_disconnects(&mut self) {
+        // Collect relays to disconnect
+        let to_disconnect: Vec<String> = {
+            let index = self.relay_sync_index.read().await;
+            index
+                .iter()
+                .filter_map(|(relay_url, state)| {
+                    // Skip bootstrap relays - they stay connected
+                    if state.is_bootstrap {
+                        return None;
+                    }
+
+                    // Disconnect if no repos and no root events
+                    if state.repos.is_empty() && state.root_events.is_empty() {
+                        Some(relay_url.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        if to_disconnect.is_empty() {
+            tracing::trace!("No empty relays to disconnect");
+            return;
+        }
+
+        tracing::info!(
+            count = to_disconnect.len(),
+            relays = ?to_disconnect,
+            "Found empty non-bootstrap relays to disconnect"
+        );
+
+        // Disconnect empty relays
+        for relay_url in to_disconnect {
+            self.disconnect_relay(&relay_url).await;
+        }
+    }
+
+    /// Disconnect a relay and clean up all associated state
+    ///
+    /// This method:
+    /// - Removes the relay from relay_sync_index
+    /// - Removes the relay from pending_sync_index
+    /// - Disconnects the connection if it exists
+    ///
+    /// Used by check_disconnects for cleanup of empty relays.
+    async fn disconnect_relay(&mut self, relay_url: &str) {
+        tracing::info!(relay = %relay_url, "Disconnecting empty relay");
+
+        // Remove from relay_sync_index
+        {
+            let mut index = self.relay_sync_index.write().await;
+            if index.remove(relay_url).is_some() {
+                tracing::debug!(
+                    relay = %relay_url,
+                    "Removed relay from relay_sync_index"
+                );
+            }
+        }
+
+        // Remove from pending_sync_index
+        {
+            let mut pending = self.pending_sync_index.write().await;
+            if pending.remove(relay_url).is_some() {
+                tracing::debug!(
+                    relay = %relay_url,
+                    "Removed relay from pending_sync_index"
+                );
+            }
+        }
+
+        // Disconnect the connection if it exists
+        if let Some(connection) = self.connections.remove(relay_url) {
+            connection.disconnect().await;
+            tracing::debug!(
+                relay = %relay_url,
+                "Disconnected connection"
+            );
+        }
+
+        tracing::info!(relay = %relay_url, "Relay disconnected and cleaned up");
     }
 }
