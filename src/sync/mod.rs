@@ -327,6 +327,15 @@ pub struct DisconnectNotification {
     pub relay_url: String,
 }
 
+/// Notification from spawned tasks about EOSE (End Of Stored Events)
+#[derive(Debug)]
+pub struct EoseNotification {
+    /// The relay URL that sent EOSE
+    pub relay_url: String,
+    /// The subscription ID that completed
+    pub sub_id: SubscriptionId,
+}
+
 /// Manages proactive synchronization with external relays
 ///
 /// The SyncManager runs as a background task, subscribing to repository
@@ -389,6 +398,109 @@ impl SyncManager {
         }
     }
 
+    /// Generate a unique batch ID
+    ///
+    /// Increments the internal counter and returns the new value.
+    /// Used for tracking pending batches and debugging/logging.
+    fn next_batch_id(&mut self) -> u64 {
+        self.next_batch_id += 1;
+        self.next_batch_id
+    }
+
+    /// Handle EOSE (End Of Stored Events) for a subscription
+    ///
+    /// This method:
+    /// - Finds the PendingBatch containing this subscription ID
+    /// - Removes the subscription from outstanding_subs
+    /// - When all subscriptions complete (outstanding_subs empty):
+    ///   - Moves repos from pending to confirmed in RelayState
+    ///   - Moves root_events from pending to confirmed
+    ///   - Removes the batch from pending_sync_index
+    async fn handle_eose(&mut self, relay_url: &str, sub_id: SubscriptionId) {
+        // 1. Find and update the pending batch
+        let mut pending = self.pending_sync_index.write().await;
+        
+        let Some(batches) = pending.get_mut(relay_url) else {
+            tracing::warn!(
+                relay = %relay_url,
+                sub_id = %sub_id,
+                "EOSE received for unknown relay"
+            );
+            return;
+        };
+
+        // Find the batch containing this subscription
+        let batch_index = batches.iter().position(|b| b.outstanding_subs.contains(&sub_id));
+        
+        let Some(batch_idx) = batch_index else {
+            tracing::warn!(
+                relay = %relay_url,
+                sub_id = %sub_id,
+                "EOSE received for unknown subscription"
+            );
+            return;
+        };
+
+        // Remove the subscription from outstanding_subs
+        let batch = &mut batches[batch_idx];
+        batch.outstanding_subs.remove(&sub_id);
+        
+        tracing::debug!(
+            relay = %relay_url,
+            sub_id = %sub_id,
+            batch_id = batch.batch_id,
+            remaining_subs = batch.outstanding_subs.len(),
+            "EOSE processed for subscription"
+        );
+
+        // Check if batch is complete
+        if !batch.outstanding_subs.is_empty() {
+            return;
+        }
+
+        // 2. Batch complete - extract items and remove batch
+        let completed_batch = batches.remove(batch_idx);
+        let batch_id = completed_batch.batch_id;
+        let repos_count = completed_batch.items.repos.len();
+        let events_count = completed_batch.items.root_events.len();
+        
+        // Clean up empty relay entry
+        if batches.is_empty() {
+            pending.remove(relay_url);
+        }
+        
+        // Drop the pending lock before acquiring relay_sync_index lock
+        drop(pending);
+
+        // 3. Move items to confirmed state in RelayState
+        {
+            let mut relay_index = self.relay_sync_index.write().await;
+            
+            if let Some(state) = relay_index.get_mut(relay_url) {
+                // Move repos to confirmed
+                state.repos.extend(completed_batch.items.repos);
+                // Move root_events to confirmed
+                state.root_events.extend(completed_batch.items.root_events);
+                
+                tracing::info!(
+                    relay = %relay_url,
+                    batch_id = batch_id,
+                    repos_confirmed = repos_count,
+                    root_events_confirmed = events_count,
+                    total_repos = state.repos.len(),
+                    total_root_events = state.root_events.len(),
+                    "Batch confirmed - items moved from pending to confirmed"
+                );
+            } else {
+                tracing::warn!(
+                    relay = %relay_url,
+                    batch_id = batch_id,
+                    "Batch completed but no RelayState found for relay"
+                );
+            }
+        }
+    }
+
     /// Run the sync manager
     ///
     /// Coordinates all sync components:
@@ -411,7 +523,10 @@ impl SyncManager {
         // 2. Create disconnect channel for spawned tasks -> manager communication
         let (disconnect_tx, mut disconnect_rx) = mpsc::channel::<DisconnectNotification>(100);
 
-        // 3. Spawn self-subscriber
+        // 3. Create EOSE channel for spawned tasks -> manager communication
+        let (eose_tx, mut eose_rx) = mpsc::channel::<EoseNotification>(100);
+
+        // 4. Spawn self-subscriber
         let self_subscriber = SelfSubscriber::new(
             format!("ws://{}", self.service_domain),
             self.service_domain.clone(),
@@ -420,13 +535,17 @@ impl SyncManager {
         );
         tokio::spawn(async move { self_subscriber.run().await });
 
-        // 4. Connect to bootstrap relay if configured
+        // 5. Connect to bootstrap relay if configured
         if let Some(ref bootstrap_url) = self.bootstrap_relay_url {
-            self.spawn_relay_connection(bootstrap_url.clone(), disconnect_tx.clone())
-                .await;
+            self.spawn_relay_connection(
+                bootstrap_url.clone(),
+                disconnect_tx.clone(),
+                eose_tx.clone(),
+            )
+            .await;
         }
 
-        // 5. Main loop - handle actions from self-subscriber and disconnect notifications
+        // 6. Main loop - handle actions from self-subscriber, disconnect, and EOSE notifications
         loop {
             tokio::select! {
                 action = action_rx.recv() => {
@@ -439,7 +558,12 @@ impl SyncManager {
 
                             if !exists {
                                 tracing::info!(relay = %relay_url, "Spawning new relay connection");
-                                self.spawn_relay_with_layer2(relay_url, repos, disconnect_tx.clone()).await;
+                                self.spawn_relay_with_layer2(
+                                    relay_url,
+                                    repos,
+                                    disconnect_tx.clone(),
+                                    eose_tx.clone(),
+                                ).await;
                             } else {
                                 tracing::debug!(
                                     relay = %relay_url,
@@ -469,6 +593,17 @@ impl SyncManager {
                         None => {
                             // All disconnect senders dropped - unlikely but handle gracefully
                             tracing::debug!("Disconnect channel closed");
+                        }
+                    }
+                }
+                eose = eose_rx.recv() => {
+                    match eose {
+                        Some(notification) => {
+                            self.handle_eose(&notification.relay_url, notification.sub_id).await;
+                        }
+                        None => {
+                            // All EOSE senders dropped - unlikely but handle gracefully
+                            tracing::debug!("EOSE channel closed");
                         }
                     }
                 }
@@ -544,6 +679,7 @@ impl SyncManager {
         relay_url: String,
         repos: HashMap<String, HashSet<EventId>>,
         disconnect_tx: tokio::sync::mpsc::Sender<DisconnectNotification>,
+        eose_tx: tokio::sync::mpsc::Sender<EoseNotification>,
     ) {
         use crate::sync::filters::build_layer2_and_layer3_filters;
         use tokio::sync::mpsc;
@@ -620,8 +756,19 @@ impl SyncManager {
                         )
                         .await;
                     }
-                    RelayEvent::EndOfStoredEvents(_) => {
-                        tracing::debug!(relay = %relay_url_clone, "EOSE received");
+                    RelayEvent::EndOfStoredEvents(sub_id) => {
+                        tracing::debug!(
+                            relay = %relay_url_clone,
+                            sub_id = %sub_id,
+                            "EOSE received, notifying SyncManager"
+                        );
+                        // Notify SyncManager of EOSE
+                        let _ = eose_tx
+                            .send(EoseNotification {
+                                relay_url: relay_url_clone.clone(),
+                                sub_id,
+                            })
+                            .await;
                     }
                     RelayEvent::Closed(reason) => {
                         tracing::info!(relay = %relay_url_clone, reason = %reason, "Relay connection closed");
@@ -653,6 +800,7 @@ impl SyncManager {
         &self,
         relay_url: String,
         disconnect_tx: tokio::sync::mpsc::Sender<DisconnectNotification>,
+        eose_tx: tokio::sync::mpsc::Sender<EoseNotification>,
     ) {
         use tokio::sync::mpsc;
 
@@ -707,8 +855,19 @@ impl SyncManager {
                         )
                         .await;
                     }
-                    RelayEvent::EndOfStoredEvents(_) => {
-                        tracing::debug!("EOSE from {}", relay_url_clone);
+                    RelayEvent::EndOfStoredEvents(sub_id) => {
+                        tracing::debug!(
+                            relay = %relay_url_clone,
+                            sub_id = %sub_id,
+                            "EOSE received, notifying SyncManager"
+                        );
+                        // Notify SyncManager of EOSE
+                        let _ = eose_tx
+                            .send(EoseNotification {
+                                relay_url: relay_url_clone.clone(),
+                                sub_id,
+                            })
+                            .await;
                     }
                     RelayEvent::Closed(reason) => {
                         tracing::info!(
