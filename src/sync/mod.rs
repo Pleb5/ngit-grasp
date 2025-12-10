@@ -1441,25 +1441,63 @@ impl SyncManager {
 
     /// Get the current filter count for a relay
     ///
-    /// Counts all outstanding subscriptions in pending batches for this relay.
+    /// Counts both pending subscriptions (outstanding_subs in batches) and
+    /// confirmed subscriptions (active Layer 2/3 filters based on RelayState).
     /// This is used to determine if consolidation is needed.
+    ///
+    /// Confirmed filter counts:
+    /// - Layer 1: 1 filter (announcement subscription)
+    /// - Layer 2: 3 filters per 100-repo chunk (for kinds 1617/1618/1619/1621)
+    /// - Layer 3: 3 filters per 100-event chunk (for replies/reactions/etc)
     async fn get_filter_count(&self, relay_url: &str) -> usize {
-        let pending = self.pending_sync_index.read().await;
-        
-        let count = match pending.get(relay_url) {
-            Some(batches) => {
-                batches.iter().map(|b| b.outstanding_subs.len()).sum()
+        // Count pending subscriptions
+        let pending_count = {
+            let pending = self.pending_sync_index.read().await;
+            match pending.get(relay_url) {
+                Some(batches) => batches.iter().map(|b| b.outstanding_subs.len()).sum(),
+                None => 0,
             }
-            None => 0,
         };
+
+        // Count confirmed subscriptions from relay state
+        let confirmed_count = {
+            let relay_index = self.relay_sync_index.read().await;
+            if let Some(state) = relay_index.get(relay_url) {
+                // Layer 1: 1 filter for announcements
+                // Layer 2: 3 filters per 100-repo chunk (ceiling division)
+                // Layer 3: 3 filters per 100-event chunk (ceiling division)
+                let repo_count = state.repos.len();
+                let event_count = state.root_events.len();
+                
+                let layer1_filters = 1;
+                let layer2_filters = if repo_count > 0 {
+                    ((repo_count + 99) / 100) * 3
+                } else {
+                    0
+                };
+                let layer3_filters = if event_count > 0 {
+                    ((event_count + 99) / 100) * 3
+                } else {
+                    0
+                };
+                
+                layer1_filters + layer2_filters + layer3_filters
+            } else {
+                0
+            }
+        };
+
+        let total_count = pending_count + confirmed_count;
 
         tracing::debug!(
             relay = %relay_url,
-            filter_count = count,
+            pending_count = pending_count,
+            confirmed_count = confirmed_count,
+            total_count = total_count,
             "Counted active filters for relay"
         );
 
-        count
+        total_count
     }
 
     /// Wait until all pending batches for a relay are complete
