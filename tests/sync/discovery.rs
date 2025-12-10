@@ -268,3 +268,166 @@ async fn test_layer2_discovery_with_chain() {
         issue_id
     );
 }
+
+/// Test 3: 3-relay recursive discovery - relay discovers third relay through bootstrap
+///
+/// Scenario:
+/// ```text
+///     relay_a (SUT)       relay_b (bootstrap)     relay_c (discovered)
+///         │                     │                       │
+///         │                     │ has announcement_x    │ has announcement_y
+///         │                     │ listing A+B+C         │ listing A+C
+///         │                     │                       │
+///         ├────connect──────────►                       │
+///         │◄───sync announcement_x───────────────────────
+///         │                                             │
+///         │    discovers relay_c from announcement_x    │
+///         │                                             │
+///         ├─────────────connect─────────────────────────►
+///         │◄────────────sync announcement_y─────────────┘
+/// ```
+///
+/// This tests that relay_a:
+/// 1. Connects to relay_b (configured as bootstrap)
+/// 2. Receives announcement_x which lists relay_c
+/// 3. Discovers and connects to relay_c
+/// 4. Syncs announcement_y from relay_c
+///
+/// NOTE: This test is ignored because recursive relay discovery from synced
+/// announcements is not yet implemented. Currently, discovery only triggers
+/// when an announcement is directly submitted to a relay, not when it's
+/// synced from a bootstrap relay.
+#[tokio::test]
+#[ignore = "Recursive relay discovery from bootstrap sync not yet implemented"]
+async fn test_recursive_relay_discovery_syncs_announcement() {
+    // 1. Start all three relays
+    
+    // relay_b - will be the bootstrap relay, has announcement_x
+    let relay_b = TestRelay::start().await;
+    println!(
+        "relay_b (bootstrap) started at {} (domain: {})",
+        relay_b.url(),
+        relay_b.domain()
+    );
+
+    // relay_c - will be discovered via announcement_x, has announcement_y
+    let relay_c = TestRelay::start().await;
+    println!(
+        "relay_c (to be discovered) started at {} (domain: {})",
+        relay_c.url(),
+        relay_c.domain()
+    );
+
+    // relay_a - SUT, starts with relay_b as bootstrap
+    let relay_a = TestRelay::start_with_sync(Some(relay_b.url().to_string())).await;
+    println!(
+        "relay_a (SUT) started at {} (domain: {})",
+        relay_a.url(),
+        relay_a.domain()
+    );
+
+    // 2. Create test keys (one for each announcement)
+    let keys_x = Keys::generate();
+    let keys_y = Keys::generate();
+
+    // 3. Create announcement_x on relay_b (lists all three relays: A+B+C)
+    let announcement_x = create_repo_announcement(
+        &keys_x,
+        &[&relay_a.domain(), &relay_b.domain(), &relay_c.domain()],
+        "repo-x-all-relays",
+    );
+    let announcement_x_id = announcement_x.id;
+    println!("Created announcement_x {} listing A+B+C", announcement_x_id);
+    for tag in announcement_x.tags.iter() {
+        println!("  Tag: {:?}", tag.as_slice());
+    }
+
+    // 4. Create announcement_y on relay_c (lists only A+C, NOT B)
+    let announcement_y = create_repo_announcement(
+        &keys_y,
+        &[&relay_a.domain(), &relay_c.domain()],
+        "repo-y-ac-only",
+    );
+    let announcement_y_id = announcement_y.id;
+    println!("Created announcement_y {} listing A+C only", announcement_y_id);
+    for tag in announcement_y.tags.iter() {
+        println!("  Tag: {:?}", tag.as_slice());
+    }
+
+    // 5. Send announcement_x to relay_b only
+    let client_b = TestClient::new(relay_b.url(), keys_x.clone())
+        .await
+        .expect("Failed to connect to relay_b");
+
+    client_b
+        .send_event(&announcement_x)
+        .await
+        .expect("Failed to send announcement_x to relay_b");
+    println!("announcement_x sent to relay_b");
+
+    client_b.disconnect().await;
+
+    // 6. Send announcement_y to relay_c only
+    let client_c = TestClient::new(relay_c.url(), keys_y.clone())
+        .await
+        .expect("Failed to connect to relay_c");
+
+    client_c
+        .send_event(&announcement_y)
+        .await
+        .expect("Failed to send announcement_y to relay_c");
+    println!("announcement_y sent to relay_c");
+
+    client_c.disconnect().await;
+
+    // 7. Wait for relay_a to:
+    //    - Sync from bootstrap relay_b (gets announcement_x)
+    //    - Discover relay_c from announcement_x's relays tag
+    //    - Connect to relay_c and sync announcement_y
+    println!("Waiting 5s for recursive relay discovery...");
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // 8. Verify announcement_x was synced to relay_a (from bootstrap relay_b)
+    let filter_x = Filter::new()
+        .kind(Kind::Custom(KIND_REPOSITORY_STATE))
+        .author(keys_x.public_key());
+
+    let announcement_x_synced =
+        wait_for_event_on_relay(relay_a.url(), filter_x, Duration::from_secs(5)).await;
+
+    println!(
+        "announcement_x {} synced to relay_a: {}",
+        announcement_x_id, announcement_x_synced
+    );
+
+    // 9. Verify announcement_y was synced to relay_a (from discovered relay_c)
+    let filter_y = Filter::new()
+        .kind(Kind::Custom(KIND_REPOSITORY_STATE))
+        .author(keys_y.public_key());
+
+    let announcement_y_synced =
+        wait_for_event_on_relay(relay_a.url(), filter_y, Duration::from_secs(5)).await;
+
+    println!(
+        "announcement_y {} synced to relay_a: {}",
+        announcement_y_id, announcement_y_synced
+    );
+
+    // 10. Cleanup
+    relay_a.stop().await;
+    relay_b.stop().await;
+    relay_c.stop().await;
+
+    // 11. Assertions
+    assert!(
+        announcement_x_synced,
+        "announcement_x {} should have synced from bootstrap relay_b to relay_a",
+        announcement_x_id
+    );
+
+    assert!(
+        announcement_y_synced,
+        "announcement_y {} should have synced from discovered relay_c to relay_a (recursive discovery)",
+        announcement_y_id
+    );
+}
