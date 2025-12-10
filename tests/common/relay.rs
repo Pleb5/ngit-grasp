@@ -94,8 +94,9 @@ impl TestRelay {
             .env("NGIT_DATABASE_BACKEND", "memory") // Force in-memory database for isolation
             .env("NGIT_OWNER_NPUB", &test_npub)
             .env("NGIT_SYNC_BATCH_WINDOW_MS", "200") // Fast batch window for tests (200ms instead of 5s default)
-            .env("RUST_LOG", "warn") // Less logging during tests
-            .stdout(Stdio::null())
+            .env("RUST_LOG", "info") // Enable INFO logging for diagnostics
+            .stdout(Stdio::null()) // Disable stderr for cleaner test output
+            // .stdout(Stdio::inherit()) // Show stdout for diagnostics
             .stderr(Stdio::null()); // Disable stderr for cleaner test output
 
         // Add bootstrap relay URL if provided

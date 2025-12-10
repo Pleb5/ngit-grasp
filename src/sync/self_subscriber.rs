@@ -443,6 +443,15 @@ impl SelfSubscriber {
             "Processing batch of repo updates"
         );
 
+        // Log what repos and relays we discovered
+        for (repo_id, needs) in &updates {
+            tracing::info!(
+                repo_id = %repo_id,
+                relay_urls = ?needs.relays,
+                "Discovered repo with relay URLs"
+            );
+        }
+
         // Update RepoSyncIndex
         let mut index = self.repo_sync_index.write().await;
 
@@ -482,6 +491,10 @@ impl SelfSubscriber {
                 None,
             );
 
+            // Log before moving values
+            let repo_count = needs.repos.len();
+            let event_count = needs.root_events.len();
+
             let action = AddFilters {
                 relay_url: relay_url.clone(),
                 repos: needs.repos,
@@ -496,8 +509,10 @@ impl SelfSubscriber {
                     "Failed to send AddFilters action"
                 );
             } else {
-                tracing::debug!(
+                tracing::info!(
                     relay = %relay_url,
+                    repo_count = repo_count,
+                    event_count = event_count,
                     "Sent AddFilters action to SyncManager"
                 );
             }

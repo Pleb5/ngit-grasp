@@ -32,6 +32,7 @@ pub enum RelayEvent {
 /// - Layer 1 subscription (announcements)
 /// - Additional filter subscriptions (Layers 2 & 3)
 /// - Event notification loop
+#[derive(Clone)]
 pub struct RelayConnection {
     /// The relay URL this connection is for
     url: String,

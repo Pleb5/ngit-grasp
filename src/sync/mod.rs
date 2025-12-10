@@ -1300,6 +1300,16 @@ impl SyncManager {
             state.disconnected_at = None;
         }
 
+        // Store connection in HashMap BEFORE sending notification
+        // This ensures it's available when handle_connect_or_reconnect is called
+        self.connections.insert(relay_url.clone(), connection);
+
+        tracing::info!(
+            relay = %relay_url,
+            is_bootstrap = is_bootstrap,
+            "Spawned relay connection"
+        );
+
         // Notify SyncManager of successful connection
         let _ = connect_tx
             .send(ConnectNotification {
@@ -1307,12 +1317,16 @@ impl SyncManager {
             })
             .await;
 
+        // Clone the connection for the event loop spawn
+        // The stored connection is used for subscription management
+        let connection_for_loop = self.connections.get(&relay_url).unwrap().clone();
+
         // Create event channel
         let (event_tx, mut event_rx) = mpsc::channel::<RelayEvent>(1000);
 
-        // Spawn event loop
+        // Spawn event loop with cloned connection
         tokio::spawn(async move {
-            connection.run_event_loop(event_tx).await;
+            connection_for_loop.run_event_loop(event_tx).await;
         });
 
         // Spawn event processor
