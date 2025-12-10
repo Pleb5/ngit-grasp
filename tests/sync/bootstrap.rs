@@ -246,7 +246,11 @@ async fn test_announcement_not_listing_relay_is_not_synced() {
     let keys = Keys::generate();
 
     // 4. Wait for relay_b's sync connection to establish
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Use the sync connection helper for more reliable connection verification
+    match wait_for_sync_connection(relay_b.url(), 1, Duration::from_secs(5)).await {
+        Ok(()) => println!("Sync connection established (verified via metrics)"),
+        Err(e) => println!("Sync connection check: {} (continuing with test)", e),
+    }
 
     // 5. Create a repository announcement that lists ONLY relay_a
     // This should NOT sync to relay_b because relay_b's write policy

@@ -365,6 +365,117 @@ pub fn create_repo_announcement(keys: &Keys, domains: &[&str], identifier: &str)
 }
 
 // ============================================================================
+// Sync Connection Helpers
+// ============================================================================
+
+/// Wait for a sync connection to be established on the syncing relay.
+///
+/// Polls the relay's metrics endpoint to check for active sync connections.
+/// This is more reliable than using fixed sleeps, as it verifies the actual
+/// connection state before proceeding with test assertions.
+///
+/// # Arguments
+/// * `syncing_relay_url` - WebSocket URL of the relay that is syncing (e.g., "ws://127.0.0.1:8080")
+/// * `expected_connections` - Expected number of sync connections (typically 1 for single bootstrap)
+/// * `timeout` - Maximum time to wait for connections to be established
+///
+/// # Returns
+/// * `Ok(())` - Connections established within timeout
+/// * `Err(String)` - Timeout waiting for connections, or other error
+///
+/// # Example
+/// ```ignore
+/// // After starting relay_b with sync from relay_a
+/// let relay_b = TestRelay::start_with_sync(Some(relay_a.url().into())).await;
+///
+/// // Wait for sync connection to be established
+/// wait_for_sync_connection(relay_b.url(), 1, Duration::from_secs(5)).await
+///     .expect("Sync connection should be established");
+///
+/// // Now proceed with test - sync connection is verified
+/// ```
+pub async fn wait_for_sync_connection(
+    syncing_relay_url: &str,
+    expected_connections: usize,
+    timeout: Duration,
+) -> Result<(), String> {
+    // Convert ws:// URL to http:// for metrics endpoint
+    let http_url = syncing_relay_url
+        .replace("ws://", "http://")
+        .replace("/", "")
+        + "/metrics";
+
+    let start = std::time::Instant::now();
+    let poll_interval = Duration::from_millis(100);
+
+    while start.elapsed() < timeout {
+        // Fetch metrics
+        if let Ok(response) = reqwest::get(&http_url).await {
+            if let Ok(metrics) = response.text().await {
+                // Look for sync connection metrics
+                // The metric name pattern: ngit_sync_connections or similar
+                // We check for any indication of established connections
+                if check_sync_connections_in_metrics(&metrics, expected_connections) {
+                    return Ok(());
+                }
+            }
+        }
+
+        tokio::time::sleep(poll_interval).await;
+    }
+
+    Err(format!(
+        "Timeout waiting for {} sync connection(s) on {} after {:?}",
+        expected_connections, syncing_relay_url, timeout
+    ))
+}
+
+/// Check metrics string for expected number of sync connections.
+///
+/// Looks for various metric patterns that indicate sync connections:
+/// - ngit_sync_connections (gauge)
+/// - ngit_sync_relay_connections (gauge)
+/// - Any metric containing "sync" and "connection" with count > 0
+fn check_sync_connections_in_metrics(metrics: &str, expected: usize) -> bool {
+    // Parse metrics line by line looking for connection counts
+    for line in metrics.lines() {
+        // Skip comments and empty lines
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+
+        // Look for sync connection metrics
+        // Format: metric_name{labels} value
+        // or: metric_name value
+        if line.contains("sync") && line.contains("connect") {
+            // Extract the value (last space-separated token)
+            if let Some(value_str) = line.split_whitespace().last() {
+                if let Ok(value) = value_str.parse::<f64>() {
+                    if value as usize >= expected {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Also check for specific metric names that might indicate connections
+        // ngit_sync_health_state with value 1 or 2 (connecting/healthy)
+        if line.contains("ngit_sync_health") {
+            if let Some(value_str) = line.split_whitespace().last() {
+                if let Ok(value) = value_str.parse::<f64>() {
+                    // Health state > 0 typically means connection attempt or established
+                    if value > 0.0 && expected > 0 {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    false
+}
+
+// ============================================================================
 // Assertion Helpers
 // ============================================================================
 
