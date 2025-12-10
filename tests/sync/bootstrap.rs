@@ -213,3 +213,92 @@ async fn test_relay_replays_events_after_restart() {
         synced_after_restart
     );
 }
+
+/// Test 4: Rejection - announcement not listing relay should NOT sync
+///
+/// Scenario:
+/// 1. relay_a (source), relay_b (sync from relay_a)
+/// 2. Create announcement listing ONLY relay_a domain
+/// 3. Send to relay_a
+/// 4. Verify NOT synced to relay_b (write policy rejects)
+///
+/// This tests that the relay's write policy correctly rejects events
+/// that don't list its domain in the clone tag.
+#[tokio::test]
+async fn test_announcement_not_listing_relay_is_not_synced() {
+    // 1. Start source relay (relay_a)
+    let relay_a = TestRelay::start().await;
+    println!(
+        "relay_a started at {} (domain: {})",
+        relay_a.url(),
+        relay_a.domain()
+    );
+
+    // 2. Start syncing relay (relay_b) configured to sync from relay_a
+    let relay_b = TestRelay::start_with_sync(Some(relay_a.url().into())).await;
+    println!(
+        "relay_b started at {} (domain: {})",
+        relay_b.url(),
+        relay_b.domain()
+    );
+
+    // 3. Create test keys
+    let keys = Keys::generate();
+
+    // 4. Wait for relay_b's sync connection to establish
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // 5. Create a repository announcement that lists ONLY relay_a
+    // This should NOT sync to relay_b because relay_b's write policy
+    // will reject events that don't list its domain
+    let announcement = create_repo_announcement(
+        &keys,
+        &[&relay_a.domain()], // Only relay_a, NOT relay_b
+        "test-repo-rejection",
+    );
+    let announcement_id = announcement.id;
+
+    println!(
+        "Created announcement {} (kind {}) - lists ONLY relay_a",
+        announcement_id,
+        announcement.kind.as_u16()
+    );
+    for tag in announcement.tags.iter() {
+        println!("  Tag: {:?}", tag.as_slice());
+    }
+
+    // 6. Send announcement to relay_a
+    let client_a = TestClient::new(relay_a.url(), keys.clone())
+        .await
+        .expect("Failed to connect to relay_a");
+
+    client_a
+        .send_event(&announcement)
+        .await
+        .expect("Failed to send announcement to relay_a");
+    println!("Announcement sent to relay_a");
+
+    client_a.disconnect().await;
+
+    // 7. Wait for potential sync attempt
+    // Give enough time for sync to complete if it were to happen
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // 8. Verify announcement did NOT sync to relay_b
+    let filter = Filter::new()
+        .kind(Kind::Custom(KIND_REPOSITORY_STATE))
+        .author(keys.public_key());
+
+    let synced = wait_for_event_on_relay(relay_b.url(), filter, Duration::from_secs(2)).await;
+
+    // 9. Cleanup
+    relay_b.stop().await;
+    relay_a.stop().await;
+
+    assert!(
+        !synced,
+        "Announcement {} should NOT have synced to relay_b because it doesn't list relay_b's domain",
+        announcement_id
+    );
+    println!("SUCCESS: Announcement was correctly rejected by relay_b (not synced)");
+}
