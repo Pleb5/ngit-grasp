@@ -299,10 +299,10 @@ impl SelfSubscriber {
                                     // Extract repo ID and relays
                                     if let Some(repo_id) = Self::extract_repo_id(&event) {
                                         let relays = Self::extract_relay_urls(&event);
-                                        let mut root_events = HashSet::new();
-                                        root_events.insert(event.id);
-
-                                        pending.add_repo(repo_id, relays, root_events);
+                                        // 30617 announcements don't contribute to root_events - those are
+                                        // the 1617/1618/1619/1621 event IDs that get added when we receive
+                                        // root events via handle_root_event. See mod.rs:71 for details.
+                                        pending.add_repo(repo_id, relays, HashSet::new());
                                         tracing::debug!(
                                             event_id = %event.id,
                                             "Queued 30617 announcement for batch processing"
