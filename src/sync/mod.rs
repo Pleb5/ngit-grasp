@@ -442,6 +442,7 @@ async fn run_disconnect_checker(
 
                 let mut manager = sync_manager.lock().await;
                 manager.check_disconnects().await;
+                manager.check_reconnects().await;
             }
             _ = shutdown_rx.recv() => {
                 tracing::info!("Disconnect checker received shutdown signal");
@@ -858,6 +859,14 @@ impl SyncManager {
     /// - For existing connected relays: subscribes to filters, creates PendingBatch
     /// - For disconnected/connecting relays: returns (will be handled on connection)
     async fn handle_add_filters(&mut self, action: AddFilters) {
+        tracing::info!(
+            relay = %action.relay_url,
+            repo_count = action.repos.len(),
+            root_event_count = action.root_events.len(),
+            filter_count = action.filters.len(),
+            "[DIAG] handle_add_filters called"
+        );
+        
         // Step 1: Check if relay exists in relay_sync_index
         let connection_status = {
             let index = self.relay_sync_index.read().await;
@@ -1728,6 +1737,64 @@ impl SyncManager {
         }
 
         tracing::info!(relay = %relay_url, "Relay disconnected and cleaned up");
+    }
+
+    /// Check for disconnected relays that should be reconnected
+    ///
+    /// This method is called periodically by run_disconnect_checker.
+    /// It identifies relays that:
+    /// - Are currently disconnected
+    /// - Have repos or root events to sync (not empty)
+    /// - Have passed the exponential backoff period (respects health tracker)
+    ///
+    /// For each eligible relay, a reconnection is attempted via spawn_relay_connection.
+    async fn check_reconnects(&mut self) {
+        // Collect relays to reconnect
+        let to_reconnect: Vec<String> = {
+            let index = self.relay_sync_index.read().await;
+            index
+                .iter()
+                .filter_map(|(relay_url, state)| {
+                    // Only consider disconnected relays
+                    if state.connection_status != ConnectionStatus::Disconnected {
+                        return None;
+                    }
+
+                    // Skip empty relays - they'll be cleaned up by check_disconnects
+                    if state.repos.is_empty() && state.root_events.is_empty() {
+                        return None;
+                    }
+
+                    // Check if backoff period has elapsed
+                    if self.health_tracker.should_attempt_connection(relay_url) {
+                        Some(relay_url.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        if to_reconnect.is_empty() {
+            tracing::trace!("No disconnected relays ready for reconnection");
+            return;
+        }
+
+        tracing::info!(
+            count = to_reconnect.len(),
+            relays = ?to_reconnect,
+            "Attempting reconnection for disconnected relays"
+        );
+
+        // Reconnect eligible relays
+        for relay_url in to_reconnect {
+            tracing::info!(
+                relay = %relay_url,
+                health_state = %self.health_tracker.get_state(&relay_url),
+                "Attempting reconnection"
+            );
+            self.spawn_relay_connection(relay_url).await;
+        }
     }
 
     /// Gracefully shutdown the SyncManager
