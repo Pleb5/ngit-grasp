@@ -39,6 +39,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nostr_sdk::prelude::*;
+use prometheus::Registry;
 use tokio::sync::{broadcast, Mutex, RwLock};
 
 use crate::config::Config;
@@ -333,6 +334,8 @@ pub struct SyncManager {
     connect_tx: Option<tokio::sync::mpsc::Sender<ConnectNotification>>,
     /// Channel for broadcasting shutdown signal to all background tasks
     shutdown_tx: Option<broadcast::Sender<()>>,
+    /// Prometheus metrics for sync operations (None if metrics disabled)
+    metrics: Option<SyncMetrics>,
 }
 
 impl SyncManager {
@@ -345,6 +348,7 @@ impl SyncManager {
     /// * `write_policy` - Policy for validating events before storage
     /// * `local_relay` - Local relay for submitting synced events (enables WebSocket broadcast)
     /// * `config` - Configuration for sync settings
+    /// * `registry` - Optional Prometheus registry for metrics (metrics only created if config.metrics_enabled is true)
     pub fn new(
         bootstrap_relay_url: Option<String>,
         service_domain: String,
@@ -352,7 +356,23 @@ impl SyncManager {
         write_policy: Nip34WritePolicy,
         local_relay: LocalRelay,
         config: &Config,
+        registry: Option<&Registry>,
     ) -> Self {
+        // Create metrics only if metrics are enabled AND a registry is provided
+        let metrics = if config.metrics_enabled {
+            registry.and_then(|r| {
+                match SyncMetrics::register(r) {
+                    Ok(m) => Some(m),
+                    Err(e) => {
+                        tracing::warn!("Failed to register sync metrics: {}", e);
+                        None
+                    }
+                }
+            })
+        } else {
+            None
+        };
+
         Self {
             bootstrap_relay_url,
             service_domain,
@@ -370,6 +390,7 @@ impl SyncManager {
             eose_tx: None,
             connect_tx: None,
             shutdown_tx: None,
+            metrics,
         }
     }
 

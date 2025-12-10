@@ -53,6 +53,7 @@ async fn main() -> Result<()> {
 
         // Start SyncManager for proactive sync (Phase 2: multi-relay support, Phase 3: health tracking)
         // Even without bootstrap relay, SyncManager discovers relays from stored announcements
+        // TODO(Phase 3): Pass registry reference for sync metrics
         let sync_manager = SyncManager::new(
             config.sync_bootstrap_relay_url.clone(),
             config.domain.clone(),
@@ -60,6 +61,7 @@ async fn main() -> Result<()> {
             relay_with_db.write_policy.clone(),
             relay_with_db.relay.clone(),
             &config,
+            None, // Registry will be passed in Phase 3
         );
 
         if config.sync_bootstrap_relay_url.is_some() {
