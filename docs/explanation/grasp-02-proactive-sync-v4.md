@@ -1227,3 +1227,98 @@ impl SelfSubscriber {
     }
 }
 ```
+
+---
+
+## Implementation Notes
+
+This section documents the actual implementation details as of December 2024 (Phases 1-10 complete).
+
+### Architectural Decisions During Implementation
+
+**Phase 7 Refactoring**: The `SyncManager::run()` method required refactoring to use `Arc<Mutex<SyncManager>>` for shared access. The daily timer and disconnect checker tasks need to access the manager, so `self` is wrapped after initial setup:
+
+```rust
+// 7. Wrap self in Arc<Mutex> for sharing with timer task
+let sync_manager = Arc::new(Mutex::new(self));
+```
+
+This allows background tasks (daily timer, disconnect checker) to acquire the lock when needed while the main event loop handles actions from the self-subscriber.
+
+**Health Module**: The health tracking module was adapted from the v3 implementation at `work/sync-v3/health.rs`. The implementation uses:
+- `DashMap` for thread-safe concurrent access without external locking
+- Three states: `Healthy`, `Degraded`, `Dead`
+- Exponential backoff: `base * 2^(failures-1)`, capped at max_backoff
+- Dead threshold: 24 hours of continuous failures
+- Dead relay retry: Once per 24 hours
+
+### Implementation Constants
+
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| `CONSOLIDATION_THRESHOLD` | 70 filters | Maximum filters before triggering consolidation |
+| `CONSOLIDATION_WAIT_TIMEOUT_SECS` | 30 seconds | Timeout for pending batches during consolidation |
+| `QUICK_RECONNECT_WINDOW_SECS` | 15 minutes | Window for quick reconnect vs fresh sync |
+| `DISCONNECT_CHECK_INTERVAL_SECS` | 60 seconds | Interval for checking empty relays to disconnect |
+| `DEAD_THRESHOLD_HOURS` | 24 hours | Time before relay marked as dead |
+| `BASE_BACKOFF_SECS` | 5 seconds | Base duration for exponential backoff |
+
+### Daily Timer Randomization
+
+The daily timer uses randomization between 23-25 hours to prevent thundering herd effects when multiple ngit-grasp instances are running:
+
+```rust
+let hours = 23.0 + rand::thread_rng().gen::<f64>() * 2.0;
+```
+
+### Bootstrap Relay Protection
+
+Bootstrap relays are never disconnected by the cleanup system. The `check_disconnects()` method explicitly filters them out:
+
+```rust
+.filter(|(_, state)| {
+    !state.is_bootstrap &&
+    state.repos.is_empty() &&
+    state.root_events.is_empty()
+})
+```
+
+### Graceful Shutdown
+
+Shutdown uses a tokio broadcast channel for coordinated termination:
+
+```rust
+let (shutdown_tx, _shutdown_rx) = broadcast::channel(1);
+```
+
+Each background task (self-subscriber, daily timer, disconnect checker) receives its own `broadcast::Receiver` subscription and monitors for the shutdown signal in its main loop.
+
+### Actual Module Structure
+
+The implemented module structure differs from the original spec:
+
+```
+src/sync/
+├── mod.rs              # SyncManager, main loop, index types, metrics
+├── algorithms.rs       # derive_relay_targets, compute_actions, AddFilters
+├── filters.rs          # build_announcement_filter, build_layer2_and_layer3_filters
+├── health.rs           # RelayHealthTracker, HealthState, exponential backoff
+├── relay_connection.rs # RelayConnection, RelayEvent, WebSocket handling
+└── self_subscriber.rs  # SelfSubscriber, RelayAction, batching logic
+```
+
+Key differences from spec:
+- No separate `state.rs` - types are defined in `mod.rs`
+- No separate `actions.rs` - moved to `algorithms.rs`
+- No separate `consolidation.rs` - consolidation logic in `mod.rs`
+- No separate `metrics.rs` - `SyncMetrics` defined in `mod.rs`
+
+### Deviations from Original v4 Spec
+
+1. **RelayState lacks `connection` field**: The spec showed `connection: Option<RelayConnection>` in `RelayState`, but the implementation stores connections in a separate `HashMap<String, RelayConnection>` in `SyncManager`.
+
+2. **SelfSubscriber simplified**: The actual implementation uses `RelayAction` enum (SpawnRelay/AddFilters) rather than directly using `AddFilters` struct.
+
+3. **Consolidation wait_pending_complete**: The spec described a `wait_pending_complete()` method, but the implementation uses a simpler timeout-based approach checking pending batches.
+
+4. **Timestamp API**: Uses `Timestamp::now().as_secs()` instead of `.as_u64()` due to nostr-sdk 0.43 API.

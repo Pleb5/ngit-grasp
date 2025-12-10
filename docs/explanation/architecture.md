@@ -11,6 +11,7 @@
 After examining both the reference implementation and HTTP server options, we have two options:
 
 #### Option 1: Hook-Based (Reference Implementation Approach)
+
 - Use standard Git HTTP backend
 - Create pre-receive and post-receive hooks
 - Hooks query the Nostr relay and validate pushes
@@ -18,6 +19,7 @@ After examining both the reference implementation and HTTP server options, we ha
 - **Cons**: Requires hook management, harder to test, less Rust-native
 
 #### Option 2: Inline Authorization (Recommended)
+
 - Intercept Git receive-pack requests in the HTTP handler
 - Validate against Nostr state before spawning Git process
 - Only forward valid pushes to Git
@@ -30,13 +32,15 @@ After examining both the reference implementation and HTTP server options, we ha
 
 1. **Full control over HTTP layer**: Using Hyper directly gives us complete control over request handling, WebSocket upgrades, and CORS headers.
 
-2. **Better Developer Experience**: 
+2. **Better Developer Experience**:
+
    - Validation errors can be returned as proper HTTP responses
    - No need to parse hook stderr output
    - Shared state between Git and Nostr components
    - Pure Rust testing without shell scripts
 
 3. **Simpler Deployment**:
+
    - Single binary
    - No hook symlinks or permissions to manage
    - No multi-process coordination
@@ -93,6 +97,7 @@ After examining both the reference implementation and HTTP server options, we ha
 ### 1. Main Server ([`src/main.rs`](src/main.rs))
 
 **Responsibilities:**
+
 - Initialize configuration from environment (clap + dotenvy)
 - Set up Hyper HTTP server with request routing
 - Initialize Nostr relay builder with custom [`Nip34WritePolicy`](src/nostr/builder.rs:51)
@@ -101,6 +106,7 @@ After examining both the reference implementation and HTTP server options, we ha
 - Handle graceful shutdown
 
 **Key Dependencies:**
+
 ```rust
 hyper = "1"
 tokio = { version = "1", features = ["full"] }
@@ -112,6 +118,7 @@ nostr-lmdb = "0.43"
 ### 2. HTTP Module ([`src/http/mod.rs`](src/http/mod.rs))
 
 **Responsibilities:**
+
 - Route HTTP requests to appropriate handlers
 - WebSocket upgrade for Nostr relay at `/`
 - Git Smart HTTP endpoints at `/<npub>/<identifier>.git/*`
@@ -228,7 +235,7 @@ Provides structures for parsing NIP-34 events:
 /// Parsed repository announcement (Kind 30617)
 pub struct RepositoryAnnouncement { ... }
 
-/// Parsed repository state (Kind 30618)  
+/// Parsed repository state (Kind 30618)
 pub struct RepositoryState { ... }
 ```
 
@@ -332,10 +339,12 @@ See [test-strategy.md](../reference/test-strategy.md) for comprehensive testing 
 ### Quick Overview
 
 **Integration Tests** ([`tests/`](tests/)):
+
 - Use [`TestRelay`](tests/common/relay.rs:14) fixture for automatic relay lifecycle
 - Each test file in [`tests/`](tests/) covers a GRASP-01 requirement
 
 **Audit Tests** ([`grasp-audit/`](grasp-audit/)):
+
 - Reusable compliance testing for any GRASP implementation
 - Spec-mirrored structure in [`grasp-audit/src/specs/grasp01/`](grasp-audit/src/specs/grasp01/)
 
@@ -367,11 +376,52 @@ async fn test_nip01_websocket_connection() {
 - Maintainer sets computed once per event validation
 - State lookups use database indexes
 
+## Proactive Sync (GRASP-02)
+
+The ngit-grasp relay implements **Proactive Sync of Nostr Eevents**, which synchronizes repository data from external relays listed in 30617 repository announcements. This enables the relay to maintain complete repository graphs even when events are published to other listed relays.
+
+**Key Features:**
+
+- **Self-subscription** discovery - monitors own relay for announcements and root events to follow
+- **Three-way diff** (`compute_actions`) determines new subscriptions needed
+- **Smart reconnection** - uses `since` filter for quick reconnects (<15 min), fresh sync otherwise
+- **Health tracking** with exponential backoff for failing relays
+- **Daily sync** with random 23-25h timer to detect state drift
+- **Filter consolidation** when count exceeds 70 to prevent subscription explosion
+
+**Architecture:**
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                       SyncManager                            │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  ┌──────────────────┐              ┌──────────────────┐    │
+│  │  SelfSubscriber  │──actions──▶  │  Main Event Loop │    │
+│  │  (own relay)     │              │  (Arc<Mutex>)    │    │
+│  └──────────────────┘              └────────┬─────────┘    │
+│                                             │              │
+│  ┌──────────────────┐              ┌────────▼─────────┐    │
+│  │  Daily Timer     │──────────────▶  RelayConnection │    │
+│  │  (23-25h random) │              │  per external    │    │
+│  └──────────────────┘              │  relay           │    │
+│                                    └──────────────────┘    │
+│  ┌──────────────────┐                                      │
+│  │  Health Tracker  │  Exponential backoff, dead detection │
+│  │  (DashMap)       │                                      │
+│  └──────────────────┘                                      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Source Code:** [`src/sync/`](src/sync/)
+
+For full design details, see [grasp-02-proactive-sync-v4.md](grasp-02-proactive-sync-v4.md).
+
 ## Future Extensions
 
 ### GRASP-02: Proactive Sync
 
-See [grasp-02-proactive-sync.md](grasp-02-proactive-sync.md) for detailed design.
+GRASP-02 is only partially implemented. still outstanding is the proactive sync of git data for 1. state event and 2. PRs / PR Update refs.
 
 ### GRASP-05: Archive
 
@@ -437,6 +487,6 @@ The key insight is that we don't need to rely on Git's hook mechanism when we ha
 ## Related Documentation
 
 - [Inline Authorization Explanation](inline-authorization.md) - Why we chose this approach
-- [GRASP-02 Proactive Sync](grasp-02-proactive-sync.md) - Future work design
+- [GRASP-02 Proactive Sync v4 Design](grasp-02-proactive-sync-v4.md) - Current production sync implementation
 - [Test Strategy](../reference/test-strategy.md) - Comprehensive testing documentation
 - [GRASP-01 Implementation Learnings](../learnings/grasp-01-implementation.md) - Patterns and lessons learned
