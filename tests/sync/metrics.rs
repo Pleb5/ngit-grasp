@@ -410,11 +410,7 @@ async fn test_connection_failure_increments_counter() {
 /// This test validates that events received via live subscription
 /// (after sync connection is established) are counted separately
 /// from startup/bootstrap events.
-///
-/// NOTE: This test may fail until sync metrics recording is fully wired up.
-/// The test documents the expected behavior.
 #[tokio::test]
-#[ignore] // Enable when live event sync metrics are wired up
 async fn test_live_sync_event_count() {
     let mut harness = MetricsTestHarness::with_sources(1).await;
 
@@ -437,8 +433,6 @@ async fn test_live_sync_event_count() {
     let live_count = metrics.events_total("live");
     println!("Live events synced: {:?}", live_count);
 
-    // NOTE: This will likely fail until sync metrics are wired up
-    // Test documents the expectation
     assert_eq!(live_count, Some(2), "Should have 2 live events");
 
     harness.stop_all().await;

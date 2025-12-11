@@ -1249,19 +1249,21 @@ impl SyncManager {
         // Spawn event processor
         let relay_url_clone = relay_url.clone();
         let metrics_clone = self.metrics.clone(); // Clone metrics for the spawned task
-        let is_bootstrap_clone = is_bootstrap; // Clone is_bootstrap for the spawned task
         tokio::spawn(async move {
             // Track whether we've already sent a disconnect notification
             let mut disconnect_sent = false;
+            // Track whether EOSE has been received - events before EOSE are "startup", after are "live"
+            let mut eose_received = false;
             
             while let Some(relay_event) = event_rx.recv().await {
                 match relay_event {
                     RelayEvent::Event(event) => {
                         if let Some(ref metrics) = metrics_clone {
-                            let source = if is_bootstrap_clone {
-                                event_source::STARTUP
-                            } else {
+                            // Events before EOSE are "startup", events after EOSE are "live"
+                            let source = if eose_received {
                                 event_source::LIVE
+                            } else {
+                                event_source::STARTUP
                             };
                             metrics.record_event(source);
                         }
@@ -1275,6 +1277,8 @@ impl SyncManager {
                         .await;
                     }
                     RelayEvent::EndOfStoredEvents(sub_id) => {
+                        // Mark EOSE as received - subsequent events are "live"
+                        eose_received = true;
                         tracing::debug!(
                             relay = %relay_url_clone,
                             sub_id = %sub_id,
