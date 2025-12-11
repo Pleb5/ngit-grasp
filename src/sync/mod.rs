@@ -1208,13 +1208,23 @@ impl SyncManager {
         }
 
         // Mark as connected in relay sync index
-        {
+        // Track whether this is a new relay for metrics
+        let is_new_relay = {
             let mut index = relay_sync_index.write().await;
+            let is_new = !index.contains_key(&relay_url);
             let state = index.entry(relay_url.clone()).or_default();
             state.connection_status = ConnectionStatus::Connected;
             state.is_bootstrap = is_bootstrap;
             state.last_connected = Some(Timestamp::now());
             state.disconnected_at = None;
+            is_new
+        };
+
+        // Increment tracked count for new relays
+        if is_new_relay {
+            if let Some(ref metrics) = self.metrics {
+                metrics.inc_tracked_count();
+            }
         }
 
         // Store connection in HashMap BEFORE sending notification

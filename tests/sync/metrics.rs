@@ -374,8 +374,6 @@ async fn test_startup_sync_event_count() {
 /// This test validates that when sync cannot connect to a source relay,
 /// the connection_attempts_total counter with result="failure" increases.
 ///
-/// NOTE: This test may fail until sync metrics recording is fully wired up.
-/// The test documents the expected behavior.
 #[tokio::test]
 async fn test_connection_failure_increments_counter() {
     let mut harness = MetricsTestHarness::with_sources(0).await; // No sources
@@ -489,8 +487,6 @@ async fn test_relay_connected_status() {
 /// This test validates that `ngit_sync_relay_status` gauge transitions from
 /// healthy (1) to degraded (2) or dead (3) when a relay cannot be connected to.
 ///
-/// NOTE: This test may fail until sync metrics recording is fully wired up.
-/// The test documents the expected behavior.
 #[tokio::test]
 async fn test_health_state_degrades_on_failure() {
     use crate::common::sync_helpers::MetricsTestHarness;
@@ -533,10 +529,7 @@ async fn test_health_state_degrades_on_failure() {
 /// Note: Current implementation may only support one sync source, so this tests
 /// with one source, verifying tracked=1 and connected=1, then connected=0 after stopping.
 ///
-/// NOTE: This test may fail until sync metrics recording is fully wired up.
-/// The test documents the expected behavior.
 #[tokio::test]
-#[ignore] // Enable when relay tracking metrics are wired up
 async fn test_multi_source_aggregate_counts() {
     use crate::common::sync_helpers::MetricsTestHarness;
 
