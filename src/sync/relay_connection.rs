@@ -32,6 +32,17 @@ pub enum RelayEvent {
 /// - Layer 1 subscription (announcements)
 /// - Additional filter subscriptions (Layers 2 & 3)
 /// - Event notification loop
+///
+/// # Why Client instead of Relay directly?
+///
+/// While it would be cleaner to hold a `Relay` directly (since we only manage
+/// one relay per connection), the nostr-sdk API makes `Relay::new()` private
+/// (`pub(crate)`). Relays can only be created through `Client::add_relay()` or
+/// `RelayPool::add_relay()`. This is an intentional design in nostr-sdk to
+/// ensure proper lifecycle management.
+///
+/// The Client adds minimal overhead since we configure it with a single relay,
+/// and we retrieve the `Relay` reference for notification handling.
 #[derive(Clone)]
 pub struct RelayConnection {
     /// The relay URL this connection is for
@@ -135,10 +146,8 @@ impl RelayConnection {
     /// `RelayNotification::RelayStatus` events are not forwarded to the pool-level channel.
     /// This enables immediate, event-driven disconnect detection without polling.
     ///
-    /// # Future Refactoring
-    /// Consider refactoring `RelayConnection` to hold a `Relay` directly instead of
-    /// wrapping a `Client`. This would simplify the architecture since we only manage
-    /// one relay per connection.
+    /// We must retrieve the Relay from the Client because nostr-sdk does not expose
+    /// `Relay::new()` publicly - relays can only be created through Client or RelayPool.
     pub async fn run_event_loop(self, event_sender: mpsc::Sender<RelayEvent>) {
         let url = self.url.clone();
 
