@@ -1251,6 +1251,9 @@ impl SyncManager {
         let metrics_clone = self.metrics.clone(); // Clone metrics for the spawned task
         let is_bootstrap_clone = is_bootstrap; // Clone is_bootstrap for the spawned task
         tokio::spawn(async move {
+            // Track whether we've already sent a disconnect notification
+            let mut disconnect_sent = false;
+            
             while let Some(relay_event) = event_rx.recv().await {
                 match relay_event {
                     RelayEvent::Event(event) => {
@@ -1297,6 +1300,7 @@ impl SyncManager {
                                 relay_url: relay_url_clone.clone(),
                             })
                             .await;
+                        disconnect_sent = true;
                         break;
                     }
                     RelayEvent::Shutdown => {
@@ -1307,9 +1311,24 @@ impl SyncManager {
                                 relay_url: relay_url_clone.clone(),
                             })
                             .await;
+                        disconnect_sent = true;
                         break;
                     }
                 }
+            }
+            
+            // If the event channel closed without a Closed/Shutdown event
+            // (e.g., connection dropped unexpectedly), still notify SyncManager
+            if !disconnect_sent {
+                tracing::info!(
+                    relay = %relay_url_clone,
+                    "Event channel closed, notifying SyncManager of disconnect"
+                );
+                let _ = disconnect_tx
+                    .send(DisconnectNotification {
+                        relay_url: relay_url_clone.clone(),
+                    })
+                    .await;
             }
         });
 

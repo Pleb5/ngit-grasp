@@ -247,7 +247,12 @@ async fn test_startup_sync_event_count() {
     // 6. Create 3 patch events (Layer 2) that reference the announcement
     let patches: Vec<_> = (0..3)
         .map(|i| {
-            create_event_referencing_repo(&keys, &repo_coord, KIND_PATCH, &format!("Test patch {}", i))
+            create_event_referencing_repo(
+                &keys,
+                &repo_coord,
+                KIND_PATCH,
+                &format!("Test patch {}", i),
+            )
         })
         .collect();
     println!("Created {} patches", patches.len());
@@ -320,8 +325,12 @@ async fn test_startup_sync_event_count() {
         .kind(Kind::Custom(KIND_PATCH))
         .author(keys.public_key());
 
-    let patches_synced =
-        crate::common::sync_helpers::wait_for_event_on_relay(syncing_relay.url(), filter, Duration::from_secs(2)).await;
+    let patches_synced = crate::common::sync_helpers::wait_for_event_on_relay(
+        syncing_relay.url(),
+        filter,
+        Duration::from_secs(2),
+    )
+    .await;
     println!("Patches synced to syncing relay: {}", patches_synced);
 
     // Cleanup
@@ -374,12 +383,15 @@ async fn test_connection_failure_increments_counter() {
 
     // Wait for initial connection attempt to the unreachable bootstrap relay
     tokio::time::sleep(Duration::from_secs(2)).await;
-    
+
     let metrics = harness.get_metrics().await.unwrap();
 
     // Failure counter should be recorded when connecting to unreachable relay
     let failures = metrics
-        .counter("ngit_sync_connection_attempts_total", &[("result", "failure")])
+        .counter(
+            "ngit_sync_connection_attempts_total",
+            &[("result", "failure")],
+        )
         .unwrap_or(0);
 
     println!("Connection failures recorded: {}", failures);
@@ -413,7 +425,9 @@ async fn test_live_sync_event_count() {
     // Now add events - these should be "live" not "startup"
     let keys = Keys::generate();
     let events: Vec<_> = (0..2)
-        .map(|i| create_repo_announcement(&keys, &[&harness.source_domain(0)], &format!("live-{}", i)))
+        .map(|i| {
+            create_repo_announcement(&keys, &[&harness.source_domain(0)], &format!("live-{}", i))
+        })
         .collect();
     harness.submit_events(0, &events).await.unwrap();
 
@@ -434,11 +448,7 @@ async fn test_live_sync_event_count() {
 ///
 /// This test validates that the ngit_sync_relay_connected gauge
 /// correctly reflects the connection state of source relays.
-///
-/// NOTE: This test may fail until sync metrics recording is fully wired up.
-/// The test documents the expected behavior.
 #[tokio::test]
-#[ignore] // Enable when relay connected status metrics are wired up
 async fn test_relay_connected_status() {
     let mut harness = MetricsTestHarness::with_sources(1).await;
     harness.start_syncing_relay(0).await;
@@ -505,7 +515,10 @@ async fn test_health_state_degrades_on_failure() {
     // Get the relay status (1=healthy, 2=degraded, 3=dead)
     let status = later.gauge("ngit_sync_relay_status", &[]).unwrap_or(0);
 
-    println!("Initial metrics: {:?}", initial.gauge("ngit_sync_relay_status", &[]));
+    println!(
+        "Initial metrics: {:?}",
+        initial.gauge("ngit_sync_relay_status", &[])
+    );
     println!("Later status: {}", status);
 
     assert!(
@@ -561,8 +574,14 @@ async fn test_multi_source_aggregate_counts() {
 
     let metrics = harness.get_metrics().await.unwrap();
 
-    println!("After stop - Tracked total: {:?}", metrics.relays_tracked_total());
-    println!("After stop - Connected total: {:?}", metrics.relays_connected_total());
+    println!(
+        "After stop - Tracked total: {:?}",
+        metrics.relays_tracked_total()
+    );
+    println!(
+        "After stop - Connected total: {:?}",
+        metrics.relays_connected_total()
+    );
 
     assert_eq!(
         metrics.relays_tracked_total(),

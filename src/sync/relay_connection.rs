@@ -124,48 +124,83 @@ impl RelayConnection {
     /// # Arguments
     /// * `event_sender` - Channel to send relay events through
     pub async fn run_event_loop(self, event_sender: mpsc::Sender<RelayEvent>) {
+        use std::time::Duration;
+        use tokio::time::interval;
+        
         let mut notifications = self.client.notifications();
         let url = self.url.clone();
+        
+        // Check connection status every second to detect dead connections
+        let mut check_interval = interval(Duration::from_secs(1));
 
         tracing::debug!(relay = %url, "Starting event loop");
 
-        while let Ok(notification) = notifications.recv().await {
-            match notification {
-                RelayPoolNotification::Event { event, .. } => {
-                    tracing::trace!(relay = %url, event_id = %event.id, "Received event");
-                    if event_sender.send(RelayEvent::Event(*event)).await.is_err() {
-                        tracing::debug!(relay = %url, "Event sender closed, stopping event loop");
-                        break;
-                    }
-                }
-                RelayPoolNotification::Message { message, .. } => {
-                    match message {
-                        RelayMessage::EndOfStoredEvents(sub_id) => {
-                            tracing::debug!(relay = %url, sub_id = ?sub_id, "Received EOSE");
-                            // Convert Cow<SubscriptionId> to owned SubscriptionId
-                            let owned_sub_id = sub_id.into_owned();
-                            if event_sender
-                                .send(RelayEvent::EndOfStoredEvents(owned_sub_id))
-                                .await
-                                .is_err()
-                            {
-                                tracing::debug!(relay = %url, "Event sender closed, stopping event loop");
-                                break;
+        loop {
+            tokio::select! {
+                // Check for new notifications
+                notification_result = notifications.recv() => {
+                    match notification_result {
+                        Ok(notification) => {
+                            match notification {
+                                RelayPoolNotification::Event { event, .. } => {
+                                    tracing::trace!(relay = %url, event_id = %event.id, "Received event");
+                                    if event_sender.send(RelayEvent::Event(*event)).await.is_err() {
+                                        tracing::debug!(relay = %url, "Event sender closed, stopping event loop");
+                                        break;
+                                    }
+                                }
+                                RelayPoolNotification::Message { message, .. } => {
+                                    match message {
+                                        RelayMessage::EndOfStoredEvents(sub_id) => {
+                                            tracing::debug!(relay = %url, sub_id = ?sub_id, "Received EOSE");
+                                            // Convert Cow<SubscriptionId> to owned SubscriptionId
+                                            let owned_sub_id = sub_id.into_owned();
+                                            if event_sender
+                                                .send(RelayEvent::EndOfStoredEvents(owned_sub_id))
+                                                .await
+                                                .is_err()
+                                            {
+                                                tracing::debug!(relay = %url, "Event sender closed, stopping event loop");
+                                                break;
+                                            }
+                                        }
+                                        RelayMessage::Closed { message: msg, .. } => {
+                                            tracing::info!(relay = %url, message = %msg, "Relay closed subscription");
+                                            let _ = event_sender
+                                                .send(RelayEvent::Closed(msg.to_string()))
+                                                .await;
+                                            break;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                RelayPoolNotification::Shutdown => {
+                                    tracing::info!(relay = %url, "Relay pool shutdown");
+                                    let _ = event_sender.send(RelayEvent::Shutdown).await;
+                                    break;
+                                }
                             }
                         }
-                        RelayMessage::Closed { message: msg, .. } => {
-                            tracing::info!(relay = %url, message = %msg, "Relay closed subscription");
-                            let _ = event_sender
-                                .send(RelayEvent::Closed(msg.to_string()))
-                                .await;
+                        Err(_) => {
+                            // Notification channel closed - connection lost
+                            tracing::debug!(relay = %url, "Notification channel error, stopping event loop");
+                            break;
                         }
-                        _ => {}
                     }
                 }
-                RelayPoolNotification::Shutdown => {
-                    tracing::info!(relay = %url, "Relay pool shutdown");
-                    let _ = event_sender.send(RelayEvent::Shutdown).await;
-                    break;
+                // Periodic connection health check
+                _ = check_interval.tick() => {
+                    // Check if relay is still connected via nostr-sdk
+                    if let Ok(relay) = self.client.relay(&self.url).await {
+                        if !relay.is_connected() {
+                            tracing::info!(relay = %url, "Relay disconnected (detected by health check)");
+                            break;
+                        }
+                    } else {
+                        // Relay not found in client - must be disconnected
+                        tracing::info!(relay = %url, "Relay not found (detected by health check)");
+                        break;
+                    }
                 }
             }
         }
