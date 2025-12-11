@@ -206,11 +206,7 @@ impl RelayHealthTracker {
                 health.next_retry_at = Some(now + backoff);
 
                 if old_state != HealthState::Degraded {
-                    tracing::warn!(
-                        "Relay {} degraded, backoff {:?}",
-                        relay_url,
-                        backoff
-                    );
+                    tracing::warn!("Relay {} degraded, backoff {:?}", relay_url, backoff);
                 } else {
                     tracing::debug!(
                         "Relay {} failure #{}, backoff {:?}",
@@ -308,12 +304,17 @@ impl RelayHealthTracker {
 
     /// Get all tracked relay URLs
     pub fn get_tracked_relays(&self) -> Vec<String> {
-        self.health.iter().map(|entry| entry.key().clone()).collect()
+        self.health
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect()
     }
 
     /// Get a clone of the health info for a relay
     pub fn get_health(&self, relay_url: &str) -> Option<RelayHealth> {
-        self.health.get(relay_url).map(|entry| entry.value().clone())
+        self.health
+            .get(relay_url)
+            .map(|entry| entry.value().clone())
     }
 }
 
@@ -369,7 +370,7 @@ mod tests {
     fn test_backoff_increases_exponentially() {
         let base = DEFAULT_BASE_BACKOFF_SECS; // 5 seconds
         let max = 3600u64;
-        
+
         // failure 1: 5s (base * 2^0 = 5)
         assert_eq!(
             RelayHealthTracker::get_backoff_duration(1, base, max),

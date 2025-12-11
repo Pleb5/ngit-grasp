@@ -229,7 +229,10 @@ async fn test_live_sync_layer3_events() {
         .send_event(&comment)
         .await
         .expect("Failed to send comment");
-    println!("Layer 3 comment {} sent to relay_a BEFORE Layer 3 subscription established", comment_id);
+    println!(
+        "Layer 3 comment {} sent to relay_a BEFORE Layer 3 subscription established",
+        comment_id
+    );
 
     // 6. Now wait for issue to sync to relay_b (this triggers Layer 3 filter creation)
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -394,7 +397,7 @@ async fn test_live_sync_event_ordering() {
         client_a
             .send_event(&issue)
             .await
-            .expect(&format!("Failed to send issue {}", i));
+            .unwrap_or_else(|_| panic!("Failed to send issue {}", i));
 
         // Delay between events to ensure different timestamps
         tokio::time::sleep(Duration::from_millis(150)).await;

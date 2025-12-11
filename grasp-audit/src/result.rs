@@ -38,7 +38,9 @@ fn parse_spec_lines(spec_ref: &str) -> Vec<u32> {
     if line_part.contains('-') {
         let range_parts: Vec<&str> = line_part.split('-').collect();
         if range_parts.len() == 2 {
-            if let (Ok(start), Ok(end)) = (range_parts[0].parse::<u32>(), range_parts[1].parse::<u32>()) {
+            if let (Ok(start), Ok(end)) =
+                (range_parts[0].parse::<u32>(), range_parts[1].parse::<u32>())
+            {
                 return (start..=end).collect();
             }
         }
@@ -162,10 +164,19 @@ impl AuditResult {
     /// Print a detailed report aligned to GRASP-01 specification
     pub fn print_report(&self) {
         println!();
-        println!("{}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{}", BOLD, RESET);
+        println!(
+            "{}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{}",
+            BOLD, RESET
+        );
         println!("{}GRASP-01 Compliance Report{}", BOLD, RESET);
-        println!("Source: github.com/nostr-protocol/grasp (commit: {})", GRASP_COMMIT_ID);
-        println!("{}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{}", BOLD, RESET);
+        println!(
+            "Source: github.com/nostr-protocol/grasp (commit: {})",
+            GRASP_COMMIT_ID
+        );
+        println!(
+            "{}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{}",
+            BOLD, RESET
+        );
 
         // Build a map of spec line -> tests that cover it
         let mut tests_by_line: BTreeMap<u32, Vec<&TestResult>> = BTreeMap::new();
@@ -185,7 +196,10 @@ impl AuditResult {
             println!();
             println!("{}{}## {}{}", CYAN, BOLD, section, RESET);
 
-            for req in GRASP_01_REQUIREMENTS.iter().filter(|r| r.section == section) {
+            for req in GRASP_01_REQUIREMENTS
+                .iter()
+                .filter(|r| r.section == section)
+            {
                 println!();
                 // Print spec requirement in blue
                 println!("{}📘 Line {}: {}{}", BLUE, req.line, req.text, RESET);
@@ -218,7 +232,10 @@ impl AuditResult {
         }
 
         println!();
-        println!("{}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{}", BOLD, RESET);
+        println!(
+            "{}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{}",
+            BOLD, RESET
+        );
 
         // Summary statistics
         let passed = self.passed_count();
@@ -252,7 +269,10 @@ impl AuditResult {
             "{}Test results:  {}/{} tests passed ({:.1}%){}",
             summary_color, passed, total_tests, pass_rate, RESET
         );
-        println!("{}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{}", BOLD, RESET);
+        println!(
+            "{}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{}",
+            BOLD, RESET
+        );
         println!();
     }
 
@@ -313,7 +333,10 @@ mod tests {
     #[test]
     fn test_parse_spec_lines_range() {
         assert_eq!(parse_spec_lines("GRASP-01:nostr-relay:7-9"), vec![7, 8, 9]);
-        assert_eq!(parse_spec_lines("GRASP-01:cors:44-47"), vec![44, 45, 46, 47]);
+        assert_eq!(
+            parse_spec_lines("GRASP-01:cors:44-47"),
+            vec![44, 45, 46, 47]
+        );
     }
 
     #[test]

@@ -239,7 +239,10 @@ impl StatePolicy {
             }
 
             // Build repository path: <git_data_path>/<owner_npub>/<identifier>.git
-            let repo_path = self.ctx.git_data_path.join(announcement.repo_path().clone());
+            let repo_path = self
+                .ctx
+                .git_data_path
+                .join(announcement.repo_path().clone());
             owner_repos.push((announcement, repo_path));
         }
 

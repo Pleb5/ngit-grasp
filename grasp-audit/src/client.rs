@@ -585,7 +585,9 @@ mod tests {
             "Missing 'grasp-audit-test-event' tag"
         );
         assert!(
-            tag_contents.iter().any(|t| t.starts_with("audit-isolated-")),
+            tag_contents
+                .iter()
+                .any(|t| t.starts_with("audit-isolated-")),
             "Missing 'audit-isolated-*' tag"
         );
         assert!(

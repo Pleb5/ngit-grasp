@@ -77,11 +77,19 @@ pub struct Config {
     pub metrics_enabled: bool,
 
     /// Connections per IP before flagging as potential abuse in metrics (display only, no rate limiting)
-    #[arg(long = "metrics-connection-per-ip-abuse-threshold", env = "NGIT_METRICS_CONNECTION_PER_IP_ABUSE_THRESHOLD", default_value_t = 10)]
+    #[arg(
+        long = "metrics-connection-per-ip-abuse-threshold",
+        env = "NGIT_METRICS_CONNECTION_PER_IP_ABUSE_THRESHOLD",
+        default_value_t = 10
+    )]
     pub metrics_connection_per_ip_abuse_threshold: u32,
 
     /// Number of top bandwidth repos to track in metrics
-    #[arg(long = "metrics-top-n-repos", env = "NGIT_METRICS_TOP_N_REPOS", default_value_t = 10)]
+    #[arg(
+        long = "metrics-top-n-repos",
+        env = "NGIT_METRICS_TOP_N_REPOS",
+        default_value_t = 10
+    )]
     pub metrics_top_n_repos: usize,
 
     /// URL of bootstrap relay to sync from on startup (optional)
@@ -95,7 +103,11 @@ pub struct Config {
 
     /// Interval in seconds for checking disconnected relays and attempting reconnection (default: 60)
     /// Set to lower value for faster reconnection testing
-    #[arg(long, env = "NGIT_SYNC_DISCONNECT_CHECK_INTERVAL_SECS", default_value_t = 60)]
+    #[arg(
+        long,
+        env = "NGIT_SYNC_DISCONNECT_CHECK_INTERVAL_SECS",
+        default_value_t = 60
+    )]
     pub sync_disconnect_check_interval_secs: u64,
 
     /// Base backoff time in seconds for relay reconnection (default: 5)

@@ -173,7 +173,11 @@ impl TestClient {
 /// # Returns
 /// * `Ok(Event)` - Signed event ready to send
 /// * `Err(String)` - If signing fails
-pub fn build_layer2_issue_event(keys: &Keys, repo_coord: &str, title: &str) -> Result<Event, String> {
+pub fn build_layer2_issue_event(
+    keys: &Keys,
+    repo_coord: &str,
+    title: &str,
+) -> Result<Event, String> {
     build_layer2_issue_with_tag(keys, repo_coord, title, TagVariant::LowercaseA)
 }
 
@@ -256,10 +260,7 @@ pub fn build_layer3_comment_event(
     // Choose tag based on kind (NIP-22 uses E, NIP-10 style uses e)
     let tag = if kind_num == KIND_COMMENT {
         // NIP-22 comment: uppercase 'E' tag
-        Tag::custom(
-            TagKind::custom("E"),
-            vec![parent_event_id.to_hex()],
-        )
+        Tag::custom(TagKind::custom("E"), vec![parent_event_id.to_hex()])
     } else {
         // Kind 1 reply: lowercase 'e' tag with root marker (NIP-10)
         Tag::custom(
@@ -299,10 +300,7 @@ pub fn build_layer3_comment_with_uppercase_e_tag(
     parent_event_id: &EventId,
     content: &str,
 ) -> Result<Event, String> {
-    let tag = Tag::custom(
-        TagKind::custom("E"),
-        vec![parent_event_id.to_hex()],
-    );
+    let tag = Tag::custom(TagKind::custom("E"), vec![parent_event_id.to_hex()]);
 
     EventBuilder::new(Kind::Custom(KIND_COMMENT), content)
         .tags(vec![tag])
@@ -316,10 +314,7 @@ pub fn build_layer3_quote_with_q_tag(
     parent_event_id: &EventId,
     content: &str,
 ) -> Result<Event, String> {
-    let tag = Tag::custom(
-        TagKind::custom("q"),
-        vec![parent_event_id.to_hex()],
-    );
+    let tag = Tag::custom(TagKind::custom("q"), vec![parent_event_id.to_hex()]);
 
     EventBuilder::new(Kind::Custom(1), content)
         .tags(vec![tag])
@@ -587,10 +582,7 @@ pub fn repo_coord(keys: &Keys, identifier: &str) -> String {
 /// ```
 pub async fn fetch_metrics(relay_url: &str) -> Result<String, reqwest::Error> {
     // Convert ws:// URL to http:// for metrics endpoint
-    let http_url = relay_url
-        .replace("ws://", "http://")
-        .replace("/", "")
-        + "/metrics";
+    let http_url = relay_url.replace("ws://", "http://").replace("/", "") + "/metrics";
 
     reqwest::get(&http_url).await?.text().await
 }
@@ -888,8 +880,8 @@ mod tests {
         let keys = Keys::generate();
         let coord = repo_coord(&keys, "my-repo");
 
-        let event = build_layer2_issue_event(&keys, &coord, "Test Issue")
-            .expect("Should create event");
+        let event =
+            build_layer2_issue_event(&keys, &coord, "Test Issue").expect("Should create event");
 
         // nostr-sdk 0.43: use field access
         assert_eq!(event.kind.as_u16(), KIND_ISSUE);
@@ -937,8 +929,13 @@ mod tests {
         let keys = Keys::generate();
         let parent_id = EventId::all_zeros();
 
-        let event = build_layer3_comment_event(&keys, &parent_id, "Test comment", Kind::Custom(KIND_COMMENT))
-            .expect("Should create event");
+        let event = build_layer3_comment_event(
+            &keys,
+            &parent_id,
+            "Test comment",
+            Kind::Custom(KIND_COMMENT),
+        )
+        .expect("Should create event");
 
         assert_eq!(event.kind.as_u16(), KIND_COMMENT);
 
@@ -980,8 +977,7 @@ mod tests {
 
         let has_e_tag = event.tags.iter().any(|tag| {
             let slice = tag.as_slice();
-            slice.first().is_some_and(|t| t == "e") &&
-            slice.get(3).is_some_and(|m| m == "root")
+            slice.first().is_some_and(|t| t == "e") && slice.get(3).is_some_and(|m| m == "root")
         });
         assert!(has_e_tag, "Should have 'e' tag with root marker");
     }
@@ -1038,7 +1034,10 @@ mod tests {
     fn test_parse_gauge_without_labels() {
         let text = r#"ngit_sync_relays_tracked_total 3"#;
         let metrics = ParsedMetrics::parse(text);
-        assert_eq!(metrics.gauge("ngit_sync_relays_tracked_total", &[]), Some(3));
+        assert_eq!(
+            metrics.gauge("ngit_sync_relays_tracked_total", &[]),
+            Some(3)
+        );
     }
 
     #[test]
@@ -1051,9 +1050,6 @@ mod tests {
     fn test_parse_metric_with_relay_url_label() {
         let text = r#"ngit_sync_relay_connected{relay="ws://127.0.0.1:12345"} 1"#;
         let metrics = ParsedMetrics::parse(text);
-        assert_eq!(
-            metrics.relay_connected("ws://127.0.0.1:12345"),
-            Some(true)
-        );
+        assert_eq!(metrics.relay_connected("ws://127.0.0.1:12345"), Some(true));
     }
 }

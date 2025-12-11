@@ -509,7 +509,13 @@ pub async fn run_server(
     loop {
         let (socket, addr) = listener.accept().await?;
         let io = TokioIo::new(socket);
-        let service = HttpService::new(relay.clone(), config.clone(), addr, database.clone(), metrics.clone());
+        let service = HttpService::new(
+            relay.clone(),
+            config.clone(),
+            addr,
+            database.clone(),
+            metrics.clone(),
+        );
 
         tokio::spawn(async move {
             if let Err(e) = http1::Builder::new()

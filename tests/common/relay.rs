@@ -104,7 +104,11 @@ impl TestRelay {
     }
 
     /// Start relay with full options
-    async fn start_with_full_options(port: u16, bootstrap_relay_url: Option<String>, disable_negentropy: bool) -> Self {
+    async fn start_with_full_options(
+        port: u16,
+        bootstrap_relay_url: Option<String>,
+        disable_negentropy: bool,
+    ) -> Self {
         let bind_address = format!("127.0.0.1:{}", port);
         let url = format!("ws://127.0.0.1:{}", port);
 

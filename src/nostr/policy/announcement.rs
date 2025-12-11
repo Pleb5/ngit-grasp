@@ -72,7 +72,10 @@ impl AnnouncementPolicy {
 
     /// Create a bare git repository if it doesn't exist
     /// Path format: <git_data_path>/<npub>/<identifier>.git
-    pub fn ensure_bare_repository(&self, announcement: &RepositoryAnnouncement) -> Result<(), String> {
+    pub fn ensure_bare_repository(
+        &self,
+        announcement: &RepositoryAnnouncement,
+    ) -> Result<(), String> {
         let repo_path = self.ctx.git_data_path.join(announcement.repo_path());
 
         // Check if repository already exists

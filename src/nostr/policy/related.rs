@@ -169,10 +169,7 @@ impl RelatedEventPolicy {
 
     /// Check if any events exist in database
     /// Returns the first matching event ID found, or None if none match
-    async fn find_accepted_event(
-        &self,
-        event_ids: &[EventId],
-    ) -> Result<Option<EventId>, String> {
+    async fn find_accepted_event(&self, event_ids: &[EventId]) -> Result<Option<EventId>, String> {
         if event_ids.is_empty() {
             return Ok(None);
         }

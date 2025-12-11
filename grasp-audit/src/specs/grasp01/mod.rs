@@ -29,6 +29,6 @@ pub use nip11_document::Nip11DocumentTests;
 pub use push_authorization::PushAuthorizationTests;
 pub use repository_creation::RepositoryCreationTests;
 pub use spec_requirements::{
-    get_requirement, get_requirements_for_section, get_sections, RequirementLevel,
-    SpecRequirement, GRASP_01_REQUIREMENTS, GRASP_COMMIT_ID,
+    get_requirement, get_requirements_for_section, get_sections, RequirementLevel, SpecRequirement,
+    GRASP_01_REQUIREMENTS, GRASP_COMMIT_ID,
 };

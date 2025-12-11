@@ -150,17 +150,21 @@ impl RelayConnection {
         //
         // See: nostr-sdk-0.44 Client::try_connect_relay documentation
         self.client
-            .try_connect_relay(&self.url, std::time::Duration::from_secs(connection_timeout_secs))
+            .try_connect_relay(
+                &self.url,
+                std::time::Duration::from_secs(connection_timeout_secs),
+            )
             .await
             .map_err(|e| format!("Failed to connect to relay {}: {}", self.url, e))?;
 
         // Subscribe to Layer 1 (announcements)
         let filter = build_announcement_filter(since);
-        let output = self
-            .client
-            .subscribe(filter, None)
-            .await
-            .map_err(|e| format!("Failed to subscribe to announcements on {}: {}", self.url, e))?;
+        let output = self.client.subscribe(filter, None).await.map_err(|e| {
+            format!(
+                "Failed to subscribe to announcements on {}: {}",
+                self.url, e
+            )
+        })?;
 
         tracing::info!(url = %self.url, sub_id = %output.val, "Connected and subscribed to Layer 1 (announcements)");
         Ok(output.val)
@@ -250,7 +254,8 @@ impl RelayConnection {
                             }
                             RelayMessage::Closed { message: msg, .. } => {
                                 tracing::info!(relay = %url, message = %msg, "Relay closed subscription");
-                                let _ = event_sender.send(RelayEvent::Closed(msg.to_string())).await;
+                                let _ =
+                                    event_sender.send(RelayEvent::Closed(msg.to_string())).await;
                                 break;
                             }
                             _ => {}
@@ -421,7 +426,10 @@ impl RelayConnection {
     /// - Relay doesn't actually support NIP-77 (despite claiming to)
     /// - Network errors during reconciliation
     /// - Timeout during sync
-    pub async fn negentropy_sync_filter(&self, filter: Filter) -> Result<NegentropySyncResult, String> {
+    pub async fn negentropy_sync_filter(
+        &self,
+        filter: Filter,
+    ) -> Result<NegentropySyncResult, String> {
         // Use nostr-sdk's sync method which handles the NEG-OPEN/NEG-MSG exchange
         let sync_opts = SyncOptions::default();
 

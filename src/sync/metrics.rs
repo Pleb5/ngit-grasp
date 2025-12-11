@@ -207,7 +207,9 @@ impl SyncMetrics {
             HealthState::Degraded => 2,
             HealthState::Dead => 3,
         };
-        self.relay_status.with_label_values(&[relay]).set(state_value);
+        self.relay_status
+            .with_label_values(&[relay])
+            .set(state_value);
     }
 
     /// Record relay failure count.
@@ -259,9 +261,7 @@ impl SyncMetrics {
     /// * `source` - The event source type (see [`record_event`](Self::record_event))
     /// * `count` - Number of events to record
     pub fn record_events(&self, source: &str, count: u64) {
-        self.events_total
-            .with_label_values(&[source])
-            .inc_by(count);
+        self.events_total.with_label_values(&[source]).inc_by(count);
     }
 
     /// Record a gap event filled during catchup.

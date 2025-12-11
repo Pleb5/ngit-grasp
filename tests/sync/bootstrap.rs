@@ -167,7 +167,8 @@ async fn test_relay_replays_events_after_restart() {
         .kind(Kind::Custom(KIND_REPOSITORY_STATE))
         .author(keys.public_key());
 
-    let synced_first = wait_for_event_on_relay(relay_b.url(), filter.clone(), Duration::from_secs(5)).await;
+    let synced_first =
+        wait_for_event_on_relay(relay_b.url(), filter.clone(), Duration::from_secs(5)).await;
     println!("First sync check: {}", synced_first);
 
     // 8. Stop relay_b
@@ -193,7 +194,8 @@ async fn test_relay_replays_events_after_restart() {
     // 12. Verify announcement is available on new relay_b
     // The announcement listed the OLD relay_b domain, but since relay_a still
     // has the event, new relay_b should be able to sync it via bootstrap
-    let synced_after_restart = wait_for_event_on_relay(relay_b_new.url(), filter, Duration::from_secs(5)).await;
+    let synced_after_restart =
+        wait_for_event_on_relay(relay_b_new.url(), filter, Duration::from_secs(5)).await;
 
     // 13. Cleanup
     relay_b_new.stop().await;
@@ -384,7 +386,8 @@ async fn test_history_sync_without_negentropy() {
         relay_b_port,
         Some(relay_a.url().into()),
         true, // disable_negentropy = true
-    ).await;
+    )
+    .await;
     println!(
         "relay_b started at {} (domain: {}) - negentropy DISABLED, will do HISTORY sync",
         relay_b.url(),

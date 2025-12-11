@@ -341,10 +341,7 @@ fn generate_hero_tags(nip11: &RelayInformationDocument) -> String {
 
     // Add GRASP tags
     for grasp in &nip11.supported_grasps {
-        html.push_str(&format!(
-            r#"<span class="tag tag-grasp">{}</span>"#,
-            grasp
-        ));
+        html.push_str(&format!(r#"<span class="tag tag-grasp">{}</span>"#, grasp));
         html.push('\n');
     }
 

@@ -32,7 +32,7 @@ async fn test_prometheus_format_valid() {
     let relay = TestRelay::start().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let metrics = fetch_metrics(&relay.url())
+    let metrics = fetch_metrics(relay.url())
         .await
         .expect("Failed to fetch metrics");
 
@@ -67,7 +67,7 @@ async fn test_metrics_availability_during_sync() {
 
     // Make multiple metrics requests while sync is active
     for i in 0..3 {
-        let metrics = fetch_metrics(&sync_relay.url()).await;
+        let metrics = fetch_metrics(sync_relay.url()).await;
         assert!(
             metrics.is_ok(),
             "Metrics request {} should succeed during sync",
@@ -135,7 +135,7 @@ async fn test_metric_values_are_numeric() {
     let relay = TestRelay::start().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let metrics = fetch_metrics(&relay.url())
+    let metrics = fetch_metrics(relay.url())
         .await
         .expect("Should fetch metrics");
 

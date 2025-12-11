@@ -65,9 +65,7 @@ pub fn derive_relay_targets(
 
     for (repo_id, needs) in repo_index {
         for relay_url in &needs.relays {
-            let entry = relay_targets
-                .entry(relay_url.clone())
-                .or_insert_with(RelaySyncNeeds::default);
+            let entry = relay_targets.entry(relay_url.clone()).or_default();
 
             entry.repos.insert(repo_id.clone());
             entry.root_events.extend(needs.root_events.iter().cloned());

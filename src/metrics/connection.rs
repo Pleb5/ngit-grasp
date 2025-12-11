@@ -25,7 +25,8 @@ use tracing::warn;
 struct ConnectionInfo {
     /// Number of active connections from this IP
     count: u32,
-    /// When the first connection from this IP was established
+    /// When the first connection from this IP was established (for future rate limiting)
+    #[allow(dead_code)]
     first_seen: Instant,
     /// Whether this IP has been flagged as potentially abusive
     flagged_as_abuse: bool,
@@ -48,16 +49,16 @@ struct ConnectionInfo {
 pub struct ConnectionTracker {
     /// Active connections per IP (INTERNAL ONLY - never exposed to metrics)
     connections: DashMap<IpAddr, ConnectionInfo>,
-    
+
     /// Threshold for abuse flagging (connections per IP)
     abuse_threshold: u32,
-    
+
     /// Prometheus gauge: total active connections
     active_connections: IntGauge,
-    
+
     /// Prometheus gauge: number of unique IPs connected
     unique_ips: IntGauge,
-    
+
     /// Prometheus gauge: number of IPs flagged as potential abusers
     flagged_abusers: IntGauge,
 }
@@ -70,29 +71,30 @@ impl ConnectionTracker {
     /// * `abuse_threshold` - Number of connections from a single IP before flagging
     /// * `registry` - Prometheus registry to register metrics with
     pub fn new(abuse_threshold: u32, registry: &Registry) -> Self {
-        let active_connections = IntGauge::with_opts(
-            Opts::new(
-                "ngit_websocket_connections_active",
-                "Current active WebSocket connections",
-            )
-        ).unwrap();
-        registry.register(Box::new(active_connections.clone())).unwrap();
+        let active_connections = IntGauge::with_opts(Opts::new(
+            "ngit_websocket_connections_active",
+            "Current active WebSocket connections",
+        ))
+        .unwrap();
+        registry
+            .register(Box::new(active_connections.clone()))
+            .unwrap();
 
-        let unique_ips = IntGauge::with_opts(
-            Opts::new(
-                "ngit_websocket_unique_ips",
-                "Number of unique IP addresses connected (NOT the IPs themselves)",
-            )
-        ).unwrap();
+        let unique_ips = IntGauge::with_opts(Opts::new(
+            "ngit_websocket_unique_ips",
+            "Number of unique IP addresses connected (NOT the IPs themselves)",
+        ))
+        .unwrap();
         registry.register(Box::new(unique_ips.clone())).unwrap();
 
-        let flagged_abusers = IntGauge::with_opts(
-            Opts::new(
-                "ngit_websocket_flagged_abusers",
-                "Number of IPs exceeding connection threshold",
-            )
-        ).unwrap();
-        registry.register(Box::new(flagged_abusers.clone())).unwrap();
+        let flagged_abusers = IntGauge::with_opts(Opts::new(
+            "ngit_websocket_flagged_abusers",
+            "Number of IPs exceeding connection threshold",
+        ))
+        .unwrap();
+        registry
+            .register(Box::new(flagged_abusers.clone()))
+            .unwrap();
 
         Self {
             connections: DashMap::new(),
@@ -140,7 +142,7 @@ impl ConnectionTracker {
 
         // Update Prometheus metrics (aggregate counts only)
         self.active_connections.inc();
-        
+
         if is_new_ip {
             self.unique_ips.inc();
         }

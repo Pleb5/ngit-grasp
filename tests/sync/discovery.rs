@@ -88,7 +88,8 @@ async fn test_discovers_layer3_via_layer2() {
     );
 
     // 6. Create a patch event (Layer 2) that references the announcement
-    let patch = create_event_referencing_repo(&keys, &repo_coord, KIND_PATCH, "Test patch proposal");
+    let patch =
+        create_event_referencing_repo(&keys, &repo_coord, KIND_PATCH, "Test patch proposal");
     let patch_id = patch.id;
 
     println!("Created patch {} (kind {})", patch_id, patch.kind.as_u16());
@@ -252,7 +253,8 @@ async fn test_layer2_discovery_with_chain() {
     let issue_filter = Filter::new()
         .kind(Kind::Custom(KIND_ISSUE))
         .author(keys.public_key());
-    let issue_synced = wait_for_event_on_relay(relay_b.url(), issue_filter, Duration::from_secs(5)).await;
+    let issue_synced =
+        wait_for_event_on_relay(relay_b.url(), issue_filter, Duration::from_secs(5)).await;
 
     println!("Sync result:");
     println!("  Issue {} synced: {}", issue_id, issue_synced);
@@ -296,7 +298,7 @@ async fn test_layer2_discovery_with_chain() {
 #[tokio::test]
 async fn test_recursive_relay_discovery_syncs_announcement() {
     // 1. Start all three relays
-    
+
     // relay_b - will be the bootstrap relay, has announcement_x
     let relay_b = TestRelay::start().await;
     println!(
@@ -344,7 +346,10 @@ async fn test_recursive_relay_discovery_syncs_announcement() {
         "repo-y-ac-only",
     );
     let announcement_y_id = announcement_y.id;
-    println!("Created announcement_y {} listing A+C only", announcement_y_id);
+    println!(
+        "Created announcement_y {} listing A+C only",
+        announcement_y_id
+    );
     for tag in announcement_y.tags.iter() {
         println!("  Tag: {:?}", tag.as_slice());
     }

@@ -87,7 +87,8 @@ struct MetricsInner {
     // === System Health Metrics ===
     /// Server start time for uptime calculation
     pub start_time: Instant,
-    /// Build information gauge
+    /// Build information gauge (stored to prevent unregistration from Prometheus)
+    #[allow(dead_code)]
     pub build_info: GaugeVec,
 }
 
@@ -158,7 +159,10 @@ impl Metrics {
 
     /// Start timing a git operation, returns a timer
     pub fn start_git_operation_timer(&self, operation: &str) -> GitOperationTimer {
-        GitOperationTimer::new(self.inner.git_operation_duration.clone(), operation.to_string())
+        GitOperationTimer::new(
+            self.inner.git_operation_duration.clone(),
+            operation.to_string(),
+        )
     }
 
     /// Record bytes transferred for a git operation
@@ -266,13 +270,14 @@ impl MetricsInner {
         }
 
         // WebSocket metrics
-        let websocket_connections_total = Counter::with_opts(
-            Opts::new(
-                "ngit_websocket_connections_total",
-                "Total WebSocket connections since startup",
-            )
-        ).unwrap();
-        REGISTRY.register(Box::new(websocket_connections_total.clone())).unwrap();
+        let websocket_connections_total = Counter::with_opts(Opts::new(
+            "ngit_websocket_connections_total",
+            "Total WebSocket connections since startup",
+        ))
+        .unwrap();
+        REGISTRY
+            .register(Box::new(websocket_connections_total.clone()))
+            .unwrap();
 
         let websocket_connection_duration = Histogram::with_opts(
             HistogramOpts::new(
@@ -280,8 +285,11 @@ impl MetricsInner {
                 "Duration of WebSocket connections",
             )
             .buckets(vec![1.0, 5.0, 15.0, 30.0, 60.0, 300.0, 900.0, 3600.0]),
-        ).unwrap();
-        REGISTRY.register(Box::new(websocket_connection_duration.clone())).unwrap();
+        )
+        .unwrap();
+        REGISTRY
+            .register(Box::new(websocket_connection_duration.clone()))
+            .unwrap();
 
         let websocket_messages_received = CounterVec::new(
             Opts::new(
@@ -289,8 +297,11 @@ impl MetricsInner {
                 "WebSocket messages received by type",
             ),
             &["type"],
-        ).unwrap();
-        REGISTRY.register(Box::new(websocket_messages_received.clone())).unwrap();
+        )
+        .unwrap();
+        REGISTRY
+            .register(Box::new(websocket_messages_received.clone()))
+            .unwrap();
 
         let websocket_messages_sent = CounterVec::new(
             Opts::new(
@@ -298,8 +309,11 @@ impl MetricsInner {
                 "WebSocket messages sent by type",
             ),
             &["type"],
-        ).unwrap();
-        REGISTRY.register(Box::new(websocket_messages_sent.clone())).unwrap();
+        )
+        .unwrap();
+        REGISTRY
+            .register(Box::new(websocket_messages_sent.clone()))
+            .unwrap();
 
         // Git operation metrics
         let git_operations_total = CounterVec::new(
@@ -308,8 +322,11 @@ impl MetricsInner {
                 "Git operations by type and status",
             ),
             &["operation", "status"],
-        ).unwrap();
-        REGISTRY.register(Box::new(git_operations_total.clone())).unwrap();
+        )
+        .unwrap();
+        REGISTRY
+            .register(Box::new(git_operations_total.clone()))
+            .unwrap();
 
         let git_operation_duration = HistogramVec::new(
             HistogramOpts::new(
@@ -318,8 +335,11 @@ impl MetricsInner {
             )
             .buckets(vec![0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0]),
             &["operation"],
-        ).unwrap();
-        REGISTRY.register(Box::new(git_operation_duration.clone())).unwrap();
+        )
+        .unwrap();
+        REGISTRY
+            .register(Box::new(git_operation_duration.clone()))
+            .unwrap();
 
         let git_bytes_total = CounterVec::new(
             Opts::new(
@@ -327,8 +347,11 @@ impl MetricsInner {
                 "Total bytes transferred for git operations",
             ),
             &["direction"],
-        ).unwrap();
-        REGISTRY.register(Box::new(git_bytes_total.clone())).unwrap();
+        )
+        .unwrap();
+        REGISTRY
+            .register(Box::new(git_bytes_total.clone()))
+            .unwrap();
 
         let git_push_authorization = CounterVec::new(
             Opts::new(
@@ -336,8 +359,11 @@ impl MetricsInner {
                 "Push authorization results",
             ),
             &["result"],
-        ).unwrap();
-        REGISTRY.register(Box::new(git_push_authorization.clone())).unwrap();
+        )
+        .unwrap();
+        REGISTRY
+            .register(Box::new(git_push_authorization.clone()))
+            .unwrap();
 
         // Nostr event metrics
         let events_received_total = CounterVec::new(
@@ -346,8 +372,11 @@ impl MetricsInner {
                 "Nostr events received by kind",
             ),
             &["kind"],
-        ).unwrap();
-        REGISTRY.register(Box::new(events_received_total.clone())).unwrap();
+        )
+        .unwrap();
+        REGISTRY
+            .register(Box::new(events_received_total.clone()))
+            .unwrap();
 
         let events_stored_total = CounterVec::new(
             Opts::new(
@@ -355,8 +384,11 @@ impl MetricsInner {
                 "Nostr events successfully stored by kind",
             ),
             &["kind"],
-        ).unwrap();
-        REGISTRY.register(Box::new(events_stored_total.clone())).unwrap();
+        )
+        .unwrap();
+        REGISTRY
+            .register(Box::new(events_stored_total.clone()))
+            .unwrap();
 
         let events_rejected_total = CounterVec::new(
             Opts::new(
@@ -364,31 +396,36 @@ impl MetricsInner {
                 "Nostr events rejected by kind and reason",
             ),
             &["kind", "reason"],
-        ).unwrap();
-        REGISTRY.register(Box::new(events_rejected_total.clone())).unwrap();
+        )
+        .unwrap();
+        REGISTRY
+            .register(Box::new(events_rejected_total.clone()))
+            .unwrap();
 
         // Repository metrics
-        let repositories_total = Gauge::with_opts(
-            Opts::new(
-                "ngit_repositories_total",
-                "Total repositories hosted",
-            )
-        ).unwrap();
-        REGISTRY.register(Box::new(repositories_total.clone())).unwrap();
+        let repositories_total = Gauge::with_opts(Opts::new(
+            "ngit_repositories_total",
+            "Total repositories hosted",
+        ))
+        .unwrap();
+        REGISTRY
+            .register(Box::new(repositories_total.clone()))
+            .unwrap();
 
         // Build info
         let build_info = GaugeVec::new(
-            Opts::new(
-                "ngit_build_info",
-                "Build information",
-            ),
+            Opts::new("ngit_build_info", "Build information"),
             &["version", "commit"],
-        ).unwrap();
+        )
+        .unwrap();
         REGISTRY.register(Box::new(build_info.clone())).unwrap();
-        
+
         // Set build info gauge to 1 (it's just for labels)
         build_info
-            .with_label_values(&[env!("CARGO_PKG_VERSION"), option_env!("GIT_HASH").unwrap_or("unknown")])
+            .with_label_values(&[
+                env!("CARGO_PKG_VERSION"),
+                option_env!("GIT_HASH").unwrap_or("unknown"),
+            ])
             .set(1.0);
 
         Self {
@@ -472,7 +509,7 @@ mod tests {
         // Note: This test may fail if run with other tests due to global registry
         // In production, consider using a test-specific registry
         let metrics = Metrics::new(10);
-        
+
         // Test that we can record metrics without panicking
         metrics.record_websocket_connection();
         metrics.record_message_received("REQ");

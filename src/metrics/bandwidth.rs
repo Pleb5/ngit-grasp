@@ -80,7 +80,9 @@ impl BandwidthTracker {
             &["repo"],
         )
         .unwrap();
-        registry.register(Box::new(top_repos_gauge.clone())).unwrap();
+        registry
+            .register(Box::new(top_repos_gauge.clone()))
+            .unwrap();
 
         Self {
             all_repos: DashMap::new(),
@@ -120,7 +122,12 @@ impl BandwidthTracker {
             // Try to update the timestamp atomically to prevent concurrent refreshes
             if self
                 .last_refresh_nanos
-                .compare_exchange(last_refresh, elapsed_nanos, Ordering::SeqCst, Ordering::Relaxed)
+                .compare_exchange(
+                    last_refresh,
+                    elapsed_nanos,
+                    Ordering::SeqCst,
+                    Ordering::Relaxed,
+                )
                 .is_ok()
             {
                 self.refresh_top_n();

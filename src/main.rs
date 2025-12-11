@@ -37,7 +37,9 @@ async fn main() -> Result<()> {
     // Initialize metrics if enabled
     let metrics = if config.metrics_enabled {
         info!("Metrics enabled on /metrics endpoint");
-        Some(Arc::new(Metrics::new(config.metrics_connection_per_ip_abuse_threshold)))
+        Some(Arc::new(Metrics::new(
+            config.metrics_connection_per_ip_abuse_threshold,
+        )))
     } else {
         info!("Metrics disabled");
         None
@@ -65,7 +67,10 @@ async fn main() -> Result<()> {
         );
 
         if config.sync_bootstrap_relay_url.is_some() {
-            info!("Starting proactive sync with bootstrap relay: {:?}", config.sync_bootstrap_relay_url);
+            info!(
+                "Starting proactive sync with bootstrap relay: {:?}",
+                config.sync_bootstrap_relay_url
+            );
         } else {
             info!("Proactive sync enabled (will discover relays from stored announcements)");
         }

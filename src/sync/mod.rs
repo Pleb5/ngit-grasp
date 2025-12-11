@@ -512,8 +512,8 @@ impl SyncManager {
         };
 
         // Check if relay supports NIP-77 negentropy AND negentropy is not disabled
-        let use_negentropy = !self.config.sync_disable_negentropy
-            && connection.supports_negentropy().await;
+        let use_negentropy =
+            !self.config.sync_disable_negentropy && connection.supports_negentropy().await;
 
         // Unsubscribe all current subscriptions
         connection.unsubscribe_all().await;
@@ -1657,12 +1657,12 @@ impl SyncManager {
 
                 let layer1_filters = 1;
                 let layer2_filters = if repo_count > 0 {
-                    ((repo_count + 99) / 100) * 3
+                    repo_count.div_ceil(100) * 3
                 } else {
                     0
                 };
                 let layer3_filters = if event_count > 0 {
-                    ((event_count + 99) / 100) * 3
+                    event_count.div_ceil(100) * 3
                 } else {
                     0
                 };

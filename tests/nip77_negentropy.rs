@@ -45,13 +45,13 @@ async fn test_nip77_negentropy_sync_finds_events() {
     let keys = Keys::generate();
 
     // Create a repository announcement that will be accepted by the relay
-    let announcement = create_repo_announcement(
-        &keys,
-        &[&relay.domain()],
-        "test-repo-nip77",
-    );
+    let announcement = create_repo_announcement(&keys, &[&relay.domain()], "test-repo-nip77");
     let event1_id = announcement.id;
-    println!("Created event 1: {} (kind {})", event1_id, announcement.kind.as_u16());
+    println!(
+        "Created event 1: {} (kind {})",
+        event1_id,
+        announcement.kind.as_u16()
+    );
 
     // Create a second event (issue referencing the repo)
     let repo_coord = format!(
@@ -63,7 +63,11 @@ async fn test_nip77_negentropy_sync_finds_events() {
     let issue = build_layer2_issue_event(&keys, &repo_coord, "Test issue for NIP-77")
         .expect("Failed to build issue event");
     let event2_id = issue.id;
-    println!("Created event 2: {} (kind {})", event2_id, issue.kind.as_u16());
+    println!(
+        "Created event 2: {} (kind {})",
+        event2_id,
+        issue.kind.as_u16()
+    );
 
     // 3. Send events to relay using TestClient
     let publish_client = TestClient::new(relay.url(), keys.clone())
@@ -99,9 +103,10 @@ async fn test_nip77_negentropy_sync_finds_events() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // 6. Perform negentropy sync with filter matching our events
-    let filter = Filter::new()
-        .author(keys.public_key())
-        .kinds(vec![Kind::Custom(KIND_REPOSITORY_STATE), Kind::Custom(KIND_ISSUE)]);
+    let filter = Filter::new().author(keys.public_key()).kinds(vec![
+        Kind::Custom(KIND_REPOSITORY_STATE),
+        Kind::Custom(KIND_ISSUE),
+    ]);
 
     println!("Starting negentropy sync with filter: {:?}", filter);
 
@@ -177,7 +182,7 @@ async fn test_nip77_negentropy_sync_empty_result() {
 
     // 3. Sync with filter that won't match anything
     let filter = Filter::new()
-        .author(keys.public_key())  // Random new key, no events exist
+        .author(keys.public_key()) // Random new key, no events exist
         .kind(Kind::Custom(KIND_REPOSITORY_STATE));
 
     println!("Starting negentropy sync with empty filter");

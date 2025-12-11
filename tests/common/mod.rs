@@ -1,4 +1,6 @@
 //! Common test utilities
+#![allow(dead_code)] // Test helpers may not be used in all test configurations
+#![allow(unused_imports)] // Re-exports may not be used in all test configurations
 
 pub mod relay;
 pub mod sync_helpers;

@@ -407,8 +407,12 @@ impl PushAuthorizationTests {
         let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
             Ok(r) => r,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:30", "Push rejected without state event")
-                    .fail(format!("Failed to create repo: {}", e))
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01:git-http:30",
+                    "Push rejected without state event",
+                )
+                .fail(format!("Failed to create repo: {}", e))
             }
         };
 
@@ -427,8 +431,12 @@ impl PushAuthorizationTests {
         let clone_path = match clone_repo(relay_domain, &npub, &repo_id) {
             Ok(p) => p,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:30", "Push rejected without state event")
-                    .fail(&e)
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01:git-http:30",
+                    "Push rejected without state event",
+                )
+                .fail(&e)
             }
         };
         let cleanup = || {
@@ -437,8 +445,12 @@ impl PushAuthorizationTests {
 
         if let Err(e) = create_commit(&clone_path, "Unauthorized commit") {
             cleanup();
-            return TestResult::new(test_name, "GRASP-01:git-http:30", "Push rejected without state event")
-                .fail(&e);
+            return TestResult::new(
+                test_name,
+                "GRASP-01:git-http:30",
+                "Push rejected without state event",
+            )
+            .fail(&e);
         }
 
         // Do NOT publish state event - push should be rejected
@@ -446,14 +458,24 @@ impl PushAuthorizationTests {
         cleanup();
 
         match push_result {
-            Ok(false) => {
-                TestResult::new(test_name, "GRASP-01:git-http:30", "Push rejected without state event").pass()
-            }
-            Ok(true) => TestResult::new(test_name, "GRASP-01:git-http:30", "Push rejected without state event")
-                .fail("Push accepted but should be rejected"),
-            Err(e) => {
-                TestResult::new(test_name, "GRASP-01:git-http:30", "Push rejected without state event").fail(&e)
-            }
+            Ok(false) => TestResult::new(
+                test_name,
+                "GRASP-01:git-http:30",
+                "Push rejected without state event",
+            )
+            .pass(),
+            Ok(true) => TestResult::new(
+                test_name,
+                "GRASP-01:git-http:30",
+                "Push rejected without state event",
+            )
+            .fail("Push accepted but should be rejected"),
+            Err(e) => TestResult::new(
+                test_name,
+                "GRASP-01:git-http:30",
+                "Push rejected without state event",
+            )
+            .fail(&e),
         }
     }
 
@@ -480,11 +502,18 @@ impl PushAuthorizationTests {
         // The OwnerStateDataPushed fixture handles all stages:
         // Generate → Send → Verify → DataPush
         match ctx.get_fixture(FixtureKind::OwnerStateDataPushed).await {
-            Ok(_state_event) => {
-                TestResult::new(test_name, "GRASP-01:git-http:30", "Push authorized with matching state").pass()
-            }
-            Err(e) => TestResult::new(test_name, "GRASP-01:git-http:30", "Push authorized with matching state")
-                .fail(format!("{}", e)),
+            Ok(_state_event) => TestResult::new(
+                test_name,
+                "GRASP-01:git-http:30",
+                "Push authorized with matching state",
+            )
+            .pass(),
+            Err(e) => TestResult::new(
+                test_name,
+                "GRASP-01:git-http:30",
+                "Push authorized with matching state",
+            )
+            .fail(format!("{}", e)),
         }
     }
 
@@ -868,8 +897,12 @@ impl PushAuthorizationTests {
         // Send the rogue state event using the raw client to bypass AuditClient's key check
         if let Err(e) = client.client().send_event(&rogue_state).await {
             cleanup();
-            return TestResult::new(test_name, "GRASP-01:git-http:30", "Non-maintainer state events ignored")
-                .fail(format!("Failed to send rogue state event: {}", e));
+            return TestResult::new(
+                test_name,
+                "GRASP-01:git-http:30",
+                "Non-maintainer state events ignored",
+            )
+            .fail(format!("Failed to send rogue state event: {}", e));
         }
 
         // Wait for event to propagate
@@ -1036,7 +1069,9 @@ impl PushAuthorizationTests {
             .await
         {
             Ok(_pr_event) => TestResult::new(test_name, "GRASP-01:git-http:34", desc).pass(),
-            Err(e) => TestResult::new(test_name, "GRASP-01:git-http:34", desc).fail(format!("{}", e)),
+            Err(e) => {
+                TestResult::new(test_name, "GRASP-01:git-http:34", desc).fail(format!("{}", e))
+            }
         }
     }
 
@@ -1062,7 +1097,8 @@ impl PushAuthorizationTests {
         {
             Ok(e) => e,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:34", desc).fail(format!("{}", e));
+                return TestResult::new(test_name, "GRASP-01:git-http:34", desc)
+                    .fail(format!("{}", e));
             }
         };
 
@@ -1072,7 +1108,8 @@ impl PushAuthorizationTests {
         let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
             Ok(r) => r,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:34", desc).fail(format!("{}", e));
+                return TestResult::new(test_name, "GRASP-01:git-http:34", desc)
+                    .fail(format!("{}", e));
             }
         };
 
@@ -1146,7 +1183,8 @@ impl PushAuthorizationTests {
         {
             Ok(e) => e,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:34", desc).fail(format!("{}", e));
+                return TestResult::new(test_name, "GRASP-01:git-http:34", desc)
+                    .fail(format!("{}", e));
             }
         };
 
@@ -1156,7 +1194,8 @@ impl PushAuthorizationTests {
         let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
             Ok(r) => r,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:34", desc).fail(format!("{}", e));
+                return TestResult::new(test_name, "GRASP-01:git-http:34", desc)
+                    .fail(format!("{}", e));
             }
         };
 
@@ -1233,7 +1272,8 @@ impl PushAuthorizationTests {
         {
             Ok(e) => e,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:34", desc).fail(format!("{}", e));
+                return TestResult::new(test_name, "GRASP-01:git-http:34", desc)
+                    .fail(format!("{}", e));
             }
         };
 
@@ -1243,7 +1283,8 @@ impl PushAuthorizationTests {
         let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
             Ok(r) => r,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:34", desc).fail(format!("{}", e));
+                return TestResult::new(test_name, "GRASP-01:git-http:34", desc)
+                    .fail(format!("{}", e));
             }
         };
 

@@ -16,8 +16,8 @@ use crate::nostr::events::{
     KIND_REPOSITORY_STATE,
 };
 use crate::nostr::policy::{
-    AnnouncementPolicy, AnnouncementResult, PolicyContext, PrEventPolicy, RelatedEventPolicy,
-    ReferenceResult, StatePolicy, StateResult,
+    AnnouncementPolicy, AnnouncementResult, PolicyContext, PrEventPolicy, ReferenceResult,
+    RelatedEventPolicy, StatePolicy, StateResult,
 };
 
 /// Type alias for the shared database used by the relay
@@ -77,7 +77,9 @@ impl Nip34WritePolicy {
                 match RepositoryAnnouncement::from_event(event.clone()) {
                     Ok(announcement) => {
                         // Try to create bare repository if it doesn't exist
-                        if let Err(e) = self.announcement_policy.ensure_bare_repository(&announcement)
+                        if let Err(e) = self
+                            .announcement_policy
+                            .ensure_bare_repository(&announcement)
                         {
                             tracing::warn!(
                                 "Failed to create bare repository for {}: {}",
@@ -145,22 +147,14 @@ impl Nip34WritePolicy {
                     Ok(_state) => {
                         // Process state alignment asynchronously
                         if let Err(e) = self.state_policy.process_state_event(event).await {
-                            tracing::warn!(
-                                "Failed to process state event {}: {}",
-                                event_id_str,
-                                e
-                            );
+                            tracing::warn!("Failed to process state event {}: {}", event_id_str, e);
                         }
 
                         tracing::debug!("Accepted repository state: {}", event_id_str);
                         PolicyResult::Accept
                     }
                     Err(e) => {
-                        tracing::warn!(
-                            "Failed to parse repository state {}: {}",
-                            event_id_str,
-                            e
-                        );
+                        tracing::warn!("Failed to parse repository state {}: {}", event_id_str, e);
                         // Still accept the event even if we can't parse it
                         // The validation passed, so it's structurally valid
                         PolicyResult::Accept

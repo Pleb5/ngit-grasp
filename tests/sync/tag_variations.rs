@@ -57,11 +57,8 @@ async fn test_layer2_sync_with_lowercase_a_tag() {
 
     // 2. Create and send repository announcement to both relays
     let repo_id = "test-repo-tag-8a";
-    let announcement = create_repo_announcement(
-        &keys,
-        &[&relay_a.domain(), &relay_b.domain()],
-        repo_id,
-    );
+    let announcement =
+        create_repo_announcement(&keys, &[&relay_a.domain(), &relay_b.domain()], repo_id);
 
     let client_a = TestClient::new(relay_a.url(), keys.clone())
         .await
@@ -88,11 +85,16 @@ async fn test_layer2_sync_with_lowercase_a_tag() {
 
     // 4. Create and send Layer 2 issue with lowercase 'a' tag
     let repo_coordinate = repo_coord(&keys, repo_id);
-    let issue = build_layer2_issue_event(&keys, &repo_coordinate, "Test Issue with lowercase a tag")
-        .expect("Failed to create issue event");
+    let issue =
+        build_layer2_issue_event(&keys, &repo_coordinate, "Test Issue with lowercase a tag")
+            .expect("Failed to create issue event");
     let issue_id = issue.id;
 
-    println!("Created issue {} (kind {}) with lowercase 'a' tag", issue_id, issue.kind.as_u16());
+    println!(
+        "Created issue {} (kind {}) with lowercase 'a' tag",
+        issue_id,
+        issue.kind.as_u16()
+    );
     for tag in issue.tags.iter() {
         println!("  Tag: {:?}", tag.as_slice());
     }
@@ -154,11 +156,8 @@ async fn test_layer2_sync_with_uppercase_a_tag() {
 
     // 2. Create and send repository announcement to both relays
     let repo_id = "test-repo-tag-8b";
-    let announcement = create_repo_announcement(
-        &keys,
-        &[&relay_a.domain(), &relay_b.domain()],
-        repo_id,
-    );
+    let announcement =
+        create_repo_announcement(&keys, &[&relay_a.domain(), &relay_b.domain()], repo_id);
 
     let client_a = TestClient::new(relay_a.url(), keys.clone())
         .await
@@ -185,11 +184,19 @@ async fn test_layer2_sync_with_uppercase_a_tag() {
 
     // 4. Create and send Layer 2 issue with uppercase 'A' tag
     let repo_coordinate = repo_coord(&keys, repo_id);
-    let issue = build_layer2_issue_with_uppercase_a_tag(&keys, &repo_coordinate, "Test Issue with uppercase A tag")
-        .expect("Failed to create issue event");
+    let issue = build_layer2_issue_with_uppercase_a_tag(
+        &keys,
+        &repo_coordinate,
+        "Test Issue with uppercase A tag",
+    )
+    .expect("Failed to create issue event");
     let issue_id = issue.id;
 
-    println!("Created issue {} (kind {}) with uppercase 'A' tag", issue_id, issue.kind.as_u16());
+    println!(
+        "Created issue {} (kind {}) with uppercase 'A' tag",
+        issue_id,
+        issue.kind.as_u16()
+    );
     for tag in issue.tags.iter() {
         println!("  Tag: {:?}", tag.as_slice());
     }
@@ -250,11 +257,8 @@ async fn test_layer2_sync_with_q_tag() {
 
     // 2. Create and send repository announcement to both relays
     let repo_id = "test-repo-tag-8c";
-    let announcement = create_repo_announcement(
-        &keys,
-        &[&relay_a.domain(), &relay_b.domain()],
-        repo_id,
-    );
+    let announcement =
+        create_repo_announcement(&keys, &[&relay_a.domain(), &relay_b.domain()], repo_id);
 
     let client_a = TestClient::new(relay_a.url(), keys.clone())
         .await
@@ -285,7 +289,11 @@ async fn test_layer2_sync_with_q_tag() {
         .expect("Failed to create issue event");
     let issue_id = issue.id;
 
-    println!("Created issue {} (kind {}) with 'q' tag", issue_id, issue.kind.as_u16());
+    println!(
+        "Created issue {} (kind {}) with 'q' tag",
+        issue_id,
+        issue.kind.as_u16()
+    );
     for tag in issue.tags.iter() {
         println!("  Tag: {:?}", tag.as_slice());
     }
@@ -350,11 +358,8 @@ async fn test_layer3_sync_with_lowercase_e_tag() {
 
     // 2. Create and send repository announcement to both relays
     let repo_id = "test-repo-tag-9a";
-    let announcement = create_repo_announcement(
-        &keys,
-        &[&relay_a.domain(), &relay_b.domain()],
-        repo_id,
-    );
+    let announcement =
+        create_repo_announcement(&keys, &[&relay_a.domain(), &relay_b.domain()], repo_id);
 
     let client_a = TestClient::new(relay_a.url(), keys.clone())
         .await
@@ -392,10 +397,9 @@ async fn test_layer3_sync_with_lowercase_e_tag() {
     println!("Layer 2 issue {} sent to relay_a", issue_id);
 
     // 5. Wait for issue to sync to relay_b
-    let issue_filter = Filter::new()
-        .kind(Kind::Custom(KIND_ISSUE))
-        .id(issue_id);
-    let issue_synced = wait_for_event_on_relay(relay_b.url(), issue_filter, Duration::from_secs(5)).await;
+    let issue_filter = Filter::new().kind(Kind::Custom(KIND_ISSUE)).id(issue_id);
+    let issue_synced =
+        wait_for_event_on_relay(relay_b.url(), issue_filter, Duration::from_secs(5)).await;
     println!("Issue synced to relay_b: {}", issue_synced);
     assert!(issue_synced, "Layer 2 issue should sync first");
 
@@ -412,7 +416,11 @@ async fn test_layer3_sync_with_lowercase_e_tag() {
         .expect("Failed to create reply");
     let reply_id = reply.id;
 
-    println!("Created reply {} (kind {}) with lowercase 'e' tag", reply_id, reply.kind.as_u16());
+    println!(
+        "Created reply {} (kind {}) with lowercase 'e' tag",
+        reply_id,
+        reply.kind.as_u16()
+    );
     for tag in reply.tags.iter() {
         println!("  Tag: {:?}", tag.as_slice());
     }
@@ -428,11 +436,12 @@ async fn test_layer3_sync_with_lowercase_e_tag() {
 
     // 7. Wait and verify reply syncs to relay_b
     let reply_filter = Filter::new()
-        .kind(Kind::TextNote)  // Kind 1
+        .kind(Kind::TextNote) // Kind 1
         .author(keys.public_key())
         .id(reply_id);
 
-    let reply_synced = wait_for_event_on_relay(relay_b.url(), reply_filter, Duration::from_secs(5)).await;
+    let reply_synced =
+        wait_for_event_on_relay(relay_b.url(), reply_filter, Duration::from_secs(5)).await;
 
     println!("Reply {} synced to relay_b: {}", reply_id, reply_synced);
 
@@ -473,11 +482,8 @@ async fn test_layer3_sync_with_uppercase_e_tag() {
 
     // 2. Create and send repository announcement to both relays
     let repo_id = "test-repo-tag-9b";
-    let announcement = create_repo_announcement(
-        &keys,
-        &[&relay_a.domain(), &relay_b.domain()],
-        repo_id,
-    );
+    let announcement =
+        create_repo_announcement(&keys, &[&relay_a.domain(), &relay_b.domain()], repo_id);
 
     let client_a = TestClient::new(relay_a.url(), keys.clone())
         .await
@@ -515,10 +521,9 @@ async fn test_layer3_sync_with_uppercase_e_tag() {
     println!("Layer 2 issue {} sent to relay_a", issue_id);
 
     // 5. Wait for issue to sync to relay_b
-    let issue_filter = Filter::new()
-        .kind(Kind::Custom(KIND_ISSUE))
-        .id(issue_id);
-    let issue_synced = wait_for_event_on_relay(relay_b.url(), issue_filter, Duration::from_secs(5)).await;
+    let issue_filter = Filter::new().kind(Kind::Custom(KIND_ISSUE)).id(issue_id);
+    let issue_synced =
+        wait_for_event_on_relay(relay_b.url(), issue_filter, Duration::from_secs(5)).await;
     println!("Issue synced to relay_b: {}", issue_synced);
     assert!(issue_synced, "Layer 2 issue should sync first");
 
@@ -531,11 +536,16 @@ async fn test_layer3_sync_with_uppercase_e_tag() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // 6. Create and send Layer 3 comment with uppercase 'E' tag (kind 1111)
-    let comment = build_layer3_comment_with_uppercase_e_tag(&keys, &issue_id, "Comment with uppercase E tag")
-        .expect("Failed to create comment");
+    let comment =
+        build_layer3_comment_with_uppercase_e_tag(&keys, &issue_id, "Comment with uppercase E tag")
+            .expect("Failed to create comment");
     let comment_id = comment.id;
 
-    println!("Created comment {} (kind {}) with uppercase 'E' tag", comment_id, comment.kind.as_u16());
+    println!(
+        "Created comment {} (kind {}) with uppercase 'E' tag",
+        comment_id,
+        comment.kind.as_u16()
+    );
     for tag in comment.tags.iter() {
         println!("  Tag: {:?}", tag.as_slice());
     }
@@ -551,13 +561,17 @@ async fn test_layer3_sync_with_uppercase_e_tag() {
 
     // 7. Wait and verify comment syncs to relay_b
     let comment_filter = Filter::new()
-        .kind(Kind::Custom(KIND_COMMENT))  // Kind 1111
+        .kind(Kind::Custom(KIND_COMMENT)) // Kind 1111
         .author(keys.public_key())
         .id(comment_id);
 
-    let comment_synced = wait_for_event_on_relay(relay_b.url(), comment_filter, Duration::from_secs(5)).await;
+    let comment_synced =
+        wait_for_event_on_relay(relay_b.url(), comment_filter, Duration::from_secs(5)).await;
 
-    println!("Comment {} synced to relay_b: {}", comment_id, comment_synced);
+    println!(
+        "Comment {} synced to relay_b: {}",
+        comment_id, comment_synced
+    );
 
     // 8. Cleanup
     relay_b.stop().await;
@@ -596,11 +610,8 @@ async fn test_layer3_sync_with_q_tag() {
 
     // 2. Create and send repository announcement to both relays
     let repo_id = "test-repo-tag-9c";
-    let announcement = create_repo_announcement(
-        &keys,
-        &[&relay_a.domain(), &relay_b.domain()],
-        repo_id,
-    );
+    let announcement =
+        create_repo_announcement(&keys, &[&relay_a.domain(), &relay_b.domain()], repo_id);
 
     let client_a = TestClient::new(relay_a.url(), keys.clone())
         .await
@@ -638,10 +649,9 @@ async fn test_layer3_sync_with_q_tag() {
     println!("Layer 2 issue {} sent to relay_a", issue_id);
 
     // 5. Wait for issue to sync to relay_b
-    let issue_filter = Filter::new()
-        .kind(Kind::Custom(KIND_ISSUE))
-        .id(issue_id);
-    let issue_synced = wait_for_event_on_relay(relay_b.url(), issue_filter, Duration::from_secs(5)).await;
+    let issue_filter = Filter::new().kind(Kind::Custom(KIND_ISSUE)).id(issue_id);
+    let issue_synced =
+        wait_for_event_on_relay(relay_b.url(), issue_filter, Duration::from_secs(5)).await;
     println!("Issue synced to relay_b: {}", issue_synced);
     assert!(issue_synced, "Layer 2 issue should sync first");
 
@@ -658,7 +668,11 @@ async fn test_layer3_sync_with_q_tag() {
         .expect("Failed to create quote");
     let quote_id = quote.id;
 
-    println!("Created quote {} (kind {}) with 'q' tag", quote_id, quote.kind.as_u16());
+    println!(
+        "Created quote {} (kind {}) with 'q' tag",
+        quote_id,
+        quote.kind.as_u16()
+    );
     for tag in quote.tags.iter() {
         println!("  Tag: {:?}", tag.as_slice());
     }
@@ -674,11 +688,12 @@ async fn test_layer3_sync_with_q_tag() {
 
     // 7. Wait and verify quote syncs to relay_b
     let quote_filter = Filter::new()
-        .kind(Kind::TextNote)  // Kind 1
+        .kind(Kind::TextNote) // Kind 1
         .author(keys.public_key())
         .id(quote_id);
 
-    let quote_synced = wait_for_event_on_relay(relay_b.url(), quote_filter, Duration::from_secs(5)).await;
+    let quote_synced =
+        wait_for_event_on_relay(relay_b.url(), quote_filter, Duration::from_secs(5)).await;
 
     println!("Quote {} synced to relay_b: {}", quote_id, quote_synced);
 

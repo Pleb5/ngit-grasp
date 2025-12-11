@@ -1973,11 +1973,11 @@ mod tests {
 
     #[test]
     fn test_context_mode_from_audit_mode() {
-        assert_eq!(ContextMode::from(AuditMode::Isolated), ContextMode::Isolated);
         assert_eq!(
-            ContextMode::from(AuditMode::Shared),
-            ContextMode::Shared
+            ContextMode::from(AuditMode::Isolated),
+            ContextMode::Isolated
         );
+        assert_eq!(ContextMode::from(AuditMode::Shared), ContextMode::Shared);
     }
 
     #[test]

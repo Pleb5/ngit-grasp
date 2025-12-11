@@ -49,7 +49,12 @@ impl PendingUpdates {
     }
 
     /// Add or update a repo with its relays and root events
-    fn add_repo(&mut self, repo_id: String, relays: HashSet<String>, root_events: HashSet<EventId>) {
+    fn add_repo(
+        &mut self,
+        repo_id: String,
+        relays: HashSet<String>,
+        root_events: HashSet<EventId>,
+    ) {
         let entry = self.repos.entry(repo_id).or_insert_with(|| RepoSyncNeeds {
             relays: HashSet::new(),
             root_events: HashSet::new(),
@@ -251,9 +256,9 @@ impl SelfSubscriber {
     ///
     /// Returns true if any extracted relay URL contains our domain
     fn lists_our_relay(&self, event: &Event) -> bool {
-        Self::extract_relay_urls(event).iter().any(|url| {
-            url.contains(&self.relay_domain) || url == &self.own_relay_url
-        })
+        Self::extract_relay_urls(event)
+            .iter()
+            .any(|url| url.contains(&self.relay_domain) || url == &self.own_relay_url)
     }
 
     /// Main run loop
@@ -413,21 +418,21 @@ impl SelfSubscriber {
         if let Some(repo_sync) = index.get_mut(&repo_ref) {
             // Add event.id to root_events set in the index (immediate availability)
             repo_sync.root_events.insert(event.id);
-            
+
             // Clone the relays before releasing the lock - Layer 3 filters need to be
             // sent to the same relays as Layer 2 filters for this repo
             let relays = repo_sync.relays.clone();
-            
+
             // Release lock before modifying pending
             drop(index);
-            
+
             // Also add root event to pending - this ensures batch processing runs
             // and creates Layer 3 filters for events referencing this root event.
             // CRITICAL: Include relays so derive_relay_targets knows where to send filters!
             let mut root_events = HashSet::new();
             root_events.insert(event.id);
             pending.add_repo(repo_ref.clone(), relays.clone(), root_events);
-            
+
             tracing::debug!(
                 event_id = %event.id,
                 repo_ref = %repo_ref,
@@ -475,10 +480,12 @@ impl SelfSubscriber {
 
         for (repo_id, needs) in updates {
             // Merge with existing entry or insert new
-            let entry = index.entry(repo_id.clone()).or_insert_with(|| RepoSyncNeeds {
-                relays: HashSet::new(),
-                root_events: HashSet::new(),
-            });
+            let entry = index
+                .entry(repo_id.clone())
+                .or_insert_with(|| RepoSyncNeeds {
+                    relays: HashSet::new(),
+                    root_events: HashSet::new(),
+                });
             entry.relays.extend(needs.relays);
             entry.root_events.extend(needs.root_events);
 
@@ -556,7 +563,7 @@ fn clone_url_to_relay_url(clone_url: &str) -> Option<String> {
     } else {
         return None;
     };
-    
+
     // Extract just the host:port part (everything before the first /)
     let host_port = rest.split('/').next()?;
     Some(format!("{}{}", ws_scheme, host_port))
@@ -581,7 +588,7 @@ mod tests {
             Some("ws://localhost:3000".to_string())
         );
     }
-    
+
     #[test]
     fn test_clone_url_to_relay_url_with_port() {
         assert_eq!(
@@ -593,6 +600,9 @@ mod tests {
     #[test]
     fn test_clone_url_to_relay_url_unsupported() {
         assert_eq!(clone_url_to_relay_url("git://example.com/repo.git"), None);
-        assert_eq!(clone_url_to_relay_url("ssh://git@example.com/repo.git"), None);
+        assert_eq!(
+            clone_url_to_relay_url("ssh://git@example.com/repo.git"),
+            None
+        );
     }
 }
