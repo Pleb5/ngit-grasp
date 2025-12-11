@@ -194,7 +194,7 @@ const CONSOLIDATION_THRESHOLD: usize = 70;
 const CONSOLIDATION_WAIT_TIMEOUT_SECS: u64 = 30;
 
 // =============================================================================
-// Daily Timer (Phase 7)
+// Daily Timer
 // =============================================================================
 
 /// Run the daily timer for periodic fresh syncs
@@ -258,7 +258,7 @@ async fn run_daily_timer(
 }
 
 // =============================================================================
-// Disconnect Checker (Phase 8)
+// Disconnect Checker
 // =============================================================================
 
 /// Run the disconnect checker for periodic cleanup of empty relays
@@ -304,7 +304,6 @@ async fn run_disconnect_checker(
 /// The SyncManager runs as a background task, subscribing to repository
 /// announcements on the local relay and syncing data from external relays
 /// listed in those announcements.
-#[allow(dead_code)] // Fields will be used in later phases
 pub struct SyncManager {
     /// Bootstrap relay URL for initial sync (optional)
     bootstrap_relay_url: Option<String>,
@@ -1446,7 +1445,7 @@ impl SyncManager {
     }
 
     // =========================================================================
-    // Consolidation System (Phase 6)
+    // Consolidation System
     // =========================================================================
 
     /// Get the current filter count for a relay
