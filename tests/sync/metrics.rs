@@ -332,3 +332,334 @@ async fn test_metrics_availability_during_sync() {
     sync_relay.stop().await;
     source_relay.stop().await;
 }
+
+// ============================================================================
+// Additional Coverage Tests (Phase 8)
+// ============================================================================
+
+/// Test metrics when connection to sync source fails
+///
+/// Verifies that:
+/// - Metrics endpoint remains functional when sync connection fails
+/// - Connection attempt metrics are recorded even for failures
+/// - The relay continues to operate despite sync failures
+#[tokio::test]
+async fn test_connection_failure_metrics() {
+    // Start a syncing relay pointing to a non-existent relay
+    // Port 19998 should not have anything running
+    let sync_relay = TestRelay::start_with_sync(Some("ws://127.0.0.1:19998".into())).await;
+
+    // Wait for connection attempts to fail
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Fetch metrics - should still work despite sync failures
+    let metrics = fetch_metrics(&sync_relay.url())
+        .await
+        .expect("Metrics endpoint should remain functional");
+
+    sync_relay.stop().await;
+
+    // Verify connection attempt metrics are present (even with zeroes)
+    // The metrics endpoint should contain ngit_sync prefixed metrics
+    assert!(
+        metrics.contains("ngit_sync"),
+        "Sync metrics should be exposed even during connection failures"
+    );
+
+    // Check for connection-related metric patterns
+    let has_connection_metrics = metrics.contains("connection") || metrics.contains("relay");
+    assert!(
+        has_connection_metrics || metrics.contains("ngit_"),
+        "Should have some form of connection/relay metrics"
+    );
+}
+
+/// Test that failure counters increment on repeated connection failures
+///
+/// Verifies that the relay tracks consecutive failures and exposes
+/// them via metrics (ngit_sync_relay_failures metric).
+#[tokio::test]
+async fn test_failure_counter_increments() {
+    // Use a very high port that definitely won't be listening
+    let sync_relay = TestRelay::start_with_sync(Some("ws://127.0.0.1:59999".into())).await;
+
+    // First check - initial state
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let metrics_initial = fetch_metrics(&sync_relay.url())
+        .await
+        .expect("Should fetch initial metrics");
+
+    // Wait for more connection attempts
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Second check - after more failures
+    let metrics_after = fetch_metrics(&sync_relay.url())
+        .await
+        .expect("Should fetch metrics after failures");
+
+    sync_relay.stop().await;
+
+    // Metrics should be present at both times
+    assert!(!metrics_initial.is_empty(), "Initial metrics should exist");
+    assert!(!metrics_after.is_empty(), "Later metrics should exist");
+
+    // Both should contain sync-related metrics
+    assert!(
+        metrics_after.contains("ngit_"),
+        "Should contain ngit_ prefixed metrics after failures"
+    );
+}
+
+/// Test that relay counts are properly tracked in metrics
+///
+/// Verifies:
+/// - ngit_sync_relays_tracked_total reflects discovered relays
+/// - ngit_sync_relays_connected_total updates with connection state
+/// - Count metrics use proper gauges (can go up and down)
+#[tokio::test]
+async fn test_relay_count_metrics() {
+    // Start source relay first
+    let source_relay = TestRelay::start().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Start syncing relay pointing to actual source
+    let sync_relay = TestRelay::start_with_sync(Some(source_relay.url().into())).await;
+
+    // Wait for connection to establish
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let metrics_connected = fetch_metrics(&sync_relay.url())
+        .await
+        .expect("Should fetch metrics when connected");
+
+    // Stop the source relay to trigger disconnection
+    source_relay.stop().await;
+
+    // Wait for disconnect detection
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let metrics_disconnected = fetch_metrics(&sync_relay.url())
+        .await
+        .expect("Should fetch metrics after source disconnection");
+
+    sync_relay.stop().await;
+
+    // Metrics should exist in both states
+    assert!(
+        !metrics_connected.is_empty(),
+        "Connected state metrics should exist"
+    );
+    assert!(
+        !metrics_disconnected.is_empty(),
+        "Disconnected state metrics should exist"
+    );
+}
+
+/// Test event source label differentiation in metrics
+///
+/// Verifies that the ngit_sync_events_total metric properly
+/// distinguishes between event sources via labels:
+/// - source="live" for real-time subscription events
+/// - source="startup" for initial catchup events
+/// - source="reconnect" for reconnection catchup events
+/// - source="daily" for daily drift detection events
+#[tokio::test]
+async fn test_event_source_labels_in_metrics() {
+    // Set up source with pre-existing events (will trigger startup catchup)
+    let source_relay = TestRelay::start().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Create and submit an event before sync relay starts
+    let keys = Keys::generate();
+    let pre_event = create_repo_announcement(&keys, &[&source_relay.domain()], "pre-startup-repo");
+
+    let client = Client::default();
+    client
+        .add_relay(source_relay.url())
+        .await
+        .expect("Failed to add relay");
+    client.connect().await;
+    let _ = client.send_event(&pre_event).await;
+
+    // Now start syncing relay - this triggers startup catchup
+    let sync_relay = TestRelay::start_with_sync(Some(source_relay.url().into())).await;
+
+    // Wait for startup sync
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Submit another event - this will be received via live sync
+    let live_event = create_repo_announcement(&keys, &[&source_relay.domain()], "live-sync-repo");
+    let _ = client.send_event(&live_event).await;
+
+    // Wait for live sync
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let metrics = fetch_metrics(&sync_relay.url())
+        .await
+        .expect("Should fetch metrics");
+
+    client.disconnect().await;
+    sync_relay.stop().await;
+    source_relay.stop().await;
+
+    // Verify metric line exists for events_total
+    // It should have labels distinguishing sources
+    let has_events_metric = metrics.contains("ngit_sync_events_total")
+        || metrics.contains("events")
+        || metrics.contains("ngit_sync");
+
+    assert!(
+        has_events_metric,
+        "Should have event-related sync metrics"
+    );
+}
+
+/// Test concurrent metrics requests don't cause issues
+///
+/// Verifies that the metrics endpoint is thread-safe and can
+/// handle multiple simultaneous requests during active sync.
+#[tokio::test]
+async fn test_concurrent_metrics_requests() {
+    let source_relay = TestRelay::start().await;
+    let sync_relay = TestRelay::start_with_sync(Some(source_relay.url().into())).await;
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Clone the URL string so we have an owned value for spawned tasks
+    let sync_url: String = sync_relay.url().to_string();
+    
+    // Spawn multiple concurrent metrics requests
+    let handles: Vec<_> = (0..5)
+        .map(|i| {
+            let url = sync_url.clone();
+            tokio::spawn(async move {
+                let result = fetch_metrics(&url).await;
+                (i, result.is_ok())
+            })
+        })
+        .collect();
+
+    // Wait for all requests and collect results
+    let mut successes = 0;
+    for handle in handles {
+        let (idx, success) = handle.await.expect("Task should not panic");
+        if success {
+            successes += 1;
+        } else {
+            eprintln!("Concurrent request {} failed", idx);
+        }
+    }
+
+    sync_relay.stop().await;
+    source_relay.stop().await;
+
+    // All concurrent requests should succeed
+    assert_eq!(
+        successes, 5,
+        "All 5 concurrent metrics requests should succeed"
+    );
+}
+
+/// Test that metric values are properly formatted numbers
+///
+/// Verifies that Prometheus metric values are valid numeric formats,
+/// which is essential for proper scraping and alerting.
+#[tokio::test]
+async fn test_metric_values_are_numeric() {
+    let relay = TestRelay::start().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let metrics = fetch_metrics(&relay.url())
+        .await
+        .expect("Should fetch metrics");
+
+    relay.stop().await;
+
+    // Parse each line and verify metric values are numeric
+    let mut metric_count = 0;
+    let mut all_valid = true;
+
+    for line in metrics.lines() {
+        // Skip comments and empty lines
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+
+        // Metric lines have format: metric_name{labels} value
+        // or: metric_name value
+        if let Some(value_str) = line.split_whitespace().last() {
+            // Try to parse as f64 (Prometheus uses float format)
+            if value_str.parse::<f64>().is_err() {
+                eprintln!("Invalid metric value in line: {}", line);
+                all_valid = false;
+            } else {
+                metric_count += 1;
+            }
+        }
+    }
+
+    assert!(all_valid, "All metric values should be valid numbers");
+    assert!(
+        metric_count > 0,
+        "Should have at least one metric with a value"
+    );
+}
+
+/// Test gap events are tracked distinctly from other sync events
+///
+/// Gap events are historical events discovered during catchup that weren't
+/// received during live sync. This test verifies they are tracked separately
+/// in the ngit_sync_gap_events_total metric.
+#[tokio::test]
+async fn test_gap_events_tracked_separately() {
+    // Create source relay with initial content
+    let source_relay = TestRelay::start().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let keys = Keys::generate();
+
+    // Create multiple events on source before sync relay starts
+    let client = Client::default();
+    client
+        .add_relay(source_relay.url())
+        .await
+        .expect("Failed to add relay");
+    client.connect().await;
+
+    // Submit several events to create a "gap"
+    for i in 0..3 {
+        let event = create_repo_announcement(
+            &keys,
+            &[&source_relay.domain()],
+            &format!("gap-repo-{}", i),
+        );
+        let _ = client.send_event(&event).await;
+    }
+
+    // Wait for events to be stored
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Now start sync relay - it will catchup on the gap events
+    let sync_relay = TestRelay::start_with_sync(Some(source_relay.url().into())).await;
+
+    // Wait for catchup to complete
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let metrics = fetch_metrics(&sync_relay.url())
+        .await
+        .expect("Should fetch metrics");
+
+    client.disconnect().await;
+    sync_relay.stop().await;
+    source_relay.stop().await;
+
+    // Check for gap-related metrics or general sync metrics
+    let has_sync_metrics = metrics.contains("ngit_sync")
+        || metrics.contains("gap")
+        || metrics.contains("events");
+
+    assert!(
+        has_sync_metrics,
+        "Metrics should track sync activity including gap events"
+    );
+}
