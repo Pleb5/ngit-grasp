@@ -109,6 +109,11 @@ pub struct Config {
     /// Set to 0 to disable jitter (useful for testing)
     #[arg(long, env = "NGIT_SYNC_STARTUP_JITTER_MS", default_value_t = 10_000)]
     pub sync_startup_jitter_ms: u64,
+
+    /// Interval in seconds for checking disconnected relays and attempting reconnection (default: 60)
+    /// Set to lower value for faster reconnection testing
+    #[arg(long, env = "NGIT_SYNC_DISCONNECT_CHECK_INTERVAL_SECS", default_value_t = 60)]
+    pub sync_disconnect_check_interval_secs: u64,
 }
 
 impl Config {
@@ -170,6 +175,7 @@ impl Config {
             sync_reconnect_delay_secs: 10,
             sync_reconnect_lookback_days: 3,
             sync_startup_jitter_ms: 10_000,
+            sync_disconnect_check_interval_secs: 60,
         }
     }
 }

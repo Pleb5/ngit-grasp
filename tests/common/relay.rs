@@ -94,6 +94,9 @@ impl TestRelay {
             .env("NGIT_DATABASE_BACKEND", "memory") // Force in-memory database for isolation
             .env("NGIT_OWNER_NPUB", &test_npub)
             .env("NGIT_SYNC_BATCH_WINDOW_MS", "200") // Fast batch window for tests (200ms instead of 5s default)
+            .env("NGIT_SYNC_STARTUP_DELAY_SECS", "0") // No startup delay for faster tests
+            .env("NGIT_SYNC_STARTUP_JITTER_MS", "0") // No jitter for tests
+            .env("NGIT_SYNC_DISCONNECT_CHECK_INTERVAL_SECS", "1") // Fast reconnect attempts for tests
             .env("RUST_LOG", "info") // Enable INFO logging for diagnostics
             .stdout(Stdio::null()) // Disable stderr for cleaner test output
             // .stdout(Stdio::inherit()) // Show stdout for diagnostics

@@ -55,7 +55,8 @@ impl RelayConnection {
     /// This method:
     /// 1. Adds the relay to the client
     /// 2. Establishes the WebSocket connection
-    /// 3. Subscribes to Layer 1 filter (kinds 30617 + 30618)
+    /// 3. Verifies connection was established
+    /// 4. Subscribes to Layer 1 filter (kinds 30617 + 30618)
     ///
     /// # Arguments
     /// * `since` - Optional timestamp for incremental sync on reconnect
@@ -75,6 +76,21 @@ impl RelayConnection {
 
         // Establish connection
         self.client.connect().await;
+
+        // Wait briefly for connection to establish and check status
+        // nostr-sdk's connect() is async and may not immediately reflect failure
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        
+        // Check if relay is actually connected
+        let relay = self.client.relay(&self.url).await
+            .map_err(|e| format!("Failed to get relay handle for {}: {}", self.url, e))?;
+        
+        if !relay.is_connected() {
+            return Err(format!(
+                "Failed to connect to relay {}: connection not established after timeout",
+                self.url
+            ));
+        }
 
         // Subscribe to Layer 1 (announcements)
         let filter = build_announcement_filter(since);

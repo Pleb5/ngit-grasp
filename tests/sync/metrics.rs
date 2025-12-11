@@ -368,17 +368,48 @@ async fn test_startup_sync_event_count() {
 /// NOTE: This test may fail until sync metrics recording is fully wired up.
 /// The test documents the expected behavior.
 #[tokio::test]
-#[ignore] // Enable when metrics recording is implemented
 async fn test_connection_failure_increments_counter() {
     let mut harness = MetricsTestHarness::with_sources(0).await; // No sources
     harness.start_syncing_relay_to_nowhere().await;
 
     // Wait for initial connection attempts
     tokio::time::sleep(Duration::from_secs(2)).await;
+    
+    // Fetch raw metrics to debug
+    let syncing_url = harness.syncing_relay_url().expect("Syncing relay should be started");
+    let raw_1 = fetch_metrics(syncing_url)
+        .await
+        .expect("Failed to fetch metrics");
+    
+    // Print all sync-related metrics
+    println!("\n=== RAW METRICS (t1) ===");
+    for line in raw_1.lines() {
+        if line.contains("sync") || line.contains("connection") {
+            println!("{}", line);
+        }
+    }
+    println!("========================\n");
+    
     let metrics_1 = harness.get_metrics().await.unwrap();
 
     // Wait for more attempts
     tokio::time::sleep(Duration::from_secs(2)).await;
+    
+    // Fetch raw metrics again
+    let syncing_url = harness.syncing_relay_url().expect("Syncing relay should be started");
+    let raw_2 = fetch_metrics(syncing_url)
+        .await
+        .expect("Failed to fetch metrics");
+    
+    // Print all sync-related metrics
+    println!("\n=== RAW METRICS (t2) ===");
+    for line in raw_2.lines() {
+        if line.contains("sync") || line.contains("connection") {
+            println!("{}", line);
+        }
+    }
+    println!("========================\n");
+    
     let metrics_2 = harness.get_metrics().await.unwrap();
 
     // Failure counter should have increased
@@ -496,7 +527,6 @@ async fn test_relay_connected_status() {
 /// NOTE: This test may fail until sync metrics recording is fully wired up.
 /// The test documents the expected behavior.
 #[tokio::test]
-#[ignore] // Ignored until sync metrics are fully wired up
 async fn test_health_state_degrades_on_failure() {
     use crate::common::sync_helpers::MetricsTestHarness;
 
