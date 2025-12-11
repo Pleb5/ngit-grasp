@@ -537,7 +537,18 @@ impl SyncManager {
             }
         }
 
-        // Recompute actions - will discover all repos/events again
+        // Re-subscribe to Layer 1 (announcements) without since filter for full discovery
+        // This is a fresh sync, so we want all announcements
+        let layer1_filter = filters::build_announcement_filter(None);
+        if let Err(e) = connection.subscribe_filter(layer1_filter).await {
+            tracing::error!(
+                relay = %relay_url,
+                error = %e,
+                "Failed to re-subscribe to Layer 1 during daily sync"
+            );
+        }
+
+        // Recompute actions for Layer 2+3 - will discover all repos/events again
         self.recompute_actions_for_relay(relay_url).await;
 
         if let Some(ref metrics) = self.metrics {
@@ -887,11 +898,12 @@ impl SyncManager {
             tracing::info!(
                 relay = %relay_url,
                 is_bootstrap = is_bootstrap,
-                "Fresh sync - subscribing to Layer 1 without since filter"
+                "Fresh sync - Layer 1 already subscribed, recomputing Layer 2+3"
             );
-            // Fresh sync: Layer 1 without since
-            // Layer 1 subscription is handled by the connection establishment
-            // Just recompute actions for new items
+            // Fresh sync: Layer 1 subscription (without since) was already established
+            // during connect_and_subscribe() in handle_add_filters(). That call subscribes
+            // to kinds 30617+30618 for the full history. Here we only need to recompute
+            // Layer 2+3 actions based on the repos we're tracking.
             self.recompute_actions_for_relay(relay_url).await;
         } else {
             // Quick reconnect: use since filter
