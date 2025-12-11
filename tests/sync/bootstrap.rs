@@ -306,3 +306,109 @@ async fn test_announcement_not_listing_relay_is_not_synced() {
     );
     println!("SUCCESS: Announcement was correctly rejected by relay_b (not synced)");
 }
+
+/// Test: History sync (bootstrap) works without NIP-77 negentropy
+///
+/// This tests that HISTORY sync works when negentropy is disabled.
+/// History sync means: events that existed on the source relay BEFORE
+/// the syncing relay connected.
+///
+/// Scenario:
+/// 1. Start relay_b temporarily to get its domain (then stop it)
+/// 2. Start relay_a (source)
+/// 3. Create announcement listing both relay domains
+/// 4. Send announcement to relay_a (event exists BEFORE relay_b connects)
+/// 5. Start relay_b AGAIN on same port, with negentropy DISABLED
+/// 6. relay_b should sync the pre-existing event via REQ+EOSE (history sync)
+/// 7. Verify relay_b has the event
+///
+/// This is different from "live sync" where events arrive after connection.
+#[tokio::test]
+async fn test_history_sync_without_negentropy() {
+    // 1. First, start relay_b temporarily just to reserve a port and get its domain
+    let relay_b_port = TestRelay::find_free_port();
+    let relay_b_domain = format!("127.0.0.1:{}", relay_b_port);
+    println!(
+        "Reserved port {} for relay_b (domain: {})",
+        relay_b_port, relay_b_domain
+    );
+
+    // 2. Start relay_a (source relay)
+    let relay_a = TestRelay::start().await;
+    println!(
+        "relay_a started at {} (domain: {})",
+        relay_a.url(),
+        relay_a.domain()
+    );
+
+    // 3. Create test keys
+    let keys = Keys::generate();
+
+    // 4. Create announcement listing BOTH relay domains
+    // This event will exist on relay_a BEFORE relay_b ever connects
+    let announcement = create_repo_announcement(
+        &keys,
+        &[&relay_a.domain(), &relay_b_domain],
+        "test-repo-history-no-negentropy",
+    );
+    let announcement_id = announcement.id;
+
+    println!(
+        "Created announcement {} (kind {})",
+        announcement_id,
+        announcement.kind.as_u16()
+    );
+    for tag in announcement.tags.iter() {
+        println!("  Tag: {:?}", tag.as_slice());
+    }
+
+    // 5. Send announcement to relay_a (event now exists BEFORE relay_b connects)
+    let client_a = TestClient::new(relay_a.url(), keys.clone())
+        .await
+        .expect("Failed to connect to relay_a");
+
+    client_a
+        .send_event(&announcement)
+        .await
+        .expect("Failed to send announcement to relay_a");
+    println!("Announcement sent to relay_a (event exists BEFORE relay_b connects)");
+
+    client_a.disconnect().await;
+
+    // 6. Wait a moment to ensure the event is stored
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // 7. NOW start relay_b on the reserved port, with negentropy DISABLED
+    // This relay_b has never connected before - it needs to do HISTORY sync
+    let relay_b = TestRelay::start_on_port_with_options(
+        relay_b_port,
+        Some(relay_a.url().into()),
+        true, // disable_negentropy = true
+    ).await;
+    println!(
+        "relay_b started at {} (domain: {}) - negentropy DISABLED, will do HISTORY sync",
+        relay_b.url(),
+        relay_b.domain()
+    );
+
+    // 8. Wait for history sync to complete (using REQ+EOSE, not negentropy)
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // 9. Verify announcement synced to relay_b via HISTORY sync
+    let filter = Filter::new()
+        .kind(Kind::Custom(KIND_REPOSITORY_STATE))
+        .author(keys.public_key());
+
+    let synced = wait_for_event_on_relay(relay_b.url(), filter, Duration::from_secs(5)).await;
+
+    // 10. Cleanup
+    relay_b.stop().await;
+    relay_a.stop().await;
+
+    assert!(
+        synced,
+        "Announcement {} should have synced from relay_a to relay_b via HISTORY sync (REQ+EOSE, negentropy disabled)",
+        announcement_id
+    );
+    println!("SUCCESS: History sync works without negentropy (using REQ+EOSE fallback)");
+}

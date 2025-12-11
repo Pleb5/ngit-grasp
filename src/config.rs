@@ -104,6 +104,12 @@ pub struct Config {
     /// Note: The connection timeout is capped at this value
     #[arg(long, env = "NGIT_SYNC_BASE_BACKOFF_SECS", default_value_t = 5)]
     pub sync_base_backoff_secs: u64,
+
+    /// Disable NIP-77 negentropy sync (default: false)
+    /// When enabled, sync will use REQ+EOSE instead of negentropy for history sync.
+    /// Primarily useful for testing that sync works without negentropy support.
+    #[arg(long, env = "NGIT_SYNC_DISABLE_NEGENTROPY", default_value_t = false)]
+    pub sync_disable_negentropy: bool,
 }
 
 impl Config {
@@ -163,6 +169,7 @@ impl Config {
             sync_max_backoff_secs: 3600,
             sync_disconnect_check_interval_secs: 60,
             sync_base_backoff_secs: 5,
+            sync_disable_negentropy: false,
         }
     }
 }

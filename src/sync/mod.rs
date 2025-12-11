@@ -511,8 +511,9 @@ impl SyncManager {
             }
         };
 
-        // Check if relay supports NIP-77 negentropy
-        let use_negentropy = connection.supports_negentropy().await;
+        // Check if relay supports NIP-77 negentropy AND negentropy is not disabled
+        let use_negentropy = !self.config.sync_disable_negentropy
+            && connection.supports_negentropy().await;
 
         // Unsubscribe all current subscriptions
         connection.unsubscribe_all().await;
@@ -948,7 +949,11 @@ impl SyncManager {
             );
 
             // Check if relay supports NIP-77 negentropy for efficient sync
-            let use_negentropy = if let Some(connection) = self.connections.get(relay_url) {
+            // Respect the sync_disable_negentropy config option
+            let use_negentropy = if self.config.sync_disable_negentropy {
+                tracing::debug!(relay = %relay_url, "Negentropy disabled via config");
+                false
+            } else if let Some(connection) = self.connections.get(relay_url) {
                 connection.supports_negentropy().await
             } else {
                 false

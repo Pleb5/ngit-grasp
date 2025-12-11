@@ -38,7 +38,21 @@ impl TestRelay {
 
     /// Start relay on a specific port
     pub async fn start_with_port(port: u16) -> Self {
-        Self::start_with_options(port, None).await
+        Self::start_with_full_options(port, None, false).await
+    }
+
+    /// Start relay on a specific port with full options
+    ///
+    /// This is useful for testing history sync where we need to:
+    /// 1. Start relay_b (first instance) to get its domain
+    /// 2. Stop relay_b
+    /// 3. Start relay_b (second instance) on SAME port with different options
+    pub async fn start_on_port_with_options(
+        port: u16,
+        bootstrap_relay_url: Option<String>,
+        disable_negentropy: bool,
+    ) -> Self {
+        Self::start_with_full_options(port, bootstrap_relay_url, disable_negentropy).await
     }
 
     /// Start relay with sync from another relay (bootstrap relay)
@@ -58,11 +72,39 @@ impl TestRelay {
     /// }
     /// ```
     pub async fn start_with_sync(bootstrap_relay_url: Option<String>) -> Self {
-        Self::start_with_options(Self::find_free_port(), bootstrap_relay_url).await
+        Self::start_with_full_options(Self::find_free_port(), bootstrap_relay_url, false).await
     }
 
-    /// Start relay with options
+    /// Start relay with sync and negentropy disabled
+    ///
+    /// This is useful for testing that sync works without NIP-77 negentropy.
+    /// History sync will use REQ+EOSE instead of the more efficient negentropy protocol.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use common::TestRelay;
+    ///
+    /// #[tokio::test]
+    /// async fn test_sync_without_negentropy() {
+    ///     let source = TestRelay::start().await;
+    ///     let syncing = TestRelay::start_with_sync_no_negentropy(Some(source.url().into())).await;
+    ///     // ... test sync behavior without negentropy ...
+    ///     syncing.stop().await;
+    ///     source.stop().await;
+    /// }
+    /// ```
+    pub async fn start_with_sync_no_negentropy(bootstrap_relay_url: Option<String>) -> Self {
+        Self::start_with_full_options(Self::find_free_port(), bootstrap_relay_url, true).await
+    }
+
+    /// Start relay with options (internal, maintains backward compatibility)
     async fn start_with_options(port: u16, bootstrap_relay_url: Option<String>) -> Self {
+        Self::start_with_full_options(port, bootstrap_relay_url, false).await
+    }
+
+    /// Start relay with full options
+    async fn start_with_full_options(port: u16, bootstrap_relay_url: Option<String>, disable_negentropy: bool) -> Self {
         let bind_address = format!("127.0.0.1:{}", port);
         let url = format!("ws://127.0.0.1:{}", port);
 
@@ -106,6 +148,11 @@ impl TestRelay {
         // Add bootstrap relay URL if provided
         if let Some(ref bootstrap_url) = bootstrap_relay_url {
             cmd.env("NGIT_SYNC_BOOTSTRAP_RELAY_URL", bootstrap_url);
+        }
+
+        // Add negentropy disable flag if requested
+        if disable_negentropy {
+            cmd.env("NGIT_SYNC_DISABLE_NEGENTROPY", "true");
         }
 
         let process = cmd.spawn().expect("Failed to start relay process");
@@ -166,7 +213,7 @@ impl TestRelay {
     }
 
     /// Find a free port to use for testing
-    fn find_free_port() -> u16 {
+    pub fn find_free_port() -> u16 {
         use std::net::TcpListener;
 
         // Bind to port 0 to get a random free port

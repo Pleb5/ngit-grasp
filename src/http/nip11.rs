@@ -109,6 +109,7 @@ mod tests {
             sync_max_backoff_secs: 3600,
             sync_disconnect_check_interval_secs: 60,
             sync_base_backoff_secs: 5,
+            sync_disable_negentropy: false,
         };
 
         let doc = RelayInformationDocument::from_config(&config);
@@ -147,6 +148,7 @@ mod tests {
             sync_max_backoff_secs: 3600,
             sync_disconnect_check_interval_secs: 60,
             sync_base_backoff_secs: 5,
+            sync_disable_negentropy: false,
         };
 
         let doc = RelayInformationDocument::from_config(&config);
