@@ -74,23 +74,24 @@ impl RelayConnection {
             .await
             .map_err(|e| format!("Failed to add relay {}: {}", self.url, e))?;
 
-        // Establish connection
-        self.client.connect().await;
-
-        // Wait briefly for connection to establish and check status
-        // nostr-sdk's connect() is async and may not immediately reflect failure
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        
-        // Check if relay is actually connected
-        let relay = self.client.relay(&self.url).await
-            .map_err(|e| format!("Failed to get relay handle for {}: {}", self.url, e))?;
-        
-        if !relay.is_connected() {
-            return Err(format!(
-                "Failed to connect to relay {}: connection not established after timeout",
-                self.url
-            ));
-        }
+        // Establish connection using try_connect_relay for immediate failure detection
+        //
+        // Key difference from client.connect():
+        // - try_connect_relay: Single attempt with timeout, returns Err on failure,
+        //   does NOT spawn background retry task (we control retries via HealthTracker)
+        // - connect(): Spawns background task, returns immediately, auto-retries forever
+        //
+        // Using try_connect_relay gives us:
+        // 1. Immediate error return on connection failure
+        // 2. Configurable timeout (5 seconds default)
+        // 3. No conflicting retry logic (we use HealthTracker for backoff)
+        // 4. Cleaner error messages for metrics recording
+        //
+        // See: nostr-sdk-0.44 Client::try_connect_relay documentation
+        self.client
+            .try_connect_relay(&self.url, std::time::Duration::from_secs(5))
+            .await
+            .map_err(|e| format!("Failed to connect to relay {}: {}", self.url, e))?;
 
         // Subscribe to Layer 1 (announcements)
         let filter = build_announcement_filter(since);
