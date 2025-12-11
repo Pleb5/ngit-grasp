@@ -90,7 +90,7 @@ pub fn tagged_one_of_our_repo_event_filters(
 /// Batched per 100 event IDs.
 ///
 /// # Arguments
-/// * `root_events` - Set of event IDs (1617/1618/1619/1621 root events)
+/// * `root_events` - Set of event IDs (1617/1618/1621 root events)
 /// * `since` - Optional timestamp for incremental sync
 ///
 /// # Returns

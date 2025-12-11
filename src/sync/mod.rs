@@ -72,7 +72,7 @@ pub type PendingSyncIndex = Arc<RwLock<HashMap<String, Vec<PendingBatch>>>>;
 pub struct RepoSyncNeeds {
     /// Relay URLs listed in this repo's 30617 announcement
     pub relays: HashSet<String>,
-    /// Root event IDs - 1617/1618/1619/1621 - that reference this repo
+    /// Root event IDs - 1617/1618/1621 - that reference this repo
     pub root_events: HashSet<EventId>,
 }
 
@@ -1633,7 +1633,7 @@ impl SyncManager {
     ///
     /// Confirmed filter counts:
     /// - Layer 1: 1 filter (announcement subscription)
-    /// - Layer 2: 3 filters per 100-repo chunk (for kinds 1617/1618/1619/1621)
+    /// - Layer 2: 3 filters per 100-repo chunk (for kinds 1617/1618/1621)
     /// - Layer 3: 3 filters per 100-event chunk (for replies/reactions/etc)
     async fn get_filter_count(&self, relay_url: &str) -> usize {
         // Count pending subscriptions

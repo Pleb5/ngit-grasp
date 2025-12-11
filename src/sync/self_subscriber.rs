@@ -84,7 +84,6 @@ impl PendingUpdates {
 /// - 30617 (Repository Announcements) - to discover repos listing our relay
 /// - 1617 (Patches) - root events referencing repos
 /// - 1618 (Issues) - root events referencing repos
-/// - 1619 (Replies) - root events referencing repos
 /// - 1621 (PRs) - root events referencing repos
 ///
 /// Note: 30618 is NOT subscribed to here (per v4 spec - only synced from remote relays)
@@ -159,7 +158,7 @@ impl SelfSubscriber {
                     if let Some(repo_id) = Self::extract_repo_id(&event) {
                         let relays = Self::extract_relay_urls(&event);
                         // 30617 announcements don't contribute to root_events - those are
-                        // the 1617/1618/1619/1621 event IDs that get added when we receive
+                        // the 1617/1618/1621 event IDs that get added when we receive
                         // root events via handle_root_event. See mod.rs:71 for details.
                         pending.add_repo(repo_id.clone(), relays.clone(), HashSet::new());
                         tracing::info!(
@@ -171,7 +170,7 @@ impl SelfSubscriber {
                         );
                     }
                 } else {
-                    // For root event kinds (1617, 1618, 1619, 1621),
+                    // For root event kinds (1617, 1618, 1621),
                     // process them to update the RepoSyncIndex AND add to pending
                     // for Layer 3 filter creation
                     tracing::trace!(
@@ -246,7 +245,7 @@ impl SelfSubscriber {
             }
         }
 
-        // For other kinds (1617, 1618, 1619, 1621), we'd need to look at
+        // For other kinds (1617, 1618, 1621), we'd need to look at
         // their 'a' tags to find which repo they belong to.
         // That processing happens in the batch processing, not here.
         None
@@ -285,7 +284,7 @@ impl SelfSubscriber {
         client.connect().await;
 
         // Subscribe to announcement and root event kinds
-        // Per v4 spec: 30617, 1617, 1618, 1619, 1621 (NOT 30618)
+        // Per v4 spec: 30617, 1617, 1618, 1621 (NOT 30618)
         // Check if we have a last_connected time for reconnect filtering
         let filter = if let Some(last) = self.last_connected {
             // Quick reconnect - use since filter (15 min buffer)
@@ -298,9 +297,8 @@ impl SelfSubscriber {
                 .kinds(vec![
                     Kind::Custom(30617), // Repository Announcements
                     Kind::Custom(1617),  // Patches
-                    Kind::Custom(1618),  // Issues
-                    Kind::Custom(1619),  // Replies/Status
-                    Kind::Custom(1621),  // Pull Requests
+                    Kind::Custom(1621),  // Issues
+                    Kind::Custom(1618),  // Pull Requests
                 ])
                 .since(since)
         } else {
@@ -308,9 +306,8 @@ impl SelfSubscriber {
             Filter::new().kinds(vec![
                 Kind::Custom(30617), // Repository Announcements
                 Kind::Custom(1617),  // Patches
-                Kind::Custom(1618),  // Issues
-                Kind::Custom(1619),  // Replies/Status
-                Kind::Custom(1621),  // Pull Requests
+                Kind::Custom(1621),  // Issues
+                Kind::Custom(1618),  // Pull Requests
             ])
         };
 
@@ -378,7 +375,7 @@ impl SelfSubscriber {
         tracing::info!("SelfSubscriber stopped");
     }
 
-    /// Handle a root event (1617/1618/1619/1621)
+    /// Handle a root event (1617/1618/1621)
     ///
     /// Extracts the 'a' tag to find the repo addressable reference,
     /// then updates the RepoSyncIndex with the event ID AND adds to pending
