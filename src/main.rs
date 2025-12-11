@@ -7,7 +7,7 @@ use tracing_subscriber::FmtSubscriber;
 use ngit_grasp::{
     config::{Config, DatabaseBackend},
     http,
-    metrics::{Metrics, REGISTRY},
+    metrics::Metrics,
     nostr,
     sync::SyncManager,
 };
@@ -53,6 +53,7 @@ async fn main() -> Result<()> {
 
         // Start SyncManager for proactive sync (Phase 2: multi-relay support, Phase 3: health tracking)
         // Even without bootstrap relay, SyncManager discovers relays from stored announcements
+        // Pass the already-registered sync metrics from Metrics to avoid duplicate registration
         let sync_manager = SyncManager::new(
             config.sync_bootstrap_relay_url.clone(),
             config.domain.clone(),
@@ -60,7 +61,7 @@ async fn main() -> Result<()> {
             relay_with_db.write_policy.clone(),
             relay_with_db.relay.clone(),
             &config,
-            Some(&REGISTRY),
+            metrics.as_ref().and_then(|m| m.sync_metrics().cloned()),
         );
 
         if config.sync_bootstrap_relay_url.is_some() {
