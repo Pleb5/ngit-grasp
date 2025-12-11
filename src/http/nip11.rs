@@ -107,10 +107,6 @@ mod tests {
             metrics_top_n_repos: 10,
             sync_bootstrap_relay_url: None,
             sync_max_backoff_secs: 3600,
-            sync_startup_delay_secs: 30,
-            sync_reconnect_delay_secs: 10,
-            sync_reconnect_lookback_days: 3,
-            sync_startup_jitter_ms: 10_000,
             sync_disconnect_check_interval_secs: 60,
             sync_base_backoff_secs: 5,
         };
@@ -149,10 +145,6 @@ mod tests {
             metrics_top_n_repos: 10,
             sync_bootstrap_relay_url: None,
             sync_max_backoff_secs: 3600,
-            sync_startup_delay_secs: 30,
-            sync_reconnect_delay_secs: 10,
-            sync_reconnect_lookback_days: 3,
-            sync_startup_jitter_ms: 10_000,
             sync_disconnect_check_interval_secs: 60,
             sync_base_backoff_secs: 5,
         };
