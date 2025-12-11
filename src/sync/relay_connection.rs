@@ -4,12 +4,22 @@
 //! Each RelayConnection manages a single connection to an external relay and handles
 //! subscriptions using the three-layer sync strategy.
 //!
-//! See `docs/explanation/grasp-02-proactive-sync-v4.md` for full design details.
+//! ## NIP-77 Negentropy Support
+//!
+//! RelayConnection supports NIP-77 negentropy for efficient set reconciliation:
+//! - `supports_negentropy()` - Check if remote relay supports NIP-77
+//! - `negentropy_sync_filter()` - Perform negentropy sync for a filter
+//!
+//! When NIP-77 is supported, historical sync uses negentropy instead of REQ+EOSE,
+//! significantly reducing bandwidth for relays with overlapping event sets.
+//!
+//! See `docs/explanation/grasp-02-proactive-sync.md` for full design details.
 
 use nostr_sdk::prelude::*;
 use tokio::sync::mpsc;
 
 use super::filters::build_announcement_filter;
+use crate::nostr::builder::SharedDatabase;
 
 /// Events from a relay connection
 #[derive(Debug)]
@@ -24,6 +34,17 @@ pub enum RelayEvent {
     Shutdown,
 }
 
+/// Result of a negentropy sync operation
+#[derive(Debug)]
+pub struct NegentropySyncResult {
+    /// Event IDs that exist on remote but not locally (discovered but not fetched)
+    pub remote_only: Vec<EventId>,
+    /// Event IDs that exist locally but not on remote (could push)
+    pub local_only: Vec<EventId>,
+    /// Event IDs that were fetched during sync
+    pub received: Vec<EventId>,
+}
+
 /// Manages connection to a single external relay
 ///
 /// RelayConnection wraps a nostr-sdk Client to manage a WebSocket connection
@@ -32,6 +53,7 @@ pub enum RelayEvent {
 /// - Layer 1 subscription (announcements)
 /// - Additional filter subscriptions (Layers 2 & 3)
 /// - Event notification loop
+/// - NIP-77 negentropy synchronization
 ///
 /// # Why Client instead of Relay directly?
 ///
@@ -49,6 +71,10 @@ pub struct RelayConnection {
     url: String,
     /// The underlying nostr-sdk client
     client: Client,
+    /// Local database for negentropy comparison (used for NIP-77 sync)
+    database: Option<SharedDatabase>,
+    /// Whether we've logged NIP-77 not supported for this relay (log once)
+    nip77_warning_logged: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RelayConnection {
@@ -58,7 +84,27 @@ impl RelayConnection {
     /// * `url` - The relay URL to connect to (e.g., "wss://relay.example.com")
     pub fn new(url: String) -> Self {
         let client = Client::default();
-        Self { url, client }
+        Self {
+            url,
+            client,
+            database: None,
+            nip77_warning_logged: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// Create a new relay connection with database for negentropy sync
+    ///
+    /// # Arguments
+    /// * `url` - The relay URL to connect to (e.g., "wss://relay.example.com")
+    /// * `database` - Shared database for local event comparison during negentropy sync
+    pub fn new_with_database(url: String, database: SharedDatabase) -> Self {
+        let client = Client::default();
+        Self {
+            url,
+            client,
+            database: Some(database),
+            nip77_warning_logged: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
     }
 
     /// Connect to the relay and subscribe to Layer 1 (announcements)
@@ -332,5 +378,116 @@ impl RelayConnection {
     pub async fn unsubscribe_all(&self) {
         self.client.unsubscribe_all().await;
         tracing::debug!(relay = %self.url, "Unsubscribed from all subscriptions");
+    }
+
+    // =========================================================================
+    // NIP-77 Negentropy Support
+    // =========================================================================
+
+    /// Check if negentropy sync should be attempted
+    ///
+    /// Rather than relying on NIP-11 document detection (which can be unreliable),
+    /// this returns true to indicate we should try negentropy sync. The actual
+    /// sync will handle failures gracefully with fallback to REQ+EOSE.
+    ///
+    /// # Note
+    /// This uses a "try and fallback" approach because:
+    /// - Some relays support NIP-77 but don't advertise it in NIP-11
+    /// - Some relays claim NIP-77 support but have bugs
+    /// - The nostr-sdk 0.44 API for relay document access varies
+    pub async fn supports_negentropy(&self) -> bool {
+        // Always return true to attempt negentropy - we handle failure gracefully
+        // in negentropy_sync_filter() which logs a warning and returns an error
+        // that the caller can use to fall back to REQ+EOSE
+        true
+    }
+
+    /// Perform negentropy synchronization for a filter
+    ///
+    /// Uses NIP-77 negentropy protocol to efficiently reconcile events matching
+    /// the filter between local database and remote relay. This is much more
+    /// efficient than REQ+EOSE for relays with overlapping event sets.
+    ///
+    /// # Arguments
+    /// * `filter` - The filter defining which events to sync
+    ///
+    /// # Returns
+    /// * `Ok(NegentropySyncResult)` - Sync completed successfully with reconciliation info
+    /// * `Err(String)` - Sync failed (relay may not support NIP-77, or other error)
+    ///
+    /// # Fallback Behavior
+    /// If this method fails, the caller should fall back to traditional REQ+EOSE sync.
+    /// Failure reasons include:
+    /// - Relay doesn't actually support NIP-77 (despite claiming to)
+    /// - Network errors during reconciliation
+    /// - Timeout during sync
+    pub async fn negentropy_sync_filter(&self, filter: Filter) -> Result<NegentropySyncResult, String> {
+        // Use nostr-sdk's sync method which handles the NEG-OPEN/NEG-MSG exchange
+        let sync_opts = SyncOptions::default();
+
+        match self.client.sync(filter.clone(), &sync_opts).await {
+            Ok(output) => {
+                let reconciliation = output.val;
+
+                tracing::debug!(
+                    relay = %self.url,
+                    local_count = reconciliation.local.len(),
+                    remote_count = reconciliation.remote.len(),
+                    sent_count = reconciliation.sent.len(),
+                    received_count = reconciliation.received.len(),
+                    "Negentropy sync completed"
+                );
+
+                // Check for any failures
+                if !output.failed.is_empty() {
+                    tracing::warn!(
+                        relay = %self.url,
+                        failures = ?output.failed,
+                        "Some relays failed during negentropy sync"
+                    );
+                }
+
+                Ok(NegentropySyncResult {
+                    remote_only: reconciliation.remote.into_iter().collect(),
+                    local_only: reconciliation.local.into_iter().collect(),
+                    received: reconciliation.received.into_iter().collect(),
+                })
+            }
+            Err(e) => {
+                // Log warning only once per relay to avoid spam
+                if !self
+                    .nip77_warning_logged
+                    .swap(true, std::sync::atomic::Ordering::Relaxed)
+                {
+                    tracing::warn!(
+                        relay = %self.url,
+                        error = %e,
+                        "Negentropy sync failed, will fall back to REQ+EOSE"
+                    );
+                }
+                Err(format!("Negentropy sync failed: {}", e))
+            }
+        }
+    }
+
+    /// Perform negentropy sync and return received event IDs
+    ///
+    /// Convenience method that performs negentropy sync and returns the event IDs
+    /// that were received (i.e., events that exist on remote but not locally).
+    ///
+    /// # Arguments
+    /// * `filter` - The filter defining which events to sync
+    ///
+    /// # Returns
+    /// * `Ok(Vec<EventId>)` - Event IDs received from remote relay
+    /// * `Err(String)` - Sync failed
+    pub async fn negentropy_sync_and_fetch(&self, filter: Filter) -> Result<Vec<EventId>, String> {
+        let result = self.negentropy_sync_filter(filter).await?;
+        Ok(result.received)
+    }
+
+    /// Check if this connection has a database configured for negentropy
+    pub fn has_database(&self) -> bool {
+        self.database.is_some()
     }
 }

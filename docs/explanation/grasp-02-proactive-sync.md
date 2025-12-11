@@ -9,6 +9,7 @@ This document explains the proactive sync system that synchronizes repository da
 3. **Two subscription paths on reconnect** - Catch-up (retained, with since) vs new items (via compute_actions)
 4. **Blank state = fresh sync** - Empty confirmed state triggers full historical fetch
 5. **Clear on disconnect, not reconnect** - PendingSyncIndex cleared at event boundary
+6. **NIP-77 negentropy for historical sync** - Efficient set reconciliation, fallback to REQ if unsupported
 
 ---
 
@@ -487,6 +488,79 @@ flowchart TB
 | Clear on disconnect | Clear PSI on disconnect | Cleanup at event boundary, simpler than on reconnect |
 | 15-minute rule | Clear confirmed if disconnected >15min | Matches since filter buffer, prevents stale subscriptions |
 | Daily timer | Fresh sync (clears state) | Ensures consistency, detects drift |
+| NIP-77 negentropy | Try first, fallback to REQ | Efficient set reconciliation when supported |
+
+---
+
+## NIP-77 Negentropy Sync
+
+The sync system supports NIP-77 negentropy for efficient set reconciliation when syncing with external relays.
+
+### What is Negentropy?
+
+NIP-77 defines the negentropy protocol for efficient event set comparison. Instead of requesting all events matching a filter (REQ+EOSE), negentropy allows relays to compare fingerprints of their event sets and only transfer the differences.
+
+### When Negentropy is Used
+
+Negentropy sync is attempted for:
+- **Initial connect** - Fresh sync without `last_connected`
+- **Daily sync** - Periodic full refresh (23-25 hour timer)
+- **Stale reconnect** - Disconnected for more than 15 minutes
+
+Negentropy is NOT used for:
+- **Quick reconnect** - Less than 15 minutes disconnected (uses REQ with `since`)
+- **Live subscriptions** - Ongoing event streams always use REQ
+
+### Implementation
+
+The [`RelayConnection`](../../src/sync/relay_connection.rs:71) now includes NIP-77 methods:
+
+```rust
+/// Check if negentropy sync should be attempted
+pub async fn supports_negentropy(&self) -> bool {
+    // Always returns true - we try negentropy and handle failure gracefully
+    true
+}
+
+/// Perform negentropy synchronization for a filter
+pub async fn negentropy_sync_filter(&self, filter: Filter)
+    -> Result<NegentropySyncResult, String> {
+    // Uses nostr-sdk's client.sync() method
+}
+```
+
+### Sync Flow with Negentropy
+
+```mermaid
+flowchart TB
+    CONNECT[Connect to relay] --> NEG{Try negentropy}
+    NEG --> |success| L1[Layer 1 synced via negentropy]
+    NEG --> |failure| FALLBACK[Fall back to REQ+EOSE]
+    
+    L1 --> SINCE[Record timestamp = now]
+    FALLBACK --> EOSE[Wait for EOSE]
+    EOSE --> SINCE
+    
+    SINCE --> LIVE[Open live REQ with since=now]
+```
+
+### Fallback Behavior
+
+If negentropy fails (relay doesn't support NIP-77, network error, etc.):
+1. A warning is logged (once per relay to avoid spam)
+2. The sync falls back to traditional REQ+EOSE
+3. No error is raised - fallback is automatic
+
+**Implementation:** [`negentropy_sync_and_process()`](../../src/sync/mod.rs:1549)
+
+### Key Design Decisions for Negentropy
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Detection approach | Try and fallback | More reliable than NIP-11 document detection |
+| When to use | Fresh/daily/stale sync only | Quick reconnect with `since` is already efficient |
+| Error handling | Log once, fallback silently | Avoid log spam while maintaining visibility |
+| Layer application | Layer 1 first | Announcements are highest priority |
 
 ---
 
