@@ -483,3 +483,106 @@ async fn test_relay_connected_status() {
 
     harness.stop_all().await;
 }
+
+// ============================================================================
+// Phase 4: Health State and Multi-Relay Aggregate Tests
+// ============================================================================
+
+/// Test that health state degrades when a relay becomes unreachable.
+///
+/// This test validates that `ngit_sync_relay_status` gauge transitions from
+/// healthy (1) to degraded (2) or dead (3) when a relay cannot be connected to.
+///
+/// NOTE: This test may fail until sync metrics recording is fully wired up.
+/// The test documents the expected behavior.
+#[tokio::test]
+#[ignore] // Ignored until sync metrics are fully wired up
+async fn test_health_state_degrades_on_failure() {
+    use crate::common::sync_helpers::MetricsTestHarness;
+
+    let mut harness = MetricsTestHarness::with_sources(0).await;
+    harness.start_syncing_relay_to_nowhere().await;
+
+    // Initially might be trying to connect
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let initial = harness.get_metrics().await.unwrap();
+
+    // After several failures, should degrade (status = 2 or 3)
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let later = harness.get_metrics().await.unwrap();
+
+    // Get the relay status (1=healthy, 2=degraded, 3=dead)
+    let status = later.gauge("ngit_sync_relay_status", &[]).unwrap_or(0);
+
+    println!("Initial metrics: {:?}", initial.gauge("ngit_sync_relay_status", &[]));
+    println!("Later status: {}", status);
+
+    assert!(
+        status >= 2,
+        "Health should degrade to 2 (degraded) or 3 (dead), got {}",
+        status
+    );
+
+    harness.stop_all().await;
+}
+
+/// Test that aggregate relay counts are tracked correctly.
+///
+/// This test validates the aggregate metrics:
+/// - `ngit_sync_relays_tracked_total`
+/// - `ngit_sync_relays_connected_total`
+///
+/// Note: Current implementation may only support one sync source, so this tests
+/// with one source, verifying tracked=1 and connected=1, then connected=0 after stopping.
+///
+/// NOTE: This test may fail until sync metrics recording is fully wired up.
+/// The test documents the expected behavior.
+#[tokio::test]
+#[ignore] // Ignored until sync metrics are fully wired up
+async fn test_multi_source_aggregate_counts() {
+    use crate::common::sync_helpers::MetricsTestHarness;
+
+    // Note: Current impl only supports ONE sync source, so this tests
+    // that with one source, tracked=1 and connected=1
+    let mut harness = MetricsTestHarness::with_sources(1).await;
+    harness.start_syncing_relay(0).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let metrics = harness.get_metrics().await.unwrap();
+
+    println!("Tracked total: {:?}", metrics.relays_tracked_total());
+    println!("Connected total: {:?}", metrics.relays_connected_total());
+
+    assert_eq!(
+        metrics.relays_tracked_total(),
+        Some(1),
+        "Should track 1 relay"
+    );
+    assert_eq!(
+        metrics.relays_connected_total(),
+        Some(1),
+        "Should have 1 connected"
+    );
+
+    // Stop source, verify connected drops to 0
+    harness.stop_source(0).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let metrics = harness.get_metrics().await.unwrap();
+
+    println!("After stop - Tracked total: {:?}", metrics.relays_tracked_total());
+    println!("After stop - Connected total: {:?}", metrics.relays_connected_total());
+
+    assert_eq!(
+        metrics.relays_tracked_total(),
+        Some(1),
+        "Still tracking 1 relay"
+    );
+    assert_eq!(
+        metrics.relays_connected_total(),
+        Some(0),
+        "Should have 0 connected"
+    );
+
+    harness.stop_all().await;
+}
