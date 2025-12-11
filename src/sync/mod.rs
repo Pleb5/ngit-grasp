@@ -1184,8 +1184,12 @@ impl SyncManager {
         // Create relay connection
         let connection = RelayConnection::new(relay_url.clone());
 
+        // Get connection timeout from health tracker (capped at base backoff)
+        // This ensures the connection attempt completes before the next retry would be scheduled
+        let connection_timeout_secs = self.health_tracker.base_backoff_secs();
+
         // Connect and subscribe to Layer 1
-        match connection.connect_and_subscribe(None).await {
+        match connection.connect_and_subscribe(None, connection_timeout_secs).await {
             Ok(_) => {
                 // Record successful connection attempt
                 if let Some(ref metrics) = self.metrics {

@@ -114,6 +114,13 @@ pub struct Config {
     /// Set to lower value for faster reconnection testing
     #[arg(long, env = "NGIT_SYNC_DISCONNECT_CHECK_INTERVAL_SECS", default_value_t = 60)]
     pub sync_disconnect_check_interval_secs: u64,
+
+    /// Base backoff time in seconds for relay reconnection (default: 5)
+    /// Used for exponential backoff: base * 2^(failures-1)
+    /// Set to 1 for faster test cycles
+    /// Note: The connection timeout is capped at this value
+    #[arg(long, env = "NGIT_SYNC_BASE_BACKOFF_SECS", default_value_t = 5)]
+    pub sync_base_backoff_secs: u64,
 }
 
 impl Config {
@@ -176,6 +183,7 @@ impl Config {
             sync_reconnect_lookback_days: 3,
             sync_startup_jitter_ms: 10_000,
             sync_disconnect_check_interval_secs: 60,
+            sync_base_backoff_secs: 5,
         }
     }
 }

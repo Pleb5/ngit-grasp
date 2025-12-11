@@ -60,6 +60,9 @@ impl RelayConnection {
     ///
     /// # Arguments
     /// * `since` - Optional timestamp for incremental sync on reconnect
+    /// * `connection_timeout_secs` - Timeout for the connection attempt in seconds.
+    ///   Should be no larger than base_backoff_secs to ensure the connection attempt
+    ///   completes before the next retry would be scheduled.
     ///
     /// # Returns
     /// * `Ok(SubscriptionId)` - The subscription ID on successful connection
@@ -67,6 +70,7 @@ impl RelayConnection {
     pub async fn connect_and_subscribe(
         &self,
         since: Option<Timestamp>,
+        connection_timeout_secs: u64,
     ) -> Result<SubscriptionId, String> {
         // Add relay to client
         self.client
@@ -83,13 +87,13 @@ impl RelayConnection {
         //
         // Using try_connect_relay gives us:
         // 1. Immediate error return on connection failure
-        // 2. Configurable timeout (5 seconds default)
+        // 2. Configurable timeout (set to base_backoff_secs to ensure retry timing works)
         // 3. No conflicting retry logic (we use HealthTracker for backoff)
         // 4. Cleaner error messages for metrics recording
         //
         // See: nostr-sdk-0.44 Client::try_connect_relay documentation
         self.client
-            .try_connect_relay(&self.url, std::time::Duration::from_secs(5))
+            .try_connect_relay(&self.url, std::time::Duration::from_secs(connection_timeout_secs))
             .await
             .map_err(|e| format!("Failed to connect to relay {}: {}", self.url, e))?;
 

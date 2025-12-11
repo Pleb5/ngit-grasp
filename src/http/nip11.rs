@@ -111,6 +111,8 @@ mod tests {
             sync_reconnect_delay_secs: 10,
             sync_reconnect_lookback_days: 3,
             sync_startup_jitter_ms: 10_000,
+            sync_disconnect_check_interval_secs: 60,
+            sync_base_backoff_secs: 5,
         };
 
         let doc = RelayInformationDocument::from_config(&config);
@@ -151,6 +153,8 @@ mod tests {
             sync_reconnect_delay_secs: 10,
             sync_reconnect_lookback_days: 3,
             sync_startup_jitter_ms: 10_000,
+            sync_disconnect_check_interval_secs: 60,
+            sync_base_backoff_secs: 5,
         };
 
         let doc = RelayInformationDocument::from_config(&config);
