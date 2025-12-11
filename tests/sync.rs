@@ -8,6 +8,7 @@
 //! - `live_sync` - Tests for real-time sync after connection established
 //! - `tag_variations` - Tests for different Layer 2/3 tag types
 //! - `catchup` - Tests for catchup sync after disconnect (not yet implemented)
+//! - `metrics` - Tests for Prometheus metrics integration
 //!
 //! # Running Tests
 //!
@@ -34,5 +35,6 @@ mod sync {
     pub mod catchup;
     pub mod discovery;
     pub mod live_sync;
+    pub mod metrics;
     pub mod tag_variations;
 }

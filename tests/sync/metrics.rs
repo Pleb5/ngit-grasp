@@ -1,6 +1,6 @@
-//! GRASP-02 Phase 6: Proactive Sync Metrics Integration Tests
+//! Proactive Sync Metrics Tests
 //!
-//! Tests the Prometheus metrics integration for proactive sync:
+//! Tests for Prometheus metrics integration with proactive sync:
 //! - All sync metrics exposed at `/metrics` endpoint
 //! - Connection metrics update correctly
 //! - Health state metrics reflect actual state
@@ -10,45 +10,15 @@
 //! # Running Tests
 //!
 //! ```bash
-//! cargo test --test proactive_sync_metrics
-//! cargo test --test proactive_sync_metrics -- --nocapture
+//! cargo test --test sync metrics
+//! cargo test --test sync metrics -- --nocapture
 //! ```
-
-mod common;
 
 use std::time::Duration;
 
-use common::TestRelay;
 use nostr_sdk::prelude::*;
 
-/// Kind 30617 - Repository State (NIP-34)
-const KIND_REPOSITORY_STATE: u16 = 30617;
-
-/// Create a valid repository announcement event for testing
-fn create_valid_repo_announcement(keys: &Keys, domain: &str, identifier: &str) -> Event {
-    let tags = vec![
-        Tag::identifier(identifier),
-        Tag::custom(
-            TagKind::custom("clone"),
-            vec![format!("http://{}/{}", domain, identifier)],
-        ),
-        Tag::custom(TagKind::custom("relays"), vec![format!("ws://{}", domain)]),
-    ];
-
-    EventBuilder::new(Kind::Custom(KIND_REPOSITORY_STATE), "Repository state")
-        .tags(tags)
-        .sign_with_keys(keys)
-        .expect("Failed to sign event")
-}
-
-/// Helper to fetch metrics from a relay's HTTP endpoint
-async fn fetch_metrics(relay: &TestRelay) -> Result<String, reqwest::Error> {
-    // Extract host:port from ws:// URL
-    let ws_url = relay.url();
-    let http_url = ws_url.replace("ws://", "http://").replace("/", "") + "/metrics";
-
-    reqwest::get(&http_url).await?.text().await
-}
+use crate::common::{sync_helpers::*, TestRelay};
 
 /// Test that sync metrics are exposed at /metrics endpoint
 #[tokio::test]
@@ -58,8 +28,8 @@ async fn test_sync_metrics_exposed() {
     // Give time for relay to start
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Fetch metrics
-    let metrics_result = fetch_metrics(&relay).await;
+    // Fetch metrics using the shared helper
+    let metrics_result = fetch_metrics(&relay.url()).await;
 
     relay.stop().await;
 
@@ -84,7 +54,7 @@ async fn test_sync_metric_names_present() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Fetch metrics from the syncing relay
-    let metrics = fetch_metrics(&sync_relay)
+    let metrics = fetch_metrics(&sync_relay.url())
         .await
         .expect("Failed to fetch metrics");
 
@@ -113,7 +83,7 @@ async fn test_connection_metrics_on_success() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Fetch metrics - we can verify the relay started and metrics endpoint works
-    let metrics = fetch_metrics(&sync_relay)
+    let metrics = fetch_metrics(&sync_relay.url())
         .await
         .expect("Failed to fetch metrics");
 
@@ -139,7 +109,7 @@ async fn test_event_sync_metrics() {
 
     // Create and submit an event to source relay
     let keys = Keys::generate();
-    let event = create_valid_repo_announcement(&keys, &source_relay.domain(), "metrics-test-repo");
+    let event = create_repo_announcement(&keys, &[&source_relay.domain()], "metrics-test-repo");
 
     let client = Client::default();
     client
@@ -154,7 +124,7 @@ async fn test_event_sync_metrics() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Fetch metrics from sync relay
-    let metrics = fetch_metrics(&sync_relay)
+    let metrics = fetch_metrics(&sync_relay.url())
         .await
         .expect("Failed to fetch metrics");
 
@@ -180,7 +150,7 @@ async fn test_health_state_metrics() {
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     // Fetch metrics
-    let metrics = fetch_metrics(&sync_relay)
+    let metrics = fetch_metrics(&sync_relay.url())
         .await
         .expect("Failed to fetch metrics");
 
@@ -203,7 +173,7 @@ async fn test_gap_event_tracking() {
     let keys = Keys::generate();
 
     // Submit event before sync relay starts
-    let event = create_valid_repo_announcement(&keys, &source_relay.domain(), "pre-existing-repo");
+    let event = create_repo_announcement(&keys, &[&source_relay.domain()], "pre-existing-repo");
 
     let client = Client::default();
     client
@@ -220,7 +190,7 @@ async fn test_gap_event_tracking() {
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     // Fetch metrics
-    let metrics = fetch_metrics(&sync_relay)
+    let metrics = fetch_metrics(&sync_relay.url())
         .await
         .expect("Failed to fetch metrics");
 
@@ -256,9 +226,9 @@ async fn test_multi_relay_load() {
     // Submit events to all source relays
     let keys = Keys::generate();
 
-    let event1 = create_valid_repo_announcement(&keys, &source_relay_1.domain(), "repo-1");
-    let event2 = create_valid_repo_announcement(&keys, &source_relay_2.domain(), "repo-2");
-    let event3 = create_valid_repo_announcement(&keys, &source_relay_3.domain(), "repo-3");
+    let event1 = create_repo_announcement(&keys, &[&source_relay_1.domain()], "repo-1");
+    let event2 = create_repo_announcement(&keys, &[&source_relay_2.domain()], "repo-2");
+    let event3 = create_repo_announcement(&keys, &[&source_relay_3.domain()], "repo-3");
 
     // Submit events
     let client1 = Client::default();
@@ -289,7 +259,7 @@ async fn test_multi_relay_load() {
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     // Fetch metrics from sync relay
-    let metrics = fetch_metrics(&sync_relay)
+    let metrics = fetch_metrics(&sync_relay.url())
         .await
         .expect("Failed to fetch metrics");
 
@@ -315,7 +285,7 @@ async fn test_prometheus_format_valid() {
     let relay = TestRelay::start().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let metrics = fetch_metrics(&relay)
+    let metrics = fetch_metrics(&relay.url())
         .await
         .expect("Failed to fetch metrics");
 
@@ -350,7 +320,7 @@ async fn test_metrics_availability_during_sync() {
 
     // Make multiple metrics requests while sync is active
     for i in 0..3 {
-        let metrics = fetch_metrics(&sync_relay).await;
+        let metrics = fetch_metrics(&sync_relay.url()).await;
         assert!(
             metrics.is_ok(),
             "Metrics request {} should succeed during sync",

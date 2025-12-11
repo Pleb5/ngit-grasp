@@ -561,6 +561,37 @@ pub fn repo_coord(keys: &Keys, identifier: &str) -> String {
     )
 }
 
+// ============================================================================
+// Metrics Helpers
+// ============================================================================
+
+/// Fetch Prometheus metrics from a relay's `/metrics` endpoint.
+///
+/// Converts the WebSocket URL to HTTP and fetches the metrics endpoint.
+/// Useful for verifying sync-related metrics in tests.
+///
+/// # Arguments
+/// * `relay_url` - WebSocket URL of the relay (e.g., "ws://127.0.0.1:8080")
+///
+/// # Returns
+/// * `Ok(String)` - The metrics text in Prometheus format
+/// * `Err(reqwest::Error)` - If the request fails
+///
+/// # Example
+/// ```ignore
+/// let metrics = fetch_metrics("ws://127.0.0.1:8080").await?;
+/// assert!(metrics.contains("ngit_sync_"));
+/// ```
+pub async fn fetch_metrics(relay_url: &str) -> Result<String, reqwest::Error> {
+    // Convert ws:// URL to http:// for metrics endpoint
+    let http_url = relay_url
+        .replace("ws://", "http://")
+        .replace("/", "")
+        + "/metrics";
+
+    reqwest::get(&http_url).await?.text().await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

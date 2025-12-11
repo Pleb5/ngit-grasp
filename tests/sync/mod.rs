@@ -8,6 +8,7 @@
 //! - Live sync (events sync in real-time after connection established)
 //! - Tag variations (testing different Layer 2/3 tag types: a/A/q, e/E/q)
 //! - Catchup sync (events from disconnected period sync on reconnect)
+//! - Metrics (Prometheus metrics for sync operations)
 //!
 //! # Test Files
 //!
@@ -16,6 +17,7 @@
 //! - `live_sync.rs` - Tests 5, 6, 7: real-time sync after connection
 //! - `tag_variations.rs` - Tests 8, 9: Layer 2/3 tag type coverage
 //! - `catchup.rs` - Test 0: catchup after disconnect (stub, `#[ignore]`)
+//! - `metrics.rs` - Prometheus metrics integration tests
 //!
 //! # Shared Imports
 //!
@@ -23,10 +25,12 @@
 //! - `TestClient` - Client with retry logic
 //! - Event builders for Layer 2/3 events
 //! - `wait_for_event_on_relay()` - Non-panicking assertion helper
+//! - `fetch_metrics()` - Prometheus metrics fetching
 
 // Test modules
 pub mod bootstrap;
 pub mod catchup;
 pub mod discovery;
 pub mod live_sync;
+pub mod metrics;
 pub mod tag_variations;
