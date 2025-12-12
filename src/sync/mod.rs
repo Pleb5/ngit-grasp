@@ -1729,7 +1729,7 @@ impl SyncManager {
                     relay = %relay_url,
                     layer = layer_name,
                     error = %e,
-                    "Negentropy sync failed for {}, will fall back to REQ+EOSE",
+                    "Negentropy sync failed for {}",
                     layer_name
                 );
 
