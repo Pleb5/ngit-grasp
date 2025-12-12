@@ -90,20 +90,34 @@ impl RelayState {
 ### PendingSyncIndex (In-Flight Batches)
 
 ```rust
+
+/// Method used for synchronization
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncMethod {
+    /// Traditional REQ+EOSE flow - waits for EOSE on subscriptions
+    ReqEose,
+    /// NIP-77 negentropy sync - confirms immediately after sync completes
+    Negentropy,
+}
+
+
 /// Tracks batches of subscriptions that are in-flight, awaiting EOSE.
 /// Each batch has its own ID and can confirm independently.
 /// Key: relay URL
 pub type PendingSyncIndex = Arc<RwLock<HashMap<String, Vec<PendingBatch>>>>;
 
-#[derive(Debug, Clone)]
 pub struct PendingBatch {
     /// Unique ID for this batch - for debugging/logging
     pub batch_id: u64,
     /// The items this batch is syncing
     pub items: PendingItems,
-    /// Subscription IDs that must ALL receive EOSE before confirming
+    /// Subscription IDs that must ALL receive EOSE before confirming (for ReqEose)
+    /// Empty for Negentropy sync method
     pub outstanding_subs: HashSet<SubscriptionId>,
+    /// The sync method used for this batch
+    pub sync_method: SyncMethod,
 }
+
 
 #[derive(Debug, Clone, Default)]
 pub struct PendingItems {
@@ -290,7 +304,7 @@ Transforms the repo-centric `RepoSyncIndex` into a relay-centric view. For each 
 
 ```rust
 // Conceptual: inverts repo → relays to relay → repos
-fn derive_relay_targets(repo_index: &HashMap<String, RepoSyncNeeds>) 
+fn derive_relay_targets(repo_index: &HashMap<String, RepoSyncNeeds>)
     -> HashMap<String, RelaySyncNeeds>
 ```
 
@@ -336,6 +350,7 @@ The filter strategy uses three layers to ensure comprehensive event coverage:
 ### Combined Layer 2+3
 
 The [`build_layer2_and_layer3_filters()`](../../src/sync/filters.rs:152) function combines both layers. Used by:
+
 - `compute_actions` for incremental subscriptions
 - `rebuild_layer2_and_layer3` during reconnection
 - Consolidation rebuilds (Layer 1 remains active separately)
@@ -350,29 +365,29 @@ The [`SyncManager`](../../src/sync/mod.rs:308) orchestrates all sync operations.
 
 ### Connection Lifecycle
 
-| Method | Purpose |
-|--------|---------|
+| Method                          | Purpose                                                                                                                             |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
 | `handle_connect_or_reconnect()` | Unified handler for initial connect and reconnect. Determines fresh vs quick reconnect based on `last_connected` and 15-minute rule |
-| `handle_disconnect()` | Updates RelayState to Disconnected, sets disconnected_at, clears pending batches, records failure in health tracker |
-| `spawn_relay_connection()` | Creates RelayConnection, subscribes to Layer 1, spawns event loop task |
+| `handle_disconnect()`           | Updates RelayState to Disconnected, sets disconnected_at, clears pending batches, records failure in health tracker                 |
+| `spawn_relay_connection()`      | Creates RelayConnection, subscribes to Layer 1, spawns event loop task                                                              |
 
 ### Sync Operations
 
-| Method | Purpose |
-|--------|---------|
-| `handle_add_filters()` | Auto-spawns connection if needed, checks consolidation threshold (>70 filters), subscribes and creates PendingBatch |
-| `handle_eose()` | Processes EOSE for subscription, moves items from pending to confirmed when batch completes |
-| `recompute_actions_for_relay()` | Runs derive_relay_targets → compute_actions for a specific relay to find new items |
-| `rebuild_layer2_and_layer3()` | Rebuilds subscriptions from confirmed state with optional since filter |
+| Method                          | Purpose                                                                                                             |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `handle_add_filters()`          | Auto-spawns connection if needed, checks consolidation threshold (>70 filters), subscribes and creates PendingBatch |
+| `handle_eose()`                 | Processes EOSE for subscription, moves items from pending to confirmed when batch completes                         |
+| `recompute_actions_for_relay()` | Runs derive_relay_targets → compute_actions for a specific relay to find new items                                  |
+| `rebuild_layer2_and_layer3()`   | Rebuilds subscriptions from confirmed state with optional since filter                                              |
 
 ### Maintenance
 
-| Method | Purpose |
-|--------|---------|
-| `daily_sync()` | Full fresh sync - unsubscribes all, clears state, recomputes actions |
-| `consolidate()` | Reduces filter count by unsubscribing and rebuilding with combined filters |
-| `check_disconnects()` | Periodic check for empty relays (no repos) to disconnect |
-| `check_reconnects()` | Attempts reconnection for disconnected relays with pending work |
+| Method                | Purpose                                                                    |
+| --------------------- | -------------------------------------------------------------------------- |
+| `daily_sync()`        | Full fresh sync - unsubscribes all, clears state, recomputes actions       |
+| `consolidate()`       | Reduces filter count by unsubscribing and rebuilding with combined filters |
+| `check_disconnects()` | Periodic check for empty relays (no repos) to disconnect                   |
+| `check_reconnects()`  | Attempts reconnection for disconnected relays with pending work            |
 
 ---
 
@@ -474,21 +489,21 @@ flowchart TB
 
 ## Key Design Decisions
 
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Startup mechanism | Self-subscription only | Single code path, fresh DB behaves same as reconnect |
-| Connect/reconnect handling | Unified handle_connect_or_reconnect | Single entry point for both initial and reconnect |
-| Layer 1 handling | Separate build_announcement_filter | Connection-level: subscribe ONCE on connect, NOT rebuilt in consolidation |
-| Layer 2+3 handling | Separate rebuild_layer2_and_layer3 | Item-level: managed by compute_actions, consolidated when filter count > 70 |
-| Filter functions | since as Option parameter | Allows same functions for fresh sync and catch-up |
-| Since filter | Only on catch-up paths | Initial/stale gets full history, quick reconnect catches up |
-| compute_actions role | ONLY for new Layer 2+3 items | Does NOT handle Layer 1 or catch-up |
-| Catch-up pending tracking | No PendingBatch | Items already confirmed, don't need re-confirmation |
-| Consolidation trigger | On filter add, not periodic | Check in handle_add_filters before adding new filters |
-| Clear on disconnect | Clear PSI on disconnect | Cleanup at event boundary, simpler than on reconnect |
-| 15-minute rule | Clear confirmed if disconnected >15min | Matches since filter buffer, prevents stale subscriptions |
-| Daily timer | Fresh sync (clears state) | Ensures consistency, detects drift |
-| NIP-77 negentropy | Try first, fallback to REQ | Efficient set reconciliation when supported |
+| Decision                   | Choice                                 | Rationale                                                                   |
+| -------------------------- | -------------------------------------- | --------------------------------------------------------------------------- |
+| Startup mechanism          | Self-subscription only                 | Single code path, fresh DB behaves same as reconnect                        |
+| Connect/reconnect handling | Unified handle_connect_or_reconnect    | Single entry point for both initial and reconnect                           |
+| Layer 1 handling           | Separate build_announcement_filter     | Connection-level: subscribe ONCE on connect, NOT rebuilt in consolidation   |
+| Layer 2+3 handling         | Separate rebuild_layer2_and_layer3     | Item-level: managed by compute_actions, consolidated when filter count > 70 |
+| Filter functions           | since as Option parameter              | Allows same functions for fresh sync and catch-up                           |
+| Since filter               | Only on catch-up paths                 | Initial/stale gets full history, quick reconnect catches up                 |
+| compute_actions role       | ONLY for new Layer 2+3 items           | Does NOT handle Layer 1 or catch-up                                         |
+| Catch-up pending tracking  | No PendingBatch                        | Items already confirmed, don't need re-confirmation                         |
+| Consolidation trigger      | On filter add, not periodic            | Check in handle_add_filters before adding new filters                       |
+| Clear on disconnect        | Clear PSI on disconnect                | Cleanup at event boundary, simpler than on reconnect                        |
+| 15-minute rule             | Clear confirmed if disconnected >15min | Matches since filter buffer, prevents stale subscriptions                   |
+| Daily timer                | Fresh sync (clears state)              | Ensures consistency, detects drift                                          |
+| NIP-77 negentropy          | Try first, fallback to REQ             | Efficient set reconciliation when supported                                 |
 
 ---
 
@@ -503,11 +518,13 @@ NIP-77 defines the negentropy protocol for efficient event set comparison. Inste
 ### When Negentropy is Used
 
 Negentropy sync is attempted for:
+
 - **Initial connect** - Fresh sync without `last_connected`
 - **Daily sync** - Periodic full refresh (23-25 hour timer)
 - **Stale reconnect** - Disconnected for more than 15 minutes
 
 Negentropy is NOT used for:
+
 - **Quick reconnect** - Less than 15 minutes disconnected (uses REQ with `since`)
 - **Live subscriptions** - Ongoing event streams always use REQ
 
@@ -536,17 +553,18 @@ flowchart TB
     CONNECT[Connect to relay] --> NEG{Try negentropy}
     NEG --> |success| L1[Layer 1 synced via negentropy]
     NEG --> |failure| FALLBACK[Fall back to REQ+EOSE]
-    
+
     L1 --> SINCE[Record timestamp = now]
     FALLBACK --> EOSE[Wait for EOSE]
     EOSE --> SINCE
-    
+
     SINCE --> LIVE[Open live REQ with since=now]
 ```
 
 ### Fallback Behavior
 
 If negentropy fails (relay doesn't support NIP-77, network error, etc.):
+
 1. A warning is logged (once per relay to avoid spam)
 2. The sync falls back to traditional REQ+EOSE
 3. No error is raised - fallback is automatic
@@ -555,12 +573,12 @@ If negentropy fails (relay doesn't support NIP-77, network error, etc.):
 
 ### Key Design Decisions for Negentropy
 
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Detection approach | Try and fallback | More reliable than NIP-11 document detection |
-| When to use | Fresh/daily/stale sync only | Quick reconnect with `since` is already efficient |
-| Error handling | Log once, fallback silently | Avoid log spam while maintaining visibility |
-| Layer application | Layer 1 first | Announcements are highest priority |
+| Decision           | Choice                      | Rationale                                         |
+| ------------------ | --------------------------- | ------------------------------------------------- |
+| Detection approach | Try and fallback            | More reliable than NIP-11 document detection      |
+| When to use        | Fresh/daily/stale sync only | Quick reconnect with `since` is already efficient |
+| Error handling     | Log once, fallback silently | Avoid log spam while maintaining visibility       |
+| Layer application  | Layer 1 first               | Announcements are highest priority                |
 
 ---
 
