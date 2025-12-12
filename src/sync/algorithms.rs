@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 
 use nostr_sdk::prelude::*;
 
-use super::{ConnectionStatus, PendingBatch, RelayState};
+use super::{ConnectionStatus, PendingBatch, RelayState, SyncMethod};
 
 // =============================================================================
 // Data Structures
@@ -396,6 +396,7 @@ mod tests {
                     root_events: HashSet::new(),
                 },
                 outstanding_subs: HashSet::new(),
+                sync_method: SyncMethod::ReqEose,
             }],
         );
 
@@ -504,6 +505,7 @@ mod tests {
                     root_events: HashSet::new(),
                 },
                 outstanding_subs: HashSet::new(),
+                sync_method: SyncMethod::ReqEose,
             }],
         );
 
