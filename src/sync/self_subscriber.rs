@@ -499,7 +499,7 @@ impl SelfSubscriber {
         drop(index); // Release lock before async operations
 
         // For each relay, send AddFilters action directly
-        // SyncManager's handle_add_filters auto-spawns connection for unknown relays
+        // SyncManager's handle_new_sync_filters auto-spawns connection for unknown relays
         for (relay_url, needs) in targets {
             // Skip our own relay URL (we're subscribed to ourselves via self-subscription)
             if relay_url.contains(&self.relay_domain) {
@@ -519,8 +519,10 @@ impl SelfSubscriber {
 
             let action = AddFilters {
                 relay_url: relay_url.clone(),
-                repos: needs.repos,
-                root_events: needs.root_events,
+                items: crate::sync::PendingItems {
+                    repos: needs.repos,
+                    root_events: needs.root_events,
+                },
                 filters,
             };
 

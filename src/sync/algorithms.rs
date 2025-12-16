@@ -11,7 +11,9 @@ use std::collections::{HashMap, HashSet};
 
 use nostr_sdk::prelude::*;
 
-use super::{ConnectionStatus, PendingBatch, RelayState, SyncMethod};
+use crate::sync::PendingItems;
+
+use super::{ConnectionStatus, PendingBatch, RelayState};
 
 // =============================================================================
 // Data Structures
@@ -36,10 +38,8 @@ pub struct RelaySyncNeeds {
 pub struct AddFilters {
     /// The relay URL to add filters to
     pub relay_url: String,
-    /// Repos being synced in this action
-    pub repos: HashSet<String>,
-    /// Root events being tracked in this action
-    pub root_events: HashSet<EventId>,
+    /// pending items - repos and root events
+    pub items: PendingItems,
     /// The actual filters to subscribe with
     pub filters: Vec<Filter>,
 }
@@ -161,8 +161,10 @@ pub fn compute_actions(
 
             actions.push(AddFilters {
                 relay_url: relay_url.clone(),
-                repos: new_repos,
-                root_events: new_events,
+                items: PendingItems {
+                    repos: new_repos,
+                    root_events: new_events,
+                },
                 filters,
             });
         }
@@ -175,6 +177,7 @@ pub fn compute_actions(
 mod tests {
     use super::*;
     use crate::sync::RepoSyncNeeds as ModRepoSyncNeeds;
+    use crate::sync::SyncMethod;
 
     // =========================================================================
     // derive_relay_targets tests
@@ -371,7 +374,7 @@ mod tests {
         assert_eq!(actions.len(), 1);
         let action = &actions[0];
         assert_eq!(action.relay_url, "wss://relay1.com");
-        assert!(action.repos.contains("repo1"));
+        assert!(action.items.repos.contains("repo1"));
         assert!(!action.filters.is_empty());
     }
 
@@ -528,10 +531,10 @@ mod tests {
         assert_eq!(actions.len(), 1);
         let action = &actions[0];
         // Only repo3 should be in the action (repo1 pending, repo2 confirmed)
-        assert_eq!(action.repos.len(), 1);
-        assert!(action.repos.contains("repo3"));
-        assert!(!action.repos.contains("repo1"));
-        assert!(!action.repos.contains("repo2"));
+        assert_eq!(action.items.repos.len(), 1);
+        assert!(action.items.repos.contains("repo3"));
+        assert!(!action.items.repos.contains("repo1"));
+        assert!(!action.items.repos.contains("repo2"));
     }
 
     #[test]
@@ -554,9 +557,9 @@ mod tests {
 
         assert_eq!(actions.len(), 1);
         let action = &actions[0];
-        assert!(action.repos.is_empty());
-        assert_eq!(action.root_events.len(), 1);
-        assert!(action.root_events.contains(&event_id));
+        assert!(action.items.repos.is_empty());
+        assert_eq!(action.items.root_events.len(), 1);
+        assert!(action.items.root_events.contains(&event_id));
         // Should have 3 filters for the root event (e, E, q tags)
         assert_eq!(action.filters.len(), 3);
     }
