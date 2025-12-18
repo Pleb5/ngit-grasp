@@ -1060,4 +1060,169 @@ mod tests {
         let metrics = ParsedMetrics::parse(text);
         assert_eq!(metrics.relay_connected("ws://127.0.0.1:12345"), Some(true));
     }
+
+// ============================================================================
+// Unified Sync Test Helper
+// ============================================================================
+
+/// Result from running a sync test setup
+///
+/// Holds all fixtures needed for making assertions in sync tests.
+/// Returned by [`run_sync_test`] after setting up the test environment.
+pub struct SyncTestResult {
+    pub source_relay: TestRelay,
+    pub syncing_relay: TestRelay,
+    pub maintainer_keys: Keys,
+    pub repo_coord: String,
+}
+
+/// Helper to send an event to a relay
+///
+/// Creates a temporary client, sends the event, and disconnects.
+async fn send_to_relay(relay: &TestRelay, event: &Event) -> Result<(), String> {
+    let temp_keys = Keys::generate();
+    let client = TestClient::new(relay.url(), temp_keys).await?;
+    client.send_event(event).await?;
+    client.disconnect().await;
+    Ok(())
+}
+
+/// Unified sync test helper that automatically determines sync mode.
+///
+/// This function sets up a complete sync test environment by determining whether
+/// to test historic sync (events sent before syncing relay connects) or live sync
+/// (events sent after syncing relay connects) based on which event slice has content.
+///
+/// # Sync Mode Detection
+///
+/// - **Historic sync**: If `historic_events` has content and `live_events` is empty
+/// - **Live sync**: If `live_events` has content and `historic_events` is empty
+/// - **Panics**: If both slices have content or both are empty (invalid usage)
+///
+/// # Arguments
+///
+/// * `historic_events` - Events to send BEFORE syncing relay connects (for historic sync tests)
+/// * `live_events` - Events to send AFTER syncing relay connects (for live sync tests)
+///
+/// # Returns
+///
+/// [`SyncTestResult`] containing test fixtures for assertions
+///
+/// # Example
+///
+/// ```ignore
+/// // Historic sync test
+/// let issue = build_layer2_issue_event(&keys, &repo_coord, "Historic Issue")?;
+/// let result = run_sync_test(&[issue], &[]).await;
+/// // Assert issue synced to result.syncing_relay
+///
+/// // Live sync test
+/// let comment = build_layer3_comment_event(&keys, &issue.id, "Live Comment", Kind::Custom(1111))?;
+/// let result = run_sync_test(&[], &[comment]).await;
+/// // Assert comment synced to result.syncing_relay
+/// ```
+pub async fn run_sync_test(
+    historic_events: &[Event],
+    live_events: &[Event],
+) -> SyncTestResult {
+    // Validate usage - exactly one slice must have content
+    let historic_mode = !historic_events.is_empty();
+    let live_mode = !live_events.is_empty();
+    
+    if historic_mode && live_mode {
+        panic!("Invalid usage: both historic_events and live_events provided. Use one or the other.");
+    }
+    if !historic_mode && !live_mode {
+        panic!("Invalid usage: both historic_events and live_events are empty. Provide at least one.");
+    }
+
+    // 1. Pre-allocate syncing relay port for announcement tags
+    let syncing_port = TestRelay::find_free_port();
+    let syncing_domain = format!("127.0.0.1:{}", syncing_port);
+
+    // 2. Start source relay
+    let source = TestRelay::start().await;
+
+    // 3. Create keys and announcement listing both relays
+    let keys = Keys::generate();
+    let announcement = create_repo_announcement(
+        &keys,
+        &[&source.domain(), &syncing_domain],
+        "test-repo",
+    );
+
+    // 4. Send announcement + historic events to source BEFORE syncing relay starts
+    send_to_relay(&source, &announcement)
+        .await
+        .expect("Failed to send announcement");
+    for event in historic_events {
+        send_to_relay(&source, event)
+            .await
+            .expect("Failed to send historic event");
+    }
+
+    // 5. Start syncing relay (connects to source)
+    let syncing = TestRelay::start_on_port_with_options(
+        syncing_port,
+        Some(source.url().into()),
+        false,
+    )
+    .await;
+
+    // 6. Wait for sync connection to establish
+    let _ = wait_for_sync_connection(syncing.url(), 1, Duration::from_secs(5)).await;
+
+    // 7. Send live events AFTER connection established
+    for event in live_events {
+        send_to_relay(&source, event)
+            .await
+            .expect("Failed to send live event");
+    }
+
+    // 8. Allow sync to complete
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // 9. Compute repo coordinate before moving keys
+    let coordinate = repo_coord(&keys, "test-repo");
+
+    SyncTestResult {
+        source_relay: source,
+        syncing_relay: syncing,
+        maintainer_keys: keys,
+        repo_coord: coordinate,
+    }
+}
+
+// ============================================================================
+// Tests for Unified Sync Test Helper
+// ============================================================================
+
+#[cfg(test)]
+mod sync_helper_tests {
+    use super::*;
+
+    // Note: Full integration tests of run_sync_test are in the actual sync test modules.
+    // These unit tests only verify the panic conditions for invalid usage.
+
+    #[tokio::test]
+    #[should_panic(expected = "both historic_events and live_events provided")]
+    async fn test_run_sync_test_panics_with_both_slices() {
+        let keys = Keys::generate();
+        let coord = repo_coord(&keys, "test");
+        let historic = build_layer2_issue_event(&keys, &coord, "Historic")
+            .expect("Should create event");
+        let live = build_layer3_reply_with_e_tag(&keys, &EventId::all_zeros(), "Live")
+            .expect("Should create event");
+
+        // Should panic - both slices provided
+        let _result = run_sync_test(&[historic], &[live]).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "both historic_events and live_events are empty")]
+    async fn test_run_sync_test_panics_with_empty_slices() {
+        // Should panic - both slices empty
+        let _result = run_sync_test(&[], &[]).await;
+    }
+}
 }
