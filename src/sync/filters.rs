@@ -103,10 +103,18 @@ pub fn tagged_one_of_our_root_event_filters(
         return vec![];
     }
 
+    // DEBUG TRACING: Log the root events we're creating Layer 3 filters for
+    tracing::debug!(
+        root_event_count = root_events.len(),
+        root_event_ids = ?root_events.iter().map(|id| id.to_hex()).collect::<Vec<_>>(),
+        since = ?since,
+        "Building Layer 3 filters for root events"
+    );
+
     let mut filters = Vec::new();
     let event_ids: Vec<String> = root_events.iter().map(|id| id.to_hex()).collect();
 
-    for chunk in event_ids.chunks(100) {
+    for (chunk_idx, chunk) in event_ids.chunks(100).enumerate() {
         // Lowercase 'e' tag - standard event reference
         let mut f1 = Filter::new();
         for event_id in chunk {
@@ -130,6 +138,17 @@ pub fn tagged_one_of_our_root_event_filters(
             f2 = f2.since(ts);
             f3 = f3.since(ts);
         }
+
+        // DEBUG TRACING: Log the filters being created
+        tracing::debug!(
+            chunk_idx = chunk_idx,
+            chunk_size = chunk.len(),
+            event_ids_in_chunk = ?chunk,
+            filter_e = ?f1,
+            filter_E = ?f2,
+            filter_q = ?f3,
+            "Created Layer 3 filter chunk"
+        );
 
         filters.push(f1);
         filters.push(f2);

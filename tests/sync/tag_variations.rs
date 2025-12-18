@@ -339,6 +339,12 @@ async fn test_layer2_sync_with_q_tag() {
 /// The lowercase 'e' tag is the standard NIP-01 way to reference events by ID.
 #[tokio::test]
 async fn test_layer3_sync_with_lowercase_e_tag() {
+    // Initialize tracing for debug output
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .try_init();
+    
     // 1. Start relays
     let relay_a = TestRelay::start().await;
     println!(

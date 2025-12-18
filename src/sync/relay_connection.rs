@@ -325,11 +325,25 @@ impl RelayConnection {
     /// * `Ok(SubscriptionId)` - The subscription ID on success
     /// * `Err(String)` - Error description on failure
     pub async fn subscribe_filter(&self, filter: Filter) -> Result<SubscriptionId, String> {
+        // DEBUG TRACING: Log the filter being subscribed to
+        tracing::debug!(
+            relay = %self.url,
+            filter = ?filter,
+            "subscribe_filter called with filter"
+        );
+
         let output = self
             .client
             .subscribe(filter, None)
             .await
             .map_err(|e| format!("Failed to subscribe on {}: {}", self.url, e))?;
+
+        tracing::debug!(
+            relay = %self.url,
+            subscription_id = %output.val,
+            "subscribe_filter succeeded"
+        );
+
         Ok(output.val)
     }
 
@@ -407,31 +421,36 @@ impl RelayConnection {
         true
     }
 
-    /// Perform negentropy synchronization for a filter
+    /// Perform a negentropy sync diff (dry run) to identify missing events
     ///
-    /// Uses NIP-77 negentropy protocol to efficiently reconcile events matching
-    /// the filter between local database and remote relay. This is much more
-    /// efficient than REQ+EOSE for relays with overlapping event sets.
+    /// This method performs NIP-77 negentropy reconciliation without downloading events.
+    /// It returns the list of event IDs that need to be fetched. The caller should then
+    /// manually fetch these events and pass them through the write policy for validation.
     ///
     /// # Arguments
-    /// * `filter` - The filter defining which events to sync
+    /// * `filter` - The filter to sync
     ///
     /// # Returns
-    /// * `Ok(NegentropySyncResult)` - Sync completed successfully with reconciliation info
+    /// * `Ok(Reconciliation)` - Reconciliation result with remote/local/sent event IDs
     /// * `Err(String)` - Sync failed (relay may not support NIP-77, or other error)
     ///
-    /// # Fallback Behavior
-    /// If this method fails, the caller should fall back to traditional REQ+EOSE sync.
-    /// Failure reasons include:
-    /// - Relay doesn't actually support NIP-77 (despite claiming to)
-    /// - Network errors during reconciliation
-    /// - Timeout during sync
-    pub async fn negentropy_sync_filter(
-        &self,
-        filter: Filter,
-    ) -> Result<NegentropySyncResult, String> {
-        // Use nostr-sdk's sync method which handles the NEG-OPEN/NEG-MSG exchange
-        let sync_opts = SyncOptions::default();
+    /// # Usage Pattern
+    /// ```ignore
+    /// // 1. Get the diff
+    /// let reconciliation = conn.negentropy_sync_diff(filter).await?;
+    ///
+    /// // 2. Fetch missing events by ID
+    /// if !reconciliation.remote.is_empty() {
+    ///     let ids: Vec<EventId> = reconciliation.remote.into_iter().collect();
+    ///     let filter = Filter::new().ids(ids);
+    ///     conn.subscribe_filter(filter, tx).await?;
+    /// }
+    ///
+    /// // 3. Events come through normal flow and get validated via process_event_static
+    /// ```
+    pub async fn negentropy_sync_diff(&self, filter: Filter) -> Result<Reconciliation, String> {
+        // Use dry_run to only identify differences without downloading events
+        let sync_opts = SyncOptions::default().dry_run();
 
         match self.client.sync(filter.clone(), &sync_opts).await {
             Ok(output) => {
@@ -441,9 +460,7 @@ impl RelayConnection {
                     relay = %self.url,
                     local_count = reconciliation.local.len(),
                     remote_count = reconciliation.remote.len(),
-                    sent_count = reconciliation.sent.len(),
-                    received_count = reconciliation.received.len(),
-                    "Negentropy sync completed"
+                    "Negentropy diff completed (dry run)"
                 );
 
                 // Check for any failures
@@ -451,15 +468,11 @@ impl RelayConnection {
                     tracing::warn!(
                         relay = %self.url,
                         failures = ?output.failed,
-                        "Some relays failed during negentropy sync"
+                        "Some relays failed during negentropy diff"
                     );
                 }
 
-                Ok(NegentropySyncResult {
-                    remote_only: reconciliation.remote.into_iter().collect(),
-                    local_only: reconciliation.local.into_iter().collect(),
-                    received: reconciliation.received.into_iter().collect(),
-                })
+                Ok(reconciliation)
             }
             Err(e) => {
                 // Log warning only once per relay to avoid spam
@@ -470,28 +483,12 @@ impl RelayConnection {
                     tracing::warn!(
                         relay = %self.url,
                         error = %e,
-                        "Negentropy sync failed, will fall back to REQ+EOSE"
+                        "Negentropy diff failed, will fall back to REQ+EOSE"
                     );
                 }
-                Err(format!("Negentropy sync failed: {}", e))
+                Err(format!("Negentropy diff failed: {}", e))
             }
         }
-    }
-
-    /// Perform negentropy sync and return received event IDs
-    ///
-    /// Convenience method that performs negentropy sync and returns the event IDs
-    /// that were received (i.e., events that exist on remote but not locally).
-    ///
-    /// # Arguments
-    /// * `filter` - The filter defining which events to sync
-    ///
-    /// # Returns
-    /// * `Ok(Vec<EventId>)` - Event IDs received from remote relay
-    /// * `Err(String)` - Sync failed
-    pub async fn negentropy_sync_and_fetch(&self, filter: Filter) -> Result<Vec<EventId>, String> {
-        let result = self.negentropy_sync_filter(filter).await?;
-        Ok(result.received)
     }
 
     /// Check if this connection has a database configured for negentropy
