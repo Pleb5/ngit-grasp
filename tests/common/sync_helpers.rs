@@ -1060,6 +1060,7 @@ mod tests {
         let metrics = ParsedMetrics::parse(text);
         assert_eq!(metrics.relay_connected("ws://127.0.0.1:12345"), Some(true));
     }
+}
 
 // ============================================================================
 // Unified Sync Test Helper
@@ -1125,16 +1126,14 @@ pub async fn run_sync_test(
     historic_events: &[Event],
     live_events: &[Event],
 ) -> SyncTestResult {
-    // Validate usage - exactly one slice must have content
+    // Validate usage - cannot provide events in both slices
     let historic_mode = !historic_events.is_empty();
     let live_mode = !live_events.is_empty();
     
     if historic_mode && live_mode {
         panic!("Invalid usage: both historic_events and live_events provided. Use one or the other.");
     }
-    if !historic_mode && !live_mode {
-        panic!("Invalid usage: both historic_events and live_events are empty. Provide at least one.");
-    }
+    // Note: Both slices can be empty - this tests just the announcement sync
 
     // 1. Pre-allocate syncing relay port for announcement tags
     let syncing_port = TestRelay::find_free_port();
@@ -1218,11 +1217,5 @@ mod sync_helper_tests {
         let _result = run_sync_test(&[historic], &[live]).await;
     }
 
-    #[tokio::test]
-    #[should_panic(expected = "both historic_events and live_events are empty")]
-    async fn test_run_sync_test_panics_with_empty_slices() {
-        // Should panic - both slices empty
-        let _result = run_sync_test(&[], &[]).await;
-    }
-}
+    // Note: Empty slices are now allowed - tests just the announcement sync
 }

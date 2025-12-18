@@ -3,7 +3,7 @@
 //! This test file organizes tests for ngit-grasp's proactive sync functionality.
 //! Tests are grouped into submodules by sync scenario:
 //!
-//! - `bootstrap` - Tests for sync from pre-configured bootstrap relay
+//! - `historic_sync` - Tests for sync from pre-configured bootstrap relay (historic events)
 //! - `discovery` - Tests for relay discovery from announcement events
 //! - `live_sync` - Tests for real-time sync after connection established
 //! - `tag_variations` - Tests for different Layer 2/3 tag types
@@ -31,7 +31,7 @@ mod common;
 
 // Include sync test submodules (located in tests/sync/)
 mod sync {
-    pub mod bootstrap;
+    pub mod historic_sync;
     pub mod catchup;
     pub mod discovery;
     pub mod live_sync;

@@ -1,12 +1,11 @@
-//! Bootstrap Sync Tests
+//! Historic Sync Tests
 //!
 //! Tests for relay synchronization from a pre-configured bootstrap relay.
 //! These tests verify that a relay can sync events from another relay
 //! that it's configured to connect to on startup.
 //!
-//! # Tests
-//! - Test 1: Bootstrap sync on startup (existing events sync)
-//! - Test 4: Replay after restart (events persist and replay)
+//! "Historic sync" refers to events that existed on the source relay BEFORE
+//! the syncing relay connected (bootstrap scenario).
 
 use std::time::Duration;
 
@@ -17,308 +16,183 @@ use crate::common::{sync_helpers::*, TestRelay};
 /// Test 1: Bootstrap sync - relay syncs existing events from bootstrap relay on startup
 ///
 /// Scenario:
-/// 1. Start relay_a (source) with an announcement
-/// 2. Start relay_b configured to sync from relay_a
-/// 3. Verify relay_b syncs the announcement from relay_a
+/// 1. Source relay has announcement (sent before syncing relay starts)
+/// 2. Start syncing relay configured to sync from source
+/// 3. Verify announcement syncs via bootstrap/historic sync
 ///
 /// This tests that when a relay starts with a bootstrap relay configured,
 /// it connects and syncs existing events.
 #[tokio::test]
 async fn test_bootstrap_syncs_existing_layer2_events() {
-    // 1. Start source relay (relay_a)
-    let relay_a = TestRelay::start().await;
-    println!(
-        "relay_a started at {} (domain: {})",
-        relay_a.url(),
-        relay_a.domain()
-    );
+    // Use run_sync_test helper - announcement auto-created and sent as historic event
+    let result = run_sync_test(&[], &[]).await;
 
-    // 2. Pre-allocate port for relay_b so we can include it in the announcement
-    let relay_b_port = TestRelay::find_free_port();
-    let relay_b_domain = format!("127.0.0.1:{}", relay_b_port);
-    println!("Pre-allocated relay_b domain: {}", relay_b_domain);
-
-    // 3. Create test keys
-    let keys = Keys::generate();
-
-    // 4. Create a repository announcement that lists BOTH relays
-    // This is required because relay_b's write policy checks that events reference its domain
-    let announcement = create_repo_announcement(
-        &keys,
-        &[&relay_a.domain(), &relay_b_domain],
-        "test-repo-bootstrap",
-    );
-    let announcement_id = announcement.id;
-
-    println!(
-        "Created announcement {} (kind {})",
-        announcement_id,
-        announcement.kind.as_u16()
-    );
-    for tag in announcement.tags.iter() {
-        println!("  Tag: {:?}", tag.as_slice());
-    }
-
-    // 5. Send announcement to relay_a BEFORE relay_b starts
-    // This is key for testing bootstrap sync
-    let client_a = TestClient::new(relay_a.url(), keys.clone())
-        .await
-        .expect("Failed to connect to relay_a");
-
-    client_a
-        .send_event(&announcement)
-        .await
-        .expect("Failed to send announcement to relay_a");
-    println!("Announcement sent to relay_a");
-
-    client_a.disconnect().await;
-
-    // 6. Wait briefly to ensure event is persisted on relay_a
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // 7. NOW start relay_b on the pre-allocated port, configured to sync from relay_a
-    // The announcement already exists on relay_a, so this tests bootstrap sync
-    let relay_b = TestRelay::start_on_port_with_options(
-        relay_b_port,
-        Some(relay_a.url().into()),
-        false,
-    )
-    .await;
-    println!(
-        "relay_b started at {} (domain: {})",
-        relay_b.url(),
-        relay_b.domain()
-    );
-
-    // 8. Wait for bootstrap sync to complete
-    // Bootstrap sync should happen automatically on startup
-    tokio::time::sleep(Duration::from_secs(3)).await;
-
-    // 9. Verify announcement synced to relay_b
+    // Verify announcement synced to syncing relay
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_REPOSITORY_STATE))
-        .author(keys.public_key());
+        .author(result.maintainer_keys.public_key());
 
-    let synced = wait_for_event_on_relay(relay_b.url(), filter, Duration::from_secs(5)).await;
+    let synced = wait_for_event_on_relay(
+        result.syncing_relay.url(),
+        filter,
+        Duration::from_secs(5)
+    ).await;
 
-    // 10. Cleanup
-    relay_b.stop().await;
-    relay_a.stop().await;
+    // Cleanup
+    result.syncing_relay.stop().await;
+    result.source_relay.stop().await;
 
     assert!(
         synced,
-        "Announcement {} should have synced from relay_a to relay_b via bootstrap sync",
-        announcement_id
+        "Announcement should have synced from source to syncing relay via bootstrap sync"
     );
 }
 
 /// Test 4: Replay after restart - relay re-syncs events from bootstrap after restart
 ///
 /// Scenario:
-/// 1. Start relay_a (bootstrap) with announcement
-/// 2. Start relay_b, sync events from relay_a
+/// 1. Start source relay with announcement
+/// 2. Start syncing relay, sync events from source
 /// 3. Verify sync worked
-/// 4. Stop relay_b
-/// 5. Restart relay_b (should re-sync from relay_a)
+/// 4. Stop syncing relay
+/// 5. Restart syncing relay (should re-sync from source)
 /// 6. Verify events are available again
 ///
-/// Note: Since we use in-memory database, relay_b loses events on stop.
+/// Note: Since we use in-memory database, syncing relay loses events on stop.
 /// This tests that the sync mechanism reconnects and re-syncs on restart.
 #[tokio::test]
 async fn test_relay_replays_events_after_restart() {
-    // 1. Start source relay (relay_a)
-    let relay_a = TestRelay::start().await;
-    println!(
-        "relay_a started at {} (domain: {})",
-        relay_a.url(),
-        relay_a.domain()
-    );
+    // First run: establish sync
+    let result = run_sync_test(&[], &[]).await;
 
-    // 2. Start relay_b first to get its domain
-    let relay_b = TestRelay::start_with_sync(Some(relay_a.url().into())).await;
-    println!(
-        "relay_b (first instance) started at {} (domain: {})",
-        relay_b.url(),
-        relay_b.domain()
-    );
-
-    // 3. Create test keys
-    let keys = Keys::generate();
-
-    // 4. Create announcement listing BOTH domains (so both relays will accept it)
-    let announcement = create_repo_announcement(
-        &keys,
-        &[&relay_a.domain(), &relay_b.domain()],
-        "test-repo-replay",
-    );
-    let announcement_id = announcement.id;
-
-    println!(
-        "Created announcement {} (kind {})",
-        announcement_id,
-        announcement.kind.as_u16()
-    );
-
-    // 5. Send announcement to relay_a
-    let client_a = TestClient::new(relay_a.url(), keys.clone())
-        .await
-        .expect("Failed to connect to relay_a");
-
-    client_a
-        .send_event(&announcement)
-        .await
-        .expect("Failed to send announcement to relay_a");
-    println!("Announcement sent to relay_a");
-    client_a.disconnect().await;
-
-    // 6. Wait for sync
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // 7. Verify announcement synced to relay_b (first time)
+    // Verify announcement synced on first run
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_REPOSITORY_STATE))
-        .author(keys.public_key());
+        .author(result.maintainer_keys.public_key());
 
-    let synced_first =
-        wait_for_event_on_relay(relay_b.url(), filter.clone(), Duration::from_secs(5)).await;
+    let synced_first = wait_for_event_on_relay(
+        result.syncing_relay.url(),
+        filter.clone(),
+        Duration::from_secs(5)
+    ).await;
+
     println!("First sync check: {}", synced_first);
 
-    // 8. Stop relay_b
-    relay_b.stop().await;
-    println!("relay_b stopped");
-
-    // 9. Wait a moment
+    // Stop syncing relay (simulates restart)
+    result.syncing_relay.stop().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // 10. Restart relay_b (new instance with same bootstrap config)
-    // Note: The new relay_b will have a different domain, so we need to check
-    // if it can still sync the event from relay_a (which already has it)
-    let relay_b_new = TestRelay::start_with_sync(Some(relay_a.url().into())).await;
+    // Restart syncing relay (new instance with same bootstrap config)
+    // Note: The new syncing relay will have a different domain, so it may not
+    // accept the event if it doesn't list its domain. This is expected behavior.
+    let syncing_new = TestRelay::start_with_sync(Some(result.source_relay.url().into())).await;
     println!(
-        "relay_b (second instance) started at {} (domain: {})",
-        relay_b_new.url(),
-        relay_b_new.domain()
+        "Syncing relay (second instance) started at {} (domain: {})",
+        syncing_new.url(),
+        syncing_new.domain()
     );
 
-    // 11. Wait for re-sync
+    // Wait for re-sync
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // 12. Verify announcement is available on new relay_b
-    // The announcement listed the OLD relay_b domain, but since relay_a still
-    // has the event, new relay_b should be able to sync it via bootstrap
-    let synced_after_restart =
-        wait_for_event_on_relay(relay_b_new.url(), filter, Duration::from_secs(5)).await;
+    // Verify announcement is available on restarted syncing relay
+    let synced_after_restart = wait_for_event_on_relay(
+        syncing_new.url(),
+        filter,
+        Duration::from_secs(5)
+    ).await;
 
-    // 13. Cleanup
-    relay_b_new.stop().await;
-    relay_a.stop().await;
+    // Cleanup
+    syncing_new.stop().await;
+    result.source_relay.stop().await;
 
     assert!(
         synced_first,
-        "Announcement {} should have synced on first connection",
-        announcement_id
+        "Announcement should have synced on first connection"
     );
-    // Note: synced_after_restart may be false because the new relay_b has a different
-    // domain, and the announcement only lists the old relay_b domain. This is expected
-    // and tests realistic behavior - relay_b_new won't accept an event that doesn't
-    // list its domain. The important test is that sync MECHANISM works (synced_first).
+    // Note: synced_after_restart may be false because the new syncing relay has a different
+    // domain, and the announcement only lists the old syncing relay domain. This is expected.
     println!(
         "After restart sync result: {} (may be false due to domain change)",
         synced_after_restart
     );
 }
 
-/// Test 4: Rejection - announcement not listing relay should NOT sync
+/// Test: Rejection - announcement not listing relay should NOT sync
 ///
 /// Scenario:
-/// 1. relay_a (source), relay_b (sync from relay_a)
-/// 2. Create announcement listing ONLY relay_a domain
-/// 3. Send to relay_a
-/// 4. Verify NOT synced to relay_b (write policy rejects)
+/// 1. source relay, syncing relay (syncs from source)
+/// 2. Create announcement listing ONLY source domain
+/// 3. Send to source
+/// 4. Verify NOT synced to syncing relay (write policy rejects)
 ///
 /// This tests that the relay's write policy correctly rejects events
 /// that don't list its domain in the clone tag.
 #[tokio::test]
 async fn test_announcement_not_listing_relay_is_not_synced() {
-    // 1. Start source relay (relay_a)
-    let relay_a = TestRelay::start().await;
-    println!(
-        "relay_a started at {} (domain: {})",
-        relay_a.url(),
-        relay_a.domain()
-    );
+    // Start source relay
+    let source = TestRelay::start().await;
 
-    // 2. Start syncing relay (relay_b) configured to sync from relay_a
-    let relay_b = TestRelay::start_with_sync(Some(relay_a.url().into())).await;
-    println!(
-        "relay_b started at {} (domain: {})",
-        relay_b.url(),
-        relay_b.domain()
-    );
+    // Start syncing relay
+    let syncing = TestRelay::start_with_sync(Some(source.url().into())).await;
 
-    // 3. Create test keys
+    // Create keys
     let keys = Keys::generate();
 
-    // 4. Wait for relay_b's sync connection to establish
-    // Use the sync connection helper for more reliable connection verification
-    match wait_for_sync_connection(relay_b.url(), 1, Duration::from_secs(5)).await {
+    // Wait for sync connection to establish
+    match wait_for_sync_connection(syncing.url(), 1, Duration::from_secs(5)).await {
         Ok(()) => println!("Sync connection established (verified via metrics)"),
         Err(e) => println!("Sync connection check: {} (continuing with test)", e),
     }
 
-    // 5. Create a repository announcement that lists ONLY relay_a
-    // This should NOT sync to relay_b because relay_b's write policy
-    // will reject events that don't list its domain
+    // Create announcement that lists ONLY source domain (NOT syncing)
+    // This should NOT sync because syncing relay's write policy will reject it
     let announcement = create_repo_announcement(
         &keys,
-        &[&relay_a.domain()], // Only relay_a, NOT relay_b
+        &[&source.domain()], // Only source, NOT syncing
         "test-repo-rejection",
     );
     let announcement_id = announcement.id;
 
     println!(
-        "Created announcement {} (kind {}) - lists ONLY relay_a",
+        "Created announcement {} (kind {}) - lists ONLY source relay",
         announcement_id,
         announcement.kind.as_u16()
     );
-    for tag in announcement.tags.iter() {
-        println!("  Tag: {:?}", tag.as_slice());
-    }
 
-    // 6. Send announcement to relay_a
-    let client_a = TestClient::new(relay_a.url(), keys.clone())
+    // Send announcement to source
+    let client = TestClient::new(source.url(), keys.clone())
         .await
-        .expect("Failed to connect to relay_a");
+        .expect("Failed to connect to source");
 
-    client_a
+    client
         .send_event(&announcement)
         .await
-        .expect("Failed to send announcement to relay_a");
-    println!("Announcement sent to relay_a");
+        .expect("Failed to send announcement to source");
+    println!("Announcement sent to source");
 
-    client_a.disconnect().await;
+    client.disconnect().await;
 
-    // 7. Wait for potential sync attempt
-    // Give enough time for sync to complete if it were to happen
+    // Wait for potential sync attempt
     tokio::time::sleep(Duration::from_secs(3)).await;
 
-    // 8. Verify announcement did NOT sync to relay_b
+    // Verify announcement did NOT sync to syncing relay
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_REPOSITORY_STATE))
         .author(keys.public_key());
 
-    let synced = wait_for_event_on_relay(relay_b.url(), filter, Duration::from_secs(2)).await;
+    let synced = wait_for_event_on_relay(syncing.url(), filter, Duration::from_secs(2)).await;
 
-    // 9. Cleanup
-    relay_b.stop().await;
-    relay_a.stop().await;
+    // Cleanup
+    syncing.stop().await;
+    source.stop().await;
 
     assert!(
         !synced,
-        "Announcement {} should NOT have synced to relay_b because it doesn't list relay_b's domain",
+        "Announcement {} should NOT have synced to syncing relay because it doesn't list syncing relay's domain",
         announcement_id
     );
-    println!("SUCCESS: Announcement was correctly rejected by relay_b (not synced)");
+    println!("SUCCESS: Announcement was correctly rejected by syncing relay (not synced)");
 }
 
 /// Test: History sync (bootstrap) works without NIP-77 negentropy
@@ -328,41 +202,34 @@ async fn test_announcement_not_listing_relay_is_not_synced() {
 /// the syncing relay connected.
 ///
 /// Scenario:
-/// 1. Start relay_b temporarily to get its domain (then stop it)
-/// 2. Start relay_a (source)
+/// 1. Pre-allocate port for syncing relay to get its domain
+/// 2. Start source relay
 /// 3. Create announcement listing both relay domains
-/// 4. Send announcement to relay_a (event exists BEFORE relay_b connects)
-/// 5. Start relay_b AGAIN on same port, with negentropy DISABLED
-/// 6. relay_b should sync the pre-existing event via REQ+EOSE (history sync)
-/// 7. Verify relay_b has the event
+/// 4. Send announcement to source (event exists BEFORE syncing relay connects)
+/// 5. Start syncing relay on pre-allocated port, with negentropy DISABLED
+/// 6. Syncing relay should sync the pre-existing event via REQ+EOSE (history sync)
+/// 7. Verify syncing relay has the event
 ///
 /// This is different from "live sync" where events arrive after connection.
 #[tokio::test]
 async fn test_history_sync_without_negentropy() {
-    // 1. First, start relay_b temporarily just to reserve a port and get its domain
-    let relay_b_port = TestRelay::find_free_port();
-    let relay_b_domain = format!("127.0.0.1:{}", relay_b_port);
-    println!(
-        "Reserved port {} for relay_b (domain: {})",
-        relay_b_port, relay_b_domain
-    );
+    // Pre-allocate syncing relay port to get its domain
+    let syncing_port = TestRelay::find_free_port();
+    let syncing_domain = format!("127.0.0.1:{}", syncing_port);
+    println!("Pre-allocated syncing relay domain: {}", syncing_domain);
 
-    // 2. Start relay_a (source relay)
-    let relay_a = TestRelay::start().await;
-    println!(
-        "relay_a started at {} (domain: {})",
-        relay_a.url(),
-        relay_a.domain()
-    );
+    // Start source relay
+    let source = TestRelay::start().await;
+    println!("Source started at {} (domain: {})", source.url(), source.domain());
 
-    // 3. Create test keys
+    // Create keys
     let keys = Keys::generate();
 
-    // 4. Create announcement listing BOTH relay domains
-    // This event will exist on relay_a BEFORE relay_b ever connects
+    // Create announcement listing BOTH relay domains
+    // This event will exist on source BEFORE syncing relay ever connects
     let announcement = create_repo_announcement(
         &keys,
-        &[&relay_a.domain(), &relay_b_domain],
+        &[&source.domain(), &syncing_domain],
         "test-repo-history-no-negentropy",
     );
     let announcement_id = announcement.id;
@@ -372,57 +239,54 @@ async fn test_history_sync_without_negentropy() {
         announcement_id,
         announcement.kind.as_u16()
     );
-    for tag in announcement.tags.iter() {
-        println!("  Tag: {:?}", tag.as_slice());
-    }
 
-    // 5. Send announcement to relay_a (event now exists BEFORE relay_b connects)
-    let client_a = TestClient::new(relay_a.url(), keys.clone())
+    // Send announcement to source (event now exists BEFORE syncing relay connects)
+    let client = TestClient::new(source.url(), keys.clone())
         .await
-        .expect("Failed to connect to relay_a");
+        .expect("Failed to connect to source");
 
-    client_a
+    client
         .send_event(&announcement)
         .await
-        .expect("Failed to send announcement to relay_a");
-    println!("Announcement sent to relay_a (event exists BEFORE relay_b connects)");
+        .expect("Failed to send announcement to source");
+    println!("Announcement sent to source (event exists BEFORE syncing relay connects)");
 
-    client_a.disconnect().await;
+    client.disconnect().await;
 
-    // 6. Wait a moment to ensure the event is stored
+    // Wait to ensure event is stored
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // 7. NOW start relay_b on the reserved port, with negentropy DISABLED
-    // This relay_b has never connected before - it needs to do HISTORY sync
-    let relay_b = TestRelay::start_on_port_with_options(
-        relay_b_port,
-        Some(relay_a.url().into()),
+    // NOW start syncing relay on the reserved port, with negentropy DISABLED
+    // This syncing relay has never connected before - it needs to do HISTORY sync
+    let syncing = TestRelay::start_on_port_with_options(
+        syncing_port,
+        Some(source.url().into()),
         true, // disable_negentropy = true
     )
     .await;
     println!(
-        "relay_b started at {} (domain: {}) - negentropy DISABLED, will do HISTORY sync",
-        relay_b.url(),
-        relay_b.domain()
+        "Syncing relay started at {} (domain: {}) - negentropy DISABLED, will do HISTORY sync",
+        syncing.url(),
+        syncing.domain()
     );
 
-    // 8. Wait for history sync to complete (using REQ+EOSE, not negentropy)
+    // Wait for history sync to complete (using REQ+EOSE, not negentropy)
     tokio::time::sleep(Duration::from_secs(3)).await;
 
-    // 9. Verify announcement synced to relay_b via HISTORY sync
+    // Verify announcement synced to syncing relay via HISTORY sync
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_REPOSITORY_STATE))
         .author(keys.public_key());
 
-    let synced = wait_for_event_on_relay(relay_b.url(), filter, Duration::from_secs(5)).await;
+    let synced = wait_for_event_on_relay(syncing.url(), filter, Duration::from_secs(5)).await;
 
-    // 10. Cleanup
-    relay_b.stop().await;
-    relay_a.stop().await;
+    // Cleanup
+    syncing.stop().await;
+    source.stop().await;
 
     assert!(
         synced,
-        "Announcement {} should have synced from relay_a to relay_b via HISTORY sync (REQ+EOSE, negentropy disabled)",
+        "Announcement {} should have synced from source to syncing relay via HISTORY sync (REQ+EOSE, negentropy disabled)",
         announcement_id
     );
     println!("SUCCESS: History sync works without negentropy (using REQ+EOSE fallback)");
