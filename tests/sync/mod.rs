@@ -28,7 +28,7 @@
 //! - `fetch_metrics()` - Prometheus metrics fetching
 
 // Test modules
-pub mod bootstrap;
+pub mod historic_sync;
 pub mod catchup;
 pub mod discovery;
 pub mod live_sync;
