@@ -1208,6 +1208,8 @@ impl SyncManager {
         if is_new {
             if let Some(ref metrics) = self.metrics {
                 metrics.inc_tracked_count();
+                // Initialize connection status to disconnected
+                metrics.set_relay_connected(&relay_url, false);
             }
             tracing::info!(relay = %relay_url, "Registered new relay for tracking");
         }

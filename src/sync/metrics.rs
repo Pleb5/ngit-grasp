@@ -154,6 +154,7 @@ impl SyncMetrics {
         self.connection_attempts_total
             .with_label_values(&[relay, result])
             .inc();
+        self.set_relay_connected(relay, success);
     }
 
     /// Set relay connection status.

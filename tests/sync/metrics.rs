@@ -444,9 +444,7 @@ async fn test_live_sync_event_count() {
 async fn test_relay_connected_status() {
     let mut harness = MetricsTestHarness::with_sources(1).await;
     harness.start_syncing_relay(0).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // Clone the URL to avoid borrow issues when stopping source
     let source_url = harness.source_url(0).to_string();
 
     // Check connected status
@@ -454,8 +452,6 @@ async fn test_relay_connected_status() {
 
     println!("Checking connection status for {}", source_url);
 
-    // NOTE: This will likely fail until sync metrics are wired up
-    // Test documents the expectation
     assert_eq!(
         metrics.relay_connected(&source_url),
         Some(true),
