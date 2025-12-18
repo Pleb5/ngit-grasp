@@ -33,26 +33,19 @@ async fn test_bootstrap_syncs_existing_layer2_events() {
         relay_a.domain()
     );
 
-    // 2. Start syncing relay (relay_b) configured to sync from relay_a
-    let relay_b = TestRelay::start_with_sync(Some(relay_a.url().into())).await;
-    println!(
-        "relay_b started at {} (domain: {})",
-        relay_b.url(),
-        relay_b.domain()
-    );
+    // 2. Pre-allocate port for relay_b so we can include it in the announcement
+    let relay_b_port = TestRelay::find_free_port();
+    let relay_b_domain = format!("127.0.0.1:{}", relay_b_port);
+    println!("Pre-allocated relay_b domain: {}", relay_b_domain);
 
     // 3. Create test keys
     let keys = Keys::generate();
 
-    // 4. Wait for relay_b's sync connection to establish
-    tokio::time::sleep(Duration::from_secs(1)).await;
-
-    // 5. Create a repository announcement that lists BOTH relays
-    // This is required for sync - the event must reference both relays
-    // for the write policy to accept it on both sides
+    // 4. Create a repository announcement that lists BOTH relays
+    // This is required because relay_b's write policy checks that events reference its domain
     let announcement = create_repo_announcement(
         &keys,
-        &[&relay_a.domain(), &relay_b.domain()],
+        &[&relay_a.domain(), &relay_b_domain],
         "test-repo-bootstrap",
     );
     let announcement_id = announcement.id;
@@ -66,7 +59,8 @@ async fn test_bootstrap_syncs_existing_layer2_events() {
         println!("  Tag: {:?}", tag.as_slice());
     }
 
-    // 6. Send announcement to relay_a
+    // 5. Send announcement to relay_a BEFORE relay_b starts
+    // This is key for testing bootstrap sync
     let client_a = TestClient::new(relay_a.url(), keys.clone())
         .await
         .expect("Failed to connect to relay_a");
@@ -79,17 +73,35 @@ async fn test_bootstrap_syncs_existing_layer2_events() {
 
     client_a.disconnect().await;
 
-    // 7. Wait for sync to occur
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // 6. Wait briefly to ensure event is persisted on relay_a
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // 8. Verify announcement synced to relay_b
+    // 7. NOW start relay_b on the pre-allocated port, configured to sync from relay_a
+    // The announcement already exists on relay_a, so this tests bootstrap sync
+    let relay_b = TestRelay::start_on_port_with_options(
+        relay_b_port,
+        Some(relay_a.url().into()),
+        false,
+    )
+    .await;
+    println!(
+        "relay_b started at {} (domain: {})",
+        relay_b.url(),
+        relay_b.domain()
+    );
+
+    // 8. Wait for bootstrap sync to complete
+    // Bootstrap sync should happen automatically on startup
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // 9. Verify announcement synced to relay_b
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_REPOSITORY_STATE))
         .author(keys.public_key());
 
     let synced = wait_for_event_on_relay(relay_b.url(), filter, Duration::from_secs(5)).await;
 
-    // 9. Cleanup
+    // 10. Cleanup
     relay_b.stop().await;
     relay_a.stop().await;
 

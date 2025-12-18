@@ -792,6 +792,14 @@ impl MetricsTestHarness {
         self.syncing_relay = Some(TestRelay::start_with_sync(Some(source_url)).await);
     }
 
+    /// Start syncing relay on a specific port pointing to source[idx]
+    pub async fn start_syncing_relay_on_port(&mut self, source_idx: usize, port: u16) {
+        let source_url = self.source_relays[source_idx].url().to_string();
+        self.syncing_relay = Some(
+            TestRelay::start_on_port_with_options(port, Some(source_url), false).await,
+        );
+    }
+
     /// Start syncing relay pointing to random unused port (for failure tests)
     pub async fn start_syncing_relay_to_nowhere(&mut self) {
         let port = random_unused_port();

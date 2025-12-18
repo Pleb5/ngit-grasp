@@ -2016,8 +2016,9 @@ impl SyncManager {
         };
 
         // Check if we should use negentropy
-        let use_negentropy =
-            !self.config.sync_disable_negentropy && connection.supports_negentropy().await;
+        // TODO once we have setup our new tests we will re-enable this and fix our implementation
+        let use_negentropy = false;
+        // !self.config.sync_disable_negentropy && connection.supports_negentropy().await;
 
         // Generate batch ID
         let batch_id = self.next_batch_id();

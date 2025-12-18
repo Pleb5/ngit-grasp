@@ -412,20 +412,30 @@ async fn test_connection_failure_increments_counter() {
 async fn test_live_sync_event_count() {
     let mut harness = MetricsTestHarness::with_sources(1).await;
 
-    // Start syncing BEFORE adding events
-    harness.start_syncing_relay(0).await;
+    // Pre-allocate syncing relay port to include in announcements
+    let sync_port = TestRelay::find_free_port();
+    let sync_domain = format!("127.0.0.1:{}", sync_port);
+
+    // Start syncing relay with pre-allocated port
+    harness.start_syncing_relay_on_port(0, sync_port).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Now add events - these should be "live" not "startup"
+    // Include BOTH domains so events are accepted by both relays
     let keys = Keys::generate();
     let events: Vec<_> = (0..2)
         .map(|i| {
-            create_repo_announcement(&keys, &[&harness.source_domain(0)], &format!("live-{}", i))
+            create_repo_announcement(
+                &keys,
+                &[&harness.source_domain(0), &sync_domain],
+                &format!("live-{}", i),
+            )
         })
         .collect();
     harness.submit_events(0, &events).await.unwrap();
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Wait longer for live events to be processed and metrics updated
+    tokio::time::sleep(Duration::from_secs(4)).await;
     let metrics = harness.get_metrics().await.unwrap();
 
     let live_count = metrics.events_total("live");
@@ -532,7 +542,25 @@ async fn test_multi_source_aggregate_counts() {
     // Note: Current impl only supports ONE sync source, so this tests
     // that with one source, tracked=1 and connected=1
     let mut harness = MetricsTestHarness::with_sources(1).await;
-    harness.start_syncing_relay(0).await;
+
+    // Pre-allocate syncing relay port and create an announcement that includes both domains
+    let sync_port = TestRelay::find_free_port();
+    let sync_domain = format!("127.0.0.1:{}", sync_port);
+
+    // Create announcement on source that references both relays
+    let keys = Keys::generate();
+    let announcement = create_repo_announcement(
+        &keys,
+        &[&harness.source_domain(0), &sync_domain],
+        "test-repo",
+    );
+    harness
+        .submit_events(0, &[announcement])
+        .await
+        .unwrap();
+
+    // Now start syncing relay - it should sync the existing announcement
+    harness.start_syncing_relay_on_port(0, sync_port).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let metrics = harness.get_metrics().await.unwrap();
@@ -553,7 +581,8 @@ async fn test_multi_source_aggregate_counts() {
 
     // Stop source, verify connected drops to 0
     harness.stop_source(0).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Wait longer for disconnect to be detected and metrics updated
+    tokio::time::sleep(Duration::from_secs(4)).await;
 
     let metrics = harness.get_metrics().await.unwrap();
 
