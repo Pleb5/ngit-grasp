@@ -64,6 +64,8 @@ pub struct RelayHealth {
     pub last_failure_time: Option<Instant>,
     /// Time of the last successful connection
     pub last_success_time: Option<Instant>,
+    /// Time of the last connection attempt (success or failure)
+    pub last_attempt_time: Option<Instant>,
     /// Next time a connection attempt should be made
     pub next_retry_at: Option<Instant>,
 }
@@ -76,6 +78,7 @@ impl Default for RelayHealth {
             first_failure_time: None,
             last_failure_time: None,
             last_success_time: None,
+            last_attempt_time: None,
             next_retry_at: None,
         }
     }
@@ -132,6 +135,17 @@ impl RelayHealthTracker {
         self.base_backoff_secs
     }
 
+    /// Record a connection attempt (updates last_attempt_time)
+    ///
+    /// This should be called before trying to connect, to track when
+    /// attempts are made regardless of success or failure.
+    pub fn record_attempt(&self, relay_url: &str) {
+        let now = Instant::now();
+        let mut entry = self.health.entry(relay_url.to_string()).or_default();
+        let health = entry.value_mut();
+        health.last_attempt_time = Some(now);
+    }
+
     /// Record a successful connection to a relay
     ///
     /// Resets the relay to Healthy state and clears failure counters.
@@ -148,6 +162,7 @@ impl RelayHealthTracker {
         health.first_failure_time = None;
         health.last_failure_time = None;
         health.last_success_time = Some(now);
+        health.last_attempt_time = Some(now);
         health.next_retry_at = None;
 
         if old_state != HealthState::Healthy {

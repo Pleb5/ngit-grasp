@@ -348,6 +348,7 @@ mod tests {
                 connection_status: ConnectionStatus::Disconnected,
                 last_connected: None,
                 disconnected_at: None,
+                announcements_synced: false,
             },
         );
 
@@ -435,6 +436,7 @@ mod tests {
                 connection_status: ConnectionStatus::Connected,
                 last_connected: None,
                 disconnected_at: None,
+                announcements_synced: false,
             },
         );
 
@@ -468,6 +470,7 @@ mod tests {
                 connection_status: ConnectionStatus::Connecting,
                 last_connected: None,
                 disconnected_at: None,
+                announcements_synced: false,
             },
         );
 
@@ -523,6 +526,7 @@ mod tests {
                 connection_status: ConnectionStatus::Connected,
                 last_connected: None,
                 disconnected_at: None,
+                announcements_synced: false,
             },
         );
 

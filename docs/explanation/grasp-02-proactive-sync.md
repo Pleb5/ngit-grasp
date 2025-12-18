@@ -64,6 +64,9 @@ pub struct RelayState {
     pub last_connected: Option<Timestamp>,
     /// When we disconnected - for 15-minute state retention rule
     pub disconnected_at: Option<Timestamp>,
+    /// Whether announcement filter historic sync has completed for this relay
+    /// Used to determine if we can use `since` filter on reconnect for Layer 1
+    pub announcements_synced: bool,
 }
 
 impl RelayState {
@@ -109,7 +112,7 @@ pub struct PendingBatch {
     /// The items this batch is syncing
     pub items: PendingItems,
     /// Subscription IDs that must ALL receive EOSE before confirming (for ReqEose)
-    /// Empty for Negentropy sync method
+    /// Empty for Negentropy sync method until missing event ids identified
     pub outstanding_subs: HashSet<SubscriptionId>,
     /// The sync method used for this batch
     pub sync_method: SyncMethod,
@@ -124,20 +127,62 @@ pub struct PendingItems {
 
 ---
 
-## Connection Lifecycle State Machine
+## Connection Lifecycle
+
+### Object vs Connection Lifecycle
+
+**Key Principle**: RelayConnection objects persist forever, WebSocket connections are transient.
+
+- **RelayConnection object**: Created once via `register_relay()`, stored in HashMap permanently
+- **WebSocket connection**: Transient, established via `try_connect_relay()`, dies on disconnect
+- **Event loop**: Spawned by `handle_connect_or_reconnect()`, must be respawned after every reconnection
+
+### Connection State Machine
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Disconnected: discover relay via RepoSyncIndex
-    Disconnected --> Connecting: AddFilters triggers spawn_connection
-    Connecting --> Connected: success
+    [*] --> Disconnected: discover relay → register_relay()
+    Disconnected --> Connecting: retry_disconnected_relays → try_connect_relay
+    Connecting --> Connected: success → handle_connect_or_reconnect
     Connecting --> Disconnected: failure + record in health tracker
-    Connected --> Disconnected: connection lost
+    Connected --> Disconnected: connection lost → handle_disconnect
     Connected --> [*]: intentional disconnect via check_disconnects
 
-    note right of Disconnected: disconnected_at set for 15min rule
-    note right of Connected: last_connected tracked for since filter
+    note right of Disconnected: disconnected_at set for 15min rule<br/>RelayConnection kept in HashMap
+    note right of Connected: last_connected tracked for since filter<br/>Event loop spawned here
+    note right of Connecting: connection attempt with timeout
 ```
+
+### Connection Flow Methods
+
+| Method | Purpose | When Called | Actions |
+|--------|---------|-------------|---------|
+| `register_relay()` | Initialize relay tracking | Discovery via RepoSyncIndex | Creates RelayConnection, stores in HashMap, returns immediately |
+| `try_connect_relay()` | Attempt connection | Periodic retry (500ms) | Calls connect_and_subscribe, sends notification on success |
+| `handle_connect_or_reconnect()` | Setup after connection | ConnectNotification received | Spawns event loop, updates state, decides sync strategy |
+| `handle_disconnect()` | Cleanup after disconnect | DisconnectNotification received | Updates state, clears pending, KEEPS RelayConnection |
+| `retry_disconnected_relays()` | Periodic reconnection | Every 500ms | For each ready relay: try_connect_relay() |
+
+### Event Loop Lifecycle
+
+**Critical**: Event loops die on disconnect and cannot be reused.
+
+```mermaid
+flowchart LR
+    CONN[Connection Success] --> SPAWN[handle_connect_or_reconnect<br/>spawns event loop]
+    SPAWN --> RUN[run_event_loop active]
+    RUN --> DISC[Disconnect detected]
+    DISC --> EXIT[Event loop breaks + task exits]
+    EXIT --> RETRY[retry_disconnected_relays]
+    RETRY --> RECONN[try_connect_relay]
+    RECONN --> |success| SPAWN
+```
+
+**Why respawn is required**:
+- `run_event_loop()` breaks on RelayStatus::Disconnected
+- The spawned task completely exits
+- Cannot resume terminated task - must spawn fresh
+- Happens for both initial connection AND every reconnect
 
 ---
 
@@ -212,7 +257,19 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    START[fresh_start called] --> CLEAR_PSI[Clear PendingSyncIndex]
+    DISC[Relay discovered via RepoSyncIndex] --> REG[register_relay]
+    REG --> CREATE[Create RelayConnection, store in HashMap]
+    CREATE --> RET[Returns immediately]
+    RET --> LOOP[retry_disconnected_relays - 500ms periodic]
+    LOOP --> CHECK[health_tracker.should_attempt_connection?]
+    CHECK --> |ready| TRY[try_connect_relay]
+    TRY --> CONN[connection.connect_and_subscribe]
+    CONN --> |success| NOTIFY[Send ConnectNotification]
+    NOTIFY --> HANDLE[handle_connect_or_reconnect called]
+    HANDLE --> UPD[Update state to Connected]
+    UPD --> SPAWN[Spawn event loop + processor]
+    SPAWN --> STRAT[Decide strategy: fresh_start]
+    STRAT --> CLEAR_PSI[Clear PendingSyncIndex]
     CLEAR_PSI --> CLEAR_RSI[Clear RelaySyncIndex]
     CLEAR_RSI --> L1_LIVE[L1: sync_live - announcements]
     L1_LIVE --> L1_HIST[L1: historic_sync - no since]
@@ -241,10 +298,25 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    DISC[Connection lost] --> MARK[Set disconnected_at = now]
-    MARK --> WAIT[Wait for reconnection < 15min]
-    WAIT --> RECONN[Connection restored]
-    RECONN --> CLEAR_PSI[Clear PendingSyncIndex]
+    DISC[Connection lost detected] --> LOOP_EXIT[Event loop breaks]
+    LOOP_EXIT --> TASK_EXIT[Event processor task exits]
+    TASK_EXIT --> NOTIFY_DISC[Send DisconnectNotification]
+    NOTIFY_DISC --> HANDLE_DISC[handle_disconnect called]
+    HANDLE_DISC --> UPD_STATE[Update state to Disconnected]
+    UPD_STATE --> MARK[Set disconnected_at = now]
+    MARK --> CLEAR[Clear pending batches]
+    CLEAR --> KEEP[Keep RelayConnection in HashMap]
+    KEEP --> WAIT[Wait < 15min]
+    WAIT --> RETRY[retry_disconnected_relays - 500ms]
+    RETRY --> CHECK[health_tracker checks backoff]
+    CHECK --> |ready| TRY[try_connect_relay]
+    TRY --> CONN[connection.connect_and_subscribe]
+    CONN --> |success| NOTIFY[Send ConnectNotification]
+    NOTIFY --> RECONN[handle_connect_or_reconnect]
+    RECONN --> UPD_CONN[Update state to Connected]
+    UPD_CONN --> SPAWN[Spawn NEW event loop + processor]
+    SPAWN --> STRAT[Decide strategy: quick_reconnect]
+    STRAT --> CLEAR_PSI[Clear PendingSyncIndex]
     CLEAR_PSI --> L1_LIVE[L1: sync_live - announcements]
     L1_LIVE --> L1_HIST[L1: historic_sync WITH since]
     L1_HIST --> RECON[reconstruct_filters from RelaySyncIndex]
