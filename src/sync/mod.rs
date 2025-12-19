@@ -1614,15 +1614,7 @@ impl SyncManager {
         let since = Timestamp::from(now.as_secs().saturating_sub(QUICK_RECONNECT_WINDOW_SECS));
 
         // Re-subscribe to Layer 1 with since filter
-        let layer1_filter = filters::build_announcement_filter(Some(since));
-        if let Err(e) = connection.subscribe_filter(layer1_filter).await {
-            tracing::error!(
-                relay = %relay_url,
-                error = %e,
-                "Failed to re-subscribe to Layer 1 during consolidation"
-            );
-        }
-
+        self.sync_generic_filters(relay_url, Some(since)).await;
         // Rebuild Layer 2 and Layer 3 with since filter
         self.rebuild_layer2_and_layer3(relay_url, Some(since)).await;
 
@@ -1817,7 +1809,11 @@ impl SyncManager {
 
         for filter in filters.iter() {
             // Filters should already NOT have a limit set (live subscription = limit 1 instead of 0 as we dont know whether some relays would treat this as no limit)
-            match connection.subscribe_filter(filter.clone().limit(1)).await {
+            // Live subscriptions do NOT auto-close - we want them to stay open for new events
+            match connection
+                .subscribe_filter(filter.clone().limit(1), false)
+                .await
+            {
                 Ok(sub_id) => {
                     sub_ids.push(sub_id);
                 }
@@ -2045,7 +2041,7 @@ impl SyncManager {
             let mut subscription_ids = HashSet::new();
             for (idx, filter) in ids_filters.iter().enumerate() {
                 if let Some(conn) = self.connections.get(relay_url) {
-                    match conn.subscribe_filter(filter.clone()).await {
+                    match conn.subscribe_filter(filter.clone(), true).await {
                         Ok(sub_id) => {
                             subscription_ids.insert(sub_id);
                         }
@@ -2102,7 +2098,7 @@ impl SyncManager {
                 );
 
                 if let Some(conn) = self.connections.get(relay_url) {
-                    match conn.subscribe_filter(filter.clone()).await {
+                    match conn.subscribe_filter(filter.clone(), true).await {
                         Ok(sub_id) => {
                             subscription_ids.insert(sub_id);
                         }

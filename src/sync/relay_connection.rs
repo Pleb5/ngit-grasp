@@ -307,21 +307,33 @@ impl RelayConnection {
     ///
     /// # Arguments
     /// * `filter` - The filter to subscribe to
+    /// * `auto_close` - If true, subscription automatically closes after EOSE (for historic sync). If false, stays open for new events (for live sync).
     ///
     /// # Returns
     /// * `Ok(SubscriptionId)` - The subscription ID on success
     /// * `Err(String)` - Error description on failure
-    pub async fn subscribe_filter(&self, filter: Filter) -> Result<SubscriptionId, String> {
+    pub async fn subscribe_filter(
+        &self,
+        filter: Filter,
+        auto_close: bool,
+    ) -> Result<SubscriptionId, String> {
         // DEBUG TRACING: Log the filter being subscribed to
         tracing::debug!(
             relay = %self.url,
             filter = ?filter,
+            auto_close = auto_close,
             "subscribe_filter called with filter"
         );
 
+        let opts = if auto_close {
+            Some(SubscribeAutoCloseOptions::default().exit_policy(ReqExitPolicy::ExitOnEOSE))
+        } else {
+            None
+        };
+
         let output = self
             .client
-            .subscribe(filter, None)
+            .subscribe(filter, opts)
             .await
             .map_err(|e| format!("Failed to subscribe on {}: {}", self.url, e))?;
 
@@ -332,37 +344,6 @@ impl RelayConnection {
         );
 
         Ok(output.val)
-    }
-
-    /// Subscribe to multiple filters at once
-    ///
-    /// Each filter creates its own subscription. Returns when all subscriptions
-    /// are established. This is useful for Layer 2 + 3 filters together.
-    ///
-    /// # Arguments
-    /// * `filters` - Vec of filters to subscribe to
-    ///
-    /// # Returns
-    /// * `Ok(Vec<SubscriptionId>)` - The subscription IDs on success
-    /// * `Err(String)` - Error description on failure
-    pub async fn subscribe_filters(
-        &self,
-        filters: Vec<Filter>,
-    ) -> Result<Vec<SubscriptionId>, String> {
-        if filters.is_empty() {
-            return Ok(vec![]);
-        }
-
-        let mut sub_ids = Vec::with_capacity(filters.len());
-        for filter in filters {
-            let output = self
-                .client
-                .subscribe(filter, None)
-                .await
-                .map_err(|e| format!("Failed to subscribe on {}: {}", self.url, e))?;
-            sub_ids.push(output.val);
-        }
-        Ok(sub_ids)
     }
 
     /// Get the relay URL
