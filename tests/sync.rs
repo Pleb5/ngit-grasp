@@ -31,9 +31,9 @@ mod common;
 
 // Include sync test submodules (located in tests/sync/)
 mod sync {
-    pub mod historic_sync;
     pub mod catchup;
     pub mod discovery;
+    pub mod historic_sync;
     pub mod live_sync;
     pub mod metrics;
     pub mod tag_variations;

@@ -175,7 +175,7 @@ async fn test_discovers_layer3_via_layer2() {
 /// Note: Layer 3 (comments on issues) sync is tracked separately and may
 /// be implemented in future phases. This test focuses on Layer 2 discovery.
 #[tokio::test]
-async fn test_layer2_discovery_with_chain() {
+async fn test_relay_discovery_via_announcements_with_historic_sync() {
     // 1. Start relay_a (source) with the event chain
     let relay_a = TestRelay::start().await;
     println!(
@@ -296,7 +296,7 @@ async fn test_layer2_discovery_with_chain() {
 /// 4. Syncs announcement_y from relay_c
 ///
 #[tokio::test]
-async fn test_recursive_relay_discovery_syncs_announcement() {
+async fn test_recursive_relay_discovery_via_announcements_with_historic_sync() {
     // 1. Start all three relays
 
     // relay_b - will be the bootstrap relay, has announcement_x
