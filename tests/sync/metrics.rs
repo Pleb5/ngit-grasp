@@ -16,8 +16,8 @@ use nostr_sdk::prelude::*;
 
 use crate::common::{
     sync_helpers::{
-        create_repo_announcement, fetch_metrics, MetricsTestHarness, ParsedMetrics, TestClient,
-        KIND_REPOSITORY_STATE,
+        create_repo_announcement, fetch_metrics, wait_for_sync_connection, MetricsTestHarness,
+        ParsedMetrics, TestClient, KIND_REPOSITORY_STATE,
     },
     TestRelay,
 };
@@ -418,7 +418,16 @@ async fn test_live_sync_event_count() {
 
     // Start syncing relay with pre-allocated port
     harness.start_syncing_relay_on_port(0, sync_port).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Wait for sync connection to be fully established with EOSE received
+    // This ensures we're in "live" mode before submitting test events
+    let sync_url = format!("ws://{}", sync_domain);
+    wait_for_sync_connection(&sync_url, 1, Duration::from_secs(10))
+        .await
+        .expect("Sync connection should be established");
+
+    // Additional small delay to ensure EOSE has been processed
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Now add events - these should be "live" not "startup"
     // Include BOTH domains so events are accepted by both relays
@@ -434,7 +443,7 @@ async fn test_live_sync_event_count() {
         .collect();
     harness.submit_events(0, &events).await.unwrap();
 
-    // Wait longer for live events to be processed and metrics updated
+    // Wait for live events to be processed and metrics updated
     tokio::time::sleep(Duration::from_secs(4)).await;
     let metrics = harness.get_metrics().await.unwrap();
 
