@@ -106,16 +106,30 @@ pub enum SyncMethod {
 /// Key: relay URL
 pub type PendingSyncIndex = Arc<RwLock<HashMap<String, Vec<PendingBatch>>>>;
 
+/// Pagination state for a subscription in non-Negentropy historic sync
+#[derive(Debug, Clone)]
+pub struct PaginationState {
+    /// Number of events received for this subscription
+    pub event_count: usize,
+    /// Smallest created_at timestamp seen (for pagination with `until`)
+    pub min_created_at: Option<Timestamp>,
+    /// Original filter to reconstruct for next page
+    pub original_filter: Filter,
+}
+
 pub struct PendingBatch {
     /// Unique ID for this batch - for debugging/logging
     pub batch_id: u64,
     /// The items this batch is syncing
     pub items: PendingItems,
     /// Subscription IDs that must ALL receive EOSE before confirming (for ReqEose)
-    /// Empty for Negentropy sync method until missing event ids identified
+    /// Empty for Negentropy sync method
     pub outstanding_subs: HashSet<SubscriptionId>,
     /// The sync method used for this batch
     pub sync_method: SyncMethod,
+    /// Pagination tracking for REQ+EOSE subscriptions (empty for Negentropy)
+    /// Maps subscription ID to its pagination state
+    pub pagination_state: HashMap<SubscriptionId, PaginationState>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -124,6 +138,17 @@ pub struct PendingItems {
     pub root_events: HashSet<EventId>,
 }
 ```
+
+**Pagination for REQ+EOSE Historic Sync:**
+
+When a relay doesn't support NIP-77 Negentropy, historic sync falls back to traditional REQ+EOSE. To handle large result sets efficiently:
+
+- **`PaginationState`** tracks per-subscription pagination progress
+  - `event_count`: Number of events received so far
+  - `min_created_at`: Smallest timestamp seen, used to set `until` for next page
+  - `original_filter`: Base filter to reconstruct with updated `until` parameter
+- **Automatic pagination**: When EOSE is received, if enough events were received to suggest more may exist, the system automatically issues a follow-up request with `until` set to `min_created_at`
+- **Completion**: Pagination continues until an EOSE is received with fewer events than expected, indicating the end of results
 
 ---
 
@@ -155,13 +180,13 @@ stateDiagram-v2
 
 ### Connection Flow Methods
 
-| Method | Purpose | When Called | Actions |
-|--------|---------|-------------|---------|
-| `register_relay()` | Initialize relay tracking | Discovery via RepoSyncIndex | Creates RelayConnection, stores in HashMap, returns immediately |
-| `try_connect_relay()` | Attempt connection | Periodic retry (500ms) | Calls connect_and_subscribe, sends notification on success |
-| `handle_connect_or_reconnect()` | Setup after connection | ConnectNotification received | Spawns event loop, updates state, decides sync strategy |
-| `handle_disconnect()` | Cleanup after disconnect | DisconnectNotification received | Updates state, clears pending, KEEPS RelayConnection |
-| `retry_disconnected_relays()` | Periodic reconnection | Every 500ms | For each ready relay: try_connect_relay() |
+| Method                          | Purpose                   | When Called                     | Actions                                                         |
+| ------------------------------- | ------------------------- | ------------------------------- | --------------------------------------------------------------- |
+| `register_relay()`              | Initialize relay tracking | Discovery via RepoSyncIndex     | Creates RelayConnection, stores in HashMap, returns immediately |
+| `try_connect_relay()`           | Attempt connection        | Periodic retry (500ms)          | Calls connect_and_subscribe, sends notification on success      |
+| `handle_connect_or_reconnect()` | Setup after connection    | ConnectNotification received    | Spawns event loop, updates state, decides sync strategy         |
+| `handle_disconnect()`           | Cleanup after disconnect  | DisconnectNotification received | Updates state, clears pending, KEEPS RelayConnection            |
+| `retry_disconnected_relays()`   | Periodic reconnection     | Every 500ms                     | For each ready relay: try_connect_relay()                       |
 
 ### Event Loop Lifecycle
 
@@ -179,6 +204,7 @@ flowchart LR
 ```
 
 **Why respawn is required**:
+
 - `run_event_loop()` breaks on RelayStatus::Disconnected
 - The spawned task completely exits
 - Cannot resume terminated task - must spawn fresh
@@ -477,21 +503,10 @@ async fn historic_sync(
 
 Dispatches to:
 
-- `historic_sync_negentropy()` - NIP-77 parallel sync (if supported)
-- `historic_sync_legacy()` - REQ+EOSE fallback
+- `historic_sync_negentropy()` - NIP-77 parallel sync (if supported) - no pagination needed
+- `historic_sync_legacy()` - REQ+EOSE fallback with automatic pagination for large result sets
 
 ### Building Blocks
-
-#### `reconstruct_filters()` - Rebuild from Confirmed State
-
-```rust
-/// Reconstruct filters from RelaySyncIndex (confirmed state ONLY)
-///
-/// Returns raw Vec<Filter> for L1+L2+L3.
-/// Used by: quick_reconnect, consolidate
-/// Does NOT include pending items - those flow through AddFilters path.
-async fn reconstruct_filters(&self, relay_url: &str) -> Vec<Filter>
-```
 
 #### `sync_computed_filters()` - Handle New AddFilters
 
@@ -692,6 +707,55 @@ If negentropy fails (relay doesn't support NIP-77, network error, etc.):
 1. A warning is logged (once per relay to avoid spam)
 2. The sync falls back to traditional REQ+EOSE
 3. No error is raised - fallback is automatic
+
+---
+
+## REQ+EOSE Pagination
+
+When a relay doesn't support NIP-77 Negentropy, historic sync uses traditional REQ+EOSE with automatic pagination to handle large result sets efficiently.
+
+### How Pagination Works
+
+1. **Initial Request**: Send REQ with filters (may include `since` parameter)
+2. **Track Events**: As events arrive, [`PaginationState`](src/sync/mod.rs:165) tracks:
+   - `event_count`: Number of events received
+   - `min_created_at`: Smallest timestamp seen (oldest event)
+   - `original_filter`: Base filter for reconstruction
+3. **EOSE Detection**: When EOSE arrives, check if pagination is needed
+4. **Next Page**: If enough events were received (suggesting more exist):
+   - Create new filter with `until: min_created_at`
+   - Issue another REQ for events older than the oldest seen
+   - Reuse same subscription ID
+5. **Completion**: Repeat until EOSE arrives with fewer events, indicating end of results
+
+### Pagination State Lifecycle
+
+```mermaid
+flowchart TB
+    REQ[Send REQ with filters] --> TRACK[Initialize PaginationState]
+    TRACK --> EVENT[Receive EVENT]
+    EVENT --> UPDATE[Update event_count and min_created_at]
+    UPDATE --> MORE{More events?}
+    MORE --> |yes| EVENT
+    MORE --> |no| EOSE[Receive EOSE]
+    EOSE --> CHECK{event_count suggests more pages?}
+    CHECK --> |yes| NEXT[Create filter with until=min_created_at]
+    NEXT --> REQ2[Send next page REQ]
+    REQ2 --> RESET[Reset event_count, keep min_created_at]
+    RESET --> EVENT
+    CHECK --> |no| DONE[Batch complete, confirm items]
+```
+
+### Pagination vs Negentropy
+
+| Aspect              | Negentropy Sync              | REQ+EOSE Pagination                                       |
+| ------------------- | ---------------------------- | --------------------------------------------------------- |
+| **Efficiency**      | High (set reconciliation)    | Lower (sequential pages)                                  |
+| **Bandwidth**       | Minimal (only missing items) | Higher (all matching events transferred)                  |
+| **Relay support**   | Requires NIP-77              | Universal (standard Nostr)                                |
+| **State tracking**  | None needed                  | [`PaginationState`](src/sync/mod.rs:165) per subscription |
+| **Completion time** | Typically faster             | Slower for large sets                                     |
+| **Use cases**       | Full sync, large event sets  | Fallback, small gaps with `since`                         |
 
 ---
 
