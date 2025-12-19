@@ -3,12 +3,11 @@
 //! This module provides comprehensive sync monitoring metrics including:
 //! - Connection status and attempts per relay
 //! - Health state tracking (Healthy/Degraded/Dead)
-//! - Event sync tracking by source (live/startup/reconnect/daily catchup)
-//! - Gap events filled during catchup operations
+//! - Event sync tracking (only newly saved events)
 //!
 //! All metrics follow the `ngit_sync_` prefix convention.
 
-use prometheus::{IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry};
+use prometheus::{IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry};
 
 use super::health::HealthState;
 
@@ -31,10 +30,8 @@ pub struct SyncMetrics {
     relay_failures: IntGaugeVec,
 
     // === Event metrics ===
-    /// Events synced by source (live/startup/reconnect/daily)
-    events_total: IntCounterVec,
-    /// Gap events filled during catchup, by relay
-    gap_events_total: IntCounterVec,
+    /// Total events synced (newly saved events only)
+    events_synced_total: IntCounter,
 
     // === Summary metrics ===
     /// Total relays discovered and tracked
@@ -91,23 +88,11 @@ impl SyncMetrics {
         registry.register(Box::new(relay_failures.clone()))?;
 
         // Event metrics
-        let events_total = IntCounterVec::new(
-            Opts::new(
-                "ngit_sync_events_total",
-                "Total events synced by source type",
-            ),
-            &["source"],
-        )?;
-        registry.register(Box::new(events_total.clone()))?;
-
-        let gap_events_total = IntCounterVec::new(
-            Opts::new(
-                "ngit_sync_gap_events_total",
-                "Gap events filled during catchup by relay",
-            ),
-            &["relay"],
-        )?;
-        registry.register(Box::new(gap_events_total.clone()))?;
+        let events_synced_total = IntCounter::with_opts(Opts::new(
+            "ngit_sync_events_synced_total",
+            "Total events synced (newly saved events only)",
+        ))?;
+        registry.register(Box::new(events_synced_total.clone()))?;
 
         // Summary metrics
         let relays_tracked_total = IntGauge::with_opts(Opts::new(
@@ -133,8 +118,7 @@ impl SyncMetrics {
             connection_attempts_total,
             relay_status,
             relay_failures,
-            events_total,
-            gap_events_total,
+            events_synced_total,
             relays_tracked_total,
             relays_connected_total,
             relays_dead_total,
@@ -242,51 +226,12 @@ impl SyncMetrics {
 
     // === Event Recording Methods ===
 
-    /// Record a synced event by source type.
+    /// Record a successfully synced event (newly saved to database).
     ///
-    /// # Arguments
-    ///
-    /// * `source` - The event source type. Use constants from [`event_source`]:
-    ///   - [`event_source::LIVE`] - Real-time subscription events
-    ///   - [`event_source::STARTUP`] - Events from startup catchup
-    ///   - [`event_source::RECONNECT`] - Events from reconnection catchup
-    ///   - [`event_source::DAILY`] - Events from daily catchup
-    pub fn record_event(&self, source: &str) {
-        self.events_total.with_label_values(&[source]).inc();
-    }
-
-    /// Record multiple events synced by source type.
-    ///
-    /// # Arguments
-    ///
-    /// * `source` - The event source type (see [`record_event`](Self::record_event))
-    /// * `count` - Number of events to record
-    pub fn record_events(&self, source: &str, count: u64) {
-        self.events_total.with_label_values(&[source]).inc_by(count);
-    }
-
-    /// Record a gap event filled during catchup.
-    ///
-    /// Gap events are historical events discovered during catchup that weren't
-    /// received during live sync.
-    ///
-    /// # Arguments
-    ///
-    /// * `relay` - The relay URL from which the gap event was received
-    pub fn record_gap_event(&self, relay: &str) {
-        self.gap_events_total.with_label_values(&[relay]).inc();
-    }
-
-    /// Record multiple gap events filled during catchup.
-    ///
-    /// # Arguments
-    ///
-    /// * `relay` - The relay URL from which the gap events were received
-    /// * `count` - Number of gap events to record
-    pub fn record_gap_events(&self, relay: &str, count: u64) {
-        self.gap_events_total
-            .with_label_values(&[relay])
-            .inc_by(count);
+    /// Only events that are new AND pass write policy should be counted.
+    /// Duplicates and rejected events are not counted.
+    pub fn record_synced_event(&self) {
+        self.events_synced_total.inc();
     }
 
     // === Summary Recording Methods ===
@@ -315,24 +260,6 @@ impl SyncMetrics {
     pub fn get_dead_count(&self) -> i64 {
         self.relays_dead_total.get()
     }
-}
-
-/// Event source types for metrics tracking.
-///
-/// These constants are used as labels for the `ngit_sync_events_total` metric
-/// to categorize events by how they were discovered.
-pub mod event_source {
-    /// Real-time subscription events received during live sync.
-    pub const LIVE: &str = "live";
-
-    /// Events from startup catchup when the relay first starts.
-    pub const STARTUP: &str = "startup";
-
-    /// Events from reconnection catchup after a relay reconnects.
-    pub const RECONNECT: &str = "reconnect";
-
-    /// Events from daily catchup for drift detection.
-    pub const DAILY: &str = "daily";
 }
 
 #[cfg(test)]
@@ -400,18 +327,10 @@ mod tests {
         let registry = create_test_registry();
         let metrics = SyncMetrics::register(&registry).unwrap();
 
-        // Record single events
-        metrics.record_event(event_source::LIVE);
-        metrics.record_event(event_source::STARTUP);
-        metrics.record_event(event_source::RECONNECT);
-        metrics.record_event(event_source::DAILY);
-
-        // Record multiple events
-        metrics.record_events(event_source::STARTUP, 10);
-
-        // Record gap events
-        metrics.record_gap_event("wss://relay1.example.com");
-        metrics.record_gap_events("wss://relay2.example.com", 5);
+        // Record synced events
+        metrics.record_synced_event();
+        metrics.record_synced_event();
+        metrics.record_synced_event();
     }
 
     #[test]
@@ -429,15 +348,6 @@ mod tests {
         // Test connected count
         metrics.update_connected_count(3);
         assert_eq!(metrics.get_connected_count(), 3);
-    }
-
-    #[test]
-    fn test_event_source_constants() {
-        // Verify constants have expected values
-        assert_eq!(event_source::LIVE, "live");
-        assert_eq!(event_source::STARTUP, "startup");
-        assert_eq!(event_source::RECONNECT, "reconnect");
-        assert_eq!(event_source::DAILY, "daily");
     }
 
     #[test]

@@ -698,9 +698,9 @@ impl ParsedMetrics {
 
     // Convenience accessors for sync metrics
 
-    /// Get total events synced from a specific source
-    pub fn events_total(&self, source: &str) -> Option<u64> {
-        self.counter("ngit_sync_events_total", &[("source", source)])
+    /// Get total events synced (no source categorization)
+    pub fn events_synced_total(&self) -> Option<u64> {
+        self.counter("ngit_sync_events_synced_total", &[])
     }
 
     /// Check if a specific relay is connected

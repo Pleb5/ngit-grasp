@@ -312,13 +312,11 @@ async fn test_startup_sync_event_count() {
     // 11. Check sync metrics
     let tracked = metrics.gauge("ngit_sync_relays_tracked_total", &[]);
     let connected = metrics.gauge("ngit_sync_relays_connected_total", &[]);
-    let startup_events = metrics.events_total("startup");
-    let live_events = metrics.events_total("live");
+    let events_synced = metrics.events_synced_total();
 
     println!("Relays tracked: {:?}", tracked);
     println!("Relays connected: {:?}", connected);
-    println!("Startup events synced: {:?}", startup_events);
-    println!("Live events synced: {:?}", live_events);
+    println!("Events synced total: {:?}", events_synced);
 
     // 12. Verify patches actually synced (functional check)
     let filter = Filter::new()
@@ -447,10 +445,10 @@ async fn test_live_sync_event_count() {
     tokio::time::sleep(Duration::from_secs(4)).await;
     let metrics = harness.get_metrics().await.unwrap();
 
-    let live_count = metrics.events_total("live");
-    println!("Live events synced: {:?}", live_count);
+    let synced_count = metrics.events_synced_total();
+    println!("Events synced total: {:?}", synced_count);
 
-    assert_eq!(live_count, Some(2), "Should have 2 live events");
+    assert_eq!(synced_count, Some(2), "Should have 2 synced events");
 
     harness.stop_all().await;
 }
