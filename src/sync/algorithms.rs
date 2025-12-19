@@ -401,6 +401,7 @@ mod tests {
                 },
                 outstanding_subs: HashSet::new(),
                 sync_method: SyncMethod::ReqEose,
+                pagination_state: HashMap::new(),
             }],
         );
 
@@ -512,6 +513,7 @@ mod tests {
                 },
                 outstanding_subs: HashSet::new(),
                 sync_method: SyncMethod::ReqEose,
+                pagination_state: HashMap::new(),
             }],
         );
 

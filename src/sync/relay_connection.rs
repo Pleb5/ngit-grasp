@@ -23,8 +23,8 @@ use crate::nostr::builder::SharedDatabase;
 /// Events from a relay connection
 #[derive(Debug)]
 pub enum RelayEvent {
-    /// A new event was received
-    Event(Event),
+    /// A new event was received (event, subscription_id)
+    Event(Event, SubscriptionId),
     /// End of stored events for a subscription
     EndOfStoredEvents(SubscriptionId),
     /// Connection was closed
@@ -216,7 +216,7 @@ impl RelayConnection {
                                 sub_id = %subscription_id,
                                 "Received event"
                             );
-                            if event_sender.send(RelayEvent::Event(*event)).await.is_err() {
+                            if event_sender.send(RelayEvent::Event(*event, subscription_id.clone())).await.is_err() {
                                 tracing::debug!(relay = %url, "Event sender closed, stopping event loop");
                                 break;
                             }
