@@ -1205,8 +1205,8 @@ impl SyncManager {
 
         let timeout = self.health_tracker.base_backoff_secs();
 
-        match connection.connect_and_subscribe(None, timeout).await {
-            Ok(_) => {
+        match connection.connect(timeout).await {
+            Ok(()) => {
                 // Success - record and send notification
                 self.health_tracker.record_success(relay_url);
 
@@ -1346,7 +1346,7 @@ impl SyncManager {
 
         // 3. Keep RelayConnection in HashMap for reuse on reconnect
         // The connection object persists and will be reused when retry_disconnected_relays
-        // calls try_connect_relay -> connection.connect_and_subscribe()
+        // calls try_connect_relay -> connection.connect()
         tracing::debug!(
             relay = %relay_url,
             "Keeping RelayConnection in HashMap for reconnection"

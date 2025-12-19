@@ -18,7 +18,6 @@
 use nostr_sdk::prelude::*;
 use tokio::sync::mpsc;
 
-use super::filters::build_announcement_filter;
 use crate::nostr::builder::SharedDatabase;
 
 /// Events from a relay connection
@@ -107,28 +106,24 @@ impl RelayConnection {
         }
     }
 
-    /// Connect to the relay and subscribe to Layer 1 (announcements)
+    /// Connect to the relay
     ///
     /// This method:
     /// 1. Adds the relay to the client
     /// 2. Establishes the WebSocket connection
     /// 3. Verifies connection was established
-    /// 4. Subscribes to Layer 1 filter (kinds 30617 + 30618)
+    ///
+    /// Subscriptions are handled separately via handle_connect_or_reconnect.
     ///
     /// # Arguments
-    /// * `since` - Optional timestamp for incremental sync on reconnect
     /// * `connection_timeout_secs` - Timeout for the connection attempt in seconds.
     ///   Should be no larger than base_backoff_secs to ensure the connection attempt
     ///   completes before the next retry would be scheduled.
     ///
     /// # Returns
-    /// * `Ok(SubscriptionId)` - The subscription ID on successful connection
+    /// * `Ok(())` - Connection established successfully
     /// * `Err(String)` with error description on failure
-    pub async fn connect_and_subscribe(
-        &self,
-        since: Option<Timestamp>,
-        connection_timeout_secs: u64,
-    ) -> Result<SubscriptionId, String> {
+    pub async fn connect(&self, connection_timeout_secs: u64) -> Result<(), String> {
         // Add relay to client
         self.client
             .add_relay(&self.url)
@@ -157,17 +152,8 @@ impl RelayConnection {
             .await
             .map_err(|e| format!("Failed to connect to relay {}: {}", self.url, e))?;
 
-        // Subscribe to Layer 1 (announcements)
-        let filter = build_announcement_filter(since);
-        let output = self.client.subscribe(filter, None).await.map_err(|e| {
-            format!(
-                "Failed to subscribe to announcements on {}: {}",
-                self.url, e
-            )
-        })?;
-
-        tracing::info!(url = %self.url, sub_id = %output.val, "Connected and subscribed to Layer 1 (announcements)");
-        Ok(output.val)
+        tracing::info!(url = %self.url, "Connected to relay");
+        Ok(())
     }
 
     /// Run the event loop, sending events through the provided channel
