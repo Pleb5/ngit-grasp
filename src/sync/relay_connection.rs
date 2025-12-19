@@ -256,7 +256,8 @@ impl RelayConnection {
                                 tracing::info!(relay = %url, message = %msg, "Relay closed subscription");
                                 let _ =
                                     event_sender.send(RelayEvent::Closed(msg.to_string())).await;
-                                break;
+                                // Don't break - CLOSED is subscription-specific, not connection-specific
+                                // The event loop should continue running for other active subscriptions
                             }
                             _ => {}
                         },
