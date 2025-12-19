@@ -800,7 +800,14 @@ impl SyncManager {
     async fn handle_connect_or_reconnect(&mut self, relay_url: &str) {
         use tokio::sync::mpsc;
 
-        // 1. Update state to Connected
+        // 1. Capture old last_connected BEFORE updating state
+        // This is critical for correct first-connection detection
+        let old_last_connected = {
+            let index = self.relay_sync_index.read().await;
+            index.get(relay_url).and_then(|s| s.last_connected)
+        };
+
+        // 2. Update state to Connected
         {
             let mut index = self.relay_sync_index.write().await;
             let state = index.entry(relay_url.to_string()).or_default();
@@ -927,13 +934,9 @@ impl SyncManager {
             "Event loop and processor spawned for connected relay"
         );
 
-        // 3. Decide reconnection strategy based on last_connected time
-        let last_connected = {
-            let index = self.relay_sync_index.read().await;
-            index.get(relay_url).and_then(|s| s.last_connected)
-        };
-
-        if let Some(last) = last_connected {
+        // 3. Decide reconnection strategy based on OLD last_connected time
+        // Use the value captured BEFORE the update to correctly detect first connections
+        if let Some(last) = old_last_connected {
             let elapsed = Timestamp::now().as_secs().saturating_sub(last.as_secs());
             if elapsed < QUICK_RECONNECT_WINDOW_SECS {
                 // Short disconnect - quick reconnect
@@ -1825,58 +1828,6 @@ impl SyncManager {
         }
 
         sub_ids
-    }
-
-    /// Reconstruct filters from RelaySyncIndex (confirmed state ONLY)
-    ///
-    /// Returns raw Vec<Filter> for L1+L2+L3.
-    /// Used by: quick_reconnect, consolidate
-    /// Does NOT include pending items - those flow through AddFilters path.
-    ///
-    /// # Arguments
-    /// * `relay_url` - The relay URL to reconstruct filters for
-    ///
-    /// # Returns
-    /// Vec of filters for L1 (announcements) + L2 (repo tags) + L3 (event tags)
-    #[allow(dead_code)] // Will be used in Phase 3+
-    async fn reconstruct_filters(&self, relay_url: &str) -> Vec<Filter> {
-        // Get confirmed state from relay_sync_index
-        let (repos, root_events) = {
-            let index = self.relay_sync_index.read().await;
-            match index.get(relay_url) {
-                Some(state) => (state.repos.clone(), state.root_events.clone()),
-                None => {
-                    tracing::warn!(
-                        relay = %relay_url,
-                        "No RelayState found for reconstruct_filters"
-                    );
-                    return vec![];
-                }
-            }
-        };
-
-        let mut all_filters = Vec::new();
-
-        // Layer 1: Announcements (always included)
-        // Note: No `since` filter - this returns raw filters for live subscriptions
-        all_filters.push(filters::build_announcement_filter(None));
-
-        // Layer 2 + Layer 3: Repo and root event tag filters
-        if !repos.is_empty() || !root_events.is_empty() {
-            let l2_l3_filters =
-                filters::build_layer2_and_layer3_filters(&repos, &root_events, None);
-            all_filters.extend(l2_l3_filters);
-        }
-
-        tracing::debug!(
-            relay = %relay_url,
-            total_filters = all_filters.len(),
-            repos_count = repos.len(),
-            root_events_count = root_events.len(),
-            "Reconstructed filters from confirmed state"
-        );
-
-        all_filters
     }
 
     /// Sync historical events and track in PendingSyncIndex
