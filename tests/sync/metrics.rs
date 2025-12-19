@@ -563,10 +563,7 @@ async fn test_multi_source_aggregate_counts() {
         &[&harness.source_domain(0), &sync_domain],
         "test-repo",
     );
-    harness
-        .submit_events(0, &[announcement])
-        .await
-        .unwrap();
+    harness.submit_events(0, &[announcement]).await.unwrap();
 
     // Now start syncing relay - it should sync the existing announcement
     harness.start_syncing_relay_on_port(0, sync_port).await;
@@ -590,8 +587,6 @@ async fn test_multi_source_aggregate_counts() {
 
     // Stop source, verify connected drops to 0
     harness.stop_source(0).await;
-    // Wait longer for disconnect to be detected and metrics updated
-    tokio::time::sleep(Duration::from_secs(4)).await;
 
     let metrics = harness.get_metrics().await.unwrap();
 
@@ -612,7 +607,7 @@ async fn test_multi_source_aggregate_counts() {
     assert_eq!(
         metrics.relays_connected_total(),
         Some(0),
-        "Should have 0 connected"
+        "Should have 0 connected (waited up to 10s for disconnect detection)"
     );
 
     harness.stop_all().await;
