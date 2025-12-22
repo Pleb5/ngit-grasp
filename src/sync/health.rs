@@ -1,15 +1,17 @@
 //! Relay Health Tracking for GRASP-02 Proactive Sync
 //!
 //! This module implements health tracking for relay connections, including:
-//! - Health state machine (Healthy -> Degraded -> Dead)
+//! - Health state machine (Healthy -> Degraded -> Dead -> RateLimited)
 //! - Exponential backoff with configurable max delay
 //! - Dead relay detection after 24h of continuous failures
+//! - Rate limit detection and fixed cooldown period
 //!
 //! ## Health States
 //!
 //! - **Healthy**: Working connection, no recent failures
 //! - **Degraded**: Connection failed, retrying with backoff
 //! - **Dead**: 24h+ of continuous failures, minimal retry (once per day)
+//! - **RateLimited**: NOTICE-triggered 65-second cooldown to avoid rate limits
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -30,37 +32,52 @@ const DEFAULT_MAX_BACKOFF_SECS: u64 = 3600;
 /// Default base backoff duration in seconds
 const DEFAULT_BASE_BACKOFF_SECS: u64 = 5;
 
+/// Rate limit cooldown duration in seconds (65 seconds = typical 60s limit + buffer)
+const RATE_LIMIT_COOLDOWN_SECS: u64 = 65;
+
+/// Stability period after recovery before marking relay as fully healthy (5 minutes)
+/// A relay must maintain connection for this duration after failures before being marked Healthy
+const STABILITY_PERIOD_SECS: u64 = 300;
+
 /// Health state of a relay connection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HealthState {
-    /// Working connection, no recent failures
+    /// Working connection, no recent failures, proven stable
     Healthy,
-    /// Connection failed, retrying with exponential backoff
+    /// Not currently connected, but no recent failures or issues
+    Disconnected,
+    /// Connection problems: failing to connect OR recently recovered but not yet stable
     Degraded,
     /// 24h+ of continuous failures, minimal retry
     Dead,
+    /// Rate limited by relay, temporary cooldown active
+    RateLimited,
 }
 
 impl std::fmt::Display for HealthState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             HealthState::Healthy => write!(f, "healthy"),
+            HealthState::Disconnected => write!(f, "disconnected"),
             HealthState::Degraded => write!(f, "degraded"),
             HealthState::Dead => write!(f, "dead"),
+            HealthState::RateLimited => write!(f, "rate_limited"),
         }
     }
 }
 
 /// Health information for a single relay
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RelayHealth {
-    /// Current health state
-    pub state: HealthState,
+    /// Are we currently connected to this relay
+    pub connected: bool,
+    /// Has this relay sent us a rate-limiting NOTICE recently
+    pub rate_limited: bool,
     /// Number of consecutive connection failures
     pub consecutive_failures: u32,
     /// Time of the first failure in the current failure streak
     pub first_failure_time: Option<Instant>,
-    /// Time of the last failure
+    /// Time of the last failure (kept after recovery for stability period tracking)
     pub last_failure_time: Option<Instant>,
     /// Time of the last successful connection
     pub last_success_time: Option<Instant>,
@@ -70,24 +87,121 @@ pub struct RelayHealth {
     pub next_retry_at: Option<Instant>,
 }
 
-impl Default for RelayHealth {
-    fn default() -> Self {
-        Self {
-            state: HealthState::Healthy,
-            consecutive_failures: 0,
-            first_failure_time: None,
-            last_failure_time: None,
-            last_success_time: None,
-            last_attempt_time: None,
-            next_retry_at: None,
-        }
-    }
-}
-
 impl RelayHealth {
-    /// Create a new RelayHealth with healthy state
+    /// Create a new RelayHealth with default values
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Get the current health state based on the relay's properties
+    ///
+    /// State is computed dynamically from:
+    /// - Rate limit status
+    /// - Connection status
+    /// - Failure history and timing
+    /// - Stability period after recovery
+    ///
+    /// ## State Logic
+    ///
+    /// 1. **RateLimited**: If rate_limited flag is set and cooldown hasn't expired
+    /// 2. **Dead**: 24+ hours of continuous failures
+    /// 3. **Degraded**: Active connection failures OR in stability period after recovery
+    /// 4. **Disconnected**: Not connected, but no recent failures or issues
+    /// 5. **Healthy**: Connected and stable (past stability period with no failures)
+    pub fn state(&self) -> HealthState {
+        let now = Instant::now();
+
+        // Check rate limiting first (highest priority)
+        if self.rate_limited {
+            if let Some(next_retry) = self.next_retry_at {
+                if now < next_retry {
+                    return HealthState::RateLimited;
+                }
+            }
+        }
+
+        // Check for dead state (24+ hours of failures)
+        if let Some(first_failure) = self.first_failure_time {
+            let failure_duration = now.duration_since(first_failure);
+            let dead_threshold = Duration::from_secs(DEAD_THRESHOLD_HOURS * 3600);
+            if failure_duration >= dead_threshold {
+                return HealthState::Dead;
+            }
+        }
+
+        // Check if we have active failures (currently failing to connect)
+        if self.consecutive_failures > 0 {
+            return HealthState::Degraded;
+        }
+
+        // Check if we're in stability period after recovery
+        // (recovered from failures but not yet proven stable)
+        if let (Some(last_success), Some(last_failure)) = (self.last_success_time, self.last_failure_time) {
+            // Only consider stability period if recovery happened after the last failure
+            if last_success > last_failure {
+                let time_since_recovery = now.duration_since(last_success);
+                let stability_period = Duration::from_secs(STABILITY_PERIOD_SECS);
+                
+                if time_since_recovery < stability_period {
+                    // Still in stability period - remain degraded to prove stability
+                    return HealthState::Degraded;
+                }
+            }
+        }
+
+        // Check connection status for final state
+        if self.connected {
+            // Connected and stable (no failures, past stability period)
+            HealthState::Healthy
+        } else {
+            // Not connected, but no recent failures - just disconnected
+            HealthState::Disconnected
+        }
+    }
+
+    /// Check if the relay is currently connected
+    pub fn is_connected(&self) -> bool {
+        self.connected
+    }
+
+    /// Check if the relay is currently rate limited (cooldown active)
+    pub fn is_rate_limited_now(&self) -> bool {
+        if !self.rate_limited {
+            return false;
+        }
+        if let Some(next_retry) = self.next_retry_at {
+            Instant::now() < next_retry
+        } else {
+            false
+        }
+    }
+
+    /// Get the consecutive failure count
+    pub fn failure_count(&self) -> u32 {
+        self.consecutive_failures
+    }
+
+    /// Get time since last successful connection
+    pub fn time_since_last_success(&self) -> Option<Duration> {
+        self.last_success_time
+            .map(|t| Instant::now().duration_since(t))
+    }
+
+    /// Get time since first failure in current streak
+    pub fn time_since_first_failure(&self) -> Option<Duration> {
+        self.first_failure_time
+            .map(|t| Instant::now().duration_since(t))
+    }
+
+    /// Get remaining backoff/cooldown duration
+    pub fn remaining_backoff(&self) -> Option<Duration> {
+        let next_retry = self.next_retry_at?;
+        let now = Instant::now();
+        if now >= next_retry {
+            None
+        } else {
+            Some(next_retry - now)
+        }
     }
 }
 
@@ -148,16 +262,17 @@ impl RelayHealthTracker {
 
     /// Record a successful connection to a relay
     ///
-    /// Resets the relay to Healthy state and clears failure counters.
+    /// Clears failure counters and rate limiting. Sets connected = true.
     pub fn record_success(&self, relay_url: &str) {
         let now = Instant::now();
         let mut entry = self.health.entry(relay_url.to_string()).or_default();
         let health = entry.value_mut();
 
-        let old_state = health.state;
+        let old_state = health.state();
 
         // Reset to healthy state
-        health.state = HealthState::Healthy;
+        health.connected = true;
+        health.rate_limited = false;
         health.consecutive_failures = 0;
         health.first_failure_time = None;
         health.last_failure_time = None;
@@ -176,13 +291,17 @@ impl RelayHealthTracker {
 
     /// Record a connection failure for a relay
     ///
-    /// Increments failure counter, updates state, and calculates next retry time.
+    /// Increments failure counter and calculates next retry time with exponential backoff.
+    /// Sets connected = false.
     pub fn record_failure(&self, relay_url: &str) {
         let now = Instant::now();
         let mut entry = self.health.entry(relay_url.to_string()).or_default();
         let health = entry.value_mut();
 
-        let old_state = health.state;
+        let old_state = health.state();
+
+        // Mark as disconnected
+        health.connected = false;
 
         // Set first_failure_time if this is a new failure streak
         if health.first_failure_time.is_none() {
@@ -192,18 +311,18 @@ impl RelayHealthTracker {
         health.consecutive_failures = health.consecutive_failures.saturating_add(1);
         health.last_failure_time = Some(now);
 
-        // Check if we should transition to Dead state
+        // Calculate backoff based on whether we're dead or degraded
         if let Some(first_failure) = health.first_failure_time {
             let failure_duration = now.duration_since(first_failure);
             let dead_threshold = Duration::from_secs(DEAD_THRESHOLD_HOURS * 3600);
 
             if failure_duration >= dead_threshold {
-                health.state = HealthState::Dead;
                 // Dead relays retry once per day
                 health.next_retry_at =
                     Some(now + Duration::from_secs(DEAD_RETRY_INTERVAL_HOURS * 3600));
 
-                if old_state != HealthState::Dead {
+                let new_state = health.state();
+                if old_state != HealthState::Dead && new_state == HealthState::Dead {
                     tracing::warn!(
                         "Relay {} marked dead after 24h failures ({} consecutive failures)",
                         relay_url,
@@ -212,15 +331,21 @@ impl RelayHealthTracker {
                 }
             } else {
                 // Degraded state with exponential backoff
-                health.state = HealthState::Degraded;
                 let backoff = Self::get_backoff_duration(
                     health.consecutive_failures,
                     self.base_backoff_secs,
                     self.max_backoff_secs,
                 );
-                health.next_retry_at = Some(now + backoff);
+                // Respect existing next_retry_at if it's later (e.g., from rate limiting)
+                let new_retry_at = now + backoff;
+                health.next_retry_at = Some(
+                    health.next_retry_at
+                        .unwrap_or(new_retry_at)
+                        .max(new_retry_at)
+                );
 
-                if old_state != HealthState::Degraded {
+                let new_state = health.state();
+                if old_state != HealthState::Degraded && new_state == HealthState::Degraded {
                     tracing::warn!("Relay {} degraded, backoff {:?}", relay_url, backoff);
                 } else {
                     tracing::debug!(
@@ -232,6 +357,91 @@ impl RelayHealthTracker {
                 }
             }
         }
+    }
+
+    /// Record a rate limit NOTICE from a relay
+    ///
+    /// Sets the relay to RateLimited state with a fixed 65-second cooldown.
+    /// This is distinct from connection failures (Degraded state) - it's triggered
+    /// by NOTICE messages from the relay indicating we're sending too many requests.
+    pub fn record_rate_limit(&self, relay_url: &str) {
+        let now = Instant::now();
+        let mut entry = self.health.entry(relay_url.to_string()).or_default();
+        let health = entry.value_mut();
+
+        health.rate_limited = true;
+        health.next_retry_at = Some(now + Duration::from_secs(RATE_LIMIT_COOLDOWN_SECS));
+
+        tracing::warn!(
+            relay = %relay_url,
+            cooldown_secs = RATE_LIMIT_COOLDOWN_SECS,
+            "Relay rate limited, pausing new subscriptions"
+        );
+    }
+
+    /// Clear rate limiting state for a specific relay
+    ///
+    /// This only clears the rate_limited flag, without affecting connection status
+    /// or failure counters. Use this when rate limit cooldown has expired and we
+    /// want to allow new subscriptions.
+    ///
+    /// This is different from `record_success()` which resets all health state.
+    pub fn clear_rate_limit(&self, relay_url: &str) {
+        if let Some(mut entry) = self.health.get_mut(relay_url) {
+            let health = entry.value_mut();
+            health.rate_limited = false;
+        }
+    }
+
+
+    /// Check if relay is currently rate limited
+    ///
+    /// Returns true if the relay is in RateLimited state and the cooldown period
+    /// has not yet expired. Once the cooldown expires, this returns false and the
+    /// relay can accept new subscriptions again.
+    pub fn is_rate_limited(&self, relay_url: &str) -> bool {
+        if let Some(entry) = self.health.get(relay_url) {
+            let health = entry.value();
+            health.rate_limited
+        } else {
+            false
+        }
+    }
+
+    /// Exit rate limiting state for relays whose cooldown has expired
+    ///
+    /// Finds all relays that are currently rate limited but whose cooldown period
+    /// has expired, clears their rate_limited flag, and returns their URLs.
+    ///
+    /// This method mutates state by clearing the rate_limited flag for recovered relays.
+    ///
+    /// Returns a vector of relay URLs that were recovered from rate limiting.
+    pub fn exit_expired_rate_limits(&self) -> Vec<String> {
+        let now = Instant::now();
+        let mut recovered_relays = Vec::new();
+
+        for mut entry in self.health.iter_mut() {
+            let (url, health) = entry.pair_mut();
+
+            // Check if rate limited and cooldown has expired
+            if health.rate_limited {
+                if let Some(next_retry) = health.next_retry_at {
+                    if now > next_retry {
+                        // Cooldown expired - clear rate limiting
+                        health.rate_limited = false;
+                        health.next_retry_at = None;
+                        recovered_relays.push(url.clone());
+
+                        tracing::info!(
+                            relay = %url,
+                            "Rate limit cooldown expired, relay ready for new subscriptions"
+                        );
+                    }
+                }
+            }
+        }
+
+        recovered_relays
     }
 
     /// Check if a connection attempt should be made to a relay
@@ -248,10 +458,16 @@ impl RelayHealthTracker {
             Some(entry) => {
                 let health = entry.value();
 
-                match health.state {
-                    HealthState::Healthy => true,
-                    HealthState::Degraded | HealthState::Dead => {
-                        // Check if backoff period has elapsed
+                // Don't reconnect if currently rate-limited
+                if health.is_rate_limited_now() {
+                    return false;
+                }
+
+                // Check state-based logic
+                match health.state() {
+                    HealthState::Healthy | HealthState::Disconnected => true,
+                    HealthState::Degraded | HealthState::Dead | HealthState::RateLimited => {
+                        // Check if backoff/cooldown period has elapsed
                         match health.next_retry_at {
                             None => true,
                             Some(next_retry) => Instant::now() >= next_retry,
@@ -266,7 +482,7 @@ impl RelayHealthTracker {
     pub fn get_state(&self, relay_url: &str) -> HealthState {
         self.health
             .get(relay_url)
-            .map(|entry| entry.value().state)
+            .map(|entry| entry.value().state())
             .unwrap_or(HealthState::Healthy)
     }
 
@@ -350,10 +566,12 @@ mod tests {
     }
 
     #[test]
-    fn test_default_health_is_healthy() {
+    fn test_default_health_is_disconnected() {
         let health = RelayHealth::default();
-        assert_eq!(health.state, HealthState::Healthy);
+        // Default state: not connected, no failures = Disconnected
+        assert_eq!(health.state(), HealthState::Disconnected);
         assert_eq!(health.consecutive_failures, 0);
+        assert!(!health.connected);
         assert!(health.first_failure_time.is_none());
     }
 
@@ -504,7 +722,7 @@ mod tests {
 
         assert!(health.is_some());
         let health = health.unwrap();
-        assert_eq!(health.state, HealthState::Healthy);
+        assert_eq!(health.state(), HealthState::Healthy);
         assert!(health.last_success_time.is_some());
     }
 

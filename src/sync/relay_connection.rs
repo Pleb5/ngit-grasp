@@ -27,6 +27,8 @@ pub enum RelayEvent {
     Event(Event, SubscriptionId),
     /// End of stored events for a subscription
     EndOfStoredEvents(SubscriptionId),
+    /// NOTICE message from relay
+    Notice(String),
     /// Connection was closed
     Closed(String),
     /// Shutdown notification
@@ -237,6 +239,11 @@ impl RelayConnection {
                                     );
                                     break;
                                 }
+                            }
+                            RelayMessage::Notice(msg) => {
+                                tracing::debug!(relay = %url, message = %msg, "Received NOTICE");
+                                let _ = event_sender.send(RelayEvent::Notice(msg.to_string())).await;
+                                // Don't break - continue processing events
                             }
                             RelayMessage::Closed { message: msg, .. } => {
                                 tracing::info!(relay = %url, message = %msg, "Relay closed subscription");

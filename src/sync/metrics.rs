@@ -72,7 +72,7 @@ impl SyncMetrics {
         let relay_status = IntGaugeVec::new(
             Opts::new(
                 "ngit_sync_relay_status",
-                "Relay health status (1=healthy, 2=degraded, 3=dead)",
+                "Relay health status (1=healthy, 2=disconnected, 3=degraded, 4=dead, 5=rate_limited)",
             ),
             &["relay"],
         )?;
@@ -178,9 +178,11 @@ impl SyncMetrics {
     /// Record relay health state change.
     ///
     /// Maps health states to numeric values for Prometheus:
-    /// - Healthy = 1
-    /// - Degraded = 2
-    /// - Dead = 3
+    /// - Healthy = 1 (connected and stable)
+    /// - Disconnected = 2 (not connected, but no issues)
+    /// - Degraded = 3 (connection problems or unstable after recovery)
+    /// - Dead = 4 (24h+ of failures)
+    /// - RateLimited = 5 (rate limit cooldown active)
     ///
     /// # Arguments
     ///
@@ -189,8 +191,10 @@ impl SyncMetrics {
     pub fn record_health_state(&self, relay: &str, state: HealthState) {
         let state_value = match state {
             HealthState::Healthy => 1,
-            HealthState::Degraded => 2,
-            HealthState::Dead => 3,
+            HealthState::Disconnected => 2,
+            HealthState::Degraded => 3,
+            HealthState::Dead => 4,
+            HealthState::RateLimited => 5,
         };
         self.relay_status
             .with_label_values(&[relay])
