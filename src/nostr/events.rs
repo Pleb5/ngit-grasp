@@ -21,6 +21,9 @@ pub const KIND_PR: u16 = 1618;
 /// NIP-34 Pull Request Update (kind 1619) - has `c` tag for commit
 pub const KIND_PR_UPDATE: u16 = 1619;
 
+/// User Grasp List (kind 10317) - user's personal list of GRASP repositories
+pub const KIND_USER_GRASP_LIST: u16 = 10317;
+
 /// Repository announcement details extracted from NIP-34 event
 #[derive(Debug, Clone)]
 pub struct RepositoryAnnouncement {

@@ -134,7 +134,11 @@ This a useful feature of other git servers.
 
 ### Store all user grasp lists (for better grasp discovery)
 
-do this. should we also accept (and weekly sync) 10002 and 0 for all authors of accepted events?
+✅ **Implemented**: Kind 10317 (User Grasp List) events are now accepted and synced from all relays for better GRASP repository discovery.
+
+**Future enhancement**: We aspire to also accept and weekly sync kind 10002 (user relay lists) and kind 0 (user metadata) events, but only for authors of accepted events. This would require an additional state-driven layer 2 filter (see Roadmap in GRASP-02 Proactive Sync documentation).
+
+**Future enhancement**: should we periodically scan relays in UserGraspLists to check for announcements that list our relay?
 
 ## Technology Stack
 

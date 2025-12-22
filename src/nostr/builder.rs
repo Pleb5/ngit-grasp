@@ -13,7 +13,7 @@ use nostr_relay_builder::prelude::*;
 use crate::config::{Config, DatabaseBackend};
 use crate::nostr::events::{
     RepositoryAnnouncement, RepositoryState, KIND_PR, KIND_PR_UPDATE, KIND_REPOSITORY_ANNOUNCEMENT,
-    KIND_REPOSITORY_STATE,
+    KIND_REPOSITORY_STATE, KIND_USER_GRASP_LIST,
 };
 use crate::nostr::policy::{
     AnnouncementPolicy, AnnouncementResult, PolicyContext, PrEventPolicy, ReferenceResult,
@@ -257,6 +257,16 @@ impl WritePolicy for Nip34WritePolicy {
                 KIND_REPOSITORY_ANNOUNCEMENT => self.handle_announcement(event).await,
                 KIND_REPOSITORY_STATE => self.handle_state(event).await,
                 KIND_PR | KIND_PR_UPDATE => self.handle_pr_event(event).await,
+                KIND_USER_GRASP_LIST => {
+                    // Accept all kind 10317 (User Grasp List) events
+                    // for better GRASP repository discovery
+                    tracing::debug!(
+                        event_id = %event.id.to_bech32().unwrap_or_else(|_| event.id.to_hex()),
+                        author = %event.pubkey.to_hex(),
+                        "Accepted kind 10317 user grasp list"
+                    );
+                    PolicyResult::Accept
+                }
                 _ => self.handle_related_event(event, "Event").await,
             }
         })

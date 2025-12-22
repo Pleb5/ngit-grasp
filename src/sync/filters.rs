@@ -13,14 +13,16 @@ use std::collections::HashSet;
 
 use nostr_sdk::prelude::*;
 
-/// Layer 1: Announcements filter (kinds 30617 + 30618)
+/// Layer 1: Announcements filter (kinds 30617 + 30618 + 10317)
 ///
 /// Subscribed ONCE on connect - NOT included in consolidation rebuilds.
 /// Note: 30618 is ONLY synced from remote relays, not self-subscribed.
+/// Note: 10317 (User Grasp List) is synced for better GRASP discovery.
 pub fn build_announcement_filter(since: Option<Timestamp>) -> Filter {
     let filter = Filter::new().kinds([
         Kind::Custom(30617), // Repository announcements
         Kind::Custom(30618), // Maintainer lists
+        Kind::Custom(10317), // User Grasp List
     ]);
 
     match since {

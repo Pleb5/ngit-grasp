@@ -285,6 +285,7 @@ impl SelfSubscriber {
 
         // Subscribe to announcement and root event kinds
         // Per v4 spec: 30617, 1617, 1618, 1621 (NOT 30618)
+        // Plus kind 10317 (User Grasp List) for GRASP discovery
         // Check if we have a last_connected time for reconnect filtering
         let filter = if let Some(last) = self.last_connected {
             // Quick reconnect - use since filter (15 min buffer)
@@ -299,6 +300,7 @@ impl SelfSubscriber {
                     Kind::Custom(1617),  // Patches
                     Kind::Custom(1621),  // Issues
                     Kind::Custom(1618),  // Pull Requests
+                    Kind::Custom(10317), // User Grasp List
                 ])
                 .since(since)
         } else {
@@ -308,6 +310,7 @@ impl SelfSubscriber {
                 Kind::Custom(1617),  // Patches
                 Kind::Custom(1621),  // Issues
                 Kind::Custom(1618),  // Pull Requests
+                Kind::Custom(10317), // User Grasp List
             ])
         };
 
