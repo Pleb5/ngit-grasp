@@ -1342,7 +1342,6 @@ impl SyncManager {
             );
             return;
         }
-        // TODO do we add since instead of limit to live sync or do a historic sync of filters?
         self.sync_live(relay_url, &filters).await;
     }
 
@@ -2120,7 +2119,6 @@ impl SyncManager {
         };
 
         // Check if we should use negentropy
-        // TODO once we have setup our new tests we will re-enable this and fix our implementation
         let use_negentropy =
             !self.config.sync_disable_negentropy && connection.supports_negentropy().await;
 
