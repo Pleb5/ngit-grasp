@@ -218,7 +218,11 @@ impl RelayConnection {
                                 sub_id = %subscription_id,
                                 "Received event"
                             );
-                            if event_sender.send(RelayEvent::Event(*event, subscription_id.clone())).await.is_err() {
+                            if event_sender
+                                .send(RelayEvent::Event(*event, subscription_id.clone()))
+                                .await
+                                .is_err()
+                            {
                                 tracing::debug!(relay = %url, "Event sender closed, stopping event loop");
                                 break;
                             }
@@ -242,7 +246,8 @@ impl RelayConnection {
                             }
                             RelayMessage::Notice(msg) => {
                                 tracing::debug!(relay = %url, message = %msg, "Received NOTICE");
-                                let _ = event_sender.send(RelayEvent::Notice(msg.to_string())).await;
+                                let _ =
+                                    event_sender.send(RelayEvent::Notice(msg.to_string())).await;
                                 // Don't break - continue processing events
                             }
                             RelayMessage::Closed { message: msg, .. } => {
@@ -356,6 +361,21 @@ impl RelayConnection {
     /// Get the relay URL
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    /// Get the number of active subscriptions on this connection
+    ///
+    /// Returns the count of subscriptions tracked by the underlying nostr-sdk client.
+    /// This reflects all active REQ subscriptions on the relay, including:
+    /// - Layer 1 announcement subscriptions
+    /// - Layer 2 repo-tagging subscriptions
+    /// - Layer 3 root-event subscriptions
+    /// - Both historic (auto-close) and live subscriptions
+    ///
+    /// # Returns
+    /// The number of active subscriptions
+    pub async fn subscription_count(&self) -> usize {
+        self.client.subscriptions().await.len()
     }
 
     /// Disconnect from the relay

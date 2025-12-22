@@ -1661,67 +1661,6 @@ impl SyncManager {
     // Consolidation System
     // =========================================================================
 
-    /// Get the current filter count for a relay
-    ///
-    /// Counts both pending subscriptions (outstanding_subs in batches) and
-    /// confirmed subscriptions (active Layer 2/3 filters based on RelayState).
-    /// This is used to determine if consolidation is needed.
-    ///
-    /// Confirmed filter counts:
-    /// - Layer 1: 1 filter (announcement subscription)
-    /// - Layer 2: 3 filters per 100-repo chunk (for kinds 1617/1618/1621)
-    /// - Layer 3: 3 filters per 100-event chunk (for replies/reactions/etc)
-    async fn get_filter_count(&self, relay_url: &str) -> usize {
-        // Count pending subscriptions
-        let pending_count = {
-            let pending = self.pending_sync_index.read().await;
-            match pending.get(relay_url) {
-                Some(batches) => batches.iter().map(|b| b.outstanding_subs.len()).sum(),
-                None => 0,
-            }
-        };
-
-        // Count confirmed subscriptions from relay state
-        let confirmed_count = {
-            let relay_index = self.relay_sync_index.read().await;
-            if let Some(state) = relay_index.get(relay_url) {
-                // Layer 1: 1 filter for announcements
-                // Layer 2: 3 filters per 100-repo chunk (ceiling division)
-                // Layer 3: 3 filters per 100-event chunk (ceiling division)
-                let repo_count = state.repos.len();
-                let event_count = state.root_events.len();
-
-                let layer1_filters = 1;
-                let layer2_filters = if repo_count > 0 {
-                    repo_count.div_ceil(100) * 3
-                } else {
-                    0
-                };
-                let layer3_filters = if event_count > 0 {
-                    event_count.div_ceil(100) * 3
-                } else {
-                    0
-                };
-
-                layer1_filters + layer2_filters + layer3_filters
-            } else {
-                0
-            }
-        };
-
-        let total_count = pending_count + confirmed_count;
-
-        tracing::debug!(
-            relay = %relay_url,
-            pending_count = pending_count,
-            confirmed_count = confirmed_count,
-            total_count = total_count,
-            "Counted active filters for relay"
-        );
-
-        total_count
-    }
-
     /// Wait until all pending batches for a relay are complete
     ///
     /// Polls the pending_sync_index until the relay has no pending batches.
@@ -1776,7 +1715,11 @@ impl SyncManager {
     /// Compares current filter count + new filter count against the threshold.
     /// If exceeded, triggers consolidation before adding new filters.
     async fn maybe_consolidate(&mut self, relay_url: &str, new_count: usize) {
-        let current_count = self.get_filter_count(relay_url).await;
+        let current_count = if let Some(connection) = self.connections.get(relay_url) {
+            connection.subscription_count().await
+        } else {
+            0
+        };
 
         if current_count + new_count > CONSOLIDATION_THRESHOLD {
             tracing::info!(
