@@ -795,9 +795,8 @@ impl MetricsTestHarness {
     /// Start syncing relay on a specific port pointing to source[idx]
     pub async fn start_syncing_relay_on_port(&mut self, source_idx: usize, port: u16) {
         let source_url = self.source_relays[source_idx].url().to_string();
-        self.syncing_relay = Some(
-            TestRelay::start_on_port_with_options(port, Some(source_url), false).await,
-        );
+        self.syncing_relay =
+            Some(TestRelay::start_on_port_with_options(port, Some(source_url), false).await);
     }
 
     /// Start syncing relay pointing to random unused port (for failure tests)
@@ -1122,16 +1121,15 @@ async fn send_to_relay(relay: &TestRelay, event: &Event) -> Result<(), String> {
 /// let result = run_sync_test(&[], &[comment]).await;
 /// // Assert comment synced to result.syncing_relay
 /// ```
-pub async fn run_sync_test(
-    historic_events: &[Event],
-    live_events: &[Event],
-) -> SyncTestResult {
+pub async fn run_sync_test(historic_events: &[Event], live_events: &[Event]) -> SyncTestResult {
     // Validate usage - cannot provide events in both slices
     let historic_mode = !historic_events.is_empty();
     let live_mode = !live_events.is_empty();
-    
+
     if historic_mode && live_mode {
-        panic!("Invalid usage: both historic_events and live_events provided. Use one or the other.");
+        panic!(
+            "Invalid usage: both historic_events and live_events provided. Use one or the other."
+        );
     }
     // Note: Both slices can be empty - this tests just the announcement sync
 
@@ -1144,11 +1142,8 @@ pub async fn run_sync_test(
 
     // 3. Create keys and announcement listing both relays
     let keys = Keys::generate();
-    let announcement = create_repo_announcement(
-        &keys,
-        &[&source.domain(), &syncing_domain],
-        "test-repo",
-    );
+    let announcement =
+        create_repo_announcement(&keys, &[&source.domain(), &syncing_domain], "test-repo");
 
     // 4. Send announcement + historic events to source BEFORE syncing relay starts
     send_to_relay(&source, &announcement)
@@ -1161,12 +1156,8 @@ pub async fn run_sync_test(
     }
 
     // 5. Start syncing relay (connects to source)
-    let syncing = TestRelay::start_on_port_with_options(
-        syncing_port,
-        Some(source.url().into()),
-        false,
-    )
-    .await;
+    let syncing =
+        TestRelay::start_on_port_with_options(syncing_port, Some(source.url().into()), false).await;
 
     // 6. Wait for sync connection to establish
     let _ = wait_for_sync_connection(syncing.url(), 1, Duration::from_secs(5)).await;
@@ -1208,8 +1199,8 @@ mod sync_helper_tests {
     async fn test_run_sync_test_panics_with_both_slices() {
         let keys = Keys::generate();
         let coord = repo_coord(&keys, "test");
-        let historic = build_layer2_issue_event(&keys, &coord, "Historic")
-            .expect("Should create event");
+        let historic =
+            build_layer2_issue_event(&keys, &coord, "Historic").expect("Should create event");
         let live = build_layer3_reply_with_e_tag(&keys, &EventId::all_zeros(), "Live")
             .expect("Should create event");
 

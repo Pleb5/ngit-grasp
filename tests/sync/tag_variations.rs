@@ -344,7 +344,7 @@ async fn test_layer3_sync_with_lowercase_e_tag() {
         .with_max_level(tracing::Level::DEBUG)
         .with_test_writer()
         .try_init();
-    
+
     // 1. Start relays
     let relay_a = TestRelay::start().await;
     println!(

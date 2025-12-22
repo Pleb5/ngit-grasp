@@ -136,12 +136,14 @@ impl RelayHealth {
 
         // Check if we're in stability period after recovery
         // (recovered from failures but not yet proven stable)
-        if let (Some(last_success), Some(last_failure)) = (self.last_success_time, self.last_failure_time) {
+        if let (Some(last_success), Some(last_failure)) =
+            (self.last_success_time, self.last_failure_time)
+        {
             // Only consider stability period if recovery happened after the last failure
             if last_success > last_failure {
                 let time_since_recovery = now.duration_since(last_success);
                 let stability_period = Duration::from_secs(STABILITY_PERIOD_SECS);
-                
+
                 if time_since_recovery < stability_period {
                     // Still in stability period - remain degraded to prove stability
                     return HealthState::Degraded;
@@ -339,9 +341,10 @@ impl RelayHealthTracker {
                 // Respect existing next_retry_at if it's later (e.g., from rate limiting)
                 let new_retry_at = now + backoff;
                 health.next_retry_at = Some(
-                    health.next_retry_at
+                    health
+                        .next_retry_at
                         .unwrap_or(new_retry_at)
-                        .max(new_retry_at)
+                        .max(new_retry_at),
                 );
 
                 let new_state = health.state();
@@ -392,7 +395,6 @@ impl RelayHealthTracker {
             health.rate_limited = false;
         }
     }
-
 
     /// Check if relay is currently rate limited
     ///

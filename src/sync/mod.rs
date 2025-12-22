@@ -1599,7 +1599,7 @@ impl SyncManager {
         write_policy: &Nip34WritePolicy,
         local_relay: &LocalRelay,
     ) -> ProcessResult {
-        use nostr_relay_builder::prelude::{WritePolicyResult, WritePolicy};
+        use nostr_relay_builder::prelude::{WritePolicy, WritePolicyResult};
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
         // Check if event already exists
         match database.event_by_id(&event.id).await {
