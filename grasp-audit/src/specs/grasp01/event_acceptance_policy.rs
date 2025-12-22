@@ -271,7 +271,7 @@ impl EventAcceptancePolicyTests {
                 .to_string();
 
             // Create unique repository identifier
-            let timestamp = Timestamp::now().as_u64();
+            let timestamp = Timestamp::now().as_secs();
             let repo_id = format!("test-repo-no-clone-{}", timestamp);
 
             // Create repo announcement WITHOUT service in clone tag
@@ -352,7 +352,7 @@ impl EventAcceptancePolicyTests {
                 .replace("wss://", "https://");
 
             // Create unique repository identifier
-            let timestamp = Timestamp::now().as_u64();
+            let timestamp = Timestamp::now().as_secs();
             let repo_id = format!("test-repo-no-relays-{}", timestamp);
 
             // Create repo announcement WITHOUT service in relays tag

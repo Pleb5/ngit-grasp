@@ -132,7 +132,7 @@ impl AuditConfig {
                 TagKind::SingleLetter(t_tag),
                 vec![format!(
                     "audit-cleanup-after-{}",
-                    self.cleanup_after.as_u64()
+                    self.cleanup_after.as_secs()
                 )],
             ),
         ]
@@ -328,7 +328,7 @@ mod tests {
         let after = Timestamp::now();
 
         // Event timestamp should be between before and after (inclusive)
-        assert!(event.created_at.as_u64() >= before.as_u64());
-        assert!(event.created_at.as_u64() <= after.as_u64());
+        assert!(event.created_at.as_secs() >= before.as_secs());
+        assert!(event.created_at.as_secs() <= after.as_secs());
     }
 }

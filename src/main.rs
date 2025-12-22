@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
 
     // Create Nostr relay with NIP-34 validation
     // Returns both the relay and database for direct queries in handlers
-    if let Ok(relay_with_db) = nostr::builder::create_relay(&config) {
+    if let Ok(relay_with_db) = nostr::builder::create_relay(&config).await {
         info!(
             "Relay created with NIP-34 validation for domain: {}",
             config.domain

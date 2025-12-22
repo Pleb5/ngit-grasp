@@ -260,11 +260,11 @@ async fn run_daily_timer(
     sync_manager: Arc<Mutex<SyncManager>>,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) {
-    use rand::Rng;
+    use ::rand::Rng;
 
     loop {
         // Random interval between 23-25 hours
-        let hours = 23.0 + rand::thread_rng().gen::<f64>() * 2.0;
+        let hours = 23.0 + ::rand::thread_rng().gen::<f64>() * 2.0;
         let seconds = (hours * 3600.0) as u64;
 
         tracing::info!(
@@ -1599,7 +1599,7 @@ impl SyncManager {
         write_policy: &Nip34WritePolicy,
         local_relay: &LocalRelay,
     ) -> ProcessResult {
-        use nostr_relay_builder::prelude::{PolicyResult, WritePolicy};
+        use nostr_relay_builder::prelude::{WritePolicyResult, WritePolicy};
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
         // Check if event already exists
         match database.event_by_id(&event.id).await {
@@ -1619,7 +1619,7 @@ impl SyncManager {
         let result = write_policy.admit_event(event, &dummy_addr).await;
 
         match result {
-            PolicyResult::Accept => {
+            WritePolicyResult::Accept => {
                 // Save event to database
                 if let Err(e) = database.save_event(event).await {
                     tracing::error!(
@@ -1644,11 +1644,11 @@ impl SyncManager {
                 );
                 ProcessResult::Saved
             }
-            PolicyResult::Reject(reason) => {
+            WritePolicyResult::Reject { message, .. } => {
                 tracing::debug!(
                     event_id = %event.id,
                     relay = %relay_url,
-                    reason = %reason,
+                    reason = %message,
                     "Event rejected by write policy"
                 );
                 ProcessResult::Rejected

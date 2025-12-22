@@ -676,7 +676,7 @@ impl<'a> TestContext<'a> {
                     .to_string();
 
                 // Create state announcement with deterministic commit hash
-                let base_time = Timestamp::now().as_u64();
+                let base_time = Timestamp::now().as_secs();
                 let older_timestamp = Timestamp::from(base_time - 10); // 10 seconds ago
 
                 // Tag format: ["refs/heads/main", "<commit_hash>"]
@@ -712,7 +712,7 @@ impl<'a> TestContext<'a> {
                     .to_string();
 
                 // Create PR event 1 second in the past
-                let base_time = Timestamp::now().as_u64();
+                let base_time = Timestamp::now().as_secs();
                 let pr_timestamp = Timestamp::from(base_time - 1);
 
                 // Build NIP-34 PR event (kind 1618)
@@ -755,7 +755,7 @@ impl<'a> TestContext<'a> {
                     .to_string();
 
                 // Create PR event 1 second in the past
-                let base_time = Timestamp::now().as_u64();
+                let base_time = Timestamp::now().as_secs();
                 let pr_timestamp = Timestamp::from(base_time - 1);
 
                 // Build NIP-34 PR event (kind 1618)
@@ -883,7 +883,7 @@ impl<'a> TestContext<'a> {
         let repo_id = self.extract_repo_id(&repo)?;
 
         // Build state event
-        let base_time = Timestamp::now().as_u64();
+        let base_time = Timestamp::now().as_secs();
         let older_timestamp = Timestamp::from(base_time - 10); // 10 seconds ago
 
         let state_event = self
@@ -1036,7 +1036,7 @@ impl<'a> TestContext<'a> {
         let repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
 
         // Build maintainer's state event (state event ONLY - no announcement)
-        let base_time = Timestamp::now().as_u64();
+        let base_time = Timestamp::now().as_secs();
         let maintainer_timestamp = Timestamp::from(base_time - 5); // 5 seconds ago (more recent than owner's state)
 
         let maintainer_state_event = self
@@ -1187,7 +1187,7 @@ impl<'a> TestContext<'a> {
         self.client.send_event(maintainer_announcement).await?;
 
         // Build recursive maintainer's state event
-        let base_time = Timestamp::now().as_u64();
+        let base_time = Timestamp::now().as_secs();
         let recursive_maintainer_timestamp = Timestamp::from(base_time - 2); // 2 seconds ago (most recent)
 
         let recursive_maintainer_state_event = self
@@ -1338,7 +1338,7 @@ impl<'a> TestContext<'a> {
         // ============================================================
         // Use the same commit hash that's already pushed to the relay
         // but point HEAD to develop branch instead of main
-        let base_time = Timestamp::now().as_u64();
+        let base_time = Timestamp::now().as_secs();
         let develop_timestamp = Timestamp::from(base_time - 1); // 1 second ago (most recent)
 
         let develop_state_event = self

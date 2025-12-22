@@ -17,11 +17,11 @@ hyper-util = { version = "0.1", features = ["tokio", "server", "http1", "http2"]
 http-body-util = "0.1"
 
 # Nostr relay
-nostr-relay-builder = "0.44"
+nostr-relay-builder = { git = "https://github.com/rust-nostr/nostr", rev = "e09c9d82a1778683d2a6b968d09eb2c619883bf3" }
 
 # Nostr
-nostr-sdk = "0.44"
-nostr-lmdb = "0.44"
+nostr-sdk = { git = "https://github.com/rust-nostr/nostr", rev = "e09c9d82a1778683d2a6b968d09eb2c619883bf3" }
+nostr-lmdb = { git = "https://github.com/rust-nostr/nostr", rev = "e09c9d82a1778683d2a6b968d09eb2c619883bf3" }
 
 # Utilities
 futures-util = "0.3"

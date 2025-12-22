@@ -3,11 +3,12 @@
 /// This module integrates nostr-relay-builder with NIP-34 validation logic
 /// using modular sub-policies for each event type.
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
 
 use nostr::nips::nip19::ToBech32;
-use nostr_lmdb::NostrLMDB;
+use nostr_lmdb::NostrLmdb;
 use nostr_relay_builder::prelude::*;
 
 use crate::config::{Config, DatabaseBackend};
@@ -68,7 +69,7 @@ impl Nip34WritePolicy {
     }
 
     /// Handle repository announcement event
-    async fn handle_announcement(&self, event: &Event) -> PolicyResult {
+    async fn handle_announcement(&self, event: &Event) -> WritePolicyResult {
         let event_id_str = event.id.to_bech32().unwrap_or_else(|_| event.id.to_hex());
 
         match self.announcement_policy.validate(event).await {
@@ -90,7 +91,7 @@ impl Nip34WritePolicy {
                         }
 
                         tracing::debug!("Accepted repository announcement: {}", event_id_str);
-                        PolicyResult::Accept
+                        WritePolicyResult::Accept
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -98,7 +99,7 @@ impl Nip34WritePolicy {
                             event_id_str,
                             e
                         );
-                        PolicyResult::Reject(format!("Failed to parse announcement: {}", e))
+                        WritePolicyResult::reject(format!("Failed to parse announcement: {}", e))
                     }
                 }
             }
@@ -113,7 +114,7 @@ impl Nip34WritePolicy {
                             announcement.identifier
                         );
                         // Don't create bare repository for external announcements
-                        PolicyResult::Accept
+                        WritePolicyResult::Accept
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -121,7 +122,7 @@ impl Nip34WritePolicy {
                             event_id_str,
                             e
                         );
-                        PolicyResult::Reject(format!("Failed to parse announcement: {}", e))
+                        WritePolicyResult::reject(format!("Failed to parse announcement: {}", e))
                     }
                 }
             }
@@ -131,13 +132,13 @@ impl Nip34WritePolicy {
                     event_id_str,
                     reason
                 );
-                PolicyResult::Reject(reason)
+                WritePolicyResult::reject(reason)
             }
         }
     }
 
     /// Handle repository state event
-    async fn handle_state(&self, event: &Event) -> PolicyResult {
+    async fn handle_state(&self, event: &Event) -> WritePolicyResult {
         let event_id_str = event.id.to_bech32().unwrap_or_else(|_| event.id.to_hex());
 
         match self.state_policy.validate(event) {
@@ -151,25 +152,25 @@ impl Nip34WritePolicy {
                         }
 
                         tracing::debug!("Accepted repository state: {}", event_id_str);
-                        PolicyResult::Accept
+                        WritePolicyResult::Accept
                     }
                     Err(e) => {
                         tracing::warn!("Failed to parse repository state {}: {}", event_id_str, e);
                         // Still accept the event even if we can't parse it
                         // The validation passed, so it's structurally valid
-                        PolicyResult::Accept
+                        WritePolicyResult::Accept
                     }
                 }
             }
             StateResult::Reject(reason) => {
                 tracing::warn!("Rejected repository state {}: {}", event_id_str, reason);
-                PolicyResult::Reject(reason)
+                WritePolicyResult::reject(reason)
             }
         }
     }
 
     /// Handle PR or PR Update event
-    async fn handle_pr_event(&self, event: &Event) -> PolicyResult {
+    async fn handle_pr_event(&self, event: &Event) -> WritePolicyResult {
         let event_id_str = event.id.to_bech32().unwrap_or_else(|_| event.id.to_hex());
 
         // Validate refs/nostr refs for this PR event
@@ -188,7 +189,7 @@ impl Nip34WritePolicy {
     }
 
     /// Handle events that must reference accepted repositories or events
-    async fn handle_related_event(&self, event: &Event, event_type: &str) -> PolicyResult {
+    async fn handle_related_event(&self, event: &Event, event_type: &str) -> WritePolicyResult {
         let event_id_str = event.id.to_bech32().unwrap_or_else(|_| event.id.to_hex());
 
         match self.related_event_policy.check_references(event).await {
@@ -199,7 +200,7 @@ impl Nip34WritePolicy {
                     event_id_str,
                     addr_ref
                 );
-                PolicyResult::Accept
+                WritePolicyResult::Accept
             }
             Ok(ReferenceResult::ReferencesEvent(event_ref)) => {
                 tracing::debug!(
@@ -208,7 +209,7 @@ impl Nip34WritePolicy {
                     event_id_str,
                     event_ref
                 );
-                PolicyResult::Accept
+                WritePolicyResult::Accept
             }
             Ok(ReferenceResult::ReferencedByAccepted) => {
                 tracing::debug!(
@@ -216,7 +217,7 @@ impl Nip34WritePolicy {
                     event_type,
                     event_id_str
                 );
-                PolicyResult::Accept
+                WritePolicyResult::Accept
             }
             Ok(ReferenceResult::Orphan) => {
                 let (addressable_refs, event_refs) =
@@ -228,7 +229,7 @@ impl Nip34WritePolicy {
                     addressable_refs.len(),
                     event_refs.len()
                 );
-                PolicyResult::Reject(format!(
+                WritePolicyResult::reject(format!(
                     "{} event must reference an accepted repository or accepted event",
                     event_type
                 ))
@@ -240,7 +241,7 @@ impl Nip34WritePolicy {
                     event_id_str,
                     e
                 );
-                PolicyResult::Reject(format!("Database query failed: {}", e))
+                WritePolicyResult::reject(format!("Database query failed: {}", e))
             }
         }
     }
@@ -251,7 +252,7 @@ impl WritePolicy for Nip34WritePolicy {
         &'a self,
         event: &'a nostr_relay_builder::prelude::Event,
         _addr: &'a SocketAddr,
-    ) -> BoxedFuture<'a, PolicyResult> {
+    ) -> BoxedFuture<'a, WritePolicyResult> {
         Box::pin(async move {
             match event.kind.as_u16() {
                 KIND_REPOSITORY_ANNOUNCEMENT => self.handle_announcement(event).await,
@@ -265,7 +266,7 @@ impl WritePolicy for Nip34WritePolicy {
                         author = %event.pubkey.to_hex(),
                         "Accepted kind 10317 user grasp list"
                     );
-                    PolicyResult::Accept
+                    WritePolicyResult::Accept
                 }
                 _ => self.handle_related_event(event, "Event").await,
             }
@@ -288,7 +289,7 @@ pub struct RelayWithDatabase {
 /// Returns a `RelayWithDatabase` struct containing:
 /// - The `LocalRelay` for handling WebSocket connections
 /// - The `SharedDatabase` for direct database queries (e.g., push authorization)
-pub fn create_relay(config: &Config) -> Result<RelayWithDatabase> {
+pub async fn create_relay(config: &Config) -> Result<RelayWithDatabase> {
     tracing::info!("Configuring nostr relay with GRASP-01 validation...");
 
     // Determine database path
@@ -300,7 +301,7 @@ pub fn create_relay(config: &Config) -> Result<RelayWithDatabase> {
             tracing::info!("Using in-memory database (no persistence)");
             Arc::new(MemoryDatabase::with_opts(MemoryDatabaseOptions {
                 events: true,
-                max_events: Some(100_000),
+                max_events: Some(NonZeroUsize::new(100_000).unwrap()),
             }))
         }
         DatabaseBackend::NostrDb => {
@@ -310,7 +311,7 @@ pub fn create_relay(config: &Config) -> Result<RelayWithDatabase> {
             tracing::warn!("NostrDB backend not yet implemented, using in-memory database");
             Arc::new(MemoryDatabase::with_opts(MemoryDatabaseOptions {
                 events: true,
-                max_events: Some(100_000),
+                max_events: Some(NonZeroUsize::new(100_000).unwrap()),
             }))
         }
         DatabaseBackend::Lmdb => {
@@ -323,7 +324,7 @@ pub fn create_relay(config: &Config) -> Result<RelayWithDatabase> {
                     e
                 )
             })?;
-            Arc::new(NostrLMDB::open(db_path).map_err(|e| {
+            Arc::new(NostrLmdb::open(db_path).await.map_err(|e| {
                 anyhow::anyhow!(
                     "Failed to open LMDB database at {}: {}",
                     db_path.display(),
@@ -338,9 +339,10 @@ pub fn create_relay(config: &Config) -> Result<RelayWithDatabase> {
     let git_data_path = config.effective_git_data_path();
     let write_policy = Nip34WritePolicy::new(&config.domain, database.clone(), &git_data_path);
 
-    let builder = RelayBuilder::default()
+    let relay = LocalRelayBuilder::default()
         .database(database.clone())
-        .write_policy(write_policy.clone());
+        .write_policy(write_policy.clone())
+        .build();
 
     tracing::info!(
         "Relay configured with GRASP-01 validation for domain: {}",
@@ -348,7 +350,7 @@ pub fn create_relay(config: &Config) -> Result<RelayWithDatabase> {
     );
 
     Ok(RelayWithDatabase {
-        relay: LocalRelay::new(builder),
+        relay,
         database,
         write_policy,
     })

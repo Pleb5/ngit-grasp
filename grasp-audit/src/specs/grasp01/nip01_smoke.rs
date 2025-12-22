@@ -216,7 +216,7 @@ impl Nip01SmokeTests {
             let invalid_event_json = serde_json::json!({
                 "id": event.id.to_hex(),
                 "pubkey": event.pubkey.to_hex(),
-                "created_at": event.created_at.as_u64(),
+                "created_at": event.created_at.as_secs(),
                 "kind": event.kind.as_u16(),
                 "tags": event.tags,
                 "content": event.content,
@@ -261,7 +261,7 @@ impl Nip01SmokeTests {
             let invalid_event_json = serde_json::json!({
                 "id": EventId::all_zeros().to_hex(), // Wrong ID!
                 "pubkey": event.pubkey.to_hex(),
-                "created_at": event.created_at.as_u64(),
+                "created_at": event.created_at.as_secs(),
                 "kind": event.kind.as_u16(),
                 "tags": event.tags,
                 "content": event.content,
