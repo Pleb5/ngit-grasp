@@ -678,12 +678,12 @@ impl PushAuthorizationTests {
     /// without publishing their own repo announcement. The maintainer is still
     /// listed in the owner's announcement, so they're a valid maintainer.
     ///
-    /// This test uses the MaintainerStateDataPushed fixture which handles all 4 stages:
-    /// 1. **Generated**: Creates ValidRepo (owner's announcement with maintainer in maintainers tag)
-    ///    + MaintainerState (maintainer's state event ONLY - no announcement)
-    /// 2. **Sent**: Sends events to relay
-    /// 3. **Verified**: Confirms events accepted by relay
-    /// 4. **DataPushed**: Clones repo, creates maintainer deterministic commit, pushes to relay
+    /// This test uses the MaintainerStateDataPushed fixture which handles all 5 stages:
+    /// 1. **OwnerStateDataPushed dependency**: Owner's repo and state event already on relay, git data pushed
+    /// 2. **Sent**: Sends maintainer state event to relay (returns OK, accepted but 'purgatory:...' message)
+    /// 3. **Verify Not Served**: Confirms event is not served by relays
+    /// 4. **DataPushed**: Clones repo, creates maintainer deterministic commit, force-pushes to relay
+    /// 5. **Verified**: Confirms event is served by relay
     ///
     /// The test wraps the fixture result in pass/fail using the error message.
     #[allow(unused_variables)] // relay_domain is now handled by fixture
@@ -720,13 +720,13 @@ impl PushAuthorizationTests {
     /// GRASP-01: "respecting the recursive maintainer set"
     /// This tests recursive maintainer chains: Owner -> Maintainer -> RecursiveMaintainer
     ///
-    /// This test uses the RecursiveMaintainerStateDataPushed fixture which handles all 4 stages:
-    /// 1. **Generated**: Creates MaintainerStateDataPushed (owner's + maintainer's data pushed)
-    ///    + MaintainerAnnouncement (maintainer lists recursive maintainer)
-    ///    + RecursiveMaintainerState (recursive maintainer's state event)
-    /// 2. **Sent**: Sends events to relay
-    /// 3. **Verified**: Confirms events accepted by relay
+    /// This test uses the RecursiveMaintainerStateDataPushed fixture which handles all 5 stages:
+    /// 1. **Generated**: (MaintainerStateDataPushed dependency includes ValidRepo + OwnerStateDataPushed)
+    ///    Creates MaintainerAnnouncement + RecursiveMaintainerState
+    /// 2. **Sent**: Sends events to relay (returns OK, accepted but 'purgatory:...' message)
+    /// 3. **Verify Not Served**: Confirms event is not served by relays
     /// 4. **DataPushed**: Clones repo, creates recursive maintainer deterministic commit, pushes to relay
+    /// 5. **Verified**: Confirms event is served by relay
     ///
     /// The test wraps the fixture result in pass/fail using the error message.
     #[allow(unused_variables)] // relay_domain is now handled by fixture

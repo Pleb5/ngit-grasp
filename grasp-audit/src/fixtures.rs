@@ -227,20 +227,17 @@ pub enum FixtureKind {
     /// - Git push verified to succeed (state matches pushed commit)
     OwnerStateDataPushed,
 
-    /// Maintainer's state event with git data successfully pushed (full 4-stage fixture)
+    /// Maintainer's state event with git data successfully pushed (full 5-stage fixture)
     ///
     /// This fixture tests that a maintainer can authorize pushes with ONLY a state event,
-    /// without publishing their own repo announcement. The maintainer is still listed in
-    /// the owner's announcement, so they're a valid maintainer.
+    /// without publishing their own repo announcement.
     ///
-    /// GRASP-01: "respecting the recursive maintainer set"
-    ///
-    /// Stages:
-    /// 1. **Generated**: Creates ValidRepo (owner's announcement with maintainer in maintainers tag)
-    ///    + MaintainerState (maintainer's state event ONLY - no announcement)
-    /// 2. **Sent**: Sends events to relay
-    /// 3. **Verified**: Confirms events accepted by relay
-    /// 4. **DataPushed**: Clones repo, creates maintainer deterministic commit, pushes to relay
+    /// This fixture represents the complete flow for testing maintainer push authorization:
+    /// 1. **OwnerStateDataPushed dependency**: Owner's repo and state event already on relay, git data pushed
+    /// 2. **Sent**: Sends maintainer state event to relay (returns OK, accepted but 'purgatory:...' message)
+    /// 3. **Verify Not Served**: Confirms event is not served by relays
+    /// 4. **DataPushed**: Clones repo, creates maintainer deterministic commit, force-pushes to relay
+    /// 5. **Verified**: Confirms event is served by relay
     ///
     /// - Requires OwnerStateDataPushed (owner's data already pushed to git)
     /// - State event signed by maintainer keys (`client.maintainer_keys()`)
@@ -248,26 +245,23 @@ pub enum FixtureKind {
     /// - Git push verified to succeed (force push with maintainer's state event authorizes the commit)
     MaintainerStateDataPushed,
 
-    /// Recursive maintainer's state event with git data successfully pushed (full 4-stage fixture)
+    /// Recursive maintainer's state event with git data successfully pushed (full 5-stage fixture)
     ///
     /// This fixture tests that a recursive maintainer (authorized via maintainer chain) can
     /// authorize pushes. The recursive maintainer is listed in the maintainer's announcement,
     /// not the owner's announcement, so this tests the recursive maintainer traversal.
     ///
-    /// GRASP-01: "respecting the recursive maintainer set"
+    /// This fixture represents the complete flow for testing recursive maintainer push authorization:
+    /// 1. **Generated**: (MaintainerStateDataPushed dependency includes ValidRepo + OwnerStateDataPushed)
+    ///    Creates MaintainerAnnouncement + RecursiveMaintainerState
+    /// 2. **Sent**: Sends events to relay (returns OK, accepted but 'purgatory:...' message)
+    /// 3. **Verify Not Served**: Confirms event is not served by relays
+    /// 4. **DataPushed**: Clones repo, creates recursive maintainer deterministic commit, pushes to relay
+    /// 5. **Verified**: Confirms event is served by relay
     ///
     /// Chain: Owner -> Maintainer -> RecursiveMaintainer
     ///
-    /// Stages:
-    /// 1. **Generated**: Creates MaintainerStateDataPushed (includes ValidRepo + OwnerStateDataPushed)
-    ///    + MaintainerAnnouncement (maintainer's announcement listing recursive maintainer)
-    ///    + RecursiveMaintainerState (recursive maintainer's state event)
-    /// 2. **Sent**: Sends events to relay
-    /// 3. **Verified**: Confirms events accepted by relay
-    /// 4. **DataPushed**: Clones repo, creates recursive maintainer deterministic commit, pushes to relay
-    ///
     /// - Requires MaintainerStateDataPushed (establishes Owner -> Maintainer chain with git data)
-    /// - Sends MaintainerAnnouncement (establishes Maintainer -> RecursiveMaintainer connection)
     /// - State event signed by recursive maintainer keys (`client.recursive_maintainer_keys()`)
     /// - Points to RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH
     /// - Git push verified to succeed (recursive maintainer's state event authorizes the commit)
@@ -1026,13 +1020,20 @@ impl<'a> TestContext<'a> {
         Ok(state_event)
     }
 
-    /// Build MaintainerStateDataPushed fixture: full 4-stage fixture for maintainer push authorization
+    /// Build MaintainerStateDataPushed fixture: full 5-stage fixture for maintainer push authorization
     ///
     /// This tests that a maintainer can authorize pushes with ONLY a state event,
     /// without publishing their own repo announcement.
     ///
     /// Depends on OwnerStateDataPushed - the owner's data has already been pushed.
     /// The maintainer force-pushes their commit on top.
+    ///
+    /// This handles all stages of the fixture:
+    /// 1. **OwnerStateDataPushed dependency**: Owner's repo and state event already on relay, git data pushed
+    /// 2. **Sent**: Sends maintainer state event to relay (returns OK, accepted but 'purgatory:...' message)
+    /// 3. **Verify Not Served**: Confirms event is not served by relays
+    /// 4. **DataPushed**: Clones repo, creates maintainer deterministic commit, force-pushes to relay
+    /// 5. **Verified**: Confirms event is served by relay
     ///
     /// # Returns
     /// The maintainer's state event (kind 30618) after all stages complete successfully
@@ -1041,7 +1042,6 @@ impl<'a> TestContext<'a> {
 
         // ============================================================
         // Stage 1: OwnerStateDataPushed is ensured by ensure_fixture before this is called
-        // The owner's repo and state event are already on the relay, and git data is pushed
         // ============================================================
         let owner_state = self.get_cached_dependency(FixtureKind::OwnerStateDataPushed)?;
 
@@ -1071,15 +1071,12 @@ impl<'a> TestContext<'a> {
             .build(self.client.maintainer_keys())
             .map_err(|e| anyhow::anyhow!("Failed to build maintainer state event: {}", e))?;
 
-        // Send maintainer state event to relay
+        // ============================================================
+        // Stage 2 & 3: Send to Relay, get Accepted response and Verify its Not Served
+        // ============================================================
         self.client
-            .send_event(maintainer_state_event.clone())
+            .send_event_expect_purgatory_not_served(maintainer_state_event.clone())
             .await?;
-
-        // ============================================================
-        // Stage 3: Verify state event was accepted
-        // ============================================================
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         // ============================================================
         // Stage 4: DataPushed - Clone repo, create maintainer commit, push
@@ -1154,20 +1151,35 @@ impl<'a> TestContext<'a> {
         cleanup(&clone_path);
 
         match push_result {
-            Ok(true) => Ok(maintainer_state_event),
-            Ok(false) => Err(anyhow::anyhow!(
-                "Push was rejected but should have been accepted. \
+            Ok(res) => {
+                if !res {
+                    return Err(anyhow::anyhow!(
+                        "Push was rejected but should have been accepted. \
                 The maintainer published a state event with commit {}, \
                 and even without a separate announcement, the relay should \
                 authorize pushes matching this state event since the maintainer \
                 is listed in the owner's announcement.",
-                MAINTAINER_DETERMINISTIC_COMMIT_HASH
-            )),
-            Err(e) => Err(anyhow::anyhow!("Push error: {}", e)),
+                        MAINTAINER_DETERMINISTIC_COMMIT_HASH
+                    ));
+                }
+            }
+            Err(e) => return Err(anyhow::anyhow!("Push error: {}", e)),
         }
+
+        // ============================================================
+        // Stage 5: Verify state event is on relay
+        // ============================================================
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        if !self.client.is_event_on_relay(maintainer_state_event.id).await? {
+            return Err(anyhow::anyhow!("state event not released from purgatory"));
+        }
+
+        Ok(maintainer_state_event)
     }
 
-    /// Build RecursiveMaintainerStateDataPushed fixture: full 4-stage fixture for recursive maintainer push authorization
+    /// Build RecursiveMaintainerStateDataPushed fixture: full 5-stage fixture for recursive maintainer push authorization
     ///
     /// This tests that a recursive maintainer (authorized via maintainer chain) can authorize pushes.
     /// The recursive maintainer is listed in the maintainer's announcement, not the owner's announcement,
@@ -1177,6 +1189,14 @@ impl<'a> TestContext<'a> {
     /// We then send the MaintainerAnnouncement (which lists the recursive maintainer), and the
     /// recursive maintainer force-pushes their commit on top.
     ///
+    /// This handles all stages of the fixture:
+    /// 1. **Generated**: (MaintainerStateDataPushed dependency includes ValidRepo + OwnerStateDataPushed)
+    ///    Creates MaintainerAnnouncement + RecursiveMaintainerState
+    /// 2. **Sent**: Sends events to relay (returns OK, accepted but 'purgatory:...' message)
+    /// 3. **Verify Not Served**: Confirms event is not served by relays
+    /// 4. **DataPushed**: Clones repo, creates recursive maintainer deterministic commit, pushes to relay
+    /// 5. **Verified**: Confirms event is served by relay
+    ///
     /// # Returns
     /// The recursive maintainer's state event (kind 30618) after all stages complete successfully
     async fn build_recursive_maintainer_state_data_pushed(&self) -> Result<Event> {
@@ -1184,8 +1204,6 @@ impl<'a> TestContext<'a> {
 
         // ============================================================
         // Stage 1: MaintainerStateDataPushed is ensured by ensure_fixture before this is called
-        // The owner's repo, owner's state event, and maintainer's state event are already on the relay,
-        // and maintainer's git data is pushed
         // ============================================================
         let maintainer_state =
             self.get_cached_dependency(FixtureKind::MaintainerStateDataPushed)?;
@@ -1197,7 +1215,7 @@ impl<'a> TestContext<'a> {
         let repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
 
         // ============================================================
-        // Stage 2: Send MaintainerAnnouncement (establishes Maintainer -> RecursiveMaintainer chain)
+        // Stage 1 (continued): Generate MaintainerAnnouncement and RecursiveMaintainerState
         // ============================================================
         let maintainer_announcement = self.build_maintainer_announcement(&repo_id).await?;
         self.client.send_event(maintainer_announcement).await?;
@@ -1224,15 +1242,12 @@ impl<'a> TestContext<'a> {
                 anyhow::anyhow!("Failed to build recursive maintainer state event: {}", e)
             })?;
 
-        // Send recursive maintainer state event to relay
+        // ============================================================
+        // Stage 2 & 3: Send to Relay, get Accepted response and Verify its Not Served
+        // ============================================================
         self.client
-            .send_event(recursive_maintainer_state_event.clone())
+            .send_event_expect_purgatory_not_served(recursive_maintainer_state_event.clone())
             .await?;
-
-        // ============================================================
-        // Stage 3: Verify state event was accepted
-        // ============================================================
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         // ============================================================
         // Stage 4: DataPushed - Clone repo, create recursive maintainer commit, push
@@ -1310,16 +1325,31 @@ impl<'a> TestContext<'a> {
         cleanup(&clone_path);
 
         match push_result {
-            Ok(true) => Ok(recursive_maintainer_state_event),
-            Ok(false) => Err(anyhow::anyhow!(
-                "Push was rejected but should have been accepted. \
+            Ok(res) => {
+                if !res {
+                    return Err(anyhow::anyhow!(
+                        "Push was rejected but should have been accepted. \
                 The recursive maintainer published a state event with commit {}, \
                 and the relay should authorize pushes matching this state event \
                 through recursive maintainer traversal (Owner -> Maintainer -> RecursiveMaintainer).",
-                RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH
-            )),
-            Err(e) => Err(anyhow::anyhow!("Push error: {}", e)),
+                        RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH
+                    ));
+                }
+            }
+            Err(e) => return Err(anyhow::anyhow!("Push error: {}", e)),
         }
+
+        // ============================================================
+        // Stage 5: Verify state event is on relay
+        // ============================================================
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        if !self.client.is_event_on_relay(recursive_maintainer_state_event.id).await? {
+            return Err(anyhow::anyhow!("state event not released from purgatory"));
+        }
+
+        Ok(recursive_maintainer_state_event)
     }
 
     /// Build HeadSetToDevelopBranch fixture: creates state event with HEAD=develop
