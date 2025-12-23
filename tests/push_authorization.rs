@@ -67,11 +67,12 @@ isolated_push_test!(test_push_to_nostr_ref_with_invalid_event_id_rejected);
 isolated_push_test!(test_pr_push_to_nostr_ref_with_wrong_commit_accepted_before_event_received);
 isolated_push_test!(test_pr_event_published_removes_nostr_ref_at_incorrect_commit);
 isolated_push_test!(test_push_to_nostr_ref_with_wrong_commit_after_event_received_rejected);
-isolated_push_test!(test_push_to_nostr_ref_with_correct_commit_after_event_received_accepted);
+isolated_push_test!(
+    test_push_to_nostr_ref_with_correct_commit_after_event_received_accepted_and_event_served
+);
 isolated_push_test!(test_head_set_after_state_event_with_existing_commit);
 isolated_push_test!(test_head_set_after_git_push_with_required_oids);
 
 // Note: test_push_of_state_by_maintainer_updates_other_maintainer_repos is not included
 // as it's a stub for the purgatory feature. It can be run manually once implemented:
 // isolated_push_test!(test_push_of_state_by_maintainer_updates_other_maintainer_repos);
-

@@ -39,6 +39,7 @@ use nostr_sdk::prelude::*;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 // ============================================================
 // PR Event Test Helper Functions
@@ -382,7 +383,7 @@ impl PushAuthorizationTests {
             .await,
         );
         results.add(
-            Self::test_push_to_nostr_ref_with_correct_commit_after_event_received_accepted(
+            Self::test_push_to_nostr_ref_with_correct_commit_after_event_received_accepted_and_event_served(
                 client,
                 relay_domain,
             )
@@ -1289,10 +1290,10 @@ impl PushAuthorizationTests {
     ///
     /// This test verifies that the relay accepts pushes to refs/nostr/<event-id>
     /// when a corresponding event exists AND the pushed commit matches
-    /// the commit in the PR event's `c` tag.
+    /// the commit in the PR event's `c` tag AND the PR event is served on relay.
     ///
     /// Uses `PREventSentAfterWrongPush` fixture, then creates correct commit and pushes.
-    pub async fn test_push_to_nostr_ref_with_correct_commit_after_event_received_accepted(
+    pub async fn test_push_to_nostr_ref_with_correct_commit_after_event_received_accepted_and_event_served(
         client: &AuditClient,
         relay_domain: &str,
     ) -> TestResult {
@@ -1353,6 +1354,21 @@ impl PushAuthorizationTests {
             return TestResult::new(test_name, "GRASP-01:git-http:40", desc).fail(&e);
         }
 
+        // TODO - uncomment this when purgatory feature added
+        // // Check event is not yet served by relay (still in purgatory)
+        // match client.is_event_on_relay(pr_event.id).await {
+        //     Ok(on_relay) => {
+        //         if !on_relay {
+        //             return TestResult::new(test_name, "GRASP-01:git-http:40", desc)
+        //                 .fail("PR event not in purgatory before correct commit pushed to refs/nostr/<event-id> (the relay serve the PR event)");
+        //         }
+        //     }
+        //     Err(_) => {
+        //         return TestResult::new(test_name, "GRASP-01:git-http:40", desc)
+        //             .fail("failed to query relay");
+        //     }
+        // }
+
         // Push correct commit (should succeed)
         let push_succeeded = match push_to_pr_ref(&clone_path, &pr_event_id) {
             Ok(success) => success,
@@ -1368,6 +1384,25 @@ impl PushAuthorizationTests {
         if !push_succeeded {
             return TestResult::new(test_name, "GRASP-01:git-http:40", desc)
                 .fail("Push rejected (expected acceptance since commit matches PR event)");
+        }
+
+        // ============================================================
+        // Stage 5: Verify PR event is on relay
+        // ============================================================
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        match client.is_event_on_relay(pr_event.id).await {
+            Ok(on_relay) => {
+                if !on_relay {
+                    return TestResult::new(test_name, "GRASP-01:git-http:40", desc)
+                        .fail("PR event not served after correct commit at refs/nostr/<event-id>");
+                }
+            }
+            Err(_) => {
+                return TestResult::new(test_name, "GRASP-01:git-http:40", desc)
+                    .fail("failed to query relay");
+            }
         }
 
         TestResult::new(test_name, "GRASP-01:git-http:40", desc).pass()
