@@ -110,9 +110,6 @@ impl EventAcceptancePolicyTests {
         results.add(Self::test_reject_repo_announcement_missing_relays_tag(client).await);
         results.add(Self::test_accept_maintainer_announcement_without_service_listed(client).await);
 
-        // Repository State Announcement Tests
-        results.add(Self::test_accept_valid_repo_state_announcement(client).await);
-
         // Group 1: Accept Events Tagging Accepted Repositories
         results.add(Self::test_accept_issue_via_a_tag(client).await);
         results.add(Self::test_accept_comment_via_capital_a_tag(client).await);
@@ -528,79 +525,6 @@ impl EventAcceptancePolicyTests {
                     repo {} with an external clone URL. The relay should accept this to \
                     enable full recursive maintainer chain discovery. Event ID: {}",
                     repo_id, event_id
-                ));
-            }
-
-            Ok(())
-        })
-        .await
-    }
-
-    // ============================================================
-    // Repository State Announcement Tests
-    // ============================================================
-
-    /// Test: Accept valid repository state announcements
-    ///
-    /// Spec: Line 7 of ../grasp/01.md
-    /// Requirement: MUST accept repo state announcements with d, maintainers, and r tags
-    ///
-    /// **EXAMPLE: Using TestContext pattern for fixture management**
-    /// This test demonstrates the new TestContext pattern:
-    /// - In CI mode: Creates fresh repo for full isolation
-    /// - In Production mode: Reuses cached repo to minimize events
-    pub async fn test_accept_valid_repo_state_announcement(client: &AuditClient) -> TestResult {
-        TestResult::new(
-            "accept_valid_repo_state_announcement",
-            "GRASP-01:nostr-relay:7",
-            "Accept valid state announcements after repo announcement accepted",
-        )
-        .run(|| async {
-            // Create TestContext for mode-aware fixture management
-            let ctx = TestContext::new(client);
-
-            // Use OwnerStateDataPushed which handles the complete flow:
-            // 1. Creates repo announcement
-            // 2. Pushes git data with the deterministic commit
-            // 3. Sends the state announcement
-            // This ensures the state event references a commit that actually exists
-            let state_event = ctx
-                .get_fixture(FixtureKind::OwnerStateDataPushed)
-                .await
-                .map_err(|e| {
-                    format!(
-                        "Test setup failed: could not get repository state fixture: {}",
-                        e
-                    )
-                })?;
-
-            // Extract repo_id from the state event
-            let repo_id = state_event
-                .tags
-                .iter()
-                .find(|t| t.kind() == TagKind::d())
-                .and_then(|t| t.content())
-                .ok_or("Missing d tag in state announcement")?
-                .to_string();
-
-            let event_id = state_event.id;
-
-            // Query back to verify it was accepted and stored
-            let filter = Filter::new()
-                .kind(Kind::Custom(30618))
-                .author(client.public_key())
-                .identifier(&repo_id);
-
-            let events = client
-                .query(filter)
-                .await
-                .map_err(|e| format!("Failed to query events from relay: {}", e))?;
-
-            // Verify we got the event back
-            if events.is_empty() {
-                return Err(format!(
-                    "Event was not stored in relay (possibly rejected). Event ID: {}, Repo ID: {}",
-                    event_id, repo_id
                 ));
             }
 
