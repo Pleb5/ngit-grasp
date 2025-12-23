@@ -55,7 +55,7 @@ impl RepositoryCreationTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:28",
+                    "GRASP-01:git-http:34",
                     "Bare repository must be created and accessible via Smart HTTP when announcement is accepted",
                 )
                 .fail(format!("Failed to create repo fixture: {}", e))
@@ -76,7 +76,7 @@ impl RepositoryCreationTests {
             None => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:28",
+                    "GRASP-01:git-http:34",
                     "Bare repository must be created and accessible via Smart HTTP when announcement is accepted",
                 )
                 .fail("Repository announcement missing d tag")
@@ -88,7 +88,7 @@ impl RepositoryCreationTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:28",
+                    "GRASP-01:git-http:34",
                     "Bare repository must be created and accessible via Smart HTTP when announcement is accepted",
                 )
                 .fail(format!("Failed to convert pubkey to npub: {}", e))
@@ -99,7 +99,7 @@ impl RepositoryCreationTests {
         if let Err(e) = check_repo_accessible_via_http(relay_domain, &npub, &repo_id).await {
             return TestResult::new(
                 test_name,
-                "GRASP-01:git-http:28",
+                "GRASP-01:git-http:34",
                 "Bare repository must be created and accessible via Smart HTTP when announcement is accepted",
             )
             .fail(format!("Repository not accessible via HTTP: {}", e));
@@ -107,7 +107,7 @@ impl RepositoryCreationTests {
 
         TestResult::new(
             test_name,
-            "GRASP-01:git-http:28",
+            "GRASP-01:git-http:34",
             "Bare repository must be created and accessible via Smart HTTP when announcement is accepted",
         )
         .pass()
@@ -135,7 +135,7 @@ impl RepositoryCreationTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:38",
+                    "GRASP-01:git-http:44",
                     "Relay SHOULD serve a webpage for existing repositories",
                 )
                 .fail(format!("Failed to create repo fixture: {}", e))
@@ -156,7 +156,7 @@ impl RepositoryCreationTests {
             None => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:38",
+                    "GRASP-01:git-http:44",
                     "Relay SHOULD serve a webpage for existing repositories",
                 )
                 .fail("Repository announcement missing d tag")
@@ -168,7 +168,7 @@ impl RepositoryCreationTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:38",
+                    "GRASP-01:git-http:44",
                     "Relay SHOULD serve a webpage for existing repositories",
                 )
                 .fail(format!("Failed to convert pubkey to npub: {}", e))
@@ -179,7 +179,7 @@ impl RepositoryCreationTests {
         if let Err(e) = check_webpage_served(relay_domain, &npub, &repo_id).await {
             return TestResult::new(
                 test_name,
-                "GRASP-01:git-http:38",
+                "GRASP-01:git-http:44",
                 "Relay SHOULD serve a webpage for existing repositories",
             )
             .fail(format!("Webpage not served: {}", e));
@@ -187,7 +187,7 @@ impl RepositoryCreationTests {
 
         TestResult::new(
             test_name,
-            "GRASP-01:git-http:38",
+            "GRASP-01:git-http:44",
             "Relay SHOULD serve a webpage for existing repositories",
         )
         .pass()
@@ -214,7 +214,7 @@ impl RepositoryCreationTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:38",
+                    "GRASP-01:git-http:44",
                     "Relay SHOULD return 404 for repositories it doesn't host",
                 )
                 .fail(format!("Failed to create repo fixture: {}", e))
@@ -226,7 +226,7 @@ impl RepositoryCreationTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:38",
+                    "GRASP-01:git-http:44",
                     "Relay SHOULD return 404 for repositories it doesn't host",
                 )
                 .fail(format!("Failed to convert pubkey to npub: {}", e))
@@ -239,7 +239,7 @@ impl RepositoryCreationTests {
         if let Err(e) = check_404_for_nonexistent_repo(relay_domain, &npub, fake_repo_id).await {
             return TestResult::new(
                 test_name,
-                "GRASP-01:git-http:38",
+                "GRASP-01:git-http:44",
                 "Relay SHOULD return 404 for repositories it doesn't host",
             )
             .fail(format!("Expected 404, got: {}", e));
@@ -247,7 +247,7 @@ impl RepositoryCreationTests {
 
         TestResult::new(
             test_name,
-            "GRASP-01:git-http:38",
+            "GRASP-01:git-http:44",
             "Relay SHOULD return 404 for repositories it doesn't host",
         )
         .pass()

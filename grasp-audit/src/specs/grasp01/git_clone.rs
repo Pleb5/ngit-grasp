@@ -53,7 +53,7 @@ impl GitCloneTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:28",
+                    "GRASP-01:git-http:34",
                     "Repository must be cloneable via Git HTTP backend",
                 )
                 .fail(format!("Failed to create repo fixture: {}", e))
@@ -86,7 +86,7 @@ impl GitCloneTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:28",
+                    "GRASP-01:git-http:34",
                     "Repository must be cloneable via Git HTTP backend",
                 )
                 .fail(format!("Failed to convert pubkey to npub: {}", e))
@@ -121,7 +121,7 @@ impl GitCloneTests {
                 cleanup();
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:28",
+                    "GRASP-01:git-http:34",
                     "Repository must be cloneable via Git HTTP backend",
                 )
                 .fail(format!("Failed to execute git clone: {}", e));
@@ -133,7 +133,7 @@ impl GitCloneTests {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return TestResult::new(
                 test_name,
-                "GRASP-01:git-http:28",
+                "GRASP-01:git-http:34",
                 "Repository must be cloneable via Git HTTP backend",
             )
             .fail(format!("Git clone failed: {}", stderr));
@@ -144,7 +144,7 @@ impl GitCloneTests {
             cleanup();
             return TestResult::new(
                 test_name,
-                "GRASP-01:git-http:28",
+                "GRASP-01:git-http:34",
                 "Repository must be cloneable via Git HTTP backend",
             )
             .fail("Cloned repository missing .git directory");
@@ -153,7 +153,7 @@ impl GitCloneTests {
         cleanup();
         TestResult::new(
             test_name,
-            "GRASP-01:git-http:28",
+            "GRASP-01:git-http:34",
             "Repository must be cloneable via Git HTTP backend",
         )
         .pass()
@@ -175,7 +175,7 @@ impl GitCloneTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:28",
+                    "GRASP-01:git-http:34",
                     "Clone URL must follow correct format",
                 )
                 .fail(format!("Failed to create repo fixture: {}", e))
@@ -203,7 +203,7 @@ impl GitCloneTests {
         if !valid_url.contains(&npub) {
             return TestResult::new(
                 test_name,
-                "GRASP-01:git-http:28",
+                "GRASP-01:git-http:34",
                 "Clone URL must follow correct format",
             )
             .fail("URL missing npub");
@@ -212,7 +212,7 @@ impl GitCloneTests {
         if !valid_url.contains(&format!("{}.git", repo_id)) {
             return TestResult::new(
                 test_name,
-                "GRASP-01:git-http:28",
+                "GRASP-01:git-http:34",
                 "Clone URL must follow correct format",
             )
             .fail("URL missing repository identifier");
@@ -241,7 +241,7 @@ impl GitCloneTests {
         if output.status.success() {
             return TestResult::new(
                 test_name,
-                "GRASP-01:git-http:28",
+                "GRASP-01:git-http:34",
                 "Clone URL must follow correct format",
             )
             .fail("Invalid URL was accepted (should have been rejected)");
@@ -249,7 +249,7 @@ impl GitCloneTests {
 
         TestResult::new(
             test_name,
-            "GRASP-01:git-http:28",
+            "GRASP-01:git-http:34",
             "Clone URL must follow correct format",
         )
         .pass()
@@ -278,7 +278,7 @@ impl GitCloneTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:36",
+                    "GRASP-01:git-http:42",
                     "MUST include allow-reachable-sha1-in-want and allow-tip-sha1-in-want in advertisement",
                 )
                 .fail(format!("Failed to create repo fixture: {}", e))
@@ -299,7 +299,7 @@ impl GitCloneTests {
             None => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:36",
+                    "GRASP-01:git-http:42",
                     "MUST include allow-reachable-sha1-in-want and allow-tip-sha1-in-want in advertisement",
                 )
                 .fail("Repository announcement missing d tag")
@@ -311,7 +311,7 @@ impl GitCloneTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:36",
+                    "GRASP-01:git-http:42",
                     "MUST include allow-reachable-sha1-in-want and allow-tip-sha1-in-want in advertisement",
                 )
                 .fail(format!("Failed to convert pubkey to npub: {}", e))
@@ -331,7 +331,7 @@ impl GitCloneTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:36",
+                    "GRASP-01:git-http:42",
                     "MUST include allow-reachable-sha1-in-want and allow-tip-sha1-in-want in advertisement",
                 )
                 .fail(format!("HTTP request failed: {}", e))
@@ -341,7 +341,7 @@ impl GitCloneTests {
         if !response.status().is_success() {
             return TestResult::new(
                 test_name,
-                "GRASP-01:git-http:36",
+                "GRASP-01:git-http:42",
                 "MUST include allow-reachable-sha1-in-want and allow-tip-sha1-in-want in advertisement",
             )
             .fail(format!(
@@ -356,7 +356,7 @@ impl GitCloneTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:36",
+                    "GRASP-01:git-http:42",
                     "MUST include allow-reachable-sha1-in-want and allow-tip-sha1-in-want in advertisement",
                 )
                 .fail(format!("Failed to read response body: {}", e))
@@ -370,7 +370,7 @@ impl GitCloneTests {
         if !has_allow_reachable {
             return TestResult::new(
                 test_name,
-                "GRASP-01:git-http:36",
+                "GRASP-01:git-http:42",
                 "MUST include allow-reachable-sha1-in-want and allow-tip-sha1-in-want in advertisement",
             )
             .fail("Missing capability: allow-reachable-sha1-in-want");
@@ -379,7 +379,7 @@ impl GitCloneTests {
         if !has_allow_tip {
             return TestResult::new(
                 test_name,
-                "GRASP-01:git-http:36",
+                "GRASP-01:git-http:42",
                 "MUST include allow-reachable-sha1-in-want and allow-tip-sha1-in-want in advertisement",
             )
             .fail("Missing capability: allow-tip-sha1-in-want");
@@ -387,7 +387,7 @@ impl GitCloneTests {
 
         TestResult::new(
             test_name,
-            "GRASP-01:git-http:36",
+            "GRASP-01:git-http:42",
             "MUST include allow-reachable-sha1-in-want and allow-tip-sha1-in-want in advertisement",
         )
         .pass()

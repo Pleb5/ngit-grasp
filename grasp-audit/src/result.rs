@@ -327,15 +327,15 @@ mod tests {
     #[test]
     fn test_parse_spec_lines_single() {
         assert_eq!(parse_spec_lines("GRASP-01:nostr-relay:7"), vec![7]);
-        assert_eq!(parse_spec_lines("GRASP-01:git-http:28"), vec![28]);
+        assert_eq!(parse_spec_lines("GRASP-01:git-http:34"), vec![34]);
     }
 
     #[test]
     fn test_parse_spec_lines_range() {
         assert_eq!(parse_spec_lines("GRASP-01:nostr-relay:7-9"), vec![7, 8, 9]);
         assert_eq!(
-            parse_spec_lines("GRASP-01:cors:44-47"),
-            vec![44, 45, 46, 47]
+            parse_spec_lines("GRASP-01:cors:50-53"),
+            vec![50, 51, 52, 53]
         );
     }
 

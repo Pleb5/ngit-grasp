@@ -44,7 +44,7 @@ impl CorsTests {
     pub async fn test_cors_allow_origin(_client: &AuditClient, relay_domain: &str) -> TestResult {
         TestResult::new(
             "cors_allow_origin",
-            "GRASP-01:git-http:cors:44",
+            "GRASP-01:git-http:cors:50",
             "Access-Control-Allow-Origin: * on all responses",
         )
         .run(|| {
@@ -90,7 +90,7 @@ impl CorsTests {
     pub async fn test_cors_allow_methods(_client: &AuditClient, relay_domain: &str) -> TestResult {
         TestResult::new(
             "cors_allow_methods",
-            "GRASP-01:git-http:cors:45",
+            "GRASP-01:git-http:cors:51",
             "Access-Control-Allow-Methods: GET, POST on all responses",
         )
         .run(|| {
@@ -134,7 +134,7 @@ impl CorsTests {
     pub async fn test_cors_allow_headers(_client: &AuditClient, relay_domain: &str) -> TestResult {
         TestResult::new(
             "cors_allow_headers",
-            "GRASP-01:git-http:cors:46",
+            "GRASP-01:git-http:cors:52",
             "Access-Control-Allow-Headers: Content-Type on all responses",
         )
         .run(|| {
@@ -181,7 +181,7 @@ impl CorsTests {
     ) -> TestResult {
         TestResult::new(
             "cors_options_preflight",
-            "GRASP-01:git-http:cors:47",
+            "GRASP-01:git-http:cors:53",
             "OPTIONS requests return 204 No Content",
         )
         .run(|| {
