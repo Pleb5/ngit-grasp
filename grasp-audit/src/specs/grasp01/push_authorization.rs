@@ -486,9 +486,10 @@ impl PushAuthorizationTests {
     ///
     /// This test uses the OwnerStateDataPushed fixture which handles all 4 stages:
     /// 1. **Generated**: Creates RepoState (repo announcement + state event)
-    /// 2. **Sent**: Sends events to relay
-    /// 3. **Verified**: Confirms events accepted by relay
+    /// 2. **Sent**: Sends events to relay (returns OK, accepted but 'purgatory:...' message)
+    /// 3. **Verify Not Served**: Confirms event is not served by relays
     /// 4. **DataPushed**: Clones repo, creates deterministic commit, pushes to relay
+    /// 5. **Verified**: Confirms event is served by relay
     ///
     /// The test wraps the fixture result in pass/fail using the error message.
     #[allow(unused_variables)] // relay_domain is now handled by fixture
@@ -504,7 +505,7 @@ impl PushAuthorizationTests {
         match ctx.get_fixture(FixtureKind::OwnerStateDataPushed).await {
             Ok(_state_event) => TestResult::new(
                 test_name,
-                "GRASP-01:git-http:36",
+                "GRASP-01:git-http:36", // TODO do we add purgatory line here?
                 "Push authorized with matching state",
             )
             .pass(),

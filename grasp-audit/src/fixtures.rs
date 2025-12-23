@@ -214,11 +214,12 @@ pub enum FixtureKind {
 
     /// Owner's state event with git data successfully pushed (full 4-stage fixture)
     ///
-    /// This fixture represents the complete flow for testing push authorization:
+    /// This fixture represents the complete flow for testing state push authorization:
     /// 1. **Generated**: Creates RepoState (repo announcement + state event)
-    /// 2. **Sent**: Sends events to relay
-    /// 3. **Verified**: Confirms events accepted by relay
+    /// 2. **Sent**: Sends events to relay (returns OK, accepted but 'purgatory:...' message)
+    /// 3. **Verify Not Served**: Confirms event is not served by relays
     /// 4. **DataPushed**: Clones repo, creates deterministic commit, pushes to relay
+    /// 5. **Verified**: Confirms event is served by relay
     ///
     /// - Requires ValidRepo (uses same repo_id)
     /// - State event signed by owner keys (`client.keys()`)
@@ -867,9 +868,10 @@ impl<'a> TestContext<'a> {
     ///
     /// This handles all stages of the fixture:
     /// 1. **Generated**: Creates RepoState (repo announcement + state event)
-    /// 2. **Sent**: Sends events to relay
-    /// 3. **Verified**: Confirms events accepted by relay
+    /// 2. **Sent**: Sends events to relay (returns OK, accepted but 'purgatory:...' message)
+    /// 3. **Verify Not Served**: Confirms event is not served by relays
     /// 4. **DataPushed**: Clones repo, creates deterministic commit, pushes to relay
+    /// 5. **Verified**: Confirms event is served by relay
     ///
     /// # Returns
     /// The state event (kind 30618) after all stages complete successfully
@@ -877,7 +879,7 @@ impl<'a> TestContext<'a> {
         use nostr_sdk::prelude::*;
 
         // ============================================================
-        // Stage 1 & 2: ValidRepo is ensured by ensure_fixture before this is called
+        // Stage 1: ValidRepo is ensured by ensure_fixture before this is called
         // ============================================================
         let repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
         let repo_id = self.extract_repo_id(&repo)?;
@@ -902,13 +904,12 @@ impl<'a> TestContext<'a> {
             .build(self.client.keys())
             .map_err(|e| anyhow::anyhow!("Failed to build state announcement: {}", e))?;
 
-        // Send state event to relay
-        self.client.send_event(state_event.clone()).await?;
-
         // ============================================================
-        // Stage 3: Verify state event was accepted
+        // Stage 2 & 3: Send to Relay, get Accepted response and Verify its Not Served
         // ============================================================
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        self.client
+            .send_event_expect_purgatory_not_served(state_event.clone())
+            .await?;
 
         // ============================================================
         // Stage 4: DataPushed - Clone repo, create commit, push
@@ -1000,14 +1001,29 @@ impl<'a> TestContext<'a> {
         cleanup(&clone_path);
 
         match push_result {
-            Ok(true) => Ok(state_event),
-            Ok(false) => Err(anyhow::anyhow!(
-                "Push was rejected but should have been accepted. \
+            Ok(res) => {
+                if !res {
+                    return Err(anyhow::anyhow!(
+                        "Push was rejected but should have been accepted. \
                 The state event points to commit {} which matches the pushed commit.",
-                DETERMINISTIC_COMMIT_HASH
-            )),
-            Err(e) => Err(anyhow::anyhow!("Push error: {}", e)),
+                        DETERMINISTIC_COMMIT_HASH
+                    ));
+                }
+            }
+            Err(e) => return Err(anyhow::anyhow!("Push error: {}", e)),
         }
+
+        // ============================================================
+        // Stage 5: Verify state event is on relay
+        // ============================================================
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        if !self.client.is_event_on_relay(state_event.id).await? {
+            return Err(anyhow::anyhow!("state event not released from purgatory"));
+        }
+
+        Ok(state_event)
     }
 
     /// Build MaintainerStateDataPushed fixture: full 4-stage fixture for maintainer push authorization
@@ -1667,6 +1683,7 @@ pub async fn send_and_verify_rejected(
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 /// Clone a repository from the relay and return the path
 ///

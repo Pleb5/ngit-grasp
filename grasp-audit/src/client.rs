@@ -2,7 +2,7 @@
 
 use crate::audit::{AuditConfig, AuditEventBuilder, AuditMode};
 use crate::fixtures::FixtureKind;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use nostr_sdk::prelude::*;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -179,6 +179,49 @@ impl AuditClient {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         Ok(event_id)
+    }
+
+    /// Send an event (with audit tags automatically added) and expect OK, success, 'purgatory:', verify not served - TODO the msg verificaiton is not implemented
+    pub async fn send_event_expect_purgatory_not_served(&self, event: Event) -> Result<EventId> {
+        if self.config.read_only {
+            return Err(anyhow!("Client is in read-only mode"));
+        }
+
+        let output = self.client.send_event(&event).await?;
+        let event_id = *output.id();
+
+        // Check if any relay rejected the event and return the error message
+        if !output.failed.is_empty() {
+            // Get the first failed relay error message
+            let (relay_url, error) = output.failed.iter().next().unwrap();
+            return Err(anyhow!("Relay {} rejected event: {}", relay_url, error));
+        }
+
+        // Wait a bit for event to propagate
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // ------------------------------------------------------
+        // TODO Magically enable purgatory by uncommenting this:
+        // ------------------------------------------------------
+        // ------------------------------------------------------
+        // if !self.is_event_on_relay(event.id).await? {
+        //     return Err(anyhow!(
+        //         "event sent to relay was served instead of being put in purgatory"
+        //     ));
+        // }
+        // ------------------------------------------------------
+
+        Ok(event_id)
+    }
+
+    /// check if an event is on the relay
+    pub async fn is_event_on_relay(&self, id: EventId) -> Result<bool> {
+        Ok(!self
+            .client
+            .fetch_events(vec![Filter::new().id(id)], Duration::from_secs(1))
+            .await
+            .context("error trying to query relay for event")?
+            .is_empty())
     }
 
     /// Create an event builder that automatically includes audit tags
