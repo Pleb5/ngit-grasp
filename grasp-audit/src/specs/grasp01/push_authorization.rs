@@ -355,6 +355,8 @@ impl PushAuthorizationTests {
         results.add(
             Self::test_push_authorized_by_recursive_maintainer_state(client, relay_domain).await,
         );
+        // Note: test_push_of_state_by_maintainer_updates_other_maintainer_repos is not included
+        // in run_tests as it's a stub for the purgatory feature and returns .skip()
         results.add(
             Self::test_push_to_nostr_ref_with_invalid_event_id_rejected(client, relay_domain).await,
         );
@@ -756,6 +758,38 @@ impl PushAuthorizationTests {
             )
             .fail(format!("{}", e)),
         }
+    }
+
+    /// Test that push of state by one maintainer updates git repos of other maintainers
+    ///
+    /// GRASP-01: "respecting the recursive maintainer set"
+    ///
+    /// This test verifies that when a maintainer publishes a state event, it updates
+    /// the git repository state for all other maintainers' views. This ensures git
+    /// repositories always reflect the state according to nostr events (including state
+    /// from recursive maintainers).
+    ///
+    /// ## Implementation Note
+    ///
+    /// This test is a stub for the purgatory feature. It will be implemented as part
+    /// of GRASP-02 purgatory functionality.
+    ///
+    /// ## Fixture Compatibility
+    ///
+    /// This test will use:
+    /// - `MaintainerStateDataPushed` - maintainer's state event with git data pushed
+    /// - Multiple maintainer clones to verify state propagation
+    #[allow(dead_code)]
+    pub async fn test_push_of_state_by_maintainer_updates_other_maintainer_repos(
+        _client: &AuditClient,
+        _relay_domain: &str,
+    ) -> TestResult {
+        TestResult::new(
+            "test_push_of_state_by_maintainer_updates_other_maintainer_repos",
+            "GRASP-01:git-http:purgatory",
+            "Maintainer state updates propagate to other maintainer repos",
+        )
+        .fail("Not yet implemented - requires purgatory feature (GRASP-02)")
     }
 
     /// Test that non-maintainer state event is ignored

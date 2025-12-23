@@ -70,3 +70,8 @@ isolated_push_test!(test_push_to_nostr_ref_with_wrong_commit_after_event_receive
 isolated_push_test!(test_push_to_nostr_ref_with_correct_commit_after_event_received_accepted);
 isolated_push_test!(test_head_set_after_state_event_with_existing_commit);
 isolated_push_test!(test_head_set_after_git_push_with_required_oids);
+
+// Note: test_push_of_state_by_maintainer_updates_other_maintainer_repos is not included
+// as it's a stub for the purgatory feature. It can be run manually once implemented:
+// isolated_push_test!(test_push_of_state_by_maintainer_updates_other_maintainer_repos);
+
