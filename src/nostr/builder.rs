@@ -13,7 +13,7 @@ use nostr_relay_builder::prelude::*;
 
 use crate::config::{Config, DatabaseBackend};
 use crate::nostr::events::{
-    RepositoryAnnouncement, RepositoryState, KIND_PR, KIND_PR_UPDATE, KIND_REPOSITORY_ANNOUNCEMENT,
+    RepositoryAnnouncement, KIND_PR, KIND_PR_UPDATE, KIND_REPOSITORY_ANNOUNCEMENT,
     KIND_REPOSITORY_STATE, KIND_USER_GRASP_LIST,
 };
 use crate::nostr::policy::{
@@ -57,8 +57,9 @@ impl Nip34WritePolicy {
         domain: impl Into<String>,
         database: SharedDatabase,
         git_data_path: impl Into<std::path::PathBuf>,
+        purgatory: std::sync::Arc<crate::purgatory::Purgatory>,
     ) -> Self {
-        let ctx = PolicyContext::new(domain, database, git_data_path);
+        let ctx = PolicyContext::new(domain, database, git_data_path, purgatory);
         Self {
             announcement_policy: AnnouncementPolicy::new(ctx.clone()),
             state_policy: StatePolicy::new(ctx.clone()),
@@ -143,21 +144,50 @@ impl Nip34WritePolicy {
 
         match self.state_policy.validate(event) {
             StateResult::Accept => {
-                // Parse state to get HEAD and branch info
-                match RepositoryState::from_event(event.clone()) {
-                    Ok(_state) => {
-                        // Process state alignment asynchronously
-                        if let Err(e) = self.state_policy.process_state_event(event).await {
-                            tracing::warn!("Failed to process state event {}: {}", event_id_str, e);
+                // Parse state to get identifier for purgatory message
+                let identifier = event
+                    .tags
+                    .iter()
+                    .find_map(|tag| {
+                        let tag_vec = tag.clone().to_vec();
+                        if tag_vec.len() >= 2 && tag_vec[0] == "d" {
+                            Some(tag_vec[1].clone())
+                        } else {
+                            None
                         }
+                    })
+                    .unwrap_or_else(|| "unknown".to_string());
 
-                        tracing::debug!("Accepted repository state: {}", event_id_str);
+                // Process state alignment asynchronously
+                match self.state_policy.process_state_event(event).await {
+                    Ok(0) => {
+                        // No repos aligned - event was added to purgatory
+                        tracing::info!(
+                            "State event {} added to purgatory: waiting for git data for identifier {}",
+                            event_id_str,
+                            identifier
+                        );
+                        WritePolicyResult::Reject {
+                            status: true, // Client sees OK
+                            message: format!(
+                                "purgatory: state event stored, waiting for git push for {}",
+                                identifier
+                            )
+                            .into(),
+                        }
+                    }
+                    Ok(count) => {
+                        // Successfully aligned repos
+                        tracing::debug!(
+                            "Accepted repository state {}: aligned {} repo(s)",
+                            event_id_str,
+                            count
+                        );
                         WritePolicyResult::Accept
                     }
                     Err(e) => {
-                        tracing::warn!("Failed to parse repository state {}: {}", event_id_str, e);
-                        // Still accept the event even if we can't parse it
-                        // The validation passed, so it's structurally valid
+                        tracing::warn!("Failed to process state event {}: {}", event_id_str, e);
+                        // Still accept the event even if processing failed
                         WritePolicyResult::Accept
                     }
                 }
@@ -172,6 +202,58 @@ impl Nip34WritePolicy {
     /// Handle PR or PR Update event
     async fn handle_pr_event(&self, event: &Event) -> WritePolicyResult {
         let event_id_str = event.id.to_bech32().unwrap_or_else(|_| event.id.to_hex());
+
+        // Check if git data exists (checks placeholders and commit existence)
+        match self.pr_event_policy.check_git_data_exists(event).await {
+            Ok(false) => {
+                // No git data exists - add to purgatory
+                let commit = event
+                    .tags
+                    .iter()
+                    .find_map(|tag| {
+                        let tag_vec = tag.clone().to_vec();
+                        if tag_vec.len() >= 2 && tag_vec[0] == "c" {
+                            Some(tag_vec[1].clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                tracing::info!(
+                    "PR event {} added to purgatory: waiting for git push with commit {}",
+                    event_id_str,
+                    commit
+                );
+
+                // Add to purgatory
+                self.ctx
+                    .purgatory
+                    .add_pr(event.clone(), event.id.to_hex(), commit.clone());
+
+                return WritePolicyResult::Reject {
+                    status: true, // Client sees OK
+                    message: format!(
+                        "purgatory: PR event stored, waiting for git push with commit {}",
+                        commit
+                    )
+                    .into(),
+                };
+            }
+            Ok(true) => {
+                // Git data exists - proceed with normal validation
+                tracing::debug!("Git data exists for PR event {}", event_id_str);
+            }
+            Err(e) => {
+                // Error checking git data - reject event
+                tracing::warn!(
+                    "Failed to check git data for PR event {}: {}",
+                    event_id_str,
+                    e
+                );
+                return WritePolicyResult::reject(format!("Failed to check git data: {}", e));
+            }
+        }
 
         // Validate refs/nostr refs for this PR event
         // This deletes any refs/nostr/<event-id> that points to wrong commit
@@ -289,7 +371,10 @@ pub struct RelayWithDatabase {
 /// Returns a `RelayWithDatabase` struct containing:
 /// - The `LocalRelay` for handling WebSocket connections
 /// - The `SharedDatabase` for direct database queries (e.g., push authorization)
-pub async fn create_relay(config: &Config) -> Result<RelayWithDatabase> {
+pub async fn create_relay(
+    config: &Config,
+    purgatory: Arc<crate::purgatory::Purgatory>,
+) -> Result<RelayWithDatabase> {
     tracing::info!("Configuring nostr relay with GRASP-01 validation...");
 
     // Determine database path
@@ -337,7 +422,10 @@ pub async fn create_relay(config: &Config) -> Result<RelayWithDatabase> {
     // Build relay with GRASP-01 validation
     // Clone Arc for the write policy so both relay and policy can access the database
     let git_data_path = config.effective_git_data_path();
-    let write_policy = Nip34WritePolicy::new(&config.domain, database.clone(), &git_data_path);
+
+    // Create write policy with purgatory integration
+    let write_policy =
+        Nip34WritePolicy::new(&config.domain, database.clone(), &git_data_path, purgatory);
 
     let relay = LocalRelayBuilder::default()
         .database(database.clone())

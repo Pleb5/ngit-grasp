@@ -1355,19 +1355,19 @@ impl PushAuthorizationTests {
         }
 
         // TODO - uncomment this when purgatory feature added
-        // // Check event is not yet served by relay (still in purgatory)
-        // match client.is_event_on_relay(pr_event.id).await {
-        //     Ok(on_relay) => {
-        //         if !on_relay {
-        //             return TestResult::new(test_name, "GRASP-01:git-http:40", desc)
-        //                 .fail("PR event not in purgatory before correct commit pushed to refs/nostr/<event-id> (the relay serve the PR event)");
-        //         }
-        //     }
-        //     Err(_) => {
-        //         return TestResult::new(test_name, "GRASP-01:git-http:40", desc)
-        //             .fail("failed to query relay");
-        //     }
-        // }
+        // Check event is not yet served by relay (still in purgatory)
+        match client.is_event_on_relay(pr_event.id).await {
+            Ok(on_relay) => {
+                if !on_relay {
+                    return TestResult::new(test_name, "GRASP-01:git-http:40", desc)
+                        .fail("PR event not in purgatory before correct commit pushed to refs/nostr/<event-id> (the relay serve the PR event)");
+                }
+            }
+            Err(_) => {
+                return TestResult::new(test_name, "GRASP-01:git-http:40", desc)
+                    .fail("failed to query relay");
+            }
+        }
 
         // Push correct commit (should succeed)
         let push_succeeded = match push_to_pr_ref(&clone_path, &pr_event_id) {

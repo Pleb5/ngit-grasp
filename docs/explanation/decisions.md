@@ -172,3 +172,32 @@ The additional complexity of parsing the Git protocol is minimal compared to the
 6. ⏭️ Implement push validation logic
 7. ⏭️ Integration tests
 8. ⏭️ GRASP-01 compliance testing
+
+## Purgatory Implementation (2025-12-23)
+
+Implemented according to design specification in [`purgatory-design.md`](purgatory-design.md). No significant deviations from original design.
+
+**Implementation approach:**
+- Phases 1-7 completed sequentially as planned
+- All data structures match design specifications
+- Integration points implemented as designed
+
+**Key technical choices:**
+
+1. **Optional Purgatory in Git Handlers**: Used `Option<Arc<Purgatory>>` in git handler signatures for backward compatibility. This allows git handlers to function even when no purgatory is provided (e.g., in minimal test setups).
+
+2. **Cleanup Interval**: Background cleanup task runs every 60 seconds as designed, removing expired entries from both state and PR stores.
+
+3. **Thread-Safe Storage**: Used `Arc<DashMap>` for lock-free concurrent access, enabling safe sharing between HTTP handlers, WebSocket handlers, and background tasks.
+
+4. **Late Binding Implementation**: Ref extraction logic in [`helpers.rs`](../../src/purgatory/helpers.rs) extracts refs at git push time, not event arrival time, as specified in the design.
+
+**Test integration:**
+- Existing test code in `grasp-audit` was uncommented (Phases 7)
+- No new integration tests added (as instructed)
+- Test verification enabled in [`grasp-audit/src/client.rs`](../../grasp-audit/src/client.rs) and [`grasp-audit/src/specs/grasp01/push_authorization.rs`](../../grasp-audit/src/specs/grasp01/push_authorization.rs)
+
+**Related Documentation:**
+- Design: [`purgatory-design.md`](purgatory-design.md)
+- Architecture: [`architecture.md`](architecture.md#5-purgatory-system-srcpurgatory)
+- Implementation Plan: [`../purgatory-implementation-plan.md`](../purgatory-implementation-plan.md)

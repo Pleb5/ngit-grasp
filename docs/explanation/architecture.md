@@ -239,7 +239,76 @@ pub struct RepositoryAnnouncement { ... }
 pub struct RepositoryState { ... }
 ```
 
-### 5. Configuration ([`src/config.rs`](src/config.rs))
+### 5. Purgatory System ([`src/purgatory/`](../../src/purgatory/))
+
+The purgatory system solves the "which arrives first?" problem where either nostr events or git pushes can arrive in any order. It provides an in-memory holding area for events and git data awaiting their counterparts.
+
+**Design Document**: See [`purgatory-design.md`](purgatory-design.md) for complete design specifications.
+
+#### Architecture
+
+```rust
+/// Main purgatory structure with two separate stores
+pub struct Purgatory {
+    /// State events (kind 30618) indexed by repository identifier
+    state_events: Arc<DashMap<String, Vec<StatePurgatoryEntry>>>,
+    
+    /// PR events (kind 1617/1618) or placeholders indexed by event ID
+    pr_events: Arc<DashMap<String, PrPurgatoryEntry>>,
+}
+```
+
+**Key Design Principles:**
+
+1. **Separate Storage**: State events and PR events use different indexing strategies
+   - State events: Indexed by `identifier` (multiple events can wait for same repo)
+   - PR events: Indexed by `event_id` (one-to-one mapping)
+
+2. **Late Binding**: State event refs are extracted at git push time, not event arrival
+   - Enables flexible matching when pushes arrive out-of-order
+   - Helper functions in [`helpers.rs`](../../src/purgatory/helpers.rs) handle ref extraction
+
+3. **Bidirectional Waiting**: Either side can arrive first
+   - **Event-first**: Event waits for git push
+   - **Git-first**: Placeholder created, waits for event
+
+4. **Automatic Expiry**: 30-minute default expiry, extensible during processing
+   - Background cleanup task runs every 60 seconds
+   - Removes expired entries from both stores
+
+#### Data Types
+
+See [`types.rs`](../../src/purgatory/types.rs) for complete definitions:
+
+- **[`RefPair`](../../src/purgatory/types.rs:16)**: Ref name + object SHA pair
+- **[`StatePurgatoryEntry`](../../src/purgatory/types.rs:29)**: State event with metadata
+- **[`PrPurgatoryEntry`](../../src/purgatory/types.rs:52)**: PR event or placeholder with metadata
+
+#### Integration Points
+
+**Write Policy** ([`src/nostr/policy/`](../../src/nostr/policy/)):
+- State policy checks git data existence before adding to purgatory
+- PR policy checks for placeholders before adding to purgatory
+- Events return "purgatory: will not be served until git data arrives" message
+
+**Git Handlers** ([`src/git/handlers.rs`](../../src/git/handlers.rs)):
+- On git push: Check purgatory for matching state events
+- On refs/nostr/* push: Check purgatory for PR events or create placeholders
+- Release events from purgatory when git data arrives
+- Save released events to database
+
+**Main.rs** ([`src/main.rs`](../../src/main.rs)):
+- Creates `Arc<Purgatory>` at startup
+- Passes to both write policy and git handlers
+- Spawns background cleanup task (60-second interval)
+
+#### Thread Safety
+
+- Uses `Arc<DashMap>` for lock-free concurrent access
+- Safe to share between HTTP handlers, WebSocket handlers, and background tasks
+- No blocking locks in hot paths
+
+### 6. Configuration ([`src/config.rs`](src/config.rs))
 
 ```rust
 pub struct Config {

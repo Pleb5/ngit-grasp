@@ -16,6 +16,8 @@ pub use related::{ReferenceResult, RelatedEventPolicy};
 pub use state::{AlignmentResult, StatePolicy, StateResult};
 
 use super::SharedDatabase;
+use crate::purgatory::Purgatory;
+use std::sync::Arc;
 
 /// Shared context for all sub-policies
 #[derive(Clone)]
@@ -23,6 +25,7 @@ pub struct PolicyContext {
     pub domain: String,
     pub database: SharedDatabase,
     pub git_data_path: std::path::PathBuf,
+    pub purgatory: Arc<Purgatory>,
 }
 
 impl PolicyContext {
@@ -30,11 +33,13 @@ impl PolicyContext {
         domain: impl Into<String>,
         database: SharedDatabase,
         git_data_path: impl Into<std::path::PathBuf>,
+        purgatory: Arc<Purgatory>,
     ) -> Self {
         Self {
             domain: domain.into(),
             database,
             git_data_path: git_data_path.into(),
+            purgatory,
         }
     }
 }

@@ -340,6 +340,74 @@ pub fn validate_nostr_ref(
     Ok(true)
 }
 
+/// Clean up placeholder refs from all repositories on shutdown.
+///
+/// Walks through all git repositories in the git_data_path and deletes
+/// `refs/nostr/<event-id>` refs for the given event IDs. This is called
+/// on shutdown to clean up placeholders created when git data arrived
+/// before the corresponding PR event.
+///
+/// # Arguments
+/// * `git_data_path` - Base directory containing git repositories
+/// * `event_ids` - Event IDs whose refs/nostr/ refs should be deleted
+///
+/// # Returns
+/// Number of refs successfully deleted
+pub fn cleanup_placeholder_refs(git_data_path: &str, event_ids: &[String]) -> usize {
+    if event_ids.is_empty() {
+        return 0;
+    }
+
+    let git_path = PathBuf::from(git_data_path);
+    if !git_path.exists() {
+        debug!("Git data path does not exist: {}", git_data_path);
+        return 0;
+    }
+
+    let mut deleted_count = 0;
+
+    // Walk through all repositories (npub/repo.git structure)
+    if let Ok(npub_entries) = std::fs::read_dir(&git_path) {
+        for npub_entry in npub_entries.flatten() {
+            if !npub_entry.path().is_dir() {
+                continue;
+            }
+
+            // For each npub directory, check repos
+            if let Ok(repo_entries) = std::fs::read_dir(npub_entry.path()) {
+                for repo_entry in repo_entries.flatten() {
+                    let repo_path = repo_entry.path();
+                    if !repo_path.is_dir() || !repo_path.to_string_lossy().ends_with(".git") {
+                        continue;
+                    }
+
+                    // Try to delete refs/nostr/<event-id> for each placeholder event
+                    for event_id in event_ids {
+                        let ref_name = format!("refs/nostr/{}", event_id);
+                        if delete_ref(&repo_path, &ref_name).is_ok() {
+                            deleted_count += 1;
+                            info!(
+                                "Cleaned up placeholder ref {} from {}",
+                                ref_name,
+                                repo_path.display()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if deleted_count > 0 {
+        info!(
+            "Shutdown cleanup: removed {} placeholder refs from git repositories",
+            deleted_count
+        );
+    }
+
+    deleted_count
+}
+
 /// Get the current HEAD ref from a repository
 ///
 /// # Arguments

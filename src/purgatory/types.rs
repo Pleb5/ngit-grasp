@@ -1,0 +1,99 @@
+//! Core data types for the purgatory system.
+//!
+//! Purgatory is an in-memory holding area for nostr events that depend on git data
+//! that hasn't arrived yet, and vice versa. This solves the "which arrives first?"
+//! problem where either the nostr event or git push can arrive first.
+
+use nostr_sdk::prelude::*;
+use std::time::Instant;
+
+/// A reference name and its target object.
+///
+/// Used to identify specific git refs (branches, tags) that a state event
+/// is waiting for. The combination of ref_name and object_sha uniquely
+/// identifies a git reference at a specific point in time.
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+pub struct RefPair {
+    /// Full ref name, e.g., "refs/heads/main" or "refs/tags/v1.0"
+    pub ref_name: String,
+    /// Target object SHA (commit or annotated tag)
+    pub object_sha: String,
+}
+
+/// A git reference update from receive-pack protocol.
+///
+/// Represents the full update information: what the ref was, what it will be,
+/// and which ref is being updated. This allows detection of:
+/// - Additions: old_oid is all zeros
+/// - Deletions: new_oid is all zeros
+/// - Modifications: both are non-zero but different
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+pub struct RefUpdate {
+    /// Old object SHA (40 zeros = ref is being created)
+    pub old_oid: String,
+    /// New object SHA (40 zeros = ref is being deleted)
+    pub new_oid: String,
+    /// Full ref name, e.g., "refs/heads/main" or "refs/tags/v1.0"
+    pub ref_name: String,
+}
+
+impl RefUpdate {
+    /// Check if this update is creating a new ref
+    pub fn is_creation(&self) -> bool {
+        self.old_oid == "0000000000000000000000000000000000000000"
+    }
+
+    /// Check if this update is deleting a ref
+    pub fn is_deletion(&self) -> bool {
+        self.new_oid == "0000000000000000000000000000000000000000"
+    }
+
+    /// Check if this update is modifying an existing ref
+    pub fn is_modification(&self) -> bool {
+        !self.is_creation() && !self.is_deletion()
+    }
+}
+
+/// Entry for a state event (kind 30618) waiting in purgatory.
+///
+/// State events declare the current state of a repository but may arrive
+/// before the corresponding git data has been pushed. This entry holds
+/// the event and associated metadata until the git data arrives.
+#[derive(Debug, Clone)]
+pub struct StatePurgatoryEntry {
+    /// The nostr state event (kind 30618) awaiting git data
+    pub event: Event,
+
+    /// The repository identifier from the event's 'd' tag
+    pub identifier: String,
+
+    /// Event author pubkey
+    pub author: PublicKey,
+
+    /// When this entry was added to purgatory
+    pub created_at: Instant,
+
+    /// Expiry deadline (30 min from creation, may be extended)
+    pub expires_at: Instant,
+}
+
+/// Entry for a PR event (kind 1617/1618) or placeholder waiting in purgatory.
+///
+/// PR events reference specific commits but may arrive before the git push
+/// containing those commits. Alternatively, a git push may arrive first,
+/// creating a placeholder entry waiting for the corresponding PR event.
+#[derive(Debug, Clone)]
+pub struct PrPurgatoryEntry {
+    /// The nostr PR event, if received (None = git data arrived first)
+    pub event: Option<Event>,
+
+    /// The expected commit SHA from 'c' tag (if event exists)
+    /// or the actual commit pushed (if git arrived first)
+    pub commit: String,
+
+    /// When this entry was added to purgatory
+    pub created_at: Instant,
+
+    /// Expiry deadline (30 min from creation, may be extended)
+    pub expires_at: Instant,
+}

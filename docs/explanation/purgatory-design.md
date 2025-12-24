@@ -1,5 +1,10 @@
 # Purgatory Implementation Design
 
+**Status**: ✅ Implemented (2025-12-23)
+**Implementation**: Phases 1-7 complete
+**Source Code**: [`src/purgatory/`](../../src/purgatory/)
+**Related**: [`docs/explanation/architecture.md`](architecture.md) - System architecture overview
+
 ## Overview
 
 Purgatory is an in-memory holding area for nostr events that depend on git data that hasn't arrived yet, **and** for git data that arrived before its corresponding nostr event. Events/placeholders are held until the other half arrives, at which point they are processed and saved to the database.
@@ -899,3 +904,110 @@ WritePolicyResult::Accept
 2. **Same event submitted twice** - Deduplicated by event ID
 3. **Push timeout during processing** - Entry expiry extended to 15 min minimum
 4. **Race between event and git push** - Whichever completes the pair triggers release
+
+
+## Purgatory Authorization Fix (2025-12-24)
+
+**Critical Implementation Note**: The original purgatory design placed purgatory checking AFTER git push execution. This created a deadlock where pushes were rejected because the authorizing state event was in purgatory, not the database.
+
+### The Deadlock Problem
+
+**Original broken flow:**
+1. State event arrives → No git data exists → Event stored in PURGATORY (not database)
+2. Git push arrives → Authorization checks DATABASE only → No state found → **PUSH REJECTED** ❌
+3. Purgatory check runs → But push already failed, so this never helps
+
+### The Fix: Authorization-Time Purgatory Check
+
+**Correct flow (implemented):**
+1. State event arrives → No git data exists → Event stored in purgatory
+2. Git push arrives → Authorization checks **DATABASE + PURGATORY** → State found in purgatory → **PUSH AUTHORIZED** ✅
+3. After successful push → Save purgatory event to database → Remove from purgatory
+
+### Implementation Details
+
+#### 1. Modified [`AuthorizationResult`](../../src/git/authorization.rs:397)
+
+Added `from_purgatory: bool` field to track whether the authorizing state came from purgatory:
+
+```rust
+pub struct AuthorizationResult {
+    pub authorized: bool,
+    pub reason: String,
+    pub state: Option<RepositoryState>,
+    pub maintainers: Vec<String>,
+    pub from_purgatory: bool,  // NEW: Track event source
+}
+```
+
+#### 2. Enhanced [`get_authorization_for_owner()`](../../src/git/authorization.rs:342)
+
+Added purgatory checking when no state found in database:
+
+```rust
+pub async fn get_authorization_for_owner(
+    database: &SharedDatabase,
+    identifier: &str,
+    owner_pubkey: &str,
+    purgatory: Option<&Arc<Purgatory>>,
+    pushed_refs: &[(String, String, String)],
+    repo_path: &Path,
+) -> Result<AuthorizationResult>
+```
+
+**Logic**:
+1. Check database for state events (existing behavior)
+2. If no state in database AND purgatory available:
+   - Parse pushed refs to RefPairs
+   - Get local refs from repository  
+   - Call [`find_matching_states()`](../../src/purgatory/mod.rs:203)
+   - Filter to latest event from authorized authors
+   - Return authorization with `from_purgatory: true`
+
+#### 3. Post-Push Purgatory Event Save
+
+In [`handle_receive_pack()`](../../src/git/handlers.rs:187), after successful push:
+
+```rust
+if from_purgatory {
+    if let (Some(db), Some(purg)) = (&database, &purgatory) {
+        // Save state event to database
+        db.save_event(&state.event).await?;
+        
+        // Remove from purgatory
+        purg.remove_state_event(identifier, &state.event.id);
+    }
+}
+```
+
+### Files Modified
+
+1. **[`src/git/authorization.rs`](../../src/git/authorization.rs)**
+   - Added `from_purgatory` field to `AuthorizationResult`
+   - Modified `get_authorization_for_owner()` signature and logic
+   - Added purgatory checking when database has no state
+
+2. **[`src/git/handlers.rs`](../../src/git/handlers.rs)**
+   - Modified `authorize_push()` to accept purgatory and repo_path parameters
+   - Added tracking of `from_purgatory` flag
+   - Added post-push database save for purgatory events
+
+### Why This Order Matters
+
+Checking purgatory DURING authorization (before push execution) is critical:
+
+- **Prevents deadlock**: Push is authorized by purgatory state before execution
+- **Maintains atomicity**: Only saves to database after successful push
+- **Race condition safe**: First successful push claims the purgatory event
+
+The alternative (checking purgatory after push) creates an insurmountable deadlock where valid pushes are rejected because their authorizing state is in purgatory instead of the database.
+
+### Testing
+
+The fix enables the `test_push_authorized_by_owner_state` integration test scenario where:
+1. State event is sent to relay (goes to purgatory - no git data yet)
+2. Git push is sent (uses purgatory state for authorization)
+3. State event is released from purgatory to database
+
+---
+

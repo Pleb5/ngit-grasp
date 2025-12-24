@@ -27,6 +27,7 @@ use crate::config::Config;
 use crate::git;
 use crate::metrics::Metrics;
 use crate::nostr::builder::SharedDatabase;
+use crate::purgatory::Purgatory;
 
 /// CORS headers required by GRASP-01 specification (lines 40-47)
 const CORS_ALLOW_ORIGIN: &str = "*";
@@ -94,6 +95,8 @@ struct HttpService {
     database: SharedDatabase,
     /// Optional metrics for Prometheus endpoint
     metrics: Option<Arc<Metrics>>,
+    /// Purgatory for event/git coordination
+    purgatory: Arc<Purgatory>,
 }
 
 impl HttpService {
@@ -103,6 +106,7 @@ impl HttpService {
         remote: SocketAddr,
         database: SharedDatabase,
         metrics: Option<Arc<Metrics>>,
+        purgatory: Arc<Purgatory>,
     ) -> Self {
         Self {
             relay,
@@ -110,6 +114,7 @@ impl HttpService {
             remote,
             database,
             metrics,
+            purgatory,
         }
     }
 }
@@ -126,6 +131,7 @@ impl Service<Request<Incoming>> for HttpService {
         let method = req.method().clone();
         let git_data_path = self.config.effective_git_data_path();
         let database = self.database.clone();
+        let purgatory = self.purgatory.clone();
 
         // Handle OPTIONS preflight requests (CORS)
         // GRASP-01 spec line 47: Respond to OPTIONS with 204 No Content
@@ -225,9 +231,10 @@ impl Service<Request<Incoming>> for HttpService {
                         let result = git::handlers::handle_receive_pack(
                             repo_path,
                             body_bytes.clone(),
-                            Some(database.clone()),
+                            database.clone(),
                             &identifier,
                             &owner_pubkey_hex,
+                            purgatory.clone(),
                         )
                         .await;
 
@@ -497,6 +504,7 @@ pub async fn run_server(
     relay: LocalRelay,
     database: SharedDatabase,
     metrics: Option<Arc<Metrics>>,
+    purgatory: Arc<Purgatory>,
 ) -> anyhow::Result<()> {
     let bind_addr: SocketAddr = config.bind_address.parse()?;
 
@@ -515,6 +523,7 @@ pub async fn run_server(
             addr,
             database.clone(),
             metrics.clone(),
+            purgatory.clone(),
         );
 
         tokio::spawn(async move {

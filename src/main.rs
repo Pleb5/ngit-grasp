@@ -1,14 +1,17 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
+use tokio::signal;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use ngit_grasp::{
     config::{Config, DatabaseBackend},
-    http,
+    git, http,
     metrics::Metrics,
     nostr,
+    purgatory::Purgatory,
     sync::SyncManager,
 };
 
@@ -45,9 +48,13 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Create purgatory for event/git coordination
+    let purgatory = Arc::new(Purgatory::new());
+    info!("Purgatory initialized for event coordination");
+
     // Create Nostr relay with NIP-34 validation
     // Returns both the relay and database for direct queries in handlers
-    if let Ok(relay_with_db) = nostr::builder::create_relay(&config).await {
+    if let Ok(relay_with_db) = nostr::builder::create_relay(&config, purgatory.clone()).await {
         info!(
             "Relay created with NIP-34 validation for domain: {}",
             config.domain
@@ -79,9 +86,57 @@ async fn main() -> Result<()> {
             sync_manager.run().await;
         });
 
+        // Spawn background cleanup task
+        let cleanup_purgatory = purgatory.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                let (state_removed, pr_removed) = cleanup_purgatory.cleanup();
+                if state_removed > 0 || pr_removed > 0 {
+                    info!(
+                        "Purgatory cleanup: removed {} state events, {} PR events",
+                        state_removed, pr_removed
+                    );
+                }
+            }
+        });
+        info!("Purgatory cleanup task started (60s interval)");
+
+        // Setup shutdown handler for purgatory cleanup
+        let shutdown_purgatory = purgatory.clone();
+        let git_data_path = config.effective_git_data_path();
+
         // Start HTTP server with integrated relay and database
         info!("Starting HTTP server on {}", config.bind_address);
-        http::run_server(config, relay_with_db.relay, relay_with_db.database, metrics).await?;
+
+        // Run server until shutdown signal, then cleanup
+        tokio::select! {
+            result = http::run_server(
+                config,
+                relay_with_db.relay,
+                relay_with_db.database,
+                metrics,
+                purgatory,
+            ) => {
+                if let Err(e) = result {
+                    return Err(e);
+                }
+            }
+            _ = signal::ctrl_c() => {
+                info!("Received shutdown signal, cleaning up...");
+            }
+        }
+
+        // Cleanup placeholder refs on shutdown
+        let placeholder_ids = shutdown_purgatory.get_placeholder_event_ids();
+        if !placeholder_ids.is_empty() {
+            info!(
+                "Cleaning up {} placeholder refs/nostr/ refs on shutdown",
+                placeholder_ids.len()
+            );
+            git::cleanup_placeholder_refs(&git_data_path, &placeholder_ids);
+        }
     }
 
     Ok(())

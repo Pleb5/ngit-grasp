@@ -1,0 +1,435 @@
+//! Helper functions for purgatory state event processing.
+//!
+//! These functions handle the late-binding extraction and matching of git refs
+//! from state events. Refs are extracted at git push time rather than event
+//! arrival time to enable flexible matching logic.
+
+use super::{RefPair, RefUpdate};
+use nostr_sdk::prelude::*;
+use std::collections::HashMap;
+
+/// Extract ref pairs from a state event (kind 30618).
+///
+/// Parses all `refs/heads/*` and `refs/tags/*` tags from the event,
+/// creating RefPair instances with the full ref name and target object SHA.
+///
+/// # Arguments
+/// * `event` - The state event to extract refs from
+///
+/// # Returns
+/// Vector of RefPair instances, one for each ref tag found
+///
+/// # Tag Format
+/// State events use custom tags where the tag kind is the ref name:
+/// - Tag kind: "refs/heads/main" or "refs/tags/v1.0"
+/// - First value: commit SHA or annotated tag SHA
+///
+/// # Example
+/// ```ignore
+/// // Event with tags:
+/// // ["refs/heads/main", "abc123..."]
+/// // ["refs/tags/v1.0", "def456..."]
+/// let refs = extract_refs_from_state(&event);
+/// // Returns: [
+/// //   RefPair { ref_name: "refs/heads/main", object_sha: "abc123..." },
+/// //   RefPair { ref_name: "refs/tags/v1.0", object_sha: "def456..." }
+/// // ]
+/// ```
+pub fn extract_refs_from_state(event: &Event) -> Vec<RefPair> {
+    event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            // Check if this is a custom tag with a ref name
+            if let TagKind::Custom(ref_name) = tag.kind() {
+                let ref_str = ref_name.as_ref();
+
+                // Only process refs/heads/* and refs/tags/*
+                if ref_str.starts_with("refs/heads/") || ref_str.starts_with("refs/tags/") {
+                    // Get the object SHA (first value in tag)
+                    let parts = tag.clone().to_vec();
+                    if parts.len() >= 2 {
+                        return Some(RefPair {
+                            ref_name: ref_str.to_string(),
+                            object_sha: parts[1].clone(),
+                        });
+                    }
+                }
+            }
+            None
+        })
+        .collect()
+}
+
+/// Check if a state event can be satisfied by ref updates plus local refs.
+///
+/// Returns true if applying the ref updates to local state results in exactly
+/// the state declared in the event. This means:
+/// 1. Filter local_refs to only branches (refs/heads/*) and tags (refs/tags/*)
+/// 2. Apply pushed_updates to create a "would-be" state
+/// 3. Compare would-be state with event's declared state - must match exactly
+///
+/// This implements correct authorization: the push must transform local state
+/// into the declared state, accounting for additions, deletions, and modifications.
+///
+/// # Arguments
+/// * `event` - The state event to check
+/// * `pushed_updates` - Ref updates in the current push operation
+/// * `local_refs` - Refs already existing locally (ref_name -> SHA)
+///
+/// # Returns
+/// true if push transforms local state into declared state, false otherwise
+///
+/// # Example
+/// ```ignore
+/// // State event declares: refs/heads/main@abc123
+/// // Local: refs/heads/main@old123, refs/heads/dev@def456
+/// // Push updates: main old123->abc123, dev def456->0000 (delete)
+/// // Result: false (event doesn't declare dev deletion)
+/// ```
+pub fn can_satisfy_state(
+    event: &Event,
+    pushed_updates: &[RefUpdate],
+    local_refs: &HashMap<String, String>,
+) -> bool {
+    let state_refs = extract_refs_from_state(event);
+
+    // Filter local_refs to only branches and tags
+    let mut would_be_state: HashMap<String, String> = local_refs
+        .iter()
+        .filter(|(ref_name, _)| {
+            ref_name.starts_with("refs/heads/") || ref_name.starts_with("refs/tags/")
+        })
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    // Apply all pushed updates to create the would-be state
+    for update in pushed_updates {
+        // Only process branches and tags
+        if !update.ref_name.starts_with("refs/heads/") && !update.ref_name.starts_with("refs/tags/")
+        {
+            continue;
+        }
+
+        if update.is_deletion() {
+            // Remove from would-be state
+            would_be_state.remove(&update.ref_name);
+        } else {
+            // Create or modify in would-be state
+            would_be_state.insert(update.ref_name.clone(), update.new_oid.clone());
+        }
+    }
+
+    // Convert event's state refs to a HashMap for comparison
+    let declared_state: HashMap<String, String> = state_refs
+        .into_iter()
+        .map(|r| (r.ref_name, r.object_sha))
+        .collect();
+
+    // would_be_state must exactly match declared_state
+    would_be_state == declared_state
+}
+
+/// Get refs from state event that aren't in pushed_refs.
+///
+/// Returns refs that need to be present but aren't being pushed.
+/// These refs should exist in local_refs for the state to be satisfiable.
+/// Useful for error messages showing what's missing.
+///
+/// # Arguments
+/// * `event` - The state event to check
+/// * `pushed_refs` - Refs being pushed in the current operation
+///
+/// # Returns
+/// Vector of RefPair instances for refs not in pushed_refs
+///
+/// # Example
+/// ```ignore
+/// // State event declares: refs/heads/main@abc123, refs/heads/dev@def456
+/// // Pushed: refs/heads/main@abc123
+/// // Result: [RefPair { ref_name: "refs/heads/dev", object_sha: "def456" }]
+/// ```
+pub fn get_unpushed_refs(event: &Event, pushed_refs: &[RefPair]) -> Vec<RefPair> {
+    let state_refs = extract_refs_from_state(event);
+
+    state_refs
+        .into_iter()
+        .filter(|state_ref| {
+            // Include if NOT in pushed_refs (by name and SHA)
+            !pushed_refs.iter().any(|pushed_ref| {
+                pushed_ref.ref_name == state_ref.ref_name
+                    && pushed_ref.object_sha == state_ref.object_sha
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nostr_sdk::{EventBuilder, Keys, Tag};
+
+    fn create_test_state_event(identifier: &str, refs: Vec<(&str, &str)>) -> Event {
+        let keys = Keys::generate();
+        let mut tags = vec![Tag::custom(TagKind::d(), vec![identifier.to_string()])];
+
+        for (ref_name, sha) in refs {
+            tags.push(Tag::custom(
+                TagKind::custom(ref_name),
+                vec![sha.to_string()],
+            ));
+        }
+
+        EventBuilder::new(Kind::from(30618), "")
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .unwrap()
+    }
+
+    #[test]
+    fn test_extract_refs_from_state() {
+        let event = create_test_state_event(
+            "test-repo",
+            vec![
+                ("refs/heads/main", "abc123"),
+                ("refs/heads/dev", "def456"),
+                ("refs/tags/v1.0", "789xyz"),
+            ],
+        );
+
+        let refs = extract_refs_from_state(&event);
+
+        assert_eq!(refs.len(), 3);
+        assert!(refs
+            .iter()
+            .any(|r| r.ref_name == "refs/heads/main" && r.object_sha == "abc123"));
+        assert!(refs
+            .iter()
+            .any(|r| r.ref_name == "refs/heads/dev" && r.object_sha == "def456"));
+        assert!(refs
+            .iter()
+            .any(|r| r.ref_name == "refs/tags/v1.0" && r.object_sha == "789xyz"));
+    }
+
+    #[test]
+    fn test_extract_refs_ignores_non_ref_tags() {
+        let keys = Keys::generate();
+        let tags = vec![
+            Tag::custom(TagKind::d(), vec!["test-repo".to_string()]),
+            Tag::custom(
+                TagKind::custom("refs/heads/main"),
+                vec!["abc123".to_string()],
+            ),
+            Tag::custom(TagKind::custom("some-other-tag"), vec!["value".to_string()]),
+        ];
+
+        let event = EventBuilder::new(Kind::from(30618), "")
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        let refs = extract_refs_from_state(&event);
+
+        // Should only extract the refs/heads/main tag
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].ref_name, "refs/heads/main");
+    }
+
+    #[test]
+    fn test_can_satisfy_state_all_in_pushed() {
+        let event = create_test_state_event(
+            "test-repo",
+            vec![("refs/heads/main", "abc123"), ("refs/heads/dev", "def456")],
+        );
+
+        let pushed_updates = vec![
+            RefUpdate {
+                old_oid: "0000000000000000000000000000000000000000".to_string(),
+                new_oid: "abc123".to_string(),
+                ref_name: "refs/heads/main".to_string(),
+            },
+            RefUpdate {
+                old_oid: "0000000000000000000000000000000000000000".to_string(),
+                new_oid: "def456".to_string(),
+                ref_name: "refs/heads/dev".to_string(),
+            },
+        ];
+
+        let local_refs = HashMap::new();
+
+        assert!(can_satisfy_state(&event, &pushed_updates, &local_refs));
+    }
+
+    #[test]
+    fn test_can_satisfy_state_split_between_pushed_and_local() {
+        let event = create_test_state_event(
+            "test-repo",
+            vec![("refs/heads/main", "abc123"), ("refs/heads/dev", "def456")],
+        );
+
+        let pushed_updates = vec![RefUpdate {
+            old_oid: "0000000000000000000000000000000000000000".to_string(),
+            new_oid: "abc123".to_string(),
+            ref_name: "refs/heads/main".to_string(),
+        }];
+
+        let mut local_refs = HashMap::new();
+        local_refs.insert("refs/heads/dev".to_string(), "def456".to_string());
+
+        assert!(can_satisfy_state(&event, &pushed_updates, &local_refs));
+    }
+
+    #[test]
+    fn test_can_satisfy_state_missing_ref() {
+        let event = create_test_state_event(
+            "test-repo",
+            vec![("refs/heads/main", "abc123"), ("refs/heads/dev", "def456")],
+        );
+
+        let pushed_updates = vec![RefUpdate {
+            old_oid: "0000000000000000000000000000000000000000".to_string(),
+            new_oid: "abc123".to_string(),
+            ref_name: "refs/heads/main".to_string(),
+        }];
+
+        let local_refs = HashMap::new();
+
+        // dev ref is missing
+        assert!(!can_satisfy_state(&event, &pushed_updates, &local_refs));
+    }
+
+    #[test]
+    fn test_can_satisfy_state_modification() {
+        let event = create_test_state_event(
+            "test-repo",
+            vec![("refs/heads/main", "abc123"), ("refs/heads/dev", "def456")],
+        );
+
+        let pushed_updates = vec![
+            RefUpdate {
+                old_oid: "old123".to_string(),
+                new_oid: "abc123".to_string(),
+                ref_name: "refs/heads/main".to_string(),
+            },
+            RefUpdate {
+                old_oid: "wrong-sha".to_string(),
+                new_oid: "def456".to_string(),
+                ref_name: "refs/heads/dev".to_string(),
+            },
+        ];
+
+        let mut local_refs = HashMap::new();
+        local_refs.insert("refs/heads/main".to_string(), "old123".to_string());
+        local_refs.insert("refs/heads/dev".to_string(), "wrong-sha".to_string());
+
+        // Should succeed because push updates both to match event
+        assert!(can_satisfy_state(&event, &pushed_updates, &local_refs));
+    }
+
+    #[test]
+    fn test_can_satisfy_state_rejects_extra_refs() {
+        let event = create_test_state_event("test-repo", vec![("refs/heads/main", "abc123")]);
+
+        let pushed_updates = vec![
+            RefUpdate {
+                old_oid: "0000000000000000000000000000000000000000".to_string(),
+                new_oid: "abc123".to_string(),
+                ref_name: "refs/heads/main".to_string(),
+            },
+            RefUpdate {
+                old_oid: "old456".to_string(),
+                new_oid: "def456".to_string(),
+                ref_name: "refs/heads/dev".to_string(),
+            },
+        ];
+
+        let mut local_refs = HashMap::new();
+        local_refs.insert("refs/heads/dev".to_string(), "old456".to_string());
+
+        // Should fail because event doesn't declare dev
+        assert!(!can_satisfy_state(&event, &pushed_updates, &local_refs));
+    }
+
+    #[test]
+    fn test_can_satisfy_state_filters_non_branch_tag_refs() {
+        let event = create_test_state_event("test-repo", vec![("refs/heads/main", "abc123")]);
+
+        let pushed_updates = vec![RefUpdate {
+            old_oid: "0000000000000000000000000000000000000000".to_string(),
+            new_oid: "abc123".to_string(),
+            ref_name: "refs/heads/main".to_string(),
+        }];
+
+        let mut local_refs = HashMap::new();
+        // Add some non-branch/non-tag refs that should be filtered out
+        local_refs.insert("refs/pull/123/head".to_string(), "xyz789".to_string());
+        local_refs.insert("refs/some/other/thing".to_string(), "aaa111".to_string());
+
+        // Should succeed - non-branch/tag refs are filtered out
+        assert!(can_satisfy_state(&event, &pushed_updates, &local_refs));
+    }
+
+    #[test]
+    fn test_can_satisfy_state_empty_event() {
+        let event = create_test_state_event("test-repo", vec![]);
+        let pushed_refs = vec![];
+        let local_refs = HashMap::new();
+
+        // Empty state event is satisfied
+        assert!(can_satisfy_state(&event, &pushed_refs, &local_refs));
+    }
+
+    #[test]
+    fn test_get_unpushed_refs() {
+        let event = create_test_state_event(
+            "test-repo",
+            vec![
+                ("refs/heads/main", "abc123"),
+                ("refs/heads/dev", "def456"),
+                ("refs/tags/v1.0", "789xyz"),
+            ],
+        );
+
+        let pushed_refs = vec![RefPair {
+            ref_name: "refs/heads/main".to_string(),
+            object_sha: "abc123".to_string(),
+        }];
+
+        let unpushed = get_unpushed_refs(&event, &pushed_refs);
+
+        assert_eq!(unpushed.len(), 2);
+        assert!(unpushed.iter().any(|r| r.ref_name == "refs/heads/dev"));
+        assert!(unpushed.iter().any(|r| r.ref_name == "refs/tags/v1.0"));
+    }
+
+    #[test]
+    fn test_get_unpushed_refs_all_pushed() {
+        let event = create_test_state_event("test-repo", vec![("refs/heads/main", "abc123")]);
+
+        let pushed_refs = vec![RefPair {
+            ref_name: "refs/heads/main".to_string(),
+            object_sha: "abc123".to_string(),
+        }];
+
+        let unpushed = get_unpushed_refs(&event, &pushed_refs);
+
+        assert_eq!(unpushed.len(), 0);
+    }
+
+    #[test]
+    fn test_get_unpushed_refs_sha_mismatch() {
+        let event = create_test_state_event("test-repo", vec![("refs/heads/main", "abc123")]);
+
+        let pushed_refs = vec![RefPair {
+            ref_name: "refs/heads/main".to_string(),
+            object_sha: "different-sha".to_string(), // Different SHA
+        }];
+
+        let unpushed = get_unpushed_refs(&event, &pushed_refs);
+
+        // Should still be unpushed because SHA doesn't match
+        assert_eq!(unpushed.len(), 1);
+        assert_eq!(unpushed[0].ref_name, "refs/heads/main");
+        assert_eq!(unpushed[0].object_sha, "abc123");
+    }
+}

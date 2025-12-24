@@ -31,7 +31,7 @@ use anyhow::{anyhow, Result};
 use nostr_relay_builder::prelude::*;
 use nostr_sdk::{EventId, ToBech32};
 use std::collections::{HashMap, HashSet};
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 use crate::nostr::builder::SharedDatabase;
 use crate::nostr::events::{
@@ -325,26 +325,31 @@ pub async fn get_authorization_from_db(
 
 /// Get the authorization result for a repository scoped to a specific owner
 ///
-/// Unlike `get_authorization_from_db`, this function scopes the authorization
-/// to a specific owner's announcement. This is the correct approach for Git push
-/// authorization where the URL path specifies the owner.
+/// Push authorization checks ONLY purgatory for state events. The database represents
+/// the current git state, while purgatory holds the intended future state that pushes
+/// should be authorized against.
 ///
 /// A push to `alice/my-repo` should only consider authorization from alice's
 /// announcement, not bob's announcement for the same identifier.
 ///
 /// It:
-/// 1. Fetches all announcements and states for the identifier
-/// 2. Collects authorized maintainers from all announcements (grouped by owner)
-/// 3. Looks up the authorized set for the specific owner
-/// 4. Finds the latest state event from an authorized maintainer
+/// 1. Fetches announcements for the identifier
+/// 2. Collects authorized maintainers from owner's announcement
+/// 3. Checks purgatory for matching state events from authorized maintainers
 ///
 /// Returns an `AuthorizationResult` that indicates whether a push is authorized.
-pub async fn get_authorization_for_owner(
+pub async fn get_state_authorization_for_specific_owner_repo(
     database: &SharedDatabase,
     identifier: &str,
     owner_pubkey: &str,
+    purgatory: &std::sync::Arc<crate::purgatory::Purgatory>,
+    pushed_refs: &[(String, String, String)],
+    repo_path: &std::path::Path,
 ) -> Result<AuthorizationResult> {
-    // Fetch all repository data with a single query
+    use crate::git::list_refs;
+    use crate::purgatory::RefUpdate;
+
+    // Fetch announcements only - we don't need database states
     let repo_data = fetch_repository_data(database, identifier).await?;
 
     if repo_data.announcements.is_empty() {
@@ -380,16 +385,82 @@ pub async fn get_authorization_for_owner(
         owner_pubkey
     );
 
-    // Find the latest authorized state from owner's maintainer set
-    match find_latest_authorized_state(&repo_data.states, &authorized) {
-        Some(state) => Ok(AuthorizationResult::authorized(
-            state.clone(),
-            authorized.into_iter().collect(),
-        )),
-        None => Ok(AuthorizationResult::denied(
-            "No state event found from authorized publishers",
-        )),
+    // Check purgatory for matching state events
+    // Convert pushed refs to RefUpdate (filter out refs/nostr/* refs)
+    let pushed_updates: Vec<RefUpdate> = pushed_refs
+        .iter()
+        .filter(|(_, _, name)| !name.starts_with("refs/nostr/"))
+        .map(|(old_oid, new_oid, ref_name)| RefUpdate {
+            old_oid: old_oid.clone(),
+            new_oid: new_oid.clone(),
+            ref_name: ref_name.clone(),
+        })
+        .collect();
+
+    // Get local refs from repository
+    let local_refs_list = list_refs(repo_path).unwrap_or_default();
+    let local_refs: HashMap<String, String> = local_refs_list.into_iter().collect();
+
+    // Find matching state events in purgatory
+    let matching_events = purgatory.find_matching_states(identifier, &pushed_updates, &local_refs);
+
+    if !matching_events.is_empty() {
+        debug!(
+            "Found {} matching state event(s) in purgatory",
+            matching_events.len()
+        );
+
+        // Filter to authorized events and collect them
+        let authorized_events: Vec<Event> = matching_events
+            .into_iter()
+            .filter(|event| {
+                let author_hex = event.pubkey.to_hex();
+                authorized.contains(&author_hex)
+            })
+            .collect();
+
+        if !authorized_events.is_empty() {
+            // Find the latest event
+            let latest_authorized = authorized_events
+                .iter()
+                .max_by_key(|event| event.created_at)
+                .unwrap(); // Safe because we checked the vec is not empty
+
+            // Parse the event into RepositoryState
+            if let Ok(state) = RepositoryState::from_event(latest_authorized.clone()) {
+                info!(
+                    "Authorized by state event {} from purgatory (author: {})",
+                    latest_authorized.id,
+                    latest_authorized
+                        .pubkey
+                        .to_bech32()
+                        .unwrap_or_else(|_| latest_authorized.pubkey.to_hex())
+                );
+
+                return Ok(AuthorizationResult {
+                    authorized: true,
+                    reason: "Authorized by state event in purgatory".to_string(),
+                    state: Some(state),
+                    maintainers: authorized.into_iter().collect(),
+                    purgatory_events: vec![latest_authorized.clone()],
+                });
+            } else {
+                warn!(
+                    "Failed to parse purgatory event {} as RepositoryState",
+                    latest_authorized.id
+                );
+            }
+        } else {
+            debug!("Purgatory events found but none from authorized authors");
+        }
+    } else {
+        debug!("No matching state events found in purgatory");
     }
+
+    // No matching state found in purgatory
+    Ok(AuthorizationResult::denied(
+        "No state event found in purgatory from authorized publishers",
+    ))
 }
 
 /// Result of authorization check
@@ -403,6 +474,8 @@ pub struct AuthorizationResult {
     pub state: Option<RepositoryState>,
     /// The set of valid maintainers (authorized publishers)
     pub maintainers: Vec<String>,
+    /// Events from purgatory that authorized this push (state, PR, PR-update events)
+    pub purgatory_events: Vec<Event>,
 }
 
 impl AuthorizationResult {
@@ -413,6 +486,7 @@ impl AuthorizationResult {
             reason: "Push matches latest authorized state".to_string(),
             state: Some(state),
             maintainers,
+            purgatory_events: vec![],
         }
     }
 
@@ -423,6 +497,7 @@ impl AuthorizationResult {
             reason: reason.into(),
             state: None,
             maintainers: vec![],
+            purgatory_events: vec![],
         }
     }
 }

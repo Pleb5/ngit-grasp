@@ -1172,7 +1172,11 @@ impl<'a> TestContext<'a> {
 
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        if !self.client.is_event_on_relay(maintainer_state_event.id).await? {
+        if !self
+            .client
+            .is_event_on_relay(maintainer_state_event.id)
+            .await?
+        {
             return Err(anyhow::anyhow!("state event not released from purgatory"));
         }
 
@@ -1345,7 +1349,11 @@ impl<'a> TestContext<'a> {
 
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        if !self.client.is_event_on_relay(recursive_maintainer_state_event.id).await? {
+        if !self
+            .client
+            .is_event_on_relay(recursive_maintainer_state_event.id)
+            .await?
+        {
             return Err(anyhow::anyhow!("state event not released from purgatory"));
         }
 

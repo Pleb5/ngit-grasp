@@ -66,6 +66,24 @@ impl StatePolicy {
         let state = RepositoryState::from_event(event.clone())
             .map_err(|e| format!("Failed to parse state: {}", e))?;
 
+        // Check if ANY git repositories exist for this identifier (regardless of authorization)
+        // This helps us distinguish "no git data yet" from "not authorized" or "not latest"
+        let has_any_git_data = self.has_git_data_for_identifier(&state.identifier);
+
+        if !has_any_git_data {
+            // No git data exists yet - add to purgatory
+            tracing::debug!(
+                "No git data found for identifier {}, adding state event {} to purgatory",
+                state.identifier,
+                event.id.to_hex()
+            );
+            self.ctx
+                .purgatory
+                .add_state(event.clone(), state.identifier.clone(), event.pubkey);
+            // Return 0 repos aligned, but this is not an error
+            return Ok(0);
+        }
+
         // Identify owner repositories for which this is the latest authorized state
         let owner_repos = self.identify_owner_repositories(&state).await?;
         let repo_count = owner_repos.len();
@@ -97,11 +115,46 @@ impl StatePolicy {
             );
         } else {
             tracing::debug!(
-                "No owner repos to align for state - git data not available yet or not latest"
+                "No owner repos to align for state - git data exists but author not authorized or not latest"
             );
         }
 
         Ok(total_aligned)
+    }
+
+    /// Check if any git repositories exist for the given identifier
+    ///
+    /// Scans the git_data_path for any directories matching the pattern:
+    /// `<any-npub>/<identifier>.git`
+    ///
+    /// This is used to distinguish "no git data yet" from "not authorized".
+    fn has_git_data_for_identifier(&self, identifier: &str) -> bool {
+        let git_data_path = &self.ctx.git_data_path;
+
+        // Check if git_data_path exists
+        if !git_data_path.exists() {
+            return false;
+        }
+
+        // Scan for any npub directories
+        let read_dir = match std::fs::read_dir(git_data_path) {
+            Ok(dir) => dir,
+            Err(_) => return false,
+        };
+
+        for entry in read_dir.flatten() {
+            if let Ok(file_type) = entry.file_type() {
+                if file_type.is_dir() {
+                    // Check if <npub>/<identifier>.git exists
+                    let repo_path = entry.path().join(format!("{}.git", identifier));
+                    if repo_path.exists() {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
     }
 
     /// Check if this state event is the latest for its identifier among authorized authors
