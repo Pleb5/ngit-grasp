@@ -163,6 +163,7 @@ impl Service<Request<Incoming>> for HttpService {
 
             let repo_path = git::resolve_repo_path(&git_data_path, &npub, &identifier);
             let metrics_clone = self.metrics.clone();
+            let relay = self.relay.clone();
 
             return Box::pin(async move {
                 // Collect request body once before the match statement
@@ -232,6 +233,7 @@ impl Service<Request<Incoming>> for HttpService {
                             repo_path,
                             body_bytes.clone(),
                             database.clone(),
+                            relay.clone(),
                             &identifier,
                             &owner_pubkey_hex,
                             purgatory.clone(),

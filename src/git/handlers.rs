@@ -4,22 +4,20 @@
 
 use http_body_util::Full;
 use hyper::{body::Bytes, Response, StatusCode};
+use nostr_relay_builder::LocalRelay;
 use nostr_sdk::prelude::*;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, info, warn};
 
-use super::authorization::{
-    get_state_authorization_for_specific_owner_repo, parse_pushed_refs, validate_nostr_ref_pushes,
-    validate_push_refs, AuthorizationResult,
-};
 use super::protocol::{GitService, PktLine};
 use super::subprocess::GitSubprocess;
 use super::try_set_head_if_available;
 
+use crate::git::authorization::authorize_push;
 use crate::nostr::builder::SharedDatabase;
-use crate::nostr::events::{RepositoryState, KIND_PR, KIND_PR_UPDATE, KIND_REPOSITORY_STATE};
+use crate::nostr::events::{KIND_PR, KIND_PR_UPDATE, KIND_REPOSITORY_STATE};
 use crate::purgatory::Purgatory;
 
 /// Handle GET /info/refs?service=git-{upload,receive}-pack
@@ -186,6 +184,7 @@ pub async fn handle_receive_pack(
     repo_path: PathBuf,
     request_body: Bytes,
     database: SharedDatabase,
+    relay: LocalRelay,
     identifier: &str,
     owner_pubkey: &str,
     purgatory: Arc<Purgatory>,
@@ -196,17 +195,14 @@ pub async fn handle_receive_pack(
         return Err(GitError::RepositoryNotFound);
     }
 
-    // Keep track of state and events for processing after push
-    let mut authorized_state: Option<RepositoryState> = None;
-    let mut authorized_events: Vec<Event> = Vec::new();
-
     // GRASP Authorization Check
     info!(
         "Authorizing push for {} owned by {} via database query",
         identifier, owner_pubkey
     );
 
-    match authorize_push(
+    // check push is authorised
+    let auth_result = match authorize_push(
         &database,
         identifier,
         owner_pubkey,
@@ -222,21 +218,19 @@ pub async fn handle_receive_pack(
                 return Err(GitError::Unauthorized);
             }
             info!(
-                "Push authorized for {} - {} maintainers, {} purgatory events",
+                "Push authorized for {} - {} maintainers, {} purgatory events: {}",
                 identifier,
                 auth_result.maintainers.len(),
-                auth_result.purgatory_events.len()
+                auth_result.purgatory_events.len(),
+                auth_result.reason
             );
-            // Save the state for HEAD setting after push
-            authorized_state = auth_result.state.clone();
-            // Save the purgatory events for database saving after push
-            authorized_events = auth_result.purgatory_events;
+            auth_result
         }
         Err(e) => {
             warn!("Authorization check failed for {}: {}", identifier, e);
             return Err(GitError::Unauthorized);
         }
-    }
+    };
 
     // Spawn git receive-pack
     let mut git = GitSubprocess::spawn(GitService::ReceivePack, &repo_path, false)
@@ -283,7 +277,7 @@ pub async fn handle_receive_pack(
     // GRASP-01: Set HEAD after git data is received
     // "MUST set repository HEAD per repository state announcement
     // as soon as the git data related to that branch has been received."
-    if let Some(ref state) = authorized_state {
+    if let Some(ref state) = auth_result.state {
         if let Some(head_ref) = &state.head {
             if let Some(branch_name) = state.get_head_branch() {
                 if let Some(commit) = state.get_branch_commit(branch_name) {
@@ -308,40 +302,52 @@ pub async fn handle_receive_pack(
 
     // Save all events from purgatory that authorized this push and remove them from purgatory
     // This includes state events, PR events, and PR-update events
-    if !authorized_events.is_empty() {
-        info!(
-            "Saving {} purgatory event(s) to database after successful push",
-            authorized_events.len()
-        );
+    info!(
+        "Saving {} purgatory event(s) to database after successful push",
+        auth_result.purgatory_events.len()
+    );
 
-        for event in &authorized_events {
-            match database.save_event(event).await {
-                Ok(_) => {
-                    info!("Saved purgatory event {} to database", event.id);
-                    // TODO let broadcast_success = local_relay.notify_event(event.clone());
-                    warn!("TODO Here we need to broadcast on open websockets for live listeners. eventid; {}", event.id);
-                    // Remove from purgatory based on event kind
-                    if event.kind == Kind::from(KIND_REPOSITORY_STATE) {
-                        purgatory.remove_state_event(identifier, &event.id);
-                        info!("Removed state event {} from purgatory", event.id);
-                    } else if event.kind == Kind::from(KIND_PR)
-                        || event.kind == Kind::from(KIND_PR_UPDATE)
-                    {
-                        // Extract event ID from the event itself (it's the event.id)
-                        let event_id_hex = event.id.to_hex();
-                        purgatory.remove_pr(&event_id_hex);
-                        info!("Removed PR event {} from purgatory", event.id);
-                    }
+    for event in &auth_result.purgatory_events {
+        match database.save_event(event).await {
+            Ok(_) => {
+                // Remove from purgatory based on event kind
+                if event.kind == Kind::from(KIND_REPOSITORY_STATE) {
+                    info!("Saved purgatory state event {} to database", event.id);
+                    purgatory.remove_state_event(identifier, &event.id);
+                    info!("Removed saved state event {} from purgatory", event.id);
+                } else if event.kind == Kind::from(KIND_PR)
+                    || event.kind == Kind::from(KIND_PR_UPDATE)
+                {
+                    info!("Saved purgatory PR event {} to database", event.id);
+                    // Extract event ID from the event itself (it's the event.id)
+                    let event_id_hex = event.id.to_hex();
+                    purgatory.remove_pr(&event_id_hex);
+                    info!("Removed saved PR event {} from purgatory", event.id);
                 }
-                Err(e) => {
+                // Broadcast to WebSocket subscribers
+                if relay.notify_event(event.clone()) {
+                    info!(
+                        "Broadcast purgatory event {} to websocket listeners",
+                        event.id
+                    );
+                } else {
                     warn!(
-                        "Failed to save purgatory event {} to database: {}",
-                        event.id, e
+                        "Failed to broadcast purgatory event {} to websocket listeners",
+                        event.id
                     );
                 }
             }
+            Err(e) => {
+                warn!(
+                    "Failed to save purgatory event {} to database: {}",
+                    event.id, e
+                );
+            }
         }
     }
+
+    // TODO figure out what atomic pushes look like in GRASP (we cant accepted differnte state events changing different branches at the same time)
+    // TODO sync git data to other repos that these events authorise.
 
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -352,180 +358,6 @@ pub async fn handle_receive_pack(
         .header("cache-control", "no-cache")
         .body(Full::new(Bytes::from(output)))
         .unwrap())
-}
-
-/// Perform GRASP authorization for a push operation
-///
-/// This function queries the database directly (not via WebSocket):
-/// 1. Parses the pushed refs from the git pack protocol
-/// 2. Separates refs/nostr/ refs from normal refs
-/// 3. For normal refs: validates against state events in purgatory
-/// 4. For refs/nostr/ refs: validates event ID format and collects PR/PR-update events from purgatory
-/// 5. Returns all authorizing events (state + PR/PR-update) in the result
-async fn authorize_push(
-    database: &SharedDatabase,
-    identifier: &str,
-    owner_pubkey: &str,
-    request_body: &Bytes,
-    purgatory: &Arc<Purgatory>,
-    repo_path: &std::path::Path,
-) -> anyhow::Result<AuthorizationResult> {
-    debug!(
-        "Authorizing push for {} owned by {} via database query",
-        identifier, owner_pubkey
-    );
-
-    // Parse refs from the push request
-    let pushed_refs = parse_pushed_refs(request_body);
-    debug!("Parsed {} refs from push request", pushed_refs.len());
-    for (old_oid, new_oid, ref_name) in &pushed_refs {
-        debug!("  {} {} -> {}", ref_name, old_oid, new_oid);
-    }
-
-    // Separate refs/nostr/ refs from state refs
-    let (nostr_refs, state_refs): (Vec<_>, Vec<_>) = pushed_refs
-        .iter()
-        .partition(|(_, _, ref_name)| ref_name.starts_with("refs/nostr/"));
-
-    // Collect all purgatory events that authorize this push
-    let mut purgatory_events = Vec::new();
-
-    // Handle refs/nostr/ refs - validate and collect PR/PR-update events from purgatory
-    if !nostr_refs.is_empty() {
-        debug!(
-            "Found {} refs/nostr/ refs - validating and collecting from purgatory",
-            nostr_refs.len()
-        );
-
-        for (_, new_oid, ref_name) in &nostr_refs {
-            // Extract event ID from ref name
-            if let Some(event_id_hex) = ref_name.strip_prefix("refs/nostr/") {
-                // Validate event ID format
-                if EventId::parse(event_id_hex).is_err() {
-                    warn!("Invalid event ID format in ref: {}", ref_name);
-                    return Ok(AuthorizationResult::denied(format!(
-                        "Invalid event ID format in ref: {}",
-                        ref_name
-                    )));
-                }
-
-                // Check purgatory for PR event
-                if let Some(entry) = purgatory.find_pr(event_id_hex) {
-                    if let Some(event) = entry.event {
-                        // Verify commit matches
-                        if entry.commit == *new_oid {
-                            debug!(
-                                "Found matching PR event {} in purgatory for ref {}",
-                                event_id_hex, ref_name
-                            );
-                            purgatory_events.push(event);
-                        } else {
-                            warn!(
-                                "PR event {} in purgatory has commit mismatch: expected {}, got {}",
-                                event_id_hex, entry.commit, new_oid
-                            );
-                            return Ok(AuthorizationResult::denied(format!(
-                                "PR event {} commit mismatch: expected {}, got {}",
-                                event_id_hex, entry.commit, new_oid
-                            )));
-                        }
-                    } else {
-                        // Placeholder exists - allow push (git-data-first scenario)
-                        debug!(
-                            "Found placeholder already for PR event {} in purgatory - as we dont have the event and therefore dont know the required commit_id we allow overwriting with a different commit_id",
-                            event_id_hex
-                        );
-                    }
-                } else {
-                    // No entry in purgatory - check database for existing event
-                    let nostr_refs_owned = vec![(String::new(), new_oid.clone(), ref_name.clone())];
-                    if let Err(e) = validate_nostr_ref_pushes(database, &nostr_refs_owned).await {
-                        warn!("refs/nostr/ validation failed: {}", e);
-                        return Ok(AuthorizationResult::denied(format!(
-                            "refs/nostr/ validation failed: {}",
-                            e
-                        )));
-                    }
-                    debug!(
-                        "No purgatory entry for {} - validated against database",
-                        event_id_hex
-                    );
-                }
-            }
-        }
-    }
-
-    // Handle normal refs - validate against state events
-    if !state_refs.is_empty() {
-        debug!(
-            "Found {} non-refs/nostr/ refs - checking state authorization",
-            state_refs.len()
-        );
-
-        let auth_result = get_state_authorization_for_specific_owner_repo(
-            database,
-            identifier,
-            owner_pubkey,
-            purgatory,
-            &pushed_refs, //it would be better to accept state_refs but thats in different format
-            repo_path,
-        )
-        .await?;
-
-        if !auth_result.authorized {
-            return Ok(auth_result);
-        }
-
-        // Collect state events from purgatory
-        purgatory_events.extend(auth_result.purgatory_events);
-
-        // Validate refs against state
-        let other_refs_owned: Vec<(String, String, String)> = state_refs
-            .into_iter()
-            .map(|(a, b, c)| (a.clone(), b.clone(), c.clone()))
-            .collect();
-
-        if let Some(ref state) = auth_result.state {
-            debug!(
-                "Validating against state with {} branches",
-                state.branches.len()
-            );
-
-            if other_refs_owned.is_empty() && !state.branches.is_empty() {
-                warn!("No refs parsed from push request but state event has branches - rejecting");
-                return Ok(AuthorizationResult::denied(
-                    "Failed to parse refs from push request - cannot validate against state",
-                ));
-            }
-
-            if let Err(e) = validate_push_refs(state, &other_refs_owned) {
-                warn!("Ref validation failed: {}", e);
-                return Ok(AuthorizationResult::denied(format!(
-                    "Ref validation failed: {}",
-                    e
-                )));
-            }
-            debug!("Ref validation passed");
-        }
-
-        // Return result with purgatory events
-        return Ok(AuthorizationResult {
-            authorized: true,
-            reason: auth_result.reason,
-            state: auth_result.state,
-            maintainers: auth_result.maintainers,
-            purgatory_events,
-        });
-    }
-
-    // Only refs/nostr/ refs - return success with collected events
-    Ok(AuthorizationResult {
-        authorized: true,
-        reason: "Push to refs/nostr/ validated".to_string(),
-        state: None,
-        maintainers: vec![],
-        purgatory_events,
-    })
 }
 
 /// Errors that can occur in Git handlers

@@ -119,9 +119,7 @@ async fn main() -> Result<()> {
                 metrics,
                 purgatory,
             ) => {
-                if let Err(e) = result {
-                    return Err(e);
-                }
+                result?
             }
             _ = signal::ctrl_c() => {
                 info!("Received shutdown signal, cleaning up...");
