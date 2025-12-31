@@ -125,7 +125,27 @@ impl StatePolicy {
                             {
                                 let repo_path =
                                     self.ctx.git_data_path.join(annoucement.repo_path().clone());
-                                // TODO - if repo_path != repo_with_git_data, pass as a datasource for missing data?
+
+                                if !repo_path.exists() {
+                                    // eg if annoucement doesnt list repo (but stored as its in maintainer set)
+                                    continue;
+                                }
+                                // If repo_path != repo_with_git_data, copy missing oids first
+                                if repo_path != repo_with_git_data {
+                                    if let Err(e) = self.copy_missing_oids(
+                                        &repo_with_git_data,
+                                        &repo_path,
+                                        &state,
+                                    ) {
+                                        tracing::warn!(
+                                            "Failed to copy oids from {} to {}: {}",
+                                            repo_with_git_data.display(),
+                                            repo_path.display(),
+                                            e
+                                        );
+                                    }
+                                }
+
                                 let result = self.align_repository_with_state(&repo_path, &state);
                                 repo_count += 1;
                                 tracing::info!(
@@ -334,6 +354,91 @@ impl StatePolicy {
         }
 
         result
+    }
+
+    /// Copy missing OIDs from a source repository to a target repository
+    ///
+    /// Identifies commits referenced in the state that are missing from the target
+    /// repository and copies them from the source repository using git fetch.
+    ///
+    /// # Arguments
+    /// * `source_repo` - Path to repository containing the commits
+    /// * `target_repo` - Path to repository to receive the commits
+    /// * `state` - Repository state containing commit references
+    ///
+    /// # Returns
+    /// Ok(()) on success, Err with error message on failure
+    fn copy_missing_oids(
+        &self,
+        source_repo: &Path,
+        target_repo: &Path,
+        state: &RepositoryState,
+    ) -> Result<(), String> {
+        use std::process::Command;
+
+        // Collect all commits referenced in the state
+        let mut commits_to_check = Vec::new();
+
+        for branch in &state.branches {
+            if !branch.commit.starts_with("ref: ") {
+                commits_to_check.push(&branch.commit);
+            }
+        }
+
+        for tag in &state.tags {
+            if !tag.commit.starts_with("ref: ") {
+                commits_to_check.push(&tag.commit);
+            }
+        }
+
+        // Identify missing commits
+        let mut missing_commits = Vec::new();
+        for commit in commits_to_check {
+            if !git::oid_exists(target_repo, commit) {
+                missing_commits.push(commit);
+            }
+        }
+
+        if missing_commits.is_empty() {
+            tracing::debug!(
+                "No missing commits to copy from {} to {}",
+                source_repo.display(),
+                target_repo.display()
+            );
+            return Ok(());
+        }
+
+        tracing::info!(
+            "Copying {} missing commits from {} to {}",
+            missing_commits.len(),
+            source_repo.display(),
+            target_repo.display()
+        );
+
+        // Fetch each missing commit from source to target
+        for commit in &missing_commits {
+            let output = Command::new("git")
+                .args([
+                    "fetch",
+                    source_repo.to_str().ok_or("Invalid source path")?,
+                    commit,
+                ])
+                .current_dir(target_repo)
+                .output()
+                .map_err(|e| format!("Failed to execute git fetch: {}", e))?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!(
+                    "git fetch failed for commit {}: {}",
+                    commit, stderr
+                ));
+            }
+
+            tracing::debug!("Copied commit {} to {}", commit, target_repo.display());
+        }
+
+        Ok(())
     }
 }
 

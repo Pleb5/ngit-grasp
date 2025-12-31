@@ -766,32 +766,159 @@ impl PushAuthorizationTests {
     ///
     /// GRASP-01: "respecting the recursive maintainer set"
     ///
-    /// This test verifies that when a maintainer publishes a state event, it updates
-    /// the git repository state for all other maintainers' views. This ensures git
-    /// repositories always reflect the state according to nostr events (including state
-    /// from recursive maintainers).
+    /// This test verifies that when a maintainer publishes a state event, the purgatory
+    /// feature correctly copies git commits between repos so all authorized maintainers'
+    /// repositories always reflect the state according to nostr events.
     ///
-    /// ## Implementation Note
+    /// ## Implementation
     ///
-    /// This test is a stub for the purgatory feature. It will be implemented as part
-    /// of GRASP-02 purgatory functionality.
+    /// This test:
+    /// 1. Uses RecursiveMaintainerStateDataPushed fixture which:
+    ///    - Creates owner repo + state (ValidRepo, OwnerStateDataPushed)
+    ///    - Creates maintainer announcement (separate repo for maintainer)
+    ///    - Pushes recursive maintainer's git data to owner's repo
+    /// 2. Clones the maintainer's repository (not the owner's)
+    /// 3. Verifies that the maintainer's repo contains the recursive maintainer's state
     ///
-    /// ## Fixture Compatibility
-    ///
-    /// This test will use:
-    /// - `MaintainerStateDataPushed` - maintainer's state event with git data pushed
-    /// - Multiple maintainer clones to verify state propagation
-    #[allow(dead_code)]
+    /// This proves purgatory is working: git data was pushed to owner's repo, and purgatory
+    /// synced it to the maintainer's repo based on the state event.
     pub async fn test_push_of_state_by_maintainer_updates_other_maintainer_repos(
-        _client: &AuditClient,
-        _relay_domain: &str,
+        client: &AuditClient,
+        relay_domain: &str,
     ) -> TestResult {
-        TestResult::new(
-            "test_push_of_state_by_maintainer_updates_other_maintainer_repos",
-            "GRASP-01:git-http:purgatory",
-            "Maintainer state updates propagate to other maintainer repos",
-        )
-        .fail("Not yet implemented - requires purgatory feature (GRASP-02)")
+        let test_name = "test_push_of_state_by_maintainer_updates_other_maintainer_repos";
+        let ctx = TestContext::new(client);
+
+        // Get the RecursiveMaintainerStateDataPushed fixture which:
+        // 1. Creates owner repo + owner state + git data
+        // 2. Creates maintainer announcement (separate repo)
+        // 3. Pushes recursive maintainer's git data to owner's repo
+        // 4. Purgatory should then sync to maintainer's repo
+        let recursive_state = match ctx
+            .get_fixture(FixtureKind::RecursiveMaintainerStateDataPushed)
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01:git-http:purgatory",
+                    "Maintainer state updates propagate to other maintainer repos",
+                )
+                .fail(format!(
+                    "Failed to get RecursiveMaintainerStateDataPushed fixture: {}",
+                    e
+                ))
+            }
+        };
+
+        // Small delay to ensure state processing completes
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Extract repo_id from the recursive maintainer's state event
+        let repo_id = match recursive_state
+            .tags
+            .iter()
+            .find(|t| t.kind() == TagKind::d())
+            .and_then(|t| t.content())
+        {
+            Some(id) => id.to_string(),
+            None => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01:git-http:purgatory",
+                    "Maintainer state updates propagate to other maintainer repos",
+                )
+                .fail("No repo identifier in recursive maintainer state event")
+            }
+        };
+
+        // Get the maintainer's npub
+        let maintainer_npub = match client.maintainer_keys().public_key().to_bech32() {
+            Ok(npub) => npub,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01:git-http:purgatory",
+                    "Maintainer state updates propagate to other maintainer repos",
+                )
+                .fail(format!(
+                    "Failed to convert maintainer pubkey to npub: {}",
+                    e
+                ))
+            }
+        };
+
+        // Use the known recursive maintainer deterministic commit hash from the fixture
+        let expected_commit = crate::RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH;
+
+        // Clone the maintainer's repository (NOT the owner's)
+        // This is the key test: git data was pushed to owner's repo, does maintainer's repo have it?
+        let clone_path = match clone_repo(relay_domain, &maintainer_npub, &repo_id) {
+            Ok(path) => path,
+            Err(e) => {
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01:git-http:purgatory",
+                    "Maintainer state updates propagate to other maintainer repos",
+                )
+                .fail(format!("Failed to clone maintainer's repo: {}", e))
+            }
+        };
+
+        let cleanup = || {
+            let _ = fs::remove_dir_all(&clone_path);
+        };
+
+        // Verify that the maintainer's repo contains the recursive maintainer's commit
+        // This proves purgatory copied it from owner's repo
+        let commit_exists_output = Command::new("git")
+            .args(["cat-file", "-t", expected_commit])
+            .current_dir(&clone_path)
+            .output();
+
+        let commit_exists = match commit_exists_output {
+            Ok(output) => {
+                if output.status.success() {
+                    let obj_type = String::from_utf8_lossy(&output.stdout);
+                    obj_type.trim() == "commit"
+                } else {
+                    false
+                }
+            }
+            Err(e) => {
+                cleanup();
+                return TestResult::new(
+                    test_name,
+                    "GRASP-01:git-http:purgatory",
+                    "Maintainer state updates propagate to other maintainer repos",
+                )
+                .fail(format!("Failed to check if commit exists: {}", e));
+            }
+        };
+
+        cleanup();
+
+        if commit_exists {
+            TestResult::new(
+                test_name,
+                "GRASP-01:git-http:purgatory",
+                "Maintainer state updates propagate to other maintainer repos",
+            )
+            .pass()
+        } else {
+            TestResult::new(
+                test_name,
+                "GRASP-01:git-http:purgatory",
+                "Maintainer state updates propagate to other maintainer repos",
+            )
+            .fail(format!(
+                "Maintainer's repo does not contain recursive maintainer's commit {}. \
+                 Git data was pushed to owner's repo, but purgatory did not copy it to \
+                 maintainer's repo. This indicates the purgatory feature is not working correctly.",
+                expected_commit
+            ))
+        }
     }
 
     /// Test that non-maintainer state event is ignored
