@@ -34,6 +34,7 @@ const PR_TEST_COMMIT_HASH: &str = "8935183ff722bf04e861928c6a7e50868c6ca4a6";
 use crate::{
     clone_repo, create_commit, create_deterministic_commit_with_variant, try_push, try_push_to_ref,
     AuditClient, CommitVariant, FixtureKind, TestContext, TestResult,
+    RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH,
 };
 use nostr_sdk::prelude::*;
 use std::fs;
@@ -1635,6 +1636,10 @@ impl PushAuthorizationTests {
                 TagKind::custom("refs/heads/develop1"),
                 vec![commit_hash.clone()],
             ))
+            .tag(Tag::custom(
+                TagKind::custom("refs/heads/develop"),
+                vec![RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH.to_string()],
+            ))
             .build(client.keys())
         {
             Ok(e) => e,
@@ -1646,7 +1651,10 @@ impl PushAuthorizationTests {
         };
 
         // Send the state event (commit doesn't exist on relay yet)
-        if let Err(e) = client.send_event(state_event).await {
+        if let Err(e) = client
+            .send_event_expect_purgatory_not_served(state_event)
+            .await
+        {
             let _ = fs::remove_dir_all(&clone_path);
             return TestResult::new(test_name, "GRASP-01:git-http:38", desc)
                 .fail(format!("Failed to send state event: {}", e));
