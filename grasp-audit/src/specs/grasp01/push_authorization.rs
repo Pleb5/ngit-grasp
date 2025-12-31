@@ -29,7 +29,7 @@
 ///
 /// Run `test_pr_test_commit_hash_discovery` to discover/verify this value.
 #[allow(dead_code)]
-const PR_TEST_COMMIT_HASH: &str = "8935183ff722bf04e861928c6a7e50868c6ca4a6";
+const PR_TEST_COMMIT_HASH: &str = "5d40fb1555a0c28bf4d650515a73aaa54d4d9bfb";
 
 use crate::{
     clone_repo, create_commit, create_deterministic_commit_with_variant, try_push, try_push_to_ref,
@@ -1355,11 +1355,10 @@ impl PushAuthorizationTests {
             return TestResult::new(test_name, "GRASP-01:git-http:40", desc).fail(&e);
         }
 
-        // TODO - uncomment this when purgatory feature added
         // Check event is not yet served by relay (still in purgatory)
         match client.is_event_on_relay(pr_event.id).await {
             Ok(on_relay) => {
-                if !on_relay {
+                if on_relay {
                     return TestResult::new(test_name, "GRASP-01:git-http:40", desc)
                         .fail("PR event not in purgatory before correct commit pushed to refs/nostr/<event-id> (the relay serve the PR event)");
                 }
