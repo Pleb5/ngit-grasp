@@ -168,8 +168,54 @@ impl Nip34WritePolicy {
     async fn handle_pr_event(&self, event: &Event) -> WritePolicyResult {
         let event_id_str = event.id.to_bech32().unwrap_or_else(|_| event.id.to_hex());
 
-        // Check if git data exists (checks placeholders and commit existence)
-        match self.pr_event_policy.check_git_data_exists(event).await {
+        // duplicate check in purgatory
+        let in_purgatory = self
+            .ctx
+            .purgatory
+            .find_pr(&event.id.to_hex())
+            .is_some_and(|e| e.event.is_some());
+        if in_purgatory {
+            tracing::debug!(
+                "processed PR event duplicate (already in purgatory): {}",
+                event.id,
+            );
+            return WritePolicyResult::Reject {
+                status: true, // Client sees OK
+                message: "duplicate: in purgatory".into(),
+            };
+        }
+
+        // duplicate check in db
+        match &self.ctx.database.check_id(&event.id).await {
+            Ok(DatabaseEventStatus::Saved) => {
+                return WritePolicyResult::Reject {
+                    status: true, // Client sees OK
+                    message: "duplicate".into(),
+                };
+            }
+            Ok(DatabaseEventStatus::Deleted) => {
+                return WritePolicyResult::Reject {
+                    status: false,
+                    message: "invalid: accepted deletion request for this event".into(),
+                };
+            }
+            Err(e) => {
+                return WritePolicyResult::Reject {
+                    status: false,
+                    message: format!("error: internal error: {e}").into(),
+                };
+            }
+            _ => {} // continue
+        }
+
+        // Reject PRs unrelated to stored repositories / events
+        match self.handle_related_event(event, "PR").await {
+            WritePolicyResult::Accept => {} // continue
+            rejected => return rejected,
+        }
+
+        // Check if git data exists (delete any incorrect commits at refs/nostr/<event-id>, copies correct data to relivant repositories)
+        match self.pr_event_policy.git_data_check(event).await {
             Ok(false) => {
                 // No git data exists - add to purgatory
                 let commit = event
@@ -196,18 +242,19 @@ impl Nip34WritePolicy {
                     .purgatory
                     .add_pr(event.clone(), event.id.to_hex(), commit.clone());
 
-                return WritePolicyResult::Reject {
+                WritePolicyResult::Reject {
                     status: true, // Client sees OK
                     message: format!(
                         "purgatory: PR event stored, waiting for git push with commit {}",
                         commit
                     )
                     .into(),
-                };
+                }
             }
             Ok(true) => {
                 // Git data exists - proceed with normal validation
                 tracing::debug!("Git data exists for PR event {}", event_id_str);
+                WritePolicyResult::Accept
             }
             Err(e) => {
                 // Error checking git data - reject event
@@ -216,23 +263,9 @@ impl Nip34WritePolicy {
                     event_id_str,
                     e
                 );
-                return WritePolicyResult::reject(format!("Failed to check git data: {}", e));
+                WritePolicyResult::reject(format!("Failed to check git data: {}", e))
             }
         }
-
-        // Validate refs/nostr refs for this PR event
-        // This deletes any refs/nostr/<event-id> that points to wrong commit
-        if let Err(e) = self.pr_event_policy.validate_nostr_ref(event).await {
-            tracing::warn!(
-                "Failed to validate refs/nostr for PR event {}: {}",
-                event_id_str,
-                e
-            );
-            // Don't reject - just log the error and proceed with normal validation
-        }
-
-        // Continue with reference checking (same as related events)
-        self.handle_related_event(event, "PR").await
     }
 
     /// Handle events that must reference accepted repositories or events

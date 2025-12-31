@@ -94,10 +94,6 @@ pub fn oid_exists(repo_path: &Path, oid: &str) -> bool {
     }
 }
 
-pub fn is_valid_oid(oid: &str) -> bool {
-    oid.len() >= 5 && oid.len() <= 40 && oid.chars().all(|c| c.is_digit(16))
-}
-
 /// Set the repository HEAD to point to a branch
 ///
 /// This updates the HEAD symbolic ref to point to the specified branch.
