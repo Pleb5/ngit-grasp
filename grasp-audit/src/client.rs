@@ -200,7 +200,7 @@ impl AuditClient {
         // Wait a bit for event to propagate
         tokio::time::sleep(Duration::from_millis(300)).await;
 
-        if !self.is_event_on_relay(event.id).await? {
+        if self.is_event_on_relay(event.id).await? {
             return Err(anyhow!(
                 "event sent to relay was served instead of being put in purgatory"
             ));
