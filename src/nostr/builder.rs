@@ -144,51 +144,16 @@ impl Nip34WritePolicy {
 
         match self.state_policy.validate(event) {
             StateResult::Accept => {
-                // Parse state to get identifier for purgatory message
-                let identifier = event
-                    .tags
-                    .iter()
-                    .find_map(|tag| {
-                        let tag_vec = tag.clone().to_vec();
-                        if tag_vec.len() >= 2 && tag_vec[0] == "d" {
-                            Some(tag_vec[1].clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_else(|| "unknown".to_string());
-
                 // Process state alignment asynchronously
                 match self.state_policy.process_state_event(event).await {
-                    Ok(0) => {
-                        // No repos aligned - event was added to purgatory
-                        tracing::info!(
-                            "State event {} added to purgatory: waiting for git data for identifier {}",
-                            event_id_str,
-                            identifier
-                        );
-                        WritePolicyResult::Reject {
-                            status: true, // Client sees OK
-                            message: format!(
-                                "purgatory: state event stored, waiting for git push for {}",
-                                identifier
-                            )
-                            .into(),
-                        }
-                    }
-                    Ok(count) => {
-                        // Successfully aligned repos
-                        tracing::debug!(
-                            "Accepted repository state {}: aligned {} repo(s)",
-                            event_id_str,
-                            count
-                        );
-                        WritePolicyResult::Accept
-                    }
+                    Ok(poilicy_result) => poilicy_result,
                     Err(e) => {
                         tracing::warn!("Failed to process state event {}: {}", event_id_str, e);
-                        // Still accept the event even if processing failed
-                        WritePolicyResult::Accept
+                        // reject if processing failed
+                        WritePolicyResult::Reject {
+                            status: false,
+                            message: format!("error: {e}").into(),
+                        }
                     }
                 }
             }

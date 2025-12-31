@@ -149,7 +149,6 @@ pub async fn authorize_push(
             "Found {} non-refs/nostr/ refs - checking state authorization",
             state_refs.len()
         );
-
         let auth_result = get_state_authorization_for_specific_owner_repo(
             database,
             identifier,

@@ -74,6 +74,30 @@ pub fn commit_exists(repo_path: &Path, commit_hash: &str) -> bool {
     }
 }
 
+/// Check if a oid exists in the repository
+///
+/// # Arguments
+/// * `repo_path` - Path to the bare git repository
+/// * `oid` - The commit hash to check
+///
+/// # Returns
+/// True if the commit exists in the repository, false otherwise
+pub fn oid_exists(repo_path: &Path, oid: &str) -> bool {
+    let output = Command::new("git")
+        .args(["cat-file", "-e", oid])
+        .current_dir(repo_path)
+        .output();
+
+    match output {
+        Ok(result) => result.status.success(),
+        Err(_) => false,
+    }
+}
+
+pub fn is_valid_oid(oid: &str) -> bool {
+    oid.len() >= 5 && oid.len() <= 40 && oid.chars().all(|c| c.is_digit(16))
+}
+
 /// Set the repository HEAD to point to a branch
 ///
 /// This updates the HEAD symbolic ref to point to the specified branch.
