@@ -19,6 +19,7 @@ pub use types::{PrPurgatoryEntry, RefPair, RefUpdate, StatePurgatoryEntry};
 
 use dashmap::DashMap;
 use nostr_sdk::prelude::*;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -251,6 +252,34 @@ impl Purgatory {
     /// * `event_id` - The event ID to remove
     pub fn remove_pr(&self, event_id: &str) {
         self.pr_events.remove(event_id);
+    }
+
+    /// Get all event IDs currently stored in purgatory.
+    ///
+    /// Returns a HashSet of all event IDs for both state events and PR events
+    /// held in purgatory. Useful for negentropy sync to avoid fetching events
+    /// that are already in purgatory awaiting git data.
+    ///
+    /// # Returns
+    /// HashSet of event IDs (as EventId) for all events in purgatory
+    pub fn event_ids(&self) -> HashSet<EventId> {
+        let mut ids = HashSet::new();
+
+        // Collect state event IDs
+        for entry in self.state_events.iter() {
+            for state_entry in entry.value().iter() {
+                ids.insert(state_entry.event.id);
+            }
+        }
+
+        // Collect PR event IDs (only actual events, not placeholders)
+        for entry in self.pr_events.iter() {
+            if let Some(ref event) = entry.value().event {
+                ids.insert(event.id);
+            }
+        }
+
+        ids
     }
 
     /// Get all PR placeholder event IDs (git-data-first entries without events).

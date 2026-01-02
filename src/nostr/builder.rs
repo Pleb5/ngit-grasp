@@ -69,6 +69,11 @@ impl Nip34WritePolicy {
         }
     }
 
+    /// Get a reference to the purgatory for read-only access
+    pub fn purgatory(&self) -> &std::sync::Arc<crate::purgatory::Purgatory> {
+        &self.ctx.purgatory
+    }
+
     /// Handle repository announcement event
     async fn handle_announcement(&self, event: &Event) -> WritePolicyResult {
         let event_id_str = event.id.to_bech32().unwrap_or_else(|_| event.id.to_hex());
