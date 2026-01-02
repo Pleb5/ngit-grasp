@@ -2,7 +2,7 @@
 //!
 //! Provides utilities for testing ngit-grasp's proactive sync functionality:
 //! - `TestClient` - Client wrapper with built-in retry logic
-//! - Event builders for Layer 2 (kind 1618) and Layer 3 (kinds 1, 1111) events
+//! - Event builders for Layer 2 (kind 1621) and Layer 3 (kinds 1, 1111) events
 //! - Assertion helpers that return bool (non-panicking)
 //!
 //! # nostr-sdk 0.43 API Notes
@@ -18,7 +18,7 @@ use nostr_sdk::prelude::*;
 use super::relay::TestRelay;
 
 /// Kind 1618 - Issue (NIP-34 git-related event)
-pub const KIND_ISSUE: u16 = 1618;
+pub const KIND_ISSUE: u16 = 1621;
 
 /// Kind 1111 - NIP-22 Comment
 pub const KIND_COMMENT: u16 = 1111;
