@@ -581,72 +581,64 @@ async fn fetch_missing_oids_from_server(
     let oids = missing_oids.to_vec();
 
     tokio::task::spawn_blocking(move || {
-        let mut fetched_count = 0;
+        // Filter to only OIDs that don't already exist
+        let missing: Vec<&String> = oids.iter().filter(|oid| !oid_exists(&repo_path, oid)).collect();
 
-        // Try to fetch each missing OID individually
-        // This uses git's ability to fetch specific commits
-        for oid in &oids {
-            // Skip if already exists
-            if oid_exists(&repo_path, oid) {
-                continue;
-            }
-
-            // git fetch <remote> <sha1>
-            let output = Command::new("git")
-                .args(["fetch", "--depth=1", &server_url, oid])
-                .current_dir(&repo_path)
-                .output();
-
-            match output {
-                Ok(result) if result.status.success() => {
-                    fetched_count += 1;
-                    tracing::debug!(
-                        oid = %oid,
-                        server = %server_url,
-                        "Successfully fetched OID"
-                    );
-                }
-                Ok(result) => {
-                    let stderr = String::from_utf8_lossy(&result.stderr);
-                    tracing::debug!(
-                        oid = %oid,
-                        server = %server_url,
-                        stderr = %stderr,
-                        "git fetch failed for OID"
-                    );
-                }
-                Err(e) => {
-                    tracing::debug!(
-                        oid = %oid,
-                        server = %server_url,
-                        error = %e,
-                        "git fetch command error"
-                    );
-                }
-            }
+        if missing.is_empty() {
+            return Ok(0);
         }
 
-        // If individual fetches didn't work, try a broader fetch
-        if fetched_count == 0 {
-            // Try fetching all refs - this might get us the commits we need
-            let output = Command::new("git")
-                .args(["fetch", "--all", "--tags", &server_url])
-                .current_dir(&repo_path)
-                .output();
+        // git fetch <remote> <sha1> <sha2> ... - fetch all OIDs in one command
+        let mut args = vec!["fetch", "--depth=1", &server_url];
+        args.extend(missing.iter().map(|s| s.as_str()));
 
-            if let Ok(result) = output {
-                if result.status.success() {
-                    // Count how many OIDs we now have
-                    for oid in &oids {
-                        if oid_exists(&repo_path, oid) {
-                            fetched_count += 1;
-                        }
-                    }
-                }
+        tracing::debug!(
+            oids = ?missing,
+            server = %server_url,
+            "Fetching OIDs"
+        );
+
+        let output = Command::new("git")
+            .args(&args)
+            .current_dir(&repo_path)
+            .output();
+
+        match output {
+            Ok(result) if result.status.success() => {
+                // Count how many OIDs we now have
+                let fetched_count = missing
+                    .iter()
+                    .filter(|oid| oid_exists(&repo_path, oid))
+                    .count();
+
+                tracing::debug!(
+                    fetched_count = fetched_count,
+                    server = %server_url,
+                    "Successfully fetched OIDs"
+                );
+
+                Ok(fetched_count)
+            }
+            Ok(result) => {
+                let stderr = String::from_utf8_lossy(&result.stderr);
+                tracing::debug!(
+                    oids = ?missing,
+                    server = %server_url,
+                    stderr = %stderr,
+                    "git fetch failed for OIDs"
+                );
+                Ok(0)
+            }
+            Err(e) => {
+                tracing::debug!(
+                    oids = ?missing,
+                    server = %server_url,
+                    error = %e,
+                    "git fetch command error"
+                );
+                Ok(0)
             }
         }
-
-        Ok(fetched_count)
     })
     .await?
 }
