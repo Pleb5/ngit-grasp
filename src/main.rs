@@ -62,6 +62,12 @@ async fn main() -> Result<()> {
             config.domain
         );
 
+        // Set the local relay on the write policy for purgatory notifications
+        // This must be done after relay creation since the relay depends on the policy
+        relay_with_db
+            .write_policy
+            .set_local_relay(relay_with_db.relay.clone());
+
         // Start SyncManager for proactive sync (Phase 2: multi-relay support, Phase 3: health tracking)
         // Even without bootstrap relay, SyncManager discovers relays from stored announcements
         // Pass the already-registered sync metrics from Metrics to avoid duplicate registration

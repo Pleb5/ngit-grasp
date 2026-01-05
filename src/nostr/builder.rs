@@ -74,6 +74,14 @@ impl Nip34WritePolicy {
         &self.ctx.purgatory
     }
 
+    /// Set the local relay for purgatory notifications.
+    ///
+    /// This must be called after the relay is created since the relay depends
+    /// on this policy, but purgatory sync needs the relay to notify subscribers.
+    pub fn set_local_relay(&self, relay: nostr_relay_builder::LocalRelay) {
+        self.ctx.set_local_relay(relay);
+    }
+
     /// Handle repository announcement event
     async fn handle_announcement(&self, event: &Event) -> WritePolicyResult {
         let event_id_str = event.id.to_bech32().unwrap_or_else(|_| event.id.to_hex());

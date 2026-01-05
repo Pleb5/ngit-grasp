@@ -179,6 +179,7 @@ impl StatePolicy {
                 state.clone(),
                 self.ctx.database.clone(),
                 Some(self.ctx.domain.clone()),
+                self.ctx.get_local_relay(),
             );
 
             tracing::info!(

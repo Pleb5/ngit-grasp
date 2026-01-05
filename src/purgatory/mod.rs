@@ -27,7 +27,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::git::authorization::{
-    fetch_repository_data, pubkey_authorised_for_repo_owners, RepositoryData,
+    collect_authorized_maintainers, fetch_repository_data, pubkey_authorised_for_repo_owners,
+    RepositoryData,
 };
 use crate::git::oid_exists;
 use crate::nostr::builder::SharedDatabase;
@@ -92,19 +93,29 @@ impl Purgatory {
     /// from remote servers listed in the repository announcements. It's called
     /// when a state event arrives but the required git data isn't available locally.
     ///
+    /// After successfully syncing OIDs:
+    /// 1. Syncs OIDs to other owner repositories that authorize this state
+    /// 2. Aligns refs with state for each repository
+    /// 3. Saves the state event to database
+    /// 4. Notifies WebSocket subscribers
+    /// 5. Removes the event from purgatory
+    ///
     /// # Arguments
     /// * `state` - The parsed repository state event
-    /// * `database` - Database to query for repository announcements
+    /// * `database` - Database to query for repository announcements and save events
     /// * `our_domain` - Our service domain to exclude from fetch targets
+    /// * `local_relay` - Local relay for notifying WebSocket subscribers (optional)
     pub fn start_state_sync(
         &self,
         state: RepositoryState,
         database: SharedDatabase,
         our_domain: Option<String>,
+        local_relay: Option<nostr_relay_builder::LocalRelay>,
     ) {
         let git_data_path = self.git_data_path.clone();
         let identifier = state.identifier.clone();
         let event_id = state.event.id;
+        let purgatory = self.clone();
 
         tokio::spawn(async move {
             tracing::debug!(
@@ -113,15 +124,31 @@ impl Purgatory {
                 "Starting background git data sync for purgatory state event"
             );
 
-            if let Err(e) =
-                sync_state_git_data(state, &database, &git_data_path, our_domain.as_deref()).await
+            match sync_state_git_data(
+                state,
+                &database,
+                &git_data_path,
+                our_domain.as_deref(),
+                local_relay.as_ref(),
+                &purgatory,
+            )
+            .await
             {
-                tracing::warn!(
-                    identifier = %identifier,
-                    event_id = %event_id,
-                    error = %e,
-                    "Failed to sync git data for purgatory state event"
-                );
+                Ok(()) => {
+                    tracing::info!(
+                        identifier = %identifier,
+                        event_id = %event_id,
+                        "Successfully synced git data and released state event from purgatory"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        identifier = %identifier,
+                        event_id = %event_id,
+                        error = %e,
+                        "Failed to sync git data for purgatory state event"
+                    );
+                }
             }
         });
     }
@@ -427,11 +454,18 @@ impl Purgatory {
 /// 3. Collects clone URLs from authorized announcements
 /// 4. Finds the most complete local repo to fetch into
 /// 5. Identifies missing OIDs and fetches them from remote servers
+/// 6. After OIDs are synced, copies them to other owner repositories
+/// 7. Aligns refs with state for each authorized repository
+/// 8. Saves the state event to database
+/// 9. Notifies WebSocket subscribers
+/// 10. Removes the event from purgatory
 async fn sync_state_git_data(
     state: RepositoryState,
     database: &SharedDatabase,
     git_data_path: &Path,
     our_domain: Option<&str>,
+    local_relay: Option<&nostr_relay_builder::LocalRelay>,
+    purgatory: &Purgatory,
 ) -> Result<()> {
     // Fetch repository data from database
     let db_repo_data = fetch_repository_data(database, &state.identifier).await?;
@@ -486,81 +520,469 @@ async fn sync_state_git_data(
     );
 
     // Find the most complete local repo to fetch into
-    let (repo_path, missing_oids) =
+    let (source_repo_path, missing_oids) =
         get_most_complete_local_repo(&db_repo_data, &state, git_data_path)?;
 
-    if missing_oids.is_empty() {
+    // Fetch missing OIDs from remote servers
+    if !missing_oids.is_empty() {
+        tracing::info!(
+            identifier = %state.identifier,
+            repo_path = %source_repo_path.display(),
+            missing_oids = ?missing_oids,
+            "Attempting to fetch {} missing OIDs from remote servers",
+            missing_oids.len()
+        );
+
+        // Try to fetch from each server until we get all missing OIDs
+        let mut last_error: Option<String> = None;
+        for server_url in &servers {
+            match fetch_missing_oids_from_server(&source_repo_path, server_url, &missing_oids).await
+            {
+                Ok(fetched) => {
+                    if fetched > 0 {
+                        tracing::info!(
+                            identifier = %state.identifier,
+                            server = %server_url,
+                            fetched = %fetched,
+                            "Successfully fetched git data"
+                        );
+                    }
+
+                    // Check if all OIDs are now available
+                    let still_missing: Vec<_> = missing_oids
+                        .iter()
+                        .filter(|oid| !oid_exists(&source_repo_path, oid))
+                        .collect();
+
+                    if still_missing.is_empty() {
+                        tracing::info!(
+                            identifier = %state.identifier,
+                            "All missing OIDs fetched successfully"
+                        );
+                        break;
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        identifier = %state.identifier,
+                        server = %server_url,
+                        error = %e,
+                        "Failed to fetch from server"
+                    );
+                    last_error = Some(e.to_string());
+                }
+            }
+        }
+
+        // Check final state - if still missing OIDs, fail
+        let still_missing: Vec<_> = missing_oids
+            .iter()
+            .filter(|oid| !oid_exists(&source_repo_path, oid))
+            .collect();
+
+        if !still_missing.is_empty() {
+            bail!(
+                "Failed to fetch {} OIDs from any server. Last error: {:?}",
+                still_missing.len(),
+                last_error
+            );
+        }
+    } else {
         tracing::debug!(
             identifier = %state.identifier,
-            repo_path = %repo_path.display(),
+            repo_path = %source_repo_path.display(),
             "No missing OIDs - git data is already complete"
+        );
+    }
+
+    // Now that we have all OIDs, sync to other owner repositories and align refs
+    let by_owner = collect_authorized_maintainers(&db_repo_data.announcements);
+    let mut repo_count = 0;
+
+    for (owner, maintainers) in &by_owner {
+        // Check if this state's author is authorized for this owner
+        if !maintainers.contains(&state.event.pubkey.to_hex()) {
+            continue;
+        }
+
+        // Find the previous latest state for this owner's maintainer set
+        let previous_state = db_repo_data
+            .states
+            .iter()
+            .filter(|s| maintainers.contains(&s.event.pubkey.to_hex()))
+            .max_by_key(|s| s.event.created_at);
+
+        // Only update if this state is newer than any existing state
+        // TODO: in event of a tie, the event with the biggest event id wins
+        if let Some(prev) = previous_state {
+            if state.event.created_at <= prev.event.created_at {
+                tracing::debug!(
+                    identifier = %state.identifier,
+                    owner = %owner,
+                    "Skipping owner - existing state is newer or equal"
+                );
+                continue;
+            }
+        }
+
+        // Find the announcement for this owner
+        let announcement = db_repo_data
+            .announcements
+            .iter()
+            .find(|a| a.event.pubkey.to_hex() == *owner);
+
+        let Some(announcement) = announcement else {
+            continue;
+        };
+
+        let target_repo_path = git_data_path.join(announcement.repo_path());
+
+        if !target_repo_path.exists() {
+            // Repository doesn't exist (e.g., announcement doesn't list this service)
+            tracing::debug!(
+                identifier = %state.identifier,
+                owner = %owner,
+                repo_path = %target_repo_path.display(),
+                "Skipping owner - repository doesn't exist"
+            );
+            continue;
+        }
+
+        // Copy missing OIDs from source repo to target repo if different
+        if target_repo_path != source_repo_path {
+            if let Err(e) =
+                copy_missing_oids_between_repos(&source_repo_path, &target_repo_path, &state)
+            {
+                tracing::warn!(
+                    identifier = %state.identifier,
+                    source = %source_repo_path.display(),
+                    target = %target_repo_path.display(),
+                    error = %e,
+                    "Failed to copy OIDs between repos"
+                );
+                // Continue anyway - we'll try to align what we can
+            }
+        }
+
+        // Align refs with state
+        let result = align_repository_with_state(&target_repo_path, &state);
+        repo_count += 1;
+
+        tracing::info!(
+            identifier = %state.identifier,
+            owner = %owner,
+            repo_path = %target_repo_path.display(),
+            refs_created = result.refs_created,
+            refs_updated = result.refs_updated,
+            refs_deleted = result.refs_deleted,
+            head_set = result.head_set,
+            "Aligned repository with state from purgatory sync"
+        );
+    }
+
+    tracing::info!(
+        identifier = %state.identifier,
+        event_id = %state.event.id,
+        repo_count = repo_count,
+        "Synced git data and aligned {} repositories",
+        repo_count
+    );
+
+    // Save state event to database
+    match database.save_event(&state.event).await {
+        Ok(_) => {
+            tracing::info!(
+                identifier = %state.identifier,
+                event_id = %state.event.id,
+                "Saved purgatory state event to database after git sync"
+            );
+
+            // Notify WebSocket subscribers
+            if let Some(relay) = local_relay {
+                if relay.notify_event(state.event.clone()) {
+                    tracing::info!(
+                        identifier = %state.identifier,
+                        event_id = %state.event.id,
+                        "Broadcast purgatory state event to websocket listeners"
+                    );
+                } else {
+                    tracing::warn!(
+                        identifier = %state.identifier,
+                        event_id = %state.event.id,
+                        "Failed to broadcast purgatory state event to websocket listeners"
+                    );
+                }
+            }
+
+            // Remove from purgatory
+            purgatory.remove_state_event(&state.identifier, &state.event.id);
+            tracing::info!(
+                identifier = %state.identifier,
+                event_id = %state.event.id,
+                "Removed state event from purgatory after successful sync"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                identifier = %state.identifier,
+                event_id = %state.event.id,
+                error = %e,
+                "Failed to save purgatory state event to database"
+            );
+            // Don't remove from purgatory if save failed - it will retry or expire
+            bail!("Failed to save state event to database: {}", e);
+        }
+    }
+
+    Ok(())
+}
+
+/// Copy missing OIDs from a source repository to a target repository.
+///
+/// Identifies commits referenced in the state that are missing from the target
+/// repository and copies them from the source repository using git fetch.
+fn copy_missing_oids_between_repos(
+    source_repo: &Path,
+    target_repo: &Path,
+    state: &RepositoryState,
+) -> Result<(), String> {
+    // Collect all commits referenced in the state
+    let mut commits_to_check = Vec::new();
+
+    for branch in &state.branches {
+        if !branch.commit.starts_with("ref: ") {
+            commits_to_check.push(&branch.commit);
+        }
+    }
+
+    for tag in &state.tags {
+        if !tag.commit.starts_with("ref: ") {
+            commits_to_check.push(&tag.commit);
+        }
+    }
+
+    // Identify missing commits
+    let mut missing_commits = Vec::new();
+    for commit in commits_to_check {
+        if !oid_exists(target_repo, commit) {
+            missing_commits.push(commit);
+        }
+    }
+
+    if missing_commits.is_empty() {
+        tracing::debug!(
+            "No missing commits to copy from {} to {}",
+            source_repo.display(),
+            target_repo.display()
         );
         return Ok(());
     }
 
     tracing::info!(
-        identifier = %state.identifier,
-        repo_path = %repo_path.display(),
-        missing_oids = ?missing_oids,
-        "Attempting to fetch {} missing OIDs from remote servers",
-        missing_oids.len()
+        "Copying {} missing commits from {} to {}",
+        missing_commits.len(),
+        source_repo.display(),
+        target_repo.display()
     );
 
-    // Try to fetch from each server until we get all missing OIDs
-    let mut last_error: Option<String> = None;
-    for server_url in &servers {
-        match fetch_missing_oids_from_server(&repo_path, server_url, &missing_oids).await {
-            Ok(fetched) => {
-                if fetched > 0 {
+    // Fetch each missing commit from source to target
+    for commit in &missing_commits {
+        let output = Command::new("git")
+            .args([
+                "fetch",
+                source_repo.to_str().ok_or("Invalid source path")?,
+                commit,
+            ])
+            .current_dir(target_repo)
+            .output()
+            .map_err(|e| format!("Failed to execute git fetch: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!(
+                "git fetch failed for commit {}: {}",
+                commit, stderr
+            ));
+        }
+
+        tracing::debug!("Copied commit {} to {}", commit, target_repo.display());
+    }
+
+    Ok(())
+}
+
+/// Result of aligning a repository with authorized state
+#[derive(Debug, Default)]
+struct SyncAlignmentResult {
+    /// Number of refs created
+    refs_created: usize,
+    /// Number of refs updated
+    refs_updated: usize,
+    /// Number of refs deleted
+    refs_deleted: usize,
+    /// Whether HEAD was set
+    head_set: bool,
+}
+
+/// Align a repository's refs with the authorized state.
+///
+/// This function:
+/// 1. Deletes refs that are in the repo but not in the state (for refs/heads/ and refs/tags/)
+/// 2. Updates refs that exist in state if we have the commit
+/// 3. Sets HEAD if the HEAD branch's commit is available
+fn align_repository_with_state(repo_path: &Path, state: &RepositoryState) -> SyncAlignmentResult {
+    use crate::git;
+
+    let mut result = SyncAlignmentResult::default();
+
+    // Check if repository exists
+    if !repo_path.exists() {
+        tracing::debug!(
+            "Repository not found at {}, cannot align with state",
+            repo_path.display()
+        );
+        return result;
+    }
+
+    // Get current refs from the repository
+    let current_refs = match git::list_refs(repo_path) {
+        Ok(refs) => refs,
+        Err(e) => {
+            tracing::warn!("Failed to list refs in {}: {}", repo_path.display(), e);
+            return result;
+        }
+    };
+
+    // Build expected refs from state
+    let mut expected_refs: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+
+    for branch in &state.branches {
+        let ref_name = format!("refs/heads/{}", branch.name);
+        expected_refs.insert(ref_name, branch.commit.clone());
+    }
+
+    for tag in &state.tags {
+        let ref_name = format!("refs/tags/{}", tag.name);
+        expected_refs.insert(ref_name, tag.commit.clone());
+    }
+
+    // Delete refs that exist in repo but not in state (only for refs/heads/ and refs/tags/)
+    for (ref_name, _current_commit) in &current_refs {
+        if (ref_name.starts_with("refs/heads/") || ref_name.starts_with("refs/tags/"))
+            && !expected_refs.contains_key(ref_name)
+        {
+            match git::delete_ref(repo_path, ref_name) {
+                Ok(()) => {
                     tracing::info!(
-                        identifier = %state.identifier,
-                        server = %server_url,
-                        fetched = %fetched,
-                        "Successfully fetched git data"
+                        "Deleted {} from {} (not in state)",
+                        ref_name,
+                        repo_path.display()
+                    );
+                    result.refs_deleted += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to delete {} from {}: {}",
+                        ref_name,
+                        repo_path.display(),
+                        e
                     );
                 }
-
-                // Check if all OIDs are now available
-                let still_missing: Vec<_> = missing_oids
-                    .iter()
-                    .filter(|oid| !oid_exists(&repo_path, oid))
-                    .collect();
-
-                if still_missing.is_empty() {
-                    tracing::info!(
-                        identifier = %state.identifier,
-                        "All missing OIDs fetched successfully"
-                    );
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                tracing::debug!(
-                    identifier = %state.identifier,
-                    server = %server_url,
-                    error = %e,
-                    "Failed to fetch from server"
-                );
-                last_error = Some(e.to_string());
             }
         }
     }
 
-    // Check final state
-    let still_missing: Vec<_> = missing_oids
-        .iter()
-        .filter(|oid| !oid_exists(&repo_path, oid))
-        .collect();
+    // Update refs that exist in state (if we have the commit)
+    for (ref_name, expected_commit) in &expected_refs {
+        // Skip symbolic refs
+        if expected_commit.starts_with("ref: ") {
+            continue;
+        }
 
-    if still_missing.is_empty() {
-        Ok(())
-    } else {
-        bail!(
-            "Failed to fetch {} OIDs from any server. Last error: {:?}",
-            still_missing.len(),
-            last_error
-        )
+        // Check if we have the commit
+        if !git::oid_exists(repo_path, expected_commit) {
+            tracing::debug!(
+                "Commit {} not available for {} in {}",
+                expected_commit,
+                ref_name,
+                repo_path.display()
+            );
+            continue;
+        }
+
+        // Check current value
+        let current_commit = current_refs
+            .iter()
+            .find(|(r, _)| r == ref_name)
+            .map(|(_, c)| c.as_str());
+
+        if current_commit == Some(expected_commit.as_str()) {
+            // Already correct
+            continue;
+        }
+
+        // Update or create the ref
+        match git::update_ref(repo_path, ref_name, expected_commit) {
+            Ok(()) => {
+                if current_commit.is_some() {
+                    tracing::info!(
+                        "Updated {} to {} in {}",
+                        ref_name,
+                        expected_commit,
+                        repo_path.display()
+                    );
+                    result.refs_updated += 1;
+                } else {
+                    tracing::info!(
+                        "Created {} at {} in {}",
+                        ref_name,
+                        expected_commit,
+                        repo_path.display()
+                    );
+                    result.refs_created += 1;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to update {} in {}: {}",
+                    ref_name,
+                    repo_path.display(),
+                    e
+                );
+            }
+        }
     }
+
+    // Set HEAD if specified in state
+    if let Some(head_ref) = &state.head {
+        if let Some(branch_name) = state.get_head_branch() {
+            if let Some(head_commit) = state.get_branch_commit(branch_name) {
+                match git::try_set_head_if_available(repo_path, head_ref, head_commit) {
+                    Ok(true) => {
+                        tracing::info!(
+                            "Set HEAD to {} in {} (from purgatory sync)",
+                            head_ref,
+                            repo_path.display()
+                        );
+                        result.head_set = true;
+                    }
+                    Ok(false) => {
+                        tracing::debug!(
+                            "HEAD commit {} not available yet in {}",
+                            head_commit,
+                            repo_path.display()
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to set HEAD in {}: {}", repo_path.display(), e);
+                    }
+                }
+            }
+        }
+    }
+
+    result
 }
 
 /// Fetch missing OIDs from a remote git server.
@@ -582,7 +1004,10 @@ async fn fetch_missing_oids_from_server(
 
     tokio::task::spawn_blocking(move || {
         // Filter to only OIDs that don't already exist
-        let missing: Vec<&String> = oids.iter().filter(|oid| !oid_exists(&repo_path, oid)).collect();
+        let missing: Vec<&String> = oids
+            .iter()
+            .filter(|oid| !oid_exists(&repo_path, oid))
+            .collect();
 
         if missing.is_empty() {
             return Ok(0);
