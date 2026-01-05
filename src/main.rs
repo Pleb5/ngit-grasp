@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::time::Duration;
+use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use tokio::signal;
@@ -49,7 +49,9 @@ async fn main() -> Result<()> {
     };
 
     // Create purgatory for event/git coordination
-    let purgatory = Arc::new(Purgatory::new());
+    let purgatory = Arc::new(Purgatory::new(PathBuf::from(
+        config.effective_git_data_path(),
+    )));
     info!("Purgatory initialized for event coordination");
 
     // Create Nostr relay with NIP-34 validation

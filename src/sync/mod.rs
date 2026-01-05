@@ -1661,6 +1661,8 @@ impl SyncManager {
                         reason = %message,
                         "Event added to purgatory"
                     );
+                    // Note: git data sync for state events is triggered by the policy
+                    // layer when adding to purgatory (via start_state_sync)
                     ProcessResult::Purgatory
                 } else {
                     tracing::debug!(

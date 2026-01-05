@@ -173,6 +173,14 @@ impl StatePolicy {
             self.ctx
                 .purgatory
                 .add_state(event.clone(), state.identifier.clone(), event.pubkey);
+
+            // Trigger background git data sync from remote servers
+            self.ctx.purgatory.start_state_sync(
+                state.clone(),
+                self.ctx.database.clone(),
+                Some(self.ctx.domain.clone()),
+            );
+
             tracing::info!(
                 "state event added to purgatory: eventid: {}, identifier: {}",
                 state.event.id,

@@ -287,6 +287,20 @@ pub async fn fetch_repository_data(
     })
 }
 
+pub fn pubkey_authorised_for_repo_owners(
+    pubkey: &PublicKey,
+    db_repo_data: &RepositoryData,
+) -> Vec<String> {
+    let mut repo_owners_authorising_pubkey = HashSet::new();
+    let collections = collect_authorized_maintainers(&db_repo_data.announcements);
+    for (owner, authoised) in collections {
+        if authoised.contains(&pubkey.to_hex()) {
+            repo_owners_authorising_pubkey.insert(owner.to_string());
+        }
+    }
+    repo_owners_authorising_pubkey.iter().cloned().collect()
+}
+
 /// Collect authorized maintainers grouped by owner from a set of announcements
 ///
 /// For each announcement, returns a map from owner pubkey to authorized maintainers:
