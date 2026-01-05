@@ -17,13 +17,15 @@
 //! authorizes a push, that push should be reflected in ALL owner repositories
 //! that would authorize the same state.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Command;
 use tracing::{debug, info, warn};
 
-use crate::git::{self, oid_exists};
+use nostr_sdk::Event;
+
 use crate::git::authorization::{collect_authorized_maintainers, RepositoryData};
+use crate::git::{self, oid_exists};
 use crate::nostr::events::RepositoryState;
 
 /// Result of syncing git data to owner repositories
@@ -67,27 +69,56 @@ pub struct PrSyncResult {
     pub errors: Vec<(String, String)>,
 }
 
-/// Sync PR data (refs/nostr/<event-id>) from a source repository to all other
-/// owner repositories that share maintainers.
+/// Extract owner pubkeys from PR events' `a` tags.
 ///
-/// This function:
-/// 1. Collects all authorized maintainers per owner from announcements
-/// 2. For each owner that shares at least one maintainer with the source owner:
-///    - Copies missing OIDs for the PR commits
-///    - Creates the refs/nostr/<event-id> ref pointing to the same commit
+/// PR events reference repositories via `a` tags with format `30617:<owner_pubkey>:<identifier>`.
+/// This function extracts all unique owner pubkeys from these tags.
+///
+/// # Arguments
+/// * `pr_events` - List of PR events to extract owner pubkeys from
+///
+/// # Returns
+/// A HashSet of owner pubkeys (hex strings) referenced by the PR events
+pub fn extract_tagged_owners_from_pr_events(pr_events: &[Event]) -> HashSet<String> {
+    let mut owners = HashSet::new();
+
+    for event in pr_events {
+        for tag in event.tags.iter() {
+            let tag_vec = tag.clone().to_vec();
+            if tag_vec.len() >= 2 && tag_vec[0] == "a" && tag_vec[1].starts_with("30617:") {
+                // Format: 30617:<owner_pubkey>:<identifier>
+                let parts: Vec<&str> = tag_vec[1].split(':').collect();
+                if parts.len() >= 2 {
+                    owners.insert(parts[1].to_string());
+                }
+            }
+        }
+    }
+
+    owners
+}
+
+/// Sync PR data (refs/nostr/<event-id>) from a source repository to owner
+/// repositories that list any of the tagged owners as a maintainer.
+///
+/// This function is used when PR events from purgatory have been authorized.
+/// It extracts the owner pubkeys from the PR events' `a` tags and syncs to
+/// any owner repo that lists any of those owners as a maintainer.
 ///
 /// # Arguments
 /// * `source_repo_path` - Path to the repository that has the PR git data
 /// * `pr_refs` - List of (event_id, commit_hash) tuples for PR refs that were pushed
+/// * `purgatory_pr_events` - PR events from purgatory that authorized this push
 /// * `db_repo_data` - Repository data from database (announcements + states)
 /// * `git_data_path` - Base path for git repositories
-/// * `source_owner_pubkey` - The owner pubkey of the source repository
+/// * `source_owner_pubkey` - The owner pubkey of the source repository (to skip)
 ///
 /// # Returns
 /// A `PrSyncResult` with statistics about what was synced
-pub fn sync_pr_refs_to_owner_repos(
+pub fn sync_pr_refs_to_tagged_owner_repos(
     source_repo_path: &Path,
     pr_refs: &[(String, String)], // (event_id, commit_hash)
+    purgatory_pr_events: &[Event],
     db_repo_data: &RepositoryData,
     git_data_path: &Path,
     source_owner_pubkey: &str,
@@ -98,27 +129,22 @@ pub fn sync_pr_refs_to_owner_repos(
         return result;
     }
 
-    // Collect authorized maintainers per owner
-    let by_owner = collect_authorized_maintainers(&db_repo_data.announcements);
+    // Extract owner pubkeys from PR events' `a` tags
+    let tagged_owners = extract_tagged_owners_from_pr_events(purgatory_pr_events);
 
-    // Get the maintainer set for the source owner
-    let source_maintainers = match by_owner.get(source_owner_pubkey) {
-        Some(maintainers) => maintainers,
-        None => {
-            debug!(
-                "No maintainer set found for source owner {}",
-                source_owner_pubkey
-            );
-            return result;
-        }
-    };
+    if tagged_owners.is_empty() {
+        debug!("No tagged owners found in PR events");
+        return result;
+    }
 
     debug!(
-        source_owner = %source_owner_pubkey,
+        tagged_owners = ?tagged_owners,
         pr_refs_count = pr_refs.len(),
-        owners = by_owner.len(),
-        "Syncing PR refs to owner repositories"
+        "Syncing PR refs to owner repositories that list tagged owners as maintainers"
     );
+
+    // Collect authorized maintainers per owner
+    let by_owner = collect_authorized_maintainers(&db_repo_data.announcements);
 
     for (owner, maintainers) in &by_owner {
         // Skip the source owner - we already have the data there
@@ -126,14 +152,13 @@ pub fn sync_pr_refs_to_owner_repos(
             continue;
         }
 
-        // Check if this owner shares any maintainers with the source owner
-        // (i.e., there's overlap in their maintainer sets)
-        let has_shared_maintainer = maintainers.iter().any(|m| source_maintainers.contains(m));
+        // Check if this owner's maintainer set includes any of the tagged owners
+        let has_tagged_owner_as_maintainer = maintainers.iter().any(|m| tagged_owners.contains(m));
 
-        if !has_shared_maintainer {
+        if !has_tagged_owner_as_maintainer {
             debug!(
                 owner = %owner,
-                "Skipping owner - no shared maintainers with source"
+                "Skipping owner - does not list any tagged owner as maintainer"
             );
             continue;
         }
@@ -164,9 +189,11 @@ pub fn sync_pr_refs_to_owner_repos(
         for (event_id, commit_hash) in pr_refs {
             // Copy the commit if missing
             if !oid_exists(&target_repo_path, commit_hash) {
-                if let Err(e) =
-                    copy_single_commit_between_repos(source_repo_path, &target_repo_path, commit_hash)
-                {
+                if let Err(e) = copy_single_commit_between_repos(
+                    source_repo_path,
+                    &target_repo_path,
+                    commit_hash,
+                ) {
                     warn!(
                         event_id = %event_id,
                         source = %source_repo_path.display(),
@@ -189,7 +216,7 @@ pub fn sync_pr_refs_to_owner_repos(
                         event_id = %event_id,
                         commit = %commit_hash,
                         target = %target_repo_path.display(),
-                        "Created PR ref in target repository"
+                        "Created PR ref in target repository (via tagged owner)"
                     );
                     refs_created_for_owner += 1;
                 }
@@ -200,7 +227,9 @@ pub fn sync_pr_refs_to_owner_repos(
                         error = %e,
                         "Failed to create PR ref in target repository"
                     );
-                    result.errors.push((target_repo_path.display().to_string(), e));
+                    result
+                        .errors
+                        .push((target_repo_path.display().to_string(), e));
                 }
             }
         }
@@ -213,7 +242,7 @@ pub fn sync_pr_refs_to_owner_repos(
                 owner = %owner,
                 repo_path = %target_repo_path.display(),
                 refs_created = refs_created_for_owner,
-                "Synced PR refs to owner repository"
+                "Synced PR refs to owner repository (via tagged owner)"
             );
         }
     }
@@ -222,7 +251,8 @@ pub fn sync_pr_refs_to_owner_repos(
         repos_synced = result.repos_synced,
         refs_created = result.refs_created,
         errors = result.errors.len(),
-        "Completed PR ref sync to owner repositories"
+        tagged_owners = tagged_owners.len(),
+        "Completed PR ref sync to owner repositories via tagged owners"
     );
 
     result
@@ -259,11 +289,7 @@ fn copy_single_commit_between_repos(
         ));
     }
 
-    debug!(
-        "Copied commit {} to {}",
-        commit_hash,
-        target_repo.display()
-    );
+    debug!("Copied commit {} to {}", commit_hash, target_repo.display());
     Ok(())
 }
 
@@ -359,7 +385,8 @@ pub fn sync_to_owner_repos(
 
         // Copy missing OIDs from source repo to target repo if different
         if target_repo_path != source_repo_path {
-            if let Err(e) = copy_missing_oids_between_repos(source_repo_path, &target_repo_path, state)
+            if let Err(e) =
+                copy_missing_oids_between_repos(source_repo_path, &target_repo_path, state)
             {
                 warn!(
                     identifier = %state.identifier,
@@ -368,7 +395,9 @@ pub fn sync_to_owner_repos(
                     error = %e,
                     "Failed to copy OIDs between repos"
                 );
-                result.errors.push((target_repo_path.display().to_string(), e));
+                result
+                    .errors
+                    .push((target_repo_path.display().to_string(), e));
                 // Continue anyway - we'll try to align what we can
             }
         }
@@ -615,11 +644,7 @@ pub fn align_repository_with_state(repo_path: &Path, state: &RepositoryState) ->
             if let Some(head_commit) = state.get_branch_commit(branch_name) {
                 match git::try_set_head_if_available(repo_path, head_ref, head_commit) {
                     Ok(true) => {
-                        info!(
-                            "Set HEAD to {} in {}",
-                            head_ref,
-                            repo_path.display()
-                        );
+                        info!("Set HEAD to {} in {}", head_ref, repo_path.display());
                         result.head_set = true;
                     }
                     Ok(false) => {
@@ -670,5 +695,102 @@ mod tests {
         assert_eq!(result.repos_synced, 0);
         assert_eq!(result.refs_created, 0);
         assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_extract_tagged_owners_from_pr_events_empty() {
+        let events: Vec<Event> = vec![];
+        let owners = extract_tagged_owners_from_pr_events(&events);
+        assert!(owners.is_empty());
+    }
+
+    #[test]
+    fn test_extract_tagged_owners_from_pr_events_with_a_tags() {
+        use nostr_sdk::{EventBuilder, Keys, Kind, Tag, TagKind};
+
+        let keys = Keys::generate();
+
+        // Create a PR event with `a` tags referencing repos
+        let tags = vec![
+            Tag::custom(
+                TagKind::Custom("a".into()),
+                vec!["30617:abc123def456:test-repo".to_string()],
+            ),
+            Tag::custom(
+                TagKind::Custom("a".into()),
+                vec!["30617:789xyz000111:another-repo".to_string()],
+            ),
+            Tag::custom(TagKind::Custom("c".into()), vec!["commit123".to_string()]),
+        ];
+
+        let event = EventBuilder::new(Kind::from(1618), "PR content")
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        let owners = extract_tagged_owners_from_pr_events(&[event]);
+        assert_eq!(owners.len(), 2);
+        assert!(owners.contains("abc123def456"));
+        assert!(owners.contains("789xyz000111"));
+    }
+
+    #[test]
+    fn test_extract_tagged_owners_from_pr_events_deduplicates() {
+        use nostr_sdk::{EventBuilder, Keys, Kind, Tag, TagKind};
+
+        let keys = Keys::generate();
+
+        // Create two events with overlapping owners
+        let tags1 = vec![Tag::custom(
+            TagKind::Custom("a".into()),
+            vec!["30617:same_owner:repo1".to_string()],
+        )];
+
+        let tags2 = vec![Tag::custom(
+            TagKind::Custom("a".into()),
+            vec!["30617:same_owner:repo2".to_string()],
+        )];
+
+        let event1 = EventBuilder::new(Kind::from(1618), "PR 1")
+            .tags(tags1)
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        let event2 = EventBuilder::new(Kind::from(1618), "PR 2")
+            .tags(tags2)
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        let owners = extract_tagged_owners_from_pr_events(&[event1, event2]);
+        assert_eq!(owners.len(), 1);
+        assert!(owners.contains("same_owner"));
+    }
+
+    #[test]
+    fn test_extract_tagged_owners_ignores_non_30617_a_tags() {
+        use nostr_sdk::{EventBuilder, Keys, Kind, Tag, TagKind};
+
+        let keys = Keys::generate();
+
+        // Create a PR event with a non-30617 `a` tag
+        let tags = vec![
+            Tag::custom(
+                TagKind::Custom("a".into()),
+                vec!["30617:valid_owner:test-repo".to_string()],
+            ),
+            Tag::custom(
+                TagKind::Custom("a".into()),
+                vec!["30618:state_event:test-repo".to_string()], // Not 30617
+            ),
+        ];
+
+        let event = EventBuilder::new(Kind::from(1618), "PR content")
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        let owners = extract_tagged_owners_from_pr_events(&[event]);
+        assert_eq!(owners.len(), 1);
+        assert!(owners.contains("valid_owner"));
     }
 }

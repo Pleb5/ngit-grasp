@@ -16,7 +16,7 @@ use super::subprocess::GitSubprocess;
 use super::try_set_head_if_available;
 
 use crate::git::authorization::{authorize_push, fetch_repository_data, parse_pushed_refs};
-use crate::git::sync::{sync_pr_refs_to_owner_repos, sync_to_owner_repos};
+use crate::git::sync::{sync_pr_refs_to_tagged_owner_repos, sync_to_owner_repos};
 use crate::nostr::builder::SharedDatabase;
 use crate::nostr::events::{KIND_PR, KIND_PR_UPDATE, KIND_REPOSITORY_STATE};
 use crate::purgatory::Purgatory;
@@ -389,36 +389,53 @@ pub async fn handle_receive_pack(
     let pr_refs: Vec<(String, String)> = pushed_refs
         .iter()
         .filter_map(|(_, new_oid, ref_name)| {
-            ref_name.strip_prefix("refs/nostr/").map(|event_id| {
-                (event_id.to_string(), new_oid.clone())
-            })
+            ref_name
+                .strip_prefix("refs/nostr/")
+                .map(|event_id| (event_id.to_string(), new_oid.clone()))
         })
         .collect();
 
     if !pr_refs.is_empty() {
+        // Extract PR events from purgatory_events (filter for KIND_PR and KIND_PR_UPDATE)
+        let purgatory_pr_events: Vec<_> = auth_result
+            .purgatory_events
+            .iter()
+            .filter(|e| e.kind == Kind::from(KIND_PR) || e.kind == Kind::from(KIND_PR_UPDATE))
+            .cloned()
+            .collect();
+
         match fetch_repository_data(&database, identifier).await {
             Ok(db_repo_data) => {
                 let git_data_path_buf = std::path::PathBuf::from(git_data_path);
-                let pr_sync_result = sync_pr_refs_to_owner_repos(
-                    &repo_path,
-                    &pr_refs,
-                    &db_repo_data,
-                    &git_data_path_buf,
-                    owner_pubkey,
-                );
 
-                if pr_sync_result.repos_synced > 0 {
-                    info!(
-                        "Synced {} PR refs to {} other owner repositories for {}",
-                        pr_sync_result.refs_created,
-                        pr_sync_result.repos_synced,
-                        identifier
+                // sync to owner repos and repos of other owners that list them as maintainers
+                // This uses the `a` tags from PR events to find tagged owner repos
+                if !purgatory_pr_events.is_empty() {
+                    let tagged_sync_result = sync_pr_refs_to_tagged_owner_repos(
+                        &repo_path,
+                        &pr_refs,
+                        &purgatory_pr_events,
+                        &db_repo_data,
+                        &git_data_path_buf,
+                        owner_pubkey,
                     );
-                }
 
-                if !pr_sync_result.errors.is_empty() {
-                    for (repo, error) in &pr_sync_result.errors {
-                        warn!("Error syncing PR ref to {}: {}", repo, error);
+                    if tagged_sync_result.repos_synced > 0 {
+                        info!(
+                            "Synced {} PR refs to {} other owner repositories for {} (via tagged owners)",
+                            tagged_sync_result.refs_created,
+                            tagged_sync_result.repos_synced,
+                            identifier
+                        );
+                    }
+
+                    if !tagged_sync_result.errors.is_empty() {
+                        for (repo, error) in &tagged_sync_result.errors {
+                            warn!(
+                                "Error syncing PR ref to {} (via tagged owner): {}",
+                                repo, error
+                            );
+                        }
                     }
                 }
             }
