@@ -237,6 +237,7 @@ impl Service<Request<Incoming>> for HttpService {
                             &identifier,
                             &owner_pubkey_hex,
                             purgatory.clone(),
+                            &git_data_path,
                         )
                         .await;
 

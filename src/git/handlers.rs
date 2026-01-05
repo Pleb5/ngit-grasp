@@ -15,7 +15,8 @@ use super::protocol::{GitService, PktLine};
 use super::subprocess::GitSubprocess;
 use super::try_set_head_if_available;
 
-use crate::git::authorization::authorize_push;
+use crate::git::authorization::{authorize_push, fetch_repository_data};
+use crate::git::sync::sync_to_owner_repos;
 use crate::nostr::builder::SharedDatabase;
 use crate::nostr::events::{KIND_PR, KIND_PR_UPDATE, KIND_REPOSITORY_STATE};
 use crate::purgatory::Purgatory;
@@ -180,6 +181,7 @@ pub async fn handle_upload_pack(
 /// * `database` - Database reference for authorization queries
 /// * `identifier` - The repository identifier (d tag) for authorization lookup
 /// * `owner_pubkey` - The owner's public key (hex) from the URL path, scoping authorization
+/// * `git_data_path` - Base path for git repositories (for syncing to other owner repos)
 pub async fn handle_receive_pack(
     repo_path: PathBuf,
     request_body: Bytes,
@@ -188,6 +190,7 @@ pub async fn handle_receive_pack(
     identifier: &str,
     owner_pubkey: &str,
     purgatory: Arc<Purgatory>,
+    git_data_path: &str,
 ) -> Result<Response<Full<Bytes>>, GitError> {
     debug!("Handling receive-pack for {:?}", repo_path);
 
@@ -347,7 +350,38 @@ pub async fn handle_receive_pack(
     }
 
     // TODO figure out what atomic pushes look like in GRASP (we cant accepted differnte state events changing different branches at the same time)
-    // TODO sync git data to other repos that these events authorise.
+
+    // Sync git data to other owner repositories that authorize the same state event
+    // This ensures all owners who share maintainers get the same git data
+    if let Some(ref state) = auth_result.state {
+        // Fetch repository data for sync
+        match fetch_repository_data(&database, identifier).await {
+            Ok(db_repo_data) => {
+                let git_data_path_buf = std::path::PathBuf::from(git_data_path);
+                let sync_result =
+                    sync_to_owner_repos(&repo_path, state, &db_repo_data, &git_data_path_buf);
+
+                if sync_result.repos_synced > 0 {
+                    info!(
+                        "Synced git data to {} other owner repositories for {}",
+                        sync_result.repos_synced, identifier
+                    );
+                }
+
+                if !sync_result.errors.is_empty() {
+                    for (repo, error) in &sync_result.errors {
+                        warn!("Error syncing to {}: {}", repo, error);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to fetch repository data for sync after push to {}: {}",
+                    identifier, e
+                );
+            }
+        }
+    }
 
     Ok(Response::builder()
         .status(StatusCode::OK)

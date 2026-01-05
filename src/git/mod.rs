@@ -21,6 +21,7 @@ pub mod authorization;
 pub mod handlers;
 pub mod protocol;
 pub mod subprocess;
+pub mod sync;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
