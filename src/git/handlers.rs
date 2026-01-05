@@ -15,8 +15,8 @@ use super::protocol::{GitService, PktLine};
 use super::subprocess::GitSubprocess;
 use super::try_set_head_if_available;
 
-use crate::git::authorization::{authorize_push, fetch_repository_data};
-use crate::git::sync::sync_to_owner_repos;
+use crate::git::authorization::{authorize_push, fetch_repository_data, parse_pushed_refs};
+use crate::git::sync::{sync_pr_refs_to_owner_repos, sync_to_owner_repos};
 use crate::nostr::builder::SharedDatabase;
 use crate::nostr::events::{KIND_PR, KIND_PR_UPDATE, KIND_REPOSITORY_STATE};
 use crate::purgatory::Purgatory;
@@ -377,6 +377,54 @@ pub async fn handle_receive_pack(
             Err(e) => {
                 warn!(
                     "Failed to fetch repository data for sync after push to {}: {}",
+                    identifier, e
+                );
+            }
+        }
+    }
+
+    // Sync PR data (refs/nostr/<event-id>) to other owner repositories
+    // Parse pushed refs to find refs/nostr/* refs
+    let pushed_refs = parse_pushed_refs(&request_body);
+    let pr_refs: Vec<(String, String)> = pushed_refs
+        .iter()
+        .filter_map(|(_, new_oid, ref_name)| {
+            ref_name.strip_prefix("refs/nostr/").map(|event_id| {
+                (event_id.to_string(), new_oid.clone())
+            })
+        })
+        .collect();
+
+    if !pr_refs.is_empty() {
+        match fetch_repository_data(&database, identifier).await {
+            Ok(db_repo_data) => {
+                let git_data_path_buf = std::path::PathBuf::from(git_data_path);
+                let pr_sync_result = sync_pr_refs_to_owner_repos(
+                    &repo_path,
+                    &pr_refs,
+                    &db_repo_data,
+                    &git_data_path_buf,
+                    owner_pubkey,
+                );
+
+                if pr_sync_result.repos_synced > 0 {
+                    info!(
+                        "Synced {} PR refs to {} other owner repositories for {}",
+                        pr_sync_result.refs_created,
+                        pr_sync_result.repos_synced,
+                        identifier
+                    );
+                }
+
+                if !pr_sync_result.errors.is_empty() {
+                    for (repo, error) in &pr_sync_result.errors {
+                        warn!("Error syncing PR ref to {}: {}", repo, error);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to fetch repository data for PR sync after push to {}: {}",
                     identifier, e
                 );
             }
