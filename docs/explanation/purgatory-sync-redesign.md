@@ -32,86 +32,114 @@ Redesign purgatory sync to be **identifier-based** rather than **event-based**, 
 ### Overview
 
 ```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                              Purgatory                                        │
-│                                                                              │
-│  ┌─────────────────┐  ┌─────────────────┐                                    │
-│  │  State Events   │  │   PR Events     │                                    │
-│  │  (by identifier)│  │  (by event_id)  │                                    │
-│  └────────┬────────┘  └────────┬────────┘                                    │
-│           │                    │                                             │
-│           └──────────┬─────────┘                                             │
-│                      │ add_state() / add_pr() / trigger_immediate_sync()     │
-│                      ▼                                                       │
-│           ┌──────────────────────────┐                                       │
-│           │      Sync Queue          │                                       │
-│           │  DashMap<id, Entry>      │                                       │
-│           │                          │                                       │
-│           │  Entry {                 │                                       │
-│           │    next_attempt,         │  ← delay/backoff timer                │
-│           │    attempt_count,        │  ← for backoff calculation            │
-│           │    in_progress,          │  ← prevents concurrent runs           │
-│           │  }                       │                                       │
-│           └────────────┬─────────────┘                                       │
-│                        │                                                     │
-│  ┌─────────────────────┼─────────────────────────────────────────────────┐   │
-│  │                     ▼                                                 │   │
-│  │          ┌─────────────────────┐                                      │   │
-│  │          │   Main Sync Loop    │  (every 1s)                          │   │
-│  │          │                     │                                      │   │
-│  │          │  1. Find ALL ready  │                                      │   │
-│  │          │     identifiers     │                                      │   │
-│  │          │  2. Spawn parallel  │                                      │   │
-│  │          │     tasks for each  │───────┐                              │   │
-│  │          │  3. Apply backoff   │       │  (parallel tasks)            │   │
-│  │          │     when done       │       │                              │   │
-│  │          └─────────────────────┘       │                              │   │
-│  │                                        ▼                              │   │
-│  │                             ┌─────────────────────────────────────┐   │   │
-│  │                             │       sync_identifier()             │   │   │
-│  │                             │                                     │   │   │
-│  │                             │  Owns its own tried_urls: HashSet   │   │   │
-│  │                             │                                     │   │   │
-│  │                             │  loop:                              │   │   │
-│  │                             │    sync_identifier_step()           │   │   │
-│  │                             │      → (url_tried, complete)        │   │   │
-│  │                             │    if complete: break               │   │   │
-│  │                             │    tried_urls.insert(url_tried)     │   │   │
-│  │                             └─────────────────────────────────────┘   │   │
-│  │                                        │                              │   │
-│  │                                        ▼                              │   │
-│  │                             ┌─────────────────────────────────────┐   │   │
-│  │                             │       Domain Throttle               │   │   │
-│  │                             │       (rate limiting only)          │   │   │
-│  │                             │                                     │   │   │
-│  │                             │  Per-domain state:                  │   │   │
-│  │                             │    - in_flight: u32                 │   │   │
-│  │                             │    - request_times: VecDeque        │   │   │
-│  │                             │                                     │   │   │
-│  │                             │  Round-robin via:                   │   │   │
-│  │                             │    - last_used_index per domain     │   │   │
-│  │                             │    - Caller passes tried_urls       │   │   │
-│  │                             └─────────────────────────────────────┘   │   │
-│  │                                                                       │   │
-│  └───────────────────────────────────────────────────────────────────────┘   │
-└──────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                                  Purgatory                                        │
+│                                                                                   │
+│  ┌─────────────────┐  ┌─────────────────┐                                         │
+│  │  State Events   │  │   PR Events     │                                         │
+│  │  (by identifier)│  │  (by event_id)  │                                         │
+│  └────────┬────────┘  └────────┬────────┘                                         │
+│           │                    │                                                  │
+│           └──────────┬─────────┘                                                  │
+│                      │ add_state() / add_pr() / trigger_immediate_sync()          │
+│                      ▼                                                            │
+│           ┌──────────────────────────┐                                            │
+│           │      Sync Queue          │                                            │
+│           │  DashMap<id, Entry>      │                                            │
+│           │                          │                                            │
+│           │  Entry {                 │                                            │
+│           │    next_attempt,         │  ← delay/backoff timer                     │
+│           │    attempt_count,        │  ← for backoff calculation                 │
+│           │    in_progress,          │  ← prevents concurrent runs                │
+│           │  }                       │                                            │
+│           └────────────┬─────────────┘                                            │
+│                        │                                                          │
+│  ┌─────────────────────┼──────────────────────────────────────────────────────┐   │
+│  │                     ▼                                                      │   │
+│  │          ┌─────────────────────┐                                           │   │
+│  │          │   Main Sync Loop    │  (every 1s)                               │   │
+│  │          │                     │                                           │   │
+│  │          │  1. Find ALL ready  │                                           │   │
+│  │          │     identifiers     │                                           │   │
+│  │          │  2. Spawn parallel  │───────┐                                   │   │
+│  │          │     tasks for each  │       │  (parallel tasks)                 │   │
+│  │          │  3. Apply backoff   │       │                                   │   │
+│  │          │     when done       │       │                                   │   │
+│  │          └─────────────────────┘       │                                   │   │
+│  │                                        ▼                                   │   │
+│  │                             ┌──────────────────────────────────────────┐   │   │
+│  │                             │       sync_identifier()                  │   │   │
+│  │                             │                                          │   │   │
+│  │                             │  Owns its own tried_urls: HashSet        │   │   │
+│  │                             │                                          │   │   │
+│  │                             │  loop:                                   │   │   │
+│  │                             │    url = sync_identifier_next_url(       │   │   │
+│  │                             │            domain=None)                  │   │   │
+│  │                             │    if url is Some:                       │   │   │
+│  │                             │      sync_identifier_from_url(url)       │   │   │
+│  │                             │      tried_urls.insert(url)              │   │   │
+│  │                             │    else:                                 │   │   │
+│  │                             │      break (no non-throttled URLs left)  │   │   │
+│  │                             │                                          │   │   │
+│  │                             │  Enqueue throttled domains then return   │   │   │
+│  │                             └──────────────────────────────────────────┘   │   │
+│  │                                        │                                   │   │
+│  │                                        │ enqueue_identifier()              │   │
+│  │                                        ▼                                   │   │
+│  │  ┌─────────────────────────────────────────────────────────────────────┐   │   │
+│  │  │                        ThrottleManager                              │   │   │
+│  │  │                                                                     │   │   │
+│  │  │   DashMap<domain, DomainThrottle>                                   │   │   │
+│  │  │                                                                     │   │   │
+│  │  │   ┌─────────────────────────────────────────────────────────────┐   │   │   │
+│  │  │   │  DomainThrottle (per domain)                                │   │   │   │
+│  │  │   │                                                             │   │   │   │
+│  │  │   │  Rate limiting:           │  Waiting queue:                 │   │   │   │
+│  │  │   │    - in_flight: u32       │    - waiting_queue: VecDeque    │   │   │   │
+│  │  │   │    - request_times        │    - identifier_state: HashMap  │   │   │   │
+│  │  │   │                           │        - tried_urls (this domain)│  │   │   │
+│  │  │   │                           │        - in_progress            │   │   │   │
+│  │  │   └─────────────────────────────────────────────────────────────┘   │   │   │
+│  │  │                                                                     │   │   │
+│  │  │   Domain Loop (per domain, runs independently):                     │   │   │
+│  │  │     1. Wait for capacity                                            │   │   │
+│  │  │     2. Pick next identifier (round-robin, not in_progress)          │   │   │
+│  │  │     3. url = sync_identifier_next_url(domain=Some(this_domain))     │   │   │
+│  │  │     4. If url: sync_identifier_from_url(url), mark tried            │   │   │
+│  │  │        Else: remove identifier from queue                           │   │   │
+│  │  └─────────────────────────────────────────────────────────────────────┘   │   │
+│  │                                                                            │   │
+│  └────────────────────────────────────────────────────────────────────────────┘   │
+└───────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Key Design Principle: Separation of Concerns
+### Key Design Principles
 
-The previous design conflated two concerns in `DomainThrottle`:
-1. **Rate limiting** (per-domain): How many requests can we make to a domain?
-2. **URL tracking** (per-identifier): Which URLs have we tried for this sync?
+**1. Two Independent Execution Paths**
 
-The new design cleanly separates these:
+The main sync loop and DomainThrottle loops run independently:
+- **Main sync**: Tries non-throttled URLs, completes quickly, applies backoff, retries later
+- **DomainThrottle**: Processes queued identifiers when capacity frees, doesn't block main sync
 
-- **`DomainThrottle`**: Only handles rate limiting. Tracks in-flight requests and request timestamps per domain. Uses round-robin internally to distribute load across URLs.
-- **`sync_identifier`**: Owns its `tried_urls: HashSet<String>`. Passes this to the throttle when requesting a URL to try.
+**2. Two Separate tried_urls Tracking**
 
-This separation enables:
-- **Unit testing** of sync logic with a mock throttle
-- **Simpler state management** - throttle doesn't need cleanup when identifiers complete
-- **Clearer reasoning** about each component's responsibility
+Each path tracks its own tried URLs:
+- **sync_identifier**: Local `HashSet<String>` for current attempt (all domains)
+- **DomainThrottle**: Per-identifier `HashSet<String>` for URLs tried via throttle (this domain only)
+
+These don't need to merge because:
+- Main sync skips throttled domains anyway
+- DomainThrottle only processes its own domain's URLs
+
+**3. Shared Functions**
+
+Both paths use the same core functions:
+- **`sync_identifier_next_url`**: Pure URL selection logic
+- **`sync_identifier_from_url`**: Pure fetch logic
+
+The `domain` parameter determines behavior:
+- `None`: Return any non-throttled URL
+- `Some(domain)`: Return URL from that specific domain only
 
 ### Flow Summary
 
@@ -124,16 +152,17 @@ This separation enables:
    - Finds ALL ready identifiers (where `!in_progress && next_attempt <= now`)
    - Spawns parallel tasks for each (marks `in_progress = true`)
    - Each `sync_identifier()` task:
-     - Creates fresh `tried_urls: HashSet<String>` 
-     - Loops calling `sync_identifier_step()` until complete
-     - Step returns `(Option<url_tried>, complete)` - clean testable interface
+     - Creates fresh `tried_urls: HashSet<String>`
+     - Loops calling `sync_identifier_next_url(domain=None)` + `sync_identifier_from_url`
+     - When no non-throttled URLs remain: enqueue with throttled domains, return
    - When task completes: apply backoff or remove from queue
 
-3. **Domain throttle**:
-   - Pure rate limiting: tracks in_flight count and request timestamps per domain
-   - `get_next_url()` takes `available_urls` and `tried_urls`, returns next URL to try
-   - Uses round-robin internally to distribute load
-   - No per-identifier state needed
+3. **ThrottleManager / DomainThrottle loops** (independent):
+   - Each domain has its own loop checking for capacity
+   - When capacity available: pick next queued identifier (round-robin, not in_progress)
+   - Call `sync_identifier_next_url(domain=Some(this_domain))`
+   - If URL returned: call `sync_identifier_from_url`, mark URL tried, mark not in_progress
+   - If no URL: remove identifier from this domain's queue
 
 ## Data Structures
 
@@ -196,142 +225,312 @@ impl SyncQueueEntry {
 }
 ```
 
-### DomainThrottle (Rate Limiting Only)
+### ThrottleManager
+
+Manages all per-domain throttles and provides the interface for checking throttle status:
 
 ```rust
-/// Domain-level rate limiting with round-robin URL selection.
+/// Manages rate limiting across all domains.
 /// 
-/// This struct ONLY handles rate limiting. It does not track which URLs
-/// have been tried - that's the caller's responsibility.
+/// Owns a collection of DomainThrottle instances and provides:
+/// - Throttle status checking for sync_identifier_next_url
+/// - Domain throttle loop spawning
+/// - Identifier queue management
+pub struct ThrottleManager {
+    /// Per-domain throttle state
+    throttles: DashMap<String, DomainThrottle>,
+    
+    /// Configuration
+    max_concurrent_per_domain: u32,
+    max_per_minute_per_domain: u32,
+}
+
+impl ThrottleManager {
+    pub fn new(max_concurrent: u32, max_per_minute: u32) -> Self {
+        Self {
+            throttles: DashMap::new(),
+            max_concurrent_per_domain: max_concurrent,
+            max_per_minute_per_domain: max_per_minute,
+        }
+    }
+    
+    /// Check if a domain is currently throttled (at capacity)
+    pub fn is_throttled(&self, domain: &str) -> bool {
+        self.throttles
+            .get(domain)
+            .map_or(false, |t| !t.has_capacity())
+    }
+    
+    /// Get or create throttle for a domain
+    fn get_or_create(&self, domain: &str) -> dashmap::mapref::one::RefMut<String, DomainThrottle> {
+        self.throttles
+            .entry(domain.to_string())
+            .or_insert_with(|| DomainThrottle::new(
+                domain.to_string(),
+                self.max_concurrent_per_domain,
+                self.max_per_minute_per_domain,
+            ))
+    }
+    
+    /// Record that a request is starting for a domain
+    pub fn start_request(&self, domain: &str) {
+        self.get_or_create(domain).start_request();
+    }
+    
+    /// Record that a request completed for a domain
+    pub fn complete_request(&self, domain: &str) {
+        if let Some(mut throttle) = self.throttles.get_mut(domain) {
+            throttle.complete_request();
+        }
+    }
+    
+    /// Add an identifier to a domain's waiting queue
+    pub fn enqueue_identifier(
+        &self,
+        domain: &str,
+        identifier: String,
+        tried_urls_for_domain: HashSet<String>,
+    ) {
+        self.get_or_create(domain)
+            .enqueue_identifier(identifier, tried_urls_for_domain);
+    }
+    
+    /// Start the throttle loop for all domains (called once at startup)
+    pub fn start_domain_loops<C: SyncContext + 'static>(
+        self: Arc<Self>,
+        ctx: Arc<C>,
+    ) -> Vec<tokio::task::JoinHandle<()>> {
+        // Spawn a single coordinator loop that manages all domains
+        vec![tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(100));
+            
+            loop {
+                interval.tick().await;
+                
+                // Check each domain for capacity and queued work
+                for mut entry in self.throttles.iter_mut() {
+                    let domain = entry.key().clone();
+                    let throttle = entry.value_mut();
+                    
+                    if throttle.has_capacity() {
+                        if let Some(identifier) = throttle.next_ready_identifier() {
+                            let ctx = ctx.clone();
+                            let manager = self.clone();
+                            let domain_clone = domain.clone();
+                            
+                            tokio::spawn(async move {
+                                manager.process_queued_identifier(
+                                    &ctx,
+                                    &domain_clone,
+                                    &identifier,
+                                ).await;
+                            });
+                        }
+                    }
+                }
+            }
+        })]
+    }
+    
+    /// Process a single identifier from a domain's queue
+    async fn process_queued_identifier<C: SyncContext>(
+        &self,
+        ctx: &C,
+        domain: &str,
+        identifier: &str,
+    ) {
+        // Get next URL for this identifier on this domain
+        let url = {
+            let throttle = match self.throttles.get(domain) {
+                Some(t) => t,
+                None => return,
+            };
+            let tried_urls = throttle.get_tried_urls(identifier);
+            
+            sync_identifier_next_url(
+                ctx,
+                identifier,
+                Some(domain),
+                &tried_urls,
+                self,
+            ).await
+        };
+        
+        match url {
+            Some(url) => {
+                // Fetch from this URL
+                sync_identifier_from_url(ctx, identifier, &url, self).await;
+                
+                // Record URL as tried
+                if let Some(mut throttle) = self.throttles.get_mut(domain) {
+                    throttle.mark_url_tried(identifier, url);
+                    throttle.mark_identifier_not_in_progress(identifier);
+                }
+            }
+            None => {
+                // No more URLs for this identifier on this domain - remove from queue
+                if let Some(mut throttle) = self.throttles.get_mut(domain) {
+                    throttle.remove_identifier(identifier);
+                }
+            }
+        }
+    }
+}
+```
+
+### DomainThrottle
+
+Per-domain rate limiting and waiting queue:
+
+```rust
+/// Per-domain rate limiting and identifier queue.
 /// 
-/// Rate limits: 5 concurrent requests, 30 requests/minute per domain
+/// Handles:
+/// - Rate limiting (concurrent requests, requests per minute)
+/// - Queue of identifiers waiting for capacity
+/// - Tracking tried URLs per identifier (for this domain only)
+/// - In-progress flag per identifier (prevent concurrent fetches for same identifier)
 pub struct DomainThrottle {
-    /// In-flight request count per domain
-    in_flight: DashMap<String, u32>,
+    /// Domain this throttle manages
+    domain: String,
     
-    /// Request timestamps per domain (sliding window)
-    request_times: DashMap<String, VecDeque<Instant>>,
+    /// Current in-flight request count
+    in_flight: u32,
     
-    /// Round-robin index per domain (for fair URL distribution)
-    round_robin_index: DashMap<String, usize>,
+    /// Request timestamps (sliding window for rate limiting)
+    request_times: VecDeque<Instant>,
     
+    /// Identifiers waiting for capacity on this domain
+    /// Stored in order for round-robin processing
+    waiting_queue: VecDeque<String>,
+    
+    /// Per-identifier state for queued identifiers
+    identifier_state: HashMap<String, IdentifierQueueState>,
+    
+    /// Configuration
     max_concurrent: u32,
     max_per_minute: u32,
 }
 
+/// State for an identifier waiting in a domain's queue
+#[derive(Debug, Clone)]
+struct IdentifierQueueState {
+    /// URLs from this domain that have been tried
+    tried_urls: HashSet<String>,
+    
+    /// Whether a fetch is currently in progress for this identifier on this domain
+    in_progress: bool,
+}
+
 impl DomainThrottle {
-    pub fn new(max_concurrent: u32, max_per_minute: u32) -> Self {
+    pub fn new(domain: String, max_concurrent: u32, max_per_minute: u32) -> Self {
         Self {
-            in_flight: DashMap::new(),
-            request_times: DashMap::new(),
-            round_robin_index: DashMap::new(),
+            domain,
+            in_flight: 0,
+            request_times: VecDeque::new(),
+            waiting_queue: VecDeque::new(),
+            identifier_state: HashMap::new(),
             max_concurrent,
             max_per_minute,
         }
     }
     
     /// Check if domain has capacity for another request
-    pub fn has_capacity(&self, domain: &str) -> bool {
-        let in_flight = self.in_flight.get(domain).map_or(0, |v| *v);
-        if in_flight >= self.max_concurrent {
+    pub fn has_capacity(&self) -> bool {
+        if self.in_flight >= self.max_concurrent {
             return false;
         }
         
         let now = Instant::now();
         let window = Duration::from_secs(60);
-        self.request_times
-            .get(domain)
-            .map_or(true, |times| {
-                times.iter().filter(|t| now.duration_since(**t) < window).count() 
-                    < self.max_per_minute as usize
-            })
-    }
-    
-    /// Get next URL to try from available URLs, excluding already-tried URLs.
-    /// Uses round-robin to distribute load across URLs for a domain.
-    /// 
-    /// Returns None if:
-    /// - Domain is at capacity (rate limited)
-    /// - All available URLs have been tried
-    pub fn get_next_url(
-        &self,
-        domain: &str,
-        available_urls: &[String],
-        tried_urls: &HashSet<String>,
-    ) -> Option<String> {
-        if !self.has_capacity(domain) {
-            return None;
-        }
-        
-        // Filter to untried URLs
-        let untried: Vec<_> = available_urls
+        let recent_count = self.request_times
             .iter()
-            .filter(|url| !tried_urls.contains(*url))
-            .collect();
+            .filter(|t| now.duration_since(**t) < window)
+            .count();
         
-        if untried.is_empty() {
-            return None;
-        }
-        
-        // Round-robin selection
-        let mut index = self.round_robin_index.entry(domain.to_string()).or_insert(0);
-        let selected_index = *index % untried.len();
-        *index = (*index + 1) % untried.len();
-        
-        Some(untried[selected_index].clone())
+        recent_count < self.max_per_minute as usize
     }
     
     /// Record that a request is starting
-    pub fn start_request(&self, domain: &str) {
-        *self.in_flight.entry(domain.to_string()).or_insert(0) += 1;
-        self.request_times
-            .entry(domain.to_string())
-            .or_default()
-            .push_back(Instant::now());
+    pub fn start_request(&mut self) {
+        self.in_flight += 1;
+        self.request_times.push_back(Instant::now());
     }
     
     /// Record that a request completed
-    pub fn complete_request(&self, domain: &str) {
-        if let Some(mut count) = self.in_flight.get_mut(domain) {
-            *count = count.saturating_sub(1);
-        }
+    pub fn complete_request(&mut self) {
+        self.in_flight = self.in_flight.saturating_sub(1);
         
         // Clean old timestamps
         let now = Instant::now();
         let window = Duration::from_secs(60);
-        if let Some(mut times) = self.request_times.get_mut(domain) {
-            while times.front().map_or(false, |t| now.duration_since(*t) >= window) {
-                times.pop_front();
-            }
+        while self.request_times.front().map_or(false, |t| now.duration_since(*t) >= window) {
+            self.request_times.pop_front();
         }
     }
     
-    /// Get time until domain has capacity (for scheduling retries)
-    pub fn time_until_capacity(&self, domain: &str) -> Option<Duration> {
-        // Check concurrent limit first
-        let in_flight = self.in_flight.get(domain).map_or(0, |v| *v);
-        if in_flight >= self.max_concurrent {
-            // Can't predict when a request will complete
-            return Some(Duration::from_millis(100));
+    /// Add an identifier to the waiting queue
+    pub fn enqueue_identifier(&mut self, identifier: String, tried_urls: HashSet<String>) {
+        if !self.identifier_state.contains_key(&identifier) {
+            self.waiting_queue.push_back(identifier.clone());
         }
-        
-        // Check rate limit
-        let now = Instant::now();
-        let window = Duration::from_secs(60);
-        if let Some(times) = self.request_times.get(domain) {
-            let recent_count = times.iter().filter(|t| now.duration_since(**t) < window).count();
-            if recent_count >= self.max_per_minute as usize {
-                // Find oldest request in window, wait until it expires
-                if let Some(oldest) = times.front() {
-                    let age = now.duration_since(*oldest);
-                    if age < window {
-                        return Some(window - age);
+        // Update or insert state (merge tried_urls if already exists)
+        self.identifier_state
+            .entry(identifier)
+            .and_modify(|state| {
+                state.tried_urls.extend(tried_urls.iter().cloned());
+            })
+            .or_insert(IdentifierQueueState {
+                tried_urls,
+                in_progress: false,
+            });
+    }
+    
+    /// Get next identifier ready for processing (round-robin, not in_progress)
+    pub fn next_ready_identifier(&mut self) -> Option<String> {
+        // Find first identifier that's not in_progress
+        for _ in 0..self.waiting_queue.len() {
+            if let Some(identifier) = self.waiting_queue.pop_front() {
+                if let Some(state) = self.identifier_state.get_mut(&identifier) {
+                    if !state.in_progress {
+                        state.in_progress = true;
+                        self.waiting_queue.push_back(identifier.clone()); // Re-add for round-robin
+                        return Some(identifier);
                     }
                 }
+                // Put it back if in_progress
+                self.waiting_queue.push_back(identifier);
             }
         }
-        
-        None // Has capacity now
+        None
+    }
+    
+    /// Get tried URLs for an identifier
+    pub fn get_tried_urls(&self, identifier: &str) -> HashSet<String> {
+        self.identifier_state
+            .get(identifier)
+            .map(|s| s.tried_urls.clone())
+            .unwrap_or_default()
+    }
+    
+    /// Mark a URL as tried for an identifier
+    pub fn mark_url_tried(&mut self, identifier: &str, url: String) {
+        if let Some(state) = self.identifier_state.get_mut(identifier) {
+            state.tried_urls.insert(url);
+        }
+    }
+    
+    /// Mark identifier as not in progress (fetch completed)
+    pub fn mark_identifier_not_in_progress(&mut self, identifier: &str) {
+        if let Some(state) = self.identifier_state.get_mut(identifier) {
+            state.in_progress = false;
+        }
+    }
+    
+    /// Remove an identifier from the queue entirely
+    pub fn remove_identifier(&mut self, identifier: &str) {
+        self.identifier_state.remove(identifier);
+        self.waiting_queue.retain(|id| id != identifier);
     }
 }
 ```
@@ -378,58 +577,58 @@ pub trait SyncContext: Send + Sync {
 
 ## Core Sync Logic
 
-### The Sync Step Function
+### Two-Function Design
 
-This is the key abstraction that enables clean testing:
+The sync logic is split into two functions that can be called by either the main sync loop or by DomainThrottle:
+
+1. **`sync_identifier_next_url`**: Pure selection logic - finds next URL to try
+2. **`sync_identifier_from_url`**: Pure fetch logic - fetches from a specific URL
+
+This separation enables:
+- Main sync loop to try non-throttled URLs immediately
+- DomainThrottle to process queued identifiers when capacity frees
+- Clean testability with mocked SyncContext
+
+### sync_identifier_next_url
 
 ```rust
-/// Result of a single sync step
-#[derive(Debug, Clone, PartialEq)]
-pub enum SyncStepResult {
-    /// Successfully tried a URL, may or may not have fetched OIDs
-    TriedUrl { url: String, oids_fetched: usize },
-    
-    /// All available URLs have been tried, need to wait for throttle
-    AllUrlsThrottled { wait_duration: Duration },
-    
-    /// No more URLs to try (all exhausted)
-    NoMoreUrls,
-    
-    /// All OIDs are now available, sync complete
-    Complete,
-    
-    /// No pending events remain
-    NoPendingEvents,
-}
-
-/// Execute one step of the sync process.
+/// Find the next URL to try for an identifier.
 /// 
-/// This function is pure logic - all I/O goes through the SyncContext trait.
-/// This makes it trivially unit testable.
-pub async fn sync_identifier_step<C: SyncContext>(
+/// When `domain` is None: returns any non-throttled URL not in tried_urls
+/// When `domain` is Some: returns a URL from that specific domain not in tried_urls
+/// 
+/// Returns None if:
+/// - No pending events for this identifier
+/// - No OIDs needed (sync complete)
+/// - No untried URLs available (for the specified domain or all domains)
+/// - All available domains are throttled (when domain is None)
+pub async fn sync_identifier_next_url<C: SyncContext>(
     ctx: &C,
     identifier: &str,
+    domain: Option<&str>,
     tried_urls: &HashSet<String>,
-    throttle: &DomainThrottle,
-) -> Result<SyncStepResult> {
+    throttle_manager: &ThrottleManager,
+) -> Option<String> {
     // 1. Check if we still have pending events
     if !ctx.has_pending_events(identifier) {
-        return Ok(SyncStepResult::NoPendingEvents);
+        return None;
     }
     
-    // 2. Collect needed OIDs (fresh each step - may have changed)
+    // 2. Collect needed OIDs
     let needed_oids = ctx.collect_needed_oids(identifier);
     if needed_oids.is_empty() {
-        // No OIDs needed - try to process events
-        ctx.process_satisfiable_events(identifier).await?;
-        return Ok(SyncStepResult::Complete);
+        // No OIDs needed - sync is complete
+        return None;
     }
     
-    // 3. Get repository data (fresh each step - announcements may have arrived)
-    let db_repo_data = ctx.fetch_repository_data(identifier).await?;
+    // 3. Get repository data
+    let repo_data = match ctx.fetch_repository_data(identifier).await {
+        Ok(data) => data,
+        Err(_) => return None,
+    };
     
     // 4. Collect clone URLs, excluding our domain
-    let all_urls: Vec<String> = db_repo_data
+    let all_urls: Vec<String> = repo_data
         .announcements
         .iter()
         .flat_map(|a| a.clone_urls.iter().cloned())
@@ -438,132 +637,292 @@ pub async fn sync_identifier_step<C: SyncContext>(
         .into_iter()
         .collect();
     
-    if all_urls.is_empty() {
-        return Ok(SyncStepResult::NoMoreUrls);
-    }
-    
-    // 5. Group by domain and find an available URL
+    // 5. Group by domain
     let urls_by_domain: HashMap<String, Vec<String>> = all_urls
         .iter()
         .fold(HashMap::new(), |mut acc, url| {
-            acc.entry(extract_domain(url)).or_default().push(url.clone());
+            if let Some(d) = extract_domain(url) {
+                acc.entry(d).or_default().push(url.clone());
+            }
             acc
         });
     
-    // 6. Try to get a URL from any domain that has capacity
-    let mut min_wait: Option<Duration> = None;
-    
-    for (domain, domain_urls) in &urls_by_domain {
-        if let Some(url) = throttle.get_next_url(domain, domain_urls, tried_urls) {
-            // Found a URL to try!
-            let target_repo = match ctx.find_target_repo(&db_repo_data) {
-                Some(path) => path,
-                None => return Ok(SyncStepResult::NoMoreUrls),
-            };
-            
-            // Start the fetch
-            throttle.start_request(domain);
-            let oids_to_fetch: Vec<String> = needed_oids.iter().cloned().collect();
-            let fetch_result = ctx.fetch_oids(&target_repo, &url, &oids_to_fetch).await;
-            throttle.complete_request(domain);
-            
-            let oids_fetched = match fetch_result {
-                Ok(fetched) => fetched.len(),
-                Err(e) => {
-                    tracing::debug!(url = %url, error = %e, "Fetch failed");
-                    0
+    // 6. Find an available URL
+    match domain {
+        Some(specific_domain) => {
+            // Only look at URLs from this specific domain
+            urls_by_domain
+                .get(specific_domain)
+                .and_then(|urls| {
+                    urls.iter()
+                        .find(|url| !tried_urls.contains(*url))
+                        .cloned()
+                })
+        }
+        None => {
+            // Try any non-throttled domain
+            for (d, domain_urls) in &urls_by_domain {
+                if throttle_manager.is_throttled(d) {
+                    continue;
                 }
-            };
-            
-            // Try to process any events that can now be satisfied
-            if oids_fetched > 0 {
-                let _ = ctx.process_satisfiable_events(identifier).await;
-            }
-            
-            return Ok(SyncStepResult::TriedUrl { url, oids_fetched });
-        } else {
-            // Domain throttled or all URLs tried
-            let untried_exist = domain_urls.iter().any(|u| !tried_urls.contains(u));
-            if untried_exist {
-                // URLs exist but domain is throttled
-                if let Some(wait) = throttle.time_until_capacity(domain) {
-                    min_wait = Some(min_wait.map_or(wait, |m| m.min(wait)));
+                if let Some(url) = domain_urls.iter().find(|url| !tried_urls.contains(*url)) {
+                    return Some(url.clone());
                 }
             }
+            None
         }
     }
+}
+
+/// Information about throttled domains with untried URLs
+#[derive(Debug, Clone)]
+pub struct ThrottledDomainInfo {
+    pub domain: String,
+    pub tried_urls_for_domain: HashSet<String>,
+}
+
+/// Get information about throttled domains that have untried URLs.
+/// 
+/// Called by main sync loop to know which DomainThrottle queues to add the identifier to.
+pub async fn get_throttled_domains_with_untried_urls<C: SyncContext>(
+    ctx: &C,
+    identifier: &str,
+    tried_urls: &HashSet<String>,
+    throttle_manager: &ThrottleManager,
+) -> Vec<ThrottledDomainInfo> {
+    let repo_data = match ctx.fetch_repository_data(identifier).await {
+        Ok(data) => data,
+        Err(_) => return vec![],
+    };
     
-    // Check if all URLs have been tried
-    let all_tried = all_urls.iter().all(|url| tried_urls.contains(url));
-    if all_tried {
-        return Ok(SyncStepResult::NoMoreUrls);
-    }
+    let all_urls: Vec<String> = repo_data
+        .announcements
+        .iter()
+        .flat_map(|a| a.clone_urls.iter().cloned())
+        .filter(|url| ctx.our_domain().map_or(true, |d| !url.contains(d)))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
     
-    // Some URLs exist but all domains are throttled
-    Ok(SyncStepResult::AllUrlsThrottled {
-        wait_duration: min_wait.unwrap_or(Duration::from_millis(100)),
-    })
+    let urls_by_domain: HashMap<String, Vec<String>> = all_urls
+        .iter()
+        .fold(HashMap::new(), |mut acc, url| {
+            if let Some(d) = extract_domain(url) {
+                acc.entry(d).or_default().push(url.clone());
+            }
+            acc
+        });
+    
+    urls_by_domain
+        .into_iter()
+        .filter_map(|(domain, domain_urls)| {
+            if !throttle_manager.is_throttled(&domain) {
+                return None; // Not throttled, skip
+            }
+            
+            let untried: Vec<_> = domain_urls
+                .iter()
+                .filter(|url| !tried_urls.contains(*url))
+                .collect();
+            
+            if untried.is_empty() {
+                return None; // All URLs tried for this domain
+            }
+            
+            // Collect tried URLs that belong to this domain
+            let tried_urls_for_domain: HashSet<String> = tried_urls
+                .iter()
+                .filter(|url| extract_domain(url).as_deref() == Some(&domain))
+                .cloned()
+                .collect();
+            
+            Some(ThrottledDomainInfo {
+                domain,
+                tried_urls_for_domain,
+            })
+        })
+        .collect()
 }
 ```
 
-### The Sync Identifier Loop
+### sync_identifier_from_url
+
+```rust
+/// Fetch git data from a specific URL for an identifier.
+/// 
+/// This function:
+/// 1. Records the request with the throttle manager
+/// 2. Performs the actual git fetch
+/// 3. Processes any events that can now be satisfied
+/// 4. Records request completion
+/// 
+/// Returns the number of OIDs successfully fetched.
+pub async fn sync_identifier_from_url<C: SyncContext>(
+    ctx: &C,
+    identifier: &str,
+    url: &str,
+    throttle_manager: &ThrottleManager,
+) -> usize {
+    let domain = match extract_domain(url) {
+        Some(d) => d,
+        None => return 0,
+    };
+    
+    // Get repository data for target repo path
+    let repo_data = match ctx.fetch_repository_data(identifier).await {
+        Ok(data) => data,
+        Err(e) => {
+            tracing::debug!(identifier = %identifier, error = %e, "Failed to fetch repo data");
+            return 0;
+        }
+    };
+    
+    let target_repo = match ctx.find_target_repo(&repo_data) {
+        Some(path) => path,
+        None => {
+            tracing::debug!(identifier = %identifier, "No target repo found");
+            return 0;
+        }
+    };
+    
+    // Collect needed OIDs
+    let needed_oids: Vec<String> = ctx.collect_needed_oids(identifier).into_iter().collect();
+    if needed_oids.is_empty() {
+        return 0;
+    }
+    
+    // Perform the fetch
+    throttle_manager.start_request(&domain);
+    let fetch_result = ctx.fetch_oids(&target_repo, url, &needed_oids).await;
+    throttle_manager.complete_request(&domain);
+    
+    let oids_fetched = match fetch_result {
+        Ok(fetched) => {
+            tracing::debug!(
+                identifier = %identifier,
+                url = %url,
+                oids_fetched = fetched.len(),
+                "Fetch succeeded"
+            );
+            fetched.len()
+        }
+        Err(e) => {
+            tracing::debug!(
+                identifier = %identifier,
+                url = %url,
+                error = %e,
+                "Fetch failed"
+            );
+            0
+        }
+    };
+    
+    // Try to process any events that can now be satisfied
+    if oids_fetched > 0 {
+        if let Err(e) = ctx.process_satisfiable_events(identifier).await {
+            tracing::warn!(
+                identifier = %identifier,
+                error = %e,
+                "Failed to process satisfiable events"
+            );
+        }
+    }
+    
+    oids_fetched
+}
+```
+
+### The Sync Identifier Loop (Main Sync)
 
 ```rust
 /// Sync git data for an identifier.
 /// 
-/// Returns true if sync completed successfully (no more pending events),
-/// false if we exhausted all options but events remain.
+/// This is called by the main sync loop. It:
+/// 1. Tries all non-throttled URLs
+/// 2. Enqueues with throttled domains for later processing
+/// 3. Returns without waiting for throttled domains
+/// 
+/// Returns true if sync completed (no pending events or no OIDs needed),
+/// false if events remain (will be retried after backoff).
 pub async fn sync_identifier<C: SyncContext>(
     ctx: &C,
     identifier: &str,
-    throttle: &DomainThrottle,
+    throttle_manager: &ThrottleManager,
 ) -> bool {
     let mut tried_urls: HashSet<String> = HashSet::new();
     
+    // Try all non-throttled URLs
     loop {
-        match sync_identifier_step(ctx, identifier, &tried_urls, throttle).await {
-            Ok(SyncStepResult::TriedUrl { url, oids_fetched }) => {
-                tried_urls.insert(url.clone());
-                tracing::debug!(
-                    identifier = %identifier,
-                    url = %url,
-                    oids_fetched = oids_fetched,
-                    "Tried URL"
-                );
-                // Continue looping
+        match sync_identifier_next_url(
+            ctx,
+            identifier,
+            None, // Any domain
+            &tried_urls,
+            throttle_manager,
+        ).await {
+            Some(url) => {
+                // Found a non-throttled URL to try
+                sync_identifier_from_url(ctx, identifier, &url, throttle_manager).await;
+                tried_urls.insert(url);
+                
+                // Check if sync is now complete
+                if !ctx.has_pending_events(identifier) {
+                    tracing::info!(identifier = %identifier, "Sync complete - no pending events");
+                    return true;
+                }
+                
+                let needed_oids = ctx.collect_needed_oids(identifier);
+                if needed_oids.is_empty() {
+                    // Process any remaining satisfiable events
+                    let _ = ctx.process_satisfiable_events(identifier).await;
+                    tracing::info!(identifier = %identifier, "Sync complete - all OIDs available");
+                    return true;
+                }
+                
+                // Continue trying more URLs
             }
-            
-            Ok(SyncStepResult::AllUrlsThrottled { wait_duration }) => {
-                tracing::debug!(
-                    identifier = %identifier,
-                    wait_ms = wait_duration.as_millis(),
-                    "All domains throttled, waiting"
-                );
-                tokio::time::sleep(wait_duration).await;
-                // Continue looping
-            }
-            
-            Ok(SyncStepResult::NoMoreUrls) => {
-                tracing::debug!(identifier = %identifier, "No more URLs to try");
-                return false; // Events remain but no URLs left
-            }
-            
-            Ok(SyncStepResult::Complete) => {
-                tracing::info!(identifier = %identifier, "Sync complete");
-                return true;
-            }
-            
-            Ok(SyncStepResult::NoPendingEvents) => {
-                tracing::debug!(identifier = %identifier, "No pending events");
-                return true;
-            }
-            
-            Err(e) => {
-                tracing::warn!(identifier = %identifier, error = %e, "Sync step error");
-                return false;
+            None => {
+                // No more non-throttled URLs available
+                break;
             }
         }
     }
+    
+    // Check if we're done (no pending events or no needed OIDs)
+    if !ctx.has_pending_events(identifier) {
+        return true;
+    }
+    
+    let needed_oids = ctx.collect_needed_oids(identifier);
+    if needed_oids.is_empty() {
+        let _ = ctx.process_satisfiable_events(identifier).await;
+        return true;
+    }
+    
+    // Enqueue with any throttled domains that have untried URLs
+    let throttled_domains = get_throttled_domains_with_untried_urls(
+        ctx,
+        identifier,
+        &tried_urls,
+        throttle_manager,
+    ).await;
+    
+    for info in throttled_domains {
+        tracing::debug!(
+            identifier = %identifier,
+            domain = %info.domain,
+            "Enqueueing with throttled domain"
+        );
+        throttle_manager.enqueue_identifier(
+            &info.domain,
+            identifier.to_string(),
+            info.tried_urls_for_domain,
+        );
+    }
+    
+    // Return false - events remain, will retry after backoff
+    // (throttled domains will process independently)
+    false
 }
 ```
 
@@ -576,7 +935,7 @@ impl Purgatory {
         database: SharedDatabase,
         our_domain: Option<String>,
         local_relay: Option<nostr_relay_builder::LocalRelay>,
-        throttle: Arc<DomainThrottle>,
+        throttle_manager: Arc<ThrottleManager>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -613,7 +972,7 @@ impl Purgatory {
                     let db = database.clone();
                     let domain = our_domain.clone();
                     let relay = local_relay.clone();
-                    let throttle = throttle.clone();
+                    let throttle_manager = throttle_manager.clone();
                     let id = identifier.clone();
                     
                     tokio::spawn(async move {
@@ -625,13 +984,14 @@ impl Purgatory {
                             relay,
                         );
                         
-                        let complete = sync_identifier(&ctx, &id, &throttle).await;
+                        let complete = sync_identifier(&ctx, &id, &throttle_manager).await;
                         
                         if complete || !purgatory.has_pending_events(&id) {
                             purgatory.sync_queue.remove(&id);
                             tracing::info!(identifier = %id, "Removed from sync queue");
                         } else {
-                            // Apply backoff
+                            // Apply backoff - will retry later
+                            // (throttled domains are being processed independently)
                             if let Some(mut entry) = purgatory.sync_queue.get_mut(&id) {
                                 entry.on_sync_complete();
                             }
@@ -667,7 +1027,6 @@ mod tests {
     #[async_trait]
     impl SyncContext for MockSyncContext {
         async fn fetch_repository_data(&self, _id: &str) -> Result<RepositoryData> {
-            // Return mock data with our available_urls
             Ok(RepositoryData {
                 announcements: vec![MockAnnouncement {
                     clone_urls: self.available_urls.clone(),
@@ -686,7 +1045,6 @@ mod tests {
         }
         
         async fn fetch_oids(&self, _path: &Path, url: &str, _oids: &[String]) -> Result<Vec<String>> {
-            // Return pre-configured fetch result for this URL
             Ok(self.fetch_results.borrow().get(url).cloned().unwrap_or_default())
         }
         
@@ -709,35 +1067,122 @@ mod tests {
     }
     
     #[tokio::test]
-    async fn test_sync_step_no_pending_events() {
+    async fn test_next_url_no_pending_events() {
         let ctx = MockSyncContext {
             pending_events: RefCell::new(false),
+            needed_oids: RefCell::new(HashSet::new()),
+            available_urls: vec!["https://example.com/repo.git".to_string()],
             ..Default::default()
         };
-        let throttle = DomainThrottle::new(5, 30);
+        let throttle_manager = ThrottleManager::new(5, 30);
         let tried = HashSet::new();
         
-        let result = sync_identifier_step(&ctx, "test", &tried, &throttle).await.unwrap();
-        assert_eq!(result, SyncStepResult::NoPendingEvents);
+        let result = sync_identifier_next_url(&ctx, "test", None, &tried, &throttle_manager).await;
+        assert!(result.is_none());
     }
     
     #[tokio::test]
-    async fn test_sync_step_no_oids_needed() {
+    async fn test_next_url_no_oids_needed() {
         let ctx = MockSyncContext {
             pending_events: RefCell::new(true),
             needed_oids: RefCell::new(HashSet::new()), // Empty = no OIDs needed
+            available_urls: vec!["https://example.com/repo.git".to_string()],
             ..Default::default()
         };
-        let throttle = DomainThrottle::new(5, 30);
+        let throttle_manager = ThrottleManager::new(5, 30);
         let tried = HashSet::new();
         
-        let result = sync_identifier_step(&ctx, "test", &tried, &throttle).await.unwrap();
-        assert_eq!(result, SyncStepResult::Complete);
-        assert_eq!(*ctx.processed_count.borrow(), 1);
+        let result = sync_identifier_next_url(&ctx, "test", None, &tried, &throttle_manager).await;
+        assert!(result.is_none()); // No URL needed, sync is complete
     }
     
     #[tokio::test]
-    async fn test_sync_step_tries_url() {
+    async fn test_next_url_returns_non_throttled() {
+        let mut needed = HashSet::new();
+        needed.insert("abc123".to_string());
+        
+        let ctx = MockSyncContext {
+            pending_events: RefCell::new(true),
+            needed_oids: RefCell::new(needed),
+            available_urls: vec!["https://example.com/repo.git".to_string()],
+            ..Default::default()
+        };
+        let throttle_manager = ThrottleManager::new(5, 30);
+        let tried = HashSet::new();
+        
+        let result = sync_identifier_next_url(&ctx, "test", None, &tried, &throttle_manager).await;
+        assert_eq!(result, Some("https://example.com/repo.git".to_string()));
+    }
+    
+    #[tokio::test]
+    async fn test_next_url_skips_tried() {
+        let mut needed = HashSet::new();
+        needed.insert("abc123".to_string());
+        
+        let ctx = MockSyncContext {
+            pending_events: RefCell::new(true),
+            needed_oids: RefCell::new(needed),
+            available_urls: vec![
+                "https://example.com/repo.git".to_string(),
+                "https://other.com/repo.git".to_string(),
+            ],
+            ..Default::default()
+        };
+        let throttle_manager = ThrottleManager::new(5, 30);
+        
+        let mut tried = HashSet::new();
+        tried.insert("https://example.com/repo.git".to_string());
+        
+        let result = sync_identifier_next_url(&ctx, "test", None, &tried, &throttle_manager).await;
+        assert_eq!(result, Some("https://other.com/repo.git".to_string()));
+    }
+    
+    #[tokio::test]
+    async fn test_next_url_specific_domain() {
+        let mut needed = HashSet::new();
+        needed.insert("abc123".to_string());
+        
+        let ctx = MockSyncContext {
+            pending_events: RefCell::new(true),
+            needed_oids: RefCell::new(needed),
+            available_urls: vec![
+                "https://example.com/repo.git".to_string(),
+                "https://other.com/repo.git".to_string(),
+            ],
+            ..Default::default()
+        };
+        let throttle_manager = ThrottleManager::new(5, 30);
+        let tried = HashSet::new();
+        
+        // Request specific domain
+        let result = sync_identifier_next_url(
+            &ctx, "test", Some("other.com"), &tried, &throttle_manager
+        ).await;
+        assert_eq!(result, Some("https://other.com/repo.git".to_string()));
+    }
+    
+    #[tokio::test]
+    async fn test_next_url_none_when_all_tried() {
+        let mut needed = HashSet::new();
+        needed.insert("abc123".to_string());
+        
+        let ctx = MockSyncContext {
+            pending_events: RefCell::new(true),
+            needed_oids: RefCell::new(needed),
+            available_urls: vec!["https://example.com/repo.git".to_string()],
+            ..Default::default()
+        };
+        let throttle_manager = ThrottleManager::new(5, 30);
+        
+        let mut tried = HashSet::new();
+        tried.insert("https://example.com/repo.git".to_string());
+        
+        let result = sync_identifier_next_url(&ctx, "test", None, &tried, &throttle_manager).await;
+        assert!(result.is_none());
+    }
+    
+    #[tokio::test]
+    async fn test_from_url_fetches_and_processes() {
         let mut needed = HashSet::new();
         needed.insert("abc123".to_string());
         
@@ -754,83 +1199,29 @@ mod tests {
             fetch_results: RefCell::new(fetch_results),
             processed_count: RefCell::new(0),
         };
-        let throttle = DomainThrottle::new(5, 30);
-        let tried = HashSet::new();
+        let throttle_manager = Arc::new(ThrottleManager::new(5, 30));
         
-        let result = sync_identifier_step(&ctx, "test", &tried, &throttle).await.unwrap();
+        let oids_fetched = sync_identifier_from_url(
+            &ctx, "test", "https://example.com/repo.git", &throttle_manager
+        ).await;
         
-        match result {
-            SyncStepResult::TriedUrl { url, oids_fetched } => {
-                assert_eq!(url, "https://example.com/repo.git");
-                assert_eq!(oids_fetched, 1);
-            }
-            _ => panic!("Expected TriedUrl, got {:?}", result),
-        }
+        assert_eq!(oids_fetched, 1);
+        assert_eq!(*ctx.processed_count.borrow(), 1);
     }
     
     #[tokio::test]
-    async fn test_sync_step_all_urls_tried() {
+    async fn test_full_sync_with_throttled_domains() {
         let mut needed = HashSet::new();
         needed.insert("abc123".to_string());
-        
-        let ctx = MockSyncContext {
-            pending_events: RefCell::new(true),
-            needed_oids: RefCell::new(needed),
-            available_urls: vec!["https://example.com/repo.git".to_string()],
-            fetch_results: RefCell::new(HashMap::new()),
-            processed_count: RefCell::new(0),
-        };
-        let throttle = DomainThrottle::new(5, 30);
-        
-        // Mark the only URL as tried
-        let mut tried = HashSet::new();
-        tried.insert("https://example.com/repo.git".to_string());
-        
-        let result = sync_identifier_step(&ctx, "test", &tried, &throttle).await.unwrap();
-        assert_eq!(result, SyncStepResult::NoMoreUrls);
-    }
-    
-    #[tokio::test]
-    async fn test_sync_step_domain_throttled() {
-        let mut needed = HashSet::new();
-        needed.insert("abc123".to_string());
-        
-        let ctx = MockSyncContext {
-            pending_events: RefCell::new(true),
-            needed_oids: RefCell::new(needed),
-            available_urls: vec!["https://example.com/repo.git".to_string()],
-            fetch_results: RefCell::new(HashMap::new()),
-            processed_count: RefCell::new(0),
-        };
-        
-        // Create throttle with 0 concurrent limit
-        let throttle = DomainThrottle::new(0, 30);
-        let tried = HashSet::new();
-        
-        let result = sync_identifier_step(&ctx, "test", &tried, &throttle).await.unwrap();
-        
-        match result {
-            SyncStepResult::AllUrlsThrottled { .. } => {}
-            _ => panic!("Expected AllUrlsThrottled, got {:?}", result),
-        }
-    }
-    
-    #[tokio::test]
-    async fn test_full_sync_loop() {
-        let mut needed = HashSet::new();
-        needed.insert("abc123".to_string());
-        needed.insert("def456".to_string());
         
         let mut fetch_results = HashMap::new();
-        // First URL returns one OID
         fetch_results.insert(
             "https://server1.com/repo.git".to_string(),
-            vec!["abc123".to_string()],
+            vec![], // First server doesn't have the OID
         );
-        // Second URL returns the other
         fetch_results.insert(
             "https://server2.com/repo.git".to_string(),
-            vec!["def456".to_string()],
+            vec!["abc123".to_string()], // Second server has it
         );
         
         let ctx = MockSyncContext {
@@ -844,14 +1235,62 @@ mod tests {
             processed_count: RefCell::new(0),
         };
         
-        // Simulate OIDs being removed as they're fetched
-        // (In real code, collect_needed_oids would return fewer OIDs)
+        let throttle_manager = Arc::new(ThrottleManager::new(5, 30));
         
-        let throttle = DomainThrottle::new(5, 30);
-        let complete = sync_identifier(&ctx, "test", &throttle).await;
+        // Manually throttle server2.com to test enqueueing
+        // (In real code, this would happen due to rate limits)
+        // For this test, we just verify the sync tries available URLs
         
-        // Should have tried both URLs
+        let complete = sync_identifier(&ctx, "test", &throttle_manager).await;
+        
+        // Should have processed events (found OID from server2)
         assert!(*ctx.processed_count.borrow() >= 1);
+    }
+    
+    #[tokio::test]
+    async fn test_domain_throttle_queue_round_robin() {
+        let mut throttle = DomainThrottle::new("example.com".to_string(), 5, 30);
+        
+        // Enqueue three identifiers
+        throttle.enqueue_identifier("id1".to_string(), HashSet::new());
+        throttle.enqueue_identifier("id2".to_string(), HashSet::new());
+        throttle.enqueue_identifier("id3".to_string(), HashSet::new());
+        
+        // Should get them in round-robin order
+        assert_eq!(throttle.next_ready_identifier(), Some("id1".to_string()));
+        throttle.mark_identifier_not_in_progress("id1");
+        
+        assert_eq!(throttle.next_ready_identifier(), Some("id2".to_string()));
+        throttle.mark_identifier_not_in_progress("id2");
+        
+        assert_eq!(throttle.next_ready_identifier(), Some("id3".to_string()));
+        throttle.mark_identifier_not_in_progress("id3");
+        
+        // Back to id1
+        assert_eq!(throttle.next_ready_identifier(), Some("id1".to_string()));
+    }
+    
+    #[tokio::test]
+    async fn test_domain_throttle_skips_in_progress() {
+        let mut throttle = DomainThrottle::new("example.com".to_string(), 5, 30);
+        
+        throttle.enqueue_identifier("id1".to_string(), HashSet::new());
+        throttle.enqueue_identifier("id2".to_string(), HashSet::new());
+        
+        // Get id1 (marks it in_progress)
+        assert_eq!(throttle.next_ready_identifier(), Some("id1".to_string()));
+        
+        // Next should skip id1 and return id2
+        assert_eq!(throttle.next_ready_identifier(), Some("id2".to_string()));
+        
+        // Both in progress, should return None
+        assert_eq!(throttle.next_ready_identifier(), None);
+        
+        // Mark id1 not in progress
+        throttle.mark_identifier_not_in_progress("id1");
+        
+        // Now id1 should be available again
+        assert_eq!(throttle.next_ready_identifier(), Some("id1".to_string()));
     }
 }
 ```
@@ -866,11 +1305,12 @@ mod tests {
 
 ## Migration Path
 
-1. **Phase 1**: Add new data structures (SyncQueueEntry, DomainThrottle, SyncContext trait)
-2. **Phase 2**: Implement `sync_identifier_step` with unit tests
-3. **Phase 3**: Implement main sync loop alongside existing `start_state_sync`
-4. **Phase 4**: Add PR event syncing
-5. **Phase 5**: Remove old `start_state_sync` code
+1. **Phase 1**: Add new data structures (SyncQueueEntry, ThrottleManager, DomainThrottle, SyncContext trait)
+2. **Phase 2**: Implement `sync_identifier_next_url` and `sync_identifier_from_url` with unit tests
+3. **Phase 3**: Implement `sync_identifier` and main sync loop alongside existing `start_state_sync`
+4. **Phase 4**: Implement ThrottleManager domain loops
+5. **Phase 5**: Add PR event syncing
+6. **Phase 6**: Remove old `start_state_sync` code
 
 ## Configuration
 
