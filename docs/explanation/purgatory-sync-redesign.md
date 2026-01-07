@@ -1331,352 +1331,421 @@ impl Purgatory {
 
 ## Testing Strategy
 
-### Unit Tests for Sync Logic
+The testing strategy follows a clear separation: **unit tests** verify the core sync mechanics (retry, backoff, throttling, round-robin) using mocks, while **integration tests** verify end-to-end behavior with real relay instances.
 
-The `SyncContext` trait enables pure unit tests without any I/O:
+### Design Principles
+
+1. **Unit tests for mechanics**: Test retry logic, backoff timing, throttle behavior, and queue management in isolation
+2. **Integration tests for outcomes**: Verify that events sync correctly, not the internal mechanics
+3. **Avoid testing implementation details**: Don't test every code path; test observable behaviors
+4. **Focus on edge cases that matter**: Partial OID availability, server failures, concurrent events
+
+### Unit Tests (src/purgatory/sync.rs)
+
+Unit tests use `MockSyncContext` to test sync logic without I/O. The mock is simple:
 
 ```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    /// Mock context for testing sync logic
-    struct MockSyncContext {
-        pending_events: RefCell<bool>,
-        needed_oids: RefCell<HashSet<String>>,
-        available_urls: Vec<String>,
-        fetch_results: RefCell<HashMap<String, Vec<String>>>,
-        processed_count: RefCell<usize>,
+/// Mock context for testing sync logic
+struct MockSyncContext {
+    /// URLs available for fetching, grouped by domain
+    urls_by_domain: HashMap<String, Vec<String>>,
+    /// Which OIDs each URL can provide
+    url_provides_oids: HashMap<String, HashSet<String>>,
+    /// OIDs still needed (decremented when "fetched")
+    needed_oids: RefCell<HashSet<String>>,
+    /// Track fetch attempts for assertions
+    fetch_log: RefCell<Vec<(String, Vec<String>)>>,  // (url, oids_requested)
+}
+```
+
+#### Test Module 1: Backoff Behavior
+
+Tests the `SyncQueueEntry` backoff calculation and state transitions:
+
+```rust
+mod backoff_tests {
+    #[test]
+    fn backoff_doubles_up_to_cap() {
+        // Verify: 20s → 40s → 80s → 120s (capped)
+        let mut entry = SyncQueueEntry::new(Duration::ZERO);
+        
+        entry.on_sync_complete();
+        assert_eq!(entry.backoff(), Duration::from_secs(20));
+        
+        entry.on_sync_complete();
+        assert_eq!(entry.backoff(), Duration::from_secs(40));
+        
+        entry.on_sync_complete();
+        assert_eq!(entry.backoff(), Duration::from_secs(80));
+        
+        entry.on_sync_complete();
+        assert_eq!(entry.backoff(), Duration::from_secs(120));
+        
+        // Stays capped
+        entry.on_sync_complete();
+        assert_eq!(entry.backoff(), Duration::from_secs(120));
     }
     
-    #[async_trait]
-    impl SyncContext for MockSyncContext {
-        async fn fetch_repository_data(&self, _id: &str) -> Result<RepositoryData> {
-            Ok(RepositoryData {
-                announcements: vec![MockAnnouncement {
-                    clone_urls: self.available_urls.clone(),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            })
-        }
+    #[test]
+    fn new_event_resets_backoff() {
+        // New event for same identifier resets attempt_count
+        let mut entry = SyncQueueEntry::new(Duration::ZERO);
+        entry.on_sync_complete();
+        entry.on_sync_complete();
+        assert!(entry.attempt_count > 0);
         
-        fn collect_needed_oids(&self, _id: &str) -> HashSet<String> {
-            self.needed_oids.borrow().clone()
-        }
-        
-        fn oid_exists(&self, _path: &Path, oid: &str) -> bool {
-            !self.needed_oids.borrow().contains(oid)
-        }
-        
-        async fn fetch_oids(&self, _path: &Path, url: &str, _oids: &[String]) -> Result<Vec<String>> {
-            Ok(self.fetch_results.borrow().get(url).cloned().unwrap_or_default())
-        }
-        
-        async fn process_satisfiable_events(&self, _id: &str) -> Result<ProcessResult> {
-            *self.processed_count.borrow_mut() += 1;
-            Ok(ProcessResult::default())
-        }
-        
-        fn has_pending_events(&self, _id: &str) -> bool {
-            *self.pending_events.borrow()
-        }
-        
-        fn find_target_repo(&self, _data: &RepositoryData) -> Option<PathBuf> {
-            Some(PathBuf::from("/tmp/test-repo"))
-        }
-        
-        fn our_domain(&self) -> Option<&str> {
-            None
-        }
-    }
-    
-    #[tokio::test]
-    async fn test_next_url_no_pending_events() {
-        let ctx = MockSyncContext {
-            pending_events: RefCell::new(false),
-            needed_oids: RefCell::new(HashSet::new()),
-            available_urls: vec!["https://example.com/repo.git".to_string()],
-            ..Default::default()
-        };
-        let throttle_manager = ThrottleManager::new(5, 30);
-        let tried = HashSet::new();
-        
-        let result = sync_identifier_next_url(&ctx, "test", None, &tried, &throttle_manager).await;
-        assert!(result.is_none());
-    }
-    
-    #[tokio::test]
-    async fn test_next_url_no_oids_needed() {
-        let ctx = MockSyncContext {
-            pending_events: RefCell::new(true),
-            needed_oids: RefCell::new(HashSet::new()), // Empty = no OIDs needed
-            available_urls: vec!["https://example.com/repo.git".to_string()],
-            ..Default::default()
-        };
-        let throttle_manager = ThrottleManager::new(5, 30);
-        let tried = HashSet::new();
-        
-        let result = sync_identifier_next_url(&ctx, "test", None, &tried, &throttle_manager).await;
-        assert!(result.is_none()); // No URL needed, sync is complete
-    }
-    
-    #[tokio::test]
-    async fn test_next_url_returns_non_throttled() {
-        let mut needed = HashSet::new();
-        needed.insert("abc123".to_string());
-        
-        let ctx = MockSyncContext {
-            pending_events: RefCell::new(true),
-            needed_oids: RefCell::new(needed),
-            available_urls: vec!["https://example.com/repo.git".to_string()],
-            ..Default::default()
-        };
-        let throttle_manager = ThrottleManager::new(5, 30);
-        let tried = HashSet::new();
-        
-        let result = sync_identifier_next_url(&ctx, "test", None, &tried, &throttle_manager).await;
-        assert_eq!(result, Some("https://example.com/repo.git".to_string()));
-    }
-    
-    #[tokio::test]
-    async fn test_next_url_skips_tried() {
-        let mut needed = HashSet::new();
-        needed.insert("abc123".to_string());
-        
-        let ctx = MockSyncContext {
-            pending_events: RefCell::new(true),
-            needed_oids: RefCell::new(needed),
-            available_urls: vec![
-                "https://example.com/repo.git".to_string(),
-                "https://other.com/repo.git".to_string(),
-            ],
-            ..Default::default()
-        };
-        let throttle_manager = ThrottleManager::new(5, 30);
-        
-        let mut tried = HashSet::new();
-        tried.insert("https://example.com/repo.git".to_string());
-        
-        let result = sync_identifier_next_url(&ctx, "test", None, &tried, &throttle_manager).await;
-        assert_eq!(result, Some("https://other.com/repo.git".to_string()));
-    }
-    
-    #[tokio::test]
-    async fn test_next_url_specific_domain() {
-        let mut needed = HashSet::new();
-        needed.insert("abc123".to_string());
-        
-        let ctx = MockSyncContext {
-            pending_events: RefCell::new(true),
-            needed_oids: RefCell::new(needed),
-            available_urls: vec![
-                "https://example.com/repo.git".to_string(),
-                "https://other.com/repo.git".to_string(),
-            ],
-            ..Default::default()
-        };
-        let throttle_manager = ThrottleManager::new(5, 30);
-        let tried = HashSet::new();
-        
-        // Request specific domain
-        let result = sync_identifier_next_url(
-            &ctx, "test", Some("other.com"), &tried, &throttle_manager
-        ).await;
-        assert_eq!(result, Some("https://other.com/repo.git".to_string()));
-    }
-    
-    #[tokio::test]
-    async fn test_next_url_none_when_all_tried() {
-        let mut needed = HashSet::new();
-        needed.insert("abc123".to_string());
-        
-        let ctx = MockSyncContext {
-            pending_events: RefCell::new(true),
-            needed_oids: RefCell::new(needed),
-            available_urls: vec!["https://example.com/repo.git".to_string()],
-            ..Default::default()
-        };
-        let throttle_manager = ThrottleManager::new(5, 30);
-        
-        let mut tried = HashSet::new();
-        tried.insert("https://example.com/repo.git".to_string());
-        
-        let result = sync_identifier_next_url(&ctx, "test", None, &tried, &throttle_manager).await;
-        assert!(result.is_none());
-    }
-    
-    #[tokio::test]
-    async fn test_from_url_fetches_and_processes() {
-        let mut needed = HashSet::new();
-        needed.insert("abc123".to_string());
-        
-        let mut fetch_results = HashMap::new();
-        fetch_results.insert(
-            "https://example.com/repo.git".to_string(),
-            vec!["abc123".to_string()],
-        );
-        
-        let ctx = MockSyncContext {
-            pending_events: RefCell::new(true),
-            needed_oids: RefCell::new(needed),
-            available_urls: vec!["https://example.com/repo.git".to_string()],
-            fetch_results: RefCell::new(fetch_results),
-            processed_count: RefCell::new(0),
-        };
-        let throttle_manager = Arc::new(ThrottleManager::new(5, 30));
-        
-        let oids_fetched = sync_identifier_from_url(
-            &ctx, "test", "https://example.com/repo.git", &throttle_manager
-        ).await;
-        
-        assert_eq!(oids_fetched, 1);
-        assert_eq!(*ctx.processed_count.borrow(), 1);
-    }
-    
-    #[tokio::test]
-    async fn test_full_sync_with_throttled_domains() {
-        let mut needed = HashSet::new();
-        needed.insert("abc123".to_string());
-        
-        let mut fetch_results = HashMap::new();
-        fetch_results.insert(
-            "https://server1.com/repo.git".to_string(),
-            vec![], // First server doesn't have the OID
-        );
-        fetch_results.insert(
-            "https://server2.com/repo.git".to_string(),
-            vec!["abc123".to_string()], // Second server has it
-        );
-        
-        let ctx = MockSyncContext {
-            pending_events: RefCell::new(true),
-            needed_oids: RefCell::new(needed.clone()),
-            available_urls: vec![
-                "https://server1.com/repo.git".to_string(),
-                "https://server2.com/repo.git".to_string(),
-            ],
-            fetch_results: RefCell::new(fetch_results),
-            processed_count: RefCell::new(0),
-        };
-        
-        let throttle_manager = Arc::new(ThrottleManager::new(5, 30));
-        
-        // Manually throttle server2.com to test enqueueing
-        // (In real code, this would happen due to rate limits)
-        // For this test, we just verify the sync tries available URLs
-        
-        let complete = sync_identifier(&ctx, "test", &throttle_manager).await;
-        
-        // Should have processed events (found OID from server2)
-        assert!(*ctx.processed_count.borrow() >= 1);
-    }
-    
-    #[tokio::test]
-    async fn test_domain_throttle_queue_round_robin() {
-        let mut throttle = DomainThrottle::new("example.com".to_string(), 5, 30);
-        
-        // Enqueue three identifiers
-        throttle.enqueue_identifier("id1".to_string(), HashSet::new());
-        throttle.enqueue_identifier("id2".to_string(), HashSet::new());
-        throttle.enqueue_identifier("id3".to_string(), HashSet::new());
-        
-        // Should get them in round-robin order
-        assert_eq!(throttle.next_ready_identifier(), Some("id1".to_string()));
-        throttle.mark_identifier_not_in_progress("id1");
-        
-        assert_eq!(throttle.next_ready_identifier(), Some("id2".to_string()));
-        throttle.mark_identifier_not_in_progress("id2");
-        
-        assert_eq!(throttle.next_ready_identifier(), Some("id3".to_string()));
-        throttle.mark_identifier_not_in_progress("id3");
-        
-        // Back to id1
-        assert_eq!(throttle.next_ready_identifier(), Some("id1".to_string()));
-    }
-    
-    #[tokio::test]
-    async fn test_domain_throttle_skips_in_progress() {
-        let mut throttle = DomainThrottle::new("example.com".to_string(), 5, 30);
-        
-        throttle.enqueue_identifier("id1".to_string(), HashSet::new());
-        throttle.enqueue_identifier("id2".to_string(), HashSet::new());
-        
-        // Get id1 (marks it in_progress)
-        assert_eq!(throttle.next_ready_identifier(), Some("id1".to_string()));
-        
-        // Next should skip id1 and return id2
-        assert_eq!(throttle.next_ready_identifier(), Some("id2".to_string()));
-        
-        // Both in progress, should return None
-        assert_eq!(throttle.next_ready_identifier(), None);
-        
-        // Mark id1 not in progress
-        throttle.mark_identifier_not_in_progress("id1");
-        
-        // Now id1 should be available again
-        assert_eq!(throttle.next_ready_identifier(), Some("id1".to_string()));
-    }
-    
-    #[tokio::test]
-    async fn test_domain_throttle_remove_adjusts_index() {
-        let mut throttle = DomainThrottle::new("example.com".to_string(), 5, 30);
-        
-        throttle.enqueue_identifier("id1".to_string(), HashSet::new());
-        throttle.enqueue_identifier("id2".to_string(), HashSet::new());
-        throttle.enqueue_identifier("id3".to_string(), HashSet::new());
-        
-        // Advance to id2
-        assert_eq!(throttle.next_ready_identifier(), Some("id1".to_string()));
-        throttle.mark_identifier_not_in_progress("id1");
-        
-        // Remove id1 (before current index)
-        throttle.remove_identifier("id1");
-        
-        // Should continue with id2 (not skip to id3)
-        assert_eq!(throttle.next_ready_identifier(), Some("id2".to_string()));
-    }
-    
-    #[tokio::test]
-    async fn test_domain_throttle_has_queued_work() {
-        let mut throttle = DomainThrottle::new("example.com".to_string(), 5, 30);
-        
-        assert!(!throttle.has_queued_work());
-        
-        throttle.enqueue_identifier("id1".to_string(), HashSet::new());
-        assert!(throttle.has_queued_work());
-        
-        throttle.remove_identifier("id1");
-        assert!(!throttle.has_queued_work());
-    }
-    
-    #[tokio::test]
-    async fn test_domain_throttle_tried_urls_merge() {
-        let mut throttle = DomainThrottle::new("example.com".to_string(), 5, 30);
-        
-        let mut urls1 = HashSet::new();
-        urls1.insert("url1".to_string());
-        throttle.enqueue_identifier("id1".to_string(), urls1);
-        
-        // Enqueue again with different tried URLs - should merge
-        let mut urls2 = HashSet::new();
-        urls2.insert("url2".to_string());
-        throttle.enqueue_identifier("id1".to_string(), urls2);
-        
-        let tried = throttle.get_tried_urls("id1");
-        assert!(tried.contains("url1"));
-        assert!(tried.contains("url2"));
+        entry.on_new_event(Duration::from_millis(500));
+        assert_eq!(entry.attempt_count, 0);
     }
 }
 ```
 
-### Integration Tests
+#### Test Module 2: Throttle & Rate Limiting
 
-1. **Sync against own implementation**: Two ngit-grasp instances syncing
-2. **Burst handling**: 10 events in 100ms, verify debounce
-3. **Backoff behavior**: Unreachable URLs, verify timing
-4. **Rate limiting**: Verify 30 req/min and 5 concurrent limits
-5. **Parallel identifiers**: 5 identifiers sync in parallel
+Tests `DomainThrottle` capacity checks and rate limiting:
+
+```rust
+mod throttle_tests {
+    #[test]
+    fn concurrent_limit_enforced() {
+        let mut throttle = DomainThrottle::new("example.com".into(), 2, 100);
+        
+        assert!(throttle.has_capacity());
+        throttle.start_request();
+        assert!(throttle.has_capacity());
+        throttle.start_request();
+        assert!(!throttle.has_capacity());  // At limit
+        
+        throttle.complete_request();
+        assert!(throttle.has_capacity());  // Capacity freed
+    }
+    
+    #[test]
+    fn rate_limit_enforced() {
+        let mut throttle = DomainThrottle::new("example.com".into(), 100, 2);
+        
+        // Make 2 requests (at rate limit)
+        throttle.start_request();
+        throttle.complete_request();
+        throttle.start_request();
+        throttle.complete_request();
+        
+        assert!(!throttle.has_capacity());  // Rate limited
+        
+        // After 60s window passes, capacity returns
+        // (In real tests, use tokio::time::pause/advance)
+    }
+    
+    #[test]
+    fn round_robin_fairness() {
+        let mut throttle = DomainThrottle::new("example.com".into(), 5, 30);
+        
+        // Enqueue 3 identifiers
+        throttle.enqueue_identifier("A".into(), HashSet::new());
+        throttle.enqueue_identifier("B".into(), HashSet::new());
+        throttle.enqueue_identifier("C".into(), HashSet::new());
+        
+        // Process in round-robin order
+        let mut order = vec![];
+        for _ in 0..6 {
+            if let Some(id) = throttle.next_ready_identifier() {
+                order.push(id.clone());
+                throttle.mark_identifier_not_in_progress(&id);
+            }
+        }
+        
+        assert_eq!(order, vec!["A", "B", "C", "A", "B", "C"]);
+    }
+    
+    #[test]
+    fn skips_in_progress_identifiers() {
+        let mut throttle = DomainThrottle::new("example.com".into(), 5, 30);
+        
+        throttle.enqueue_identifier("A".into(), HashSet::new());
+        throttle.enqueue_identifier("B".into(), HashSet::new());
+        
+        // Get A (now in_progress)
+        assert_eq!(throttle.next_ready_identifier(), Some("A".into()));
+        
+        // Next skips A, returns B
+        assert_eq!(throttle.next_ready_identifier(), Some("B".into()));
+        
+        // Both in progress
+        assert_eq!(throttle.next_ready_identifier(), None);
+    }
+}
+```
+
+#### Test Module 3: Retry & URL Selection
+
+Tests `sync_identifier_next_url` behavior:
+
+```rust
+mod retry_tests {
+    #[tokio::test]
+    async fn tries_urls_until_success() {
+        let ctx = MockSyncContext::new()
+            .with_urls(&["https://fail1.com/r.git", "https://fail2.com/r.git", "https://ok.com/r.git"])
+            .with_needed_oids(&["abc123"])
+            .url_provides("https://ok.com/r.git", &["abc123"]);
+        
+        let throttle = Arc::new(ThrottleManager::new(5, 30));
+        sync_identifier(&ctx, "test-repo", &throttle).await;
+        
+        // Should have tried all 3 URLs
+        assert_eq!(ctx.fetch_log.borrow().len(), 3);
+        // OID should now be satisfied
+        assert!(ctx.needed_oids.borrow().is_empty());
+    }
+    
+    #[tokio::test]
+    async fn skips_throttled_domains() {
+        let ctx = MockSyncContext::new()
+            .with_urls(&["https://throttled.com/r.git", "https://ok.com/r.git"])
+            .with_needed_oids(&["abc123"])
+            .url_provides("https://ok.com/r.git", &["abc123"]);
+        
+        let throttle = Arc::new(ThrottleManager::new(5, 30));
+        
+        // Saturate throttled.com
+        for _ in 0..5 {
+            throttle.start_request("throttled.com");
+        }
+        
+        sync_identifier(&ctx, "test-repo", &throttle).await;
+        
+        // Should only try ok.com (throttled.com skipped)
+        let urls_tried: Vec<_> = ctx.fetch_log.borrow().iter().map(|(u, _)| u.clone()).collect();
+        assert!(!urls_tried.contains(&"https://throttled.com/r.git".to_string()));
+        assert!(urls_tried.contains(&"https://ok.com/r.git".to_string()));
+    }
+    
+    #[tokio::test]
+    async fn enqueues_with_throttled_domains() {
+        let ctx = MockSyncContext::new()
+            .with_urls(&["https://throttled.com/r.git"])
+            .with_needed_oids(&["abc123"]);
+        
+        let throttle = Arc::new(ThrottleManager::new(1, 30));
+        throttle.start_request("throttled.com");  // Saturate
+        
+        sync_identifier(&ctx, "test-repo", &throttle).await;
+        
+        // Should be enqueued with throttled.com for later
+        assert!(throttle.has_queued_identifier("throttled.com", "test-repo"));
+    }
+}
+```
+
+#### Test Module 4: Partial OID Fetching
+
+Tests behavior when servers have different subsets of OIDs:
+
+```rust
+mod partial_oid_tests {
+    #[tokio::test]
+    async fn aggregates_oids_from_multiple_servers() {
+        // Server A has oid1, Server B has oid2
+        let ctx = MockSyncContext::new()
+            .with_urls(&["https://a.com/r.git", "https://b.com/r.git"])
+            .with_needed_oids(&["oid1", "oid2"])
+            .url_provides("https://a.com/r.git", &["oid1"])
+            .url_provides("https://b.com/r.git", &["oid2"]);
+        
+        let throttle = Arc::new(ThrottleManager::new(5, 30));
+        let complete = sync_identifier(&ctx, "test-repo", &throttle).await;
+        
+        assert!(complete);
+        assert!(ctx.needed_oids.borrow().is_empty());
+    }
+    
+    #[tokio::test]
+    async fn incomplete_when_oids_unavailable() {
+        // No server has oid2
+        let ctx = MockSyncContext::new()
+            .with_urls(&["https://a.com/r.git", "https://b.com/r.git"])
+            .with_needed_oids(&["oid1", "oid2"])
+            .url_provides("https://a.com/r.git", &["oid1"])
+            .url_provides("https://b.com/r.git", &["oid1"]);  // Same OID, missing oid2
+        
+        let throttle = Arc::new(ThrottleManager::new(5, 30));
+        let complete = sync_identifier(&ctx, "test-repo", &throttle).await;
+        
+        assert!(!complete);
+        assert!(ctx.needed_oids.borrow().contains("oid2"));
+    }
+}
+```
+
+#### Test Module 5: Burst Debouncing
+
+Tests that rapid event arrivals are debounced:
+
+```rust
+mod debounce_tests {
+    #[tokio::test]
+    async fn burst_events_debounced() {
+        tokio::time::pause();
+        
+        let queue = SyncQueue::new();
+        
+        // Simulate 10 events arriving in 100ms
+        for i in 0..10 {
+            queue.enqueue("test-repo", Duration::from_millis(500));
+            tokio::time::advance(Duration::from_millis(10)).await;
+        }
+        
+        // Should only have one entry (debounced)
+        assert_eq!(queue.len(), 1);
+        
+        // Entry should be ready after 500ms from last event
+        tokio::time::advance(Duration::from_millis(400)).await;
+        assert!(!queue.get("test-repo").unwrap().is_ready());
+        
+        tokio::time::advance(Duration::from_millis(100)).await;
+        assert!(queue.get("test-repo").unwrap().is_ready());
+    }
+}
+```
+
+### Integration Tests (tests/purgatory_sync.rs)
+
+Integration tests verify end-to-end behavior with real relay instances. Keep these minimal and focused on outcomes.
+
+```rust
+//! Purgatory Sync Integration Tests
+//!
+//! These tests verify that state and PR events sync correctly between
+//! ngit-grasp instances, including git data fetching.
+
+mod common;
+use common::{TestRelay, TestRepo, create_state_event, create_pr_event};
+
+/// Core test: State event syncs with git data
+/// 
+/// Verifies the complete purgatory workflow:
+/// 1. State event arrives at relay B (no git data)
+/// 2. Event enters purgatory
+/// 3. Git data fetched from relay A
+/// 4. Event released and served
+#[tokio::test]
+async fn state_event_syncs_from_remote() {
+    // Setup: Two relays, relay A has repo with git data
+    let relay_a = TestRelay::start().await;
+    let repo = TestRepo::create_with_commits(&relay_a, 3).await;
+    
+    // Relay B configured to sync from A
+    let relay_b = TestRelay::start_with_sync_source(relay_a.url()).await;
+    
+    // Publish state event to relay B (git data not present)
+    let state = create_state_event(&repo);
+    relay_b.publish(&state).await;
+    
+    // Wait for sync (with timeout)
+    let synced = relay_b.wait_for_event_served(&state.id, Duration::from_secs(10)).await;
+    assert!(synced, "State event should be served after git sync");
+    
+    // Verify git data is now available
+    assert!(relay_b.can_clone(&repo.identifier()).await);
+}
+
+/// Core test: PR event syncs with commit data
+#[tokio::test]
+async fn pr_event_syncs_from_remote() {
+    let relay_a = TestRelay::start().await;
+    let repo = TestRepo::create_with_commits(&relay_a, 1).await;
+    
+    // Create PR with a new commit
+    let pr_commit = repo.create_pr_commit().await;
+    let pr_event = create_pr_event(&repo, &pr_commit);
+    relay_a.publish(&pr_event).await;
+    relay_a.push_pr_ref(&repo, &pr_event.id, &pr_commit).await;
+    
+    // Relay B syncs
+    let relay_b = TestRelay::start_with_sync_source(relay_a.url()).await;
+    relay_b.publish(&pr_event).await;
+    
+    let synced = relay_b.wait_for_event_served(&pr_event.id, Duration::from_secs(10)).await;
+    assert!(synced, "PR event should be served after git sync");
+}
+
+/// Edge case: Concurrent state and PR events for same repo
+/// 
+/// Verifies that both event types sync correctly when arriving together.
+#[tokio::test]
+async fn concurrent_state_and_pr_sync() {
+    let relay_a = TestRelay::start().await;
+    let repo = TestRepo::create_with_commits(&relay_a, 2).await;
+    
+    let state = create_state_event(&repo);
+    let pr_commit = repo.create_pr_commit().await;
+    let pr_event = create_pr_event(&repo, &pr_commit);
+    
+    relay_a.publish(&state).await;
+    relay_a.publish(&pr_event).await;
+    relay_a.push_pr_ref(&repo, &pr_event.id, &pr_commit).await;
+    
+    let relay_b = TestRelay::start_with_sync_source(relay_a.url()).await;
+    
+    // Publish both simultaneously
+    tokio::join!(
+        relay_b.publish(&state),
+        relay_b.publish(&pr_event),
+    );
+    
+    // Both should sync
+    let (state_synced, pr_synced) = tokio::join!(
+        relay_b.wait_for_event_served(&state.id, Duration::from_secs(10)),
+        relay_b.wait_for_event_served(&pr_event.id, Duration::from_secs(10)),
+    );
+    
+    assert!(state_synced && pr_synced, "Both events should sync");
+}
+
+/// Edge case: Server has subset of required OIDs
+/// 
+/// Verifies aggregation from multiple sources when no single
+/// server has all required OIDs.
+#[tokio::test]
+async fn partial_oid_aggregation() {
+    // Relay A has commits 1-2, Relay B has commits 2-3
+    let relay_a = TestRelay::start().await;
+    let relay_b = TestRelay::start().await;
+    
+    let repo_a = TestRepo::create_with_commits(&relay_a, 2).await;
+    let repo_b = TestRepo::create_with_commits(&relay_b, 2).await;
+    repo_b.push_additional_commits(1).await;  // Commit 3 only on B
+    
+    // State references commits 1, 2, and 3
+    let state = create_state_event_with_commits(&[
+        repo_a.commit(0),
+        repo_a.commit(1), 
+        repo_b.commit(2),
+    ]);
+    
+    // Relay C syncs from both A and B
+    let relay_c = TestRelay::start_with_sync_sources(&[relay_a.url(), relay_b.url()]).await;
+    relay_c.publish(&state).await;
+    
+    let synced = relay_c.wait_for_event_served(&state.id, Duration::from_secs(15)).await;
+    assert!(synced, "Should aggregate OIDs from multiple sources");
+}
+```
+
+### Test Summary
+
+| Category | Test Count | Purpose |
+|----------|------------|---------|
+| Backoff | 2 | Verify exponential backoff timing and reset |
+| Throttle | 4 | Verify rate limiting, concurrency, round-robin |
+| Retry | 3 | Verify URL iteration and throttle-skip behavior |
+| Partial OIDs | 2 | Verify OID aggregation from multiple servers |
+| Debounce | 1 | Verify burst event handling |
+| **Unit Total** | **12** | |
+| Integration | 4 | End-to-end sync verification |
+| **Grand Total** | **16** | |
+
+This is a focused set that covers the key behaviors without redundant tests.
 
 ## Migration Path
 
