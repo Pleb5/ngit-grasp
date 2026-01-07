@@ -10,4 +10,4 @@ mod queue;
 mod throttle;
 
 pub use queue::SyncQueueEntry;
-pub use throttle::DomainThrottle;
+pub use throttle::{DomainThrottle, ThrottleManager};
