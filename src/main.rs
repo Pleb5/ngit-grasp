@@ -11,7 +11,7 @@ use ngit_grasp::{
     git, http,
     metrics::Metrics,
     nostr,
-    purgatory::Purgatory,
+    purgatory::{sync::RealSyncContext, sync::ThrottleManager, Purgatory},
     sync::SyncManager,
 };
 
@@ -110,6 +110,24 @@ async fn main() -> Result<()> {
             }
         });
         info!("Purgatory cleanup task started (60s interval)");
+
+        // Start purgatory sync loop for background git data fetching
+        let sync_ctx = Arc::new(RealSyncContext::new(
+            purgatory.clone(),
+            relay_with_db.database.clone(),
+            PathBuf::from(config.effective_git_data_path()),
+            Some(config.domain.clone()),
+            Some(relay_with_db.relay.clone()),
+        ));
+
+        // Create throttle manager for rate limiting remote git servers
+        // Default: 5 concurrent requests per domain, 30 requests per minute per domain
+        let throttle_manager = Arc::new(ThrottleManager::new(5, 30));
+        throttle_manager.set_context(sync_ctx.clone());
+
+        // Start the sync loop
+        let _sync_loop_handle = purgatory.clone().start_sync_loop(sync_ctx, throttle_manager);
+        info!("Purgatory sync loop started (1s interval)");
 
         // Setup shutdown handler for purgatory cleanup
         let shutdown_purgatory = purgatory.clone();

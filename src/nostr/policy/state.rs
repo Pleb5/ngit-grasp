@@ -152,17 +152,10 @@ impl StatePolicy {
             Ok(WritePolicyResult::Accept) // event should be saved and broadcast
         } else {
             // if no git data - add to purgatory
+            // (add_state automatically enqueues for background sync)
             self.ctx
                 .purgatory
                 .add_state(event.clone(), state.identifier.clone(), event.pubkey);
-
-            // Trigger background git data sync from remote servers
-            self.ctx.purgatory.start_state_sync(
-                state.clone(),
-                self.ctx.database.clone(),
-                Some(self.ctx.domain.clone()),
-                self.ctx.get_local_relay(),
-            );
 
             tracing::info!(
                 "state event added to purgatory: eventid: {}, identifier: {}",
