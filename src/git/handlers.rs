@@ -14,7 +14,6 @@ use tracing::{debug, error, info, warn};
 
 use super::protocol::{GitService, PktLine};
 use super::subprocess::GitSubprocess;
-use super::try_set_head_if_available;
 
 use crate::git::authorization::{authorize_push, parse_pushed_refs};
 use crate::git::sync::process_newly_available_git_data;
@@ -277,36 +276,6 @@ pub async fn handle_receive_pack(
         return Err(GitError::GitFailed(status.code()));
     }
 
-    // GRASP-01: Set HEAD after git data is received
-    // "MUST set repository HEAD per repository state announcement
-    // as soon as the git data related to that branch has been received."
-    //
-    // Note: HEAD setting is also handled by process_newly_available_git_data via
-    // align_repository_with_state, but we do it here first for the pushed-to repo
-    // to ensure it's set immediately after the push succeeds.
-    if let Some(ref state) = auth_result.state {
-        if let Some(head_ref) = &state.head {
-            if let Some(branch_name) = state.get_head_branch() {
-                if let Some(commit) = state.get_branch_commit(branch_name) {
-                    match try_set_head_if_available(&repo_path, head_ref, commit) {
-                        Ok(true) => {
-                            info!("Set HEAD to {} after push to {:?}", head_ref, repo_path);
-                        }
-                        Ok(false) => {
-                            debug!(
-                                "HEAD commit {} not found after push, HEAD not updated",
-                                commit
-                            );
-                        }
-                        Err(e) => {
-                            warn!("Failed to set HEAD after push: {}", e);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     // Process newly available git data using the unified function
     // This handles:
     // - Discovering satisfiable events from purgatory (state events and PR events)
@@ -340,16 +309,16 @@ pub async fn handle_receive_pack(
             if result.released_any() {
                 info!(
                     "Processed push for {}: {} states released, {} PRs released, {} repos synced",
-                    identifier,
-                    result.states_released,
-                    result.prs_released,
-                    result.repos_synced
+                    identifier, result.states_released, result.prs_released, result.repos_synced
                 );
             }
 
             if !result.errors.is_empty() {
                 for error in &result.errors {
-                    warn!("Error during post-push processing for {}: {}", identifier, error);
+                    warn!(
+                        "Error during post-push processing for {}: {}",
+                        identifier, error
+                    );
                 }
             }
         }
