@@ -12,6 +12,7 @@
 //! - **Separate stores**: State events and PR events use different indexing strategies
 
 mod helpers;
+pub mod sync;
 mod types;
 
 use anyhow::{bail, Result};
