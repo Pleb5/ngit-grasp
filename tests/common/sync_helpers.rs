@@ -340,10 +340,16 @@ pub fn build_layer3_quote_with_q_tag(
 /// # Returns
 /// A signed repository announcement event ready to send.
 pub fn create_repo_announcement(keys: &Keys, domains: &[&str], identifier: &str) -> Event {
-    // Build clone URLs for all domains (with .git suffix)
+    // Get npub for the clone URL path (format: /<npub>/<identifier>.git)
+    let npub = keys
+        .public_key()
+        .to_bech32()
+        .expect("Failed to convert public key to npub");
+
+    // Build clone URLs for all domains (with npub and .git suffix)
     let clone_urls: Vec<String> = domains
         .iter()
-        .map(|d| format!("http://{}/{}.git", d, identifier))
+        .map(|d| format!("http://{}/{}/{}.git", d, npub, identifier))
         .collect();
 
     // Build relay URLs for all domains
