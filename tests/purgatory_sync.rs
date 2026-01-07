@@ -31,7 +31,7 @@ use common::{
     add_commit_to_repo, build_repo_coord, check_ref_at_commit, create_pr_event,
     create_pr_event_with_clone, create_repo_announcement, create_state_event,
     create_test_repo_with_commit, push_ref_to_relay, push_to_relay, verify_event_not_served,
-    wait_for_event_served, wait_for_sync_connection, CommitVariant, MockRelay, SimpleGitServer,
+    wait_for_event_served, wait_for_sync_connection, CommitVariant, MockRelay, SmartGitServer,
     TestRelay,
 };
 use nostr_sdk::prelude::*;
@@ -759,8 +759,10 @@ async fn test_pr_event_clone_tag_sync_with_partial_oid_aggregation_from_multiple
     // 2. mock_relay - rust-nostr relay for PR event (no validation, no purgatory)
     let mock_relay = MockRelay::start().await;
 
-    // 3. git_server - SimpleGitServer with PR commit only
-    let git_server = SimpleGitServer::start(repo_b.path()).await;
+    // 3. git_server - SmartGitServer with PR commit only
+    //    Using SmartGitServer because purgatory sync uses `git fetch --depth=1`
+    //    which requires the Git Smart HTTP protocol (not dumb HTTP)
+    let git_server = SmartGitServer::start(repo_b.path()).await;
 
     // 4. Pre-allocate syncing_relay port for announcement tags
     let syncing_port = TestRelay::find_free_port();

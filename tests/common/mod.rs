@@ -8,7 +8,7 @@ pub mod purgatory_helpers;
 pub mod relay;
 pub mod sync_helpers;
 
-pub use git_server::SimpleGitServer;
+pub use git_server::{SimpleGitServer, SmartGitServer};
 pub use mock_relay::MockRelay;
 pub use purgatory_helpers::*;
 pub use relay::TestRelay;
