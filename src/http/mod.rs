@@ -152,13 +152,21 @@ impl Service<Request<Incoming>> for HttpService {
             let identifier = identifier.to_string();
             let subpath = subpath.to_string();
 
+            // Extract Git-Protocol header for protocol v2 support
+            let git_protocol = req
+                .headers()
+                .get("git-protocol")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+
             tracing::debug!(
-                "Git request: {} {} (npub={}, id={}, subpath={})",
+                "Git request: {} {} (npub={}, id={}, subpath={}, protocol={:?})",
                 method,
                 path,
                 npub,
                 identifier,
-                subpath
+                subpath,
+                git_protocol
             );
 
             let repo_path = git::resolve_repo_path(&git_data_path, &npub, &identifier);
@@ -185,7 +193,12 @@ impl Service<Request<Incoming>> for HttpService {
 
                         match service {
                             Some(svc) => {
-                                let result = git::handlers::handle_info_refs(repo_path, svc).await;
+                                let result = git::handlers::handle_info_refs(
+                                    repo_path,
+                                    svc,
+                                    git_protocol.as_deref(),
+                                )
+                                .await;
                                 // Track operation
                                 if let Some(ref m) = metrics_clone {
                                     let status = if result.is_ok() { "success" } else { "error" };
@@ -203,7 +216,12 @@ impl Service<Request<Incoming>> for HttpService {
 
                     // POST /git-upload-pack (clone/fetch)
                     (m, "git-upload-pack") if m == Method::POST => {
-                        let result = git::handlers::handle_upload_pack(repo_path, body_bytes).await;
+                        let result = git::handlers::handle_upload_pack(
+                            repo_path,
+                            body_bytes,
+                            git_protocol.as_deref(),
+                        )
+                        .await;
                         if let Some(ref m) = metrics_clone {
                             let status = if result.is_ok() { "success" } else { "error" };
                             m.record_git_operation("clone", status);
@@ -238,6 +256,7 @@ impl Service<Request<Incoming>> for HttpService {
                             &owner_pubkey_hex,
                             purgatory.clone(),
                             &git_data_path,
+                            git_protocol.as_deref(),
                         )
                         .await;
 

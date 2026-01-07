@@ -26,6 +26,7 @@ use crate::purgatory::Purgatory;
 pub async fn handle_info_refs(
     repo_path: PathBuf,
     service: GitService,
+    git_protocol: Option<&str>,
 ) -> Result<Response<Full<Bytes>>, GitError> {
     debug!(
         "Handling info/refs for {:?} with service {:?}",
@@ -39,7 +40,7 @@ pub async fn handle_info_refs(
     }
 
     // Spawn git with --advertise-refs
-    let mut git = GitSubprocess::spawn(service, &repo_path, true).map_err(|e| {
+    let mut git = GitSubprocess::spawn(service, &repo_path, true, git_protocol).map_err(|e| {
         error!("Failed to spawn git process: {}", e);
         GitError::ProcessSpawnFailed(e)
     })?;
@@ -102,6 +103,7 @@ pub async fn handle_info_refs(
 pub async fn handle_upload_pack(
     repo_path: PathBuf,
     request_body: Bytes,
+    git_protocol: Option<&str>,
 ) -> Result<Response<Full<Bytes>>, GitError> {
     debug!("Handling upload-pack for {:?}", repo_path);
 
@@ -110,7 +112,7 @@ pub async fn handle_upload_pack(
     }
 
     // Spawn git upload-pack
-    let mut git = GitSubprocess::spawn(GitService::UploadPack, &repo_path, false)
+    let mut git = GitSubprocess::spawn(GitService::UploadPack, &repo_path, false, git_protocol)
         .map_err(GitError::ProcessSpawnFailed)?;
 
     // Write request to git's stdin
@@ -181,6 +183,7 @@ pub async fn handle_upload_pack(
 /// * `identifier` - The repository identifier (d tag) for authorization lookup
 /// * `owner_pubkey` - The owner's public key (hex) from the URL path, scoping authorization
 /// * `git_data_path` - Base path for git repositories (for syncing to other owner repos)
+/// * `git_protocol` - Optional Git protocol version (e.g., "version=2")
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_receive_pack(
     repo_path: PathBuf,
@@ -191,6 +194,7 @@ pub async fn handle_receive_pack(
     owner_pubkey: &str,
     purgatory: Arc<Purgatory>,
     git_data_path: &str,
+    git_protocol: Option<&str>,
 ) -> Result<Response<Full<Bytes>>, GitError> {
     debug!("Handling receive-pack for {:?}", repo_path);
 
@@ -236,7 +240,7 @@ pub async fn handle_receive_pack(
     };
 
     // Spawn git receive-pack
-    let mut git = GitSubprocess::spawn(GitService::ReceivePack, &repo_path, false)
+    let mut git = GitSubprocess::spawn(GitService::ReceivePack, &repo_path, false, git_protocol)
         .map_err(GitError::ProcessSpawnFailed)?;
 
     // Write request to git's stdin

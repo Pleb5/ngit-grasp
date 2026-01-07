@@ -22,10 +22,12 @@ impl GitSubprocess {
     /// * `service` - The Git service (upload-pack or receive-pack)
     /// * `repo_path` - Path to the bare Git repository
     /// * `advertise` - If true, run with --advertise-refs flag
+    /// * `git_protocol` - Optional Git protocol version (e.g., "version=2")
     pub fn spawn(
         service: GitService,
         repo_path: impl AsRef<Path>,
         advertise: bool,
+        git_protocol: Option<&str>,
     ) -> std::io::Result<Self> {
         let repo_path = repo_path.as_ref();
 
@@ -51,6 +53,12 @@ impl GitSubprocess {
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
+
+        // Set GIT_PROTOCOL environment variable if provided
+        // This enables Git protocol v2 support for modern git clients
+        if let Some(protocol) = git_protocol {
+            cmd.env("GIT_PROTOCOL", protocol);
+        }
 
         let child = cmd.spawn()?;
 
@@ -118,7 +126,7 @@ mod tests {
     #[tokio::test]
     async fn test_spawn_upload_pack_advertise() {
         let repo = create_bare_repo();
-        let mut proc = GitSubprocess::spawn(GitService::UploadPack, repo.path(), true)
+        let mut proc = GitSubprocess::spawn(GitService::UploadPack, repo.path(), true, None)
             .expect("Failed to spawn git");
 
         // Should have spawned successfully
@@ -132,7 +140,7 @@ mod tests {
     #[tokio::test]
     async fn test_spawn_receive_pack() {
         let repo = create_bare_repo();
-        let mut proc = GitSubprocess::spawn(GitService::ReceivePack, repo.path(), false)
+        let mut proc = GitSubprocess::spawn(GitService::ReceivePack, repo.path(), false, None)
             .expect("Failed to spawn git");
 
         assert!(proc.stdout().is_some());
