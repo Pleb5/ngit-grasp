@@ -27,6 +27,40 @@ Redesign purgatory sync to be **identifier-based** rather than **event-based**, 
 5. Debouncing for burst event arrivals (500ms for sync-triggered, 3min default)
 6. **Clean separation of concerns**: Domain throttle handles rate limiting only; sync logic tracks its own tried URLs
 
+### Key Design Decision: Where Does OID Copying Happen?
+
+**Answer: In `process_satisfiable_events`, NOT after the entire sync completes.**
+
+The current implementation (`sync_state_git_data`) fetches all OIDs first, then at the end:
+1. Copies OIDs to all authorized owner repos
+2. Aligns refs with state
+3. Saves to database
+4. Notifies subscribers
+5. Removes from purgatory
+
+The redesign moves all of this into `process_satisfiable_events`, which is called after **each successful URL fetch**. This enables:
+
+| Aspect | Current (end-of-sync) | Redesign (per-fetch) |
+|--------|----------------------|---------------------|
+| **When events release** | Only after all URLs tried | As soon as OIDs available |
+| **Partial success** | All or nothing per event | Events release independently |
+| **Multiple state events** | All wait for slowest | Each releases when ready |
+| **Authorization check** | Once at start | At release time (handles changes) |
+
+**Why this matters:**
+
+Consider syncing an identifier with 3 state events from different maintainers:
+- State A needs OIDs from `server1.com` (fast)
+- State B needs OIDs from `server2.com` (slow)  
+- State C needs OIDs from `server3.com` (down)
+
+With the redesign:
+1. Fetch from `server1.com` succeeds → `process_satisfiable_events` releases State A immediately
+2. Fetch from `server2.com` succeeds → `process_satisfiable_events` releases State B
+3. Fetch from `server3.com` fails → State C stays in purgatory, retries with backoff
+
+The current implementation would wait for all servers before releasing any events.
+
 ## Architecture
 
 ### Overview
@@ -600,8 +634,24 @@ pub trait SyncContext: Send + Sync {
     /// Fetch OIDs from a remote server
     async fn fetch_oids(&self, repo_path: &Path, url: &str, oids: &[String]) -> Result<Vec<String>>;
     
-    /// Process events that can now be satisfied (save to DB, notify, remove from purgatory)
-    async fn process_satisfiable_events(&self, identifier: &str) -> Result<()>;
+    /// Process events that can now be satisfied.
+    /// 
+    /// For each purgatory event (state or PR) for this identifier:
+    /// 1. Check if all required OIDs are now available in the source repo
+    /// 2. For satisfiable state events:
+    ///    a. Check if this state is authorized and should be applied (vs existing states)
+    ///    b. Copy OIDs to all owner repos that authorize this state author
+    ///    c. Align refs with state in each authorized repo
+    ///    d. Save state event to database
+    ///    e. Notify WebSocket subscribers
+    ///    f. Remove from purgatory
+    /// 3. For satisfiable PR events:
+    ///    a. Copy PR commit to owner repos that share maintainers with tagged owners
+    ///    b. Create refs/nostr/<event-id> in each repo
+    ///    c. Save PR event to database
+    ///    d. Notify WebSocket subscribers
+    ///    e. Remove from purgatory
+    async fn process_satisfiable_events(&self, identifier: &str) -> Result<ProcessResult>;
     
     /// Check if there are still pending events for this identifier
     fn has_pending_events(&self, identifier: &str) -> bool;
@@ -612,7 +662,61 @@ pub trait SyncContext: Send + Sync {
     /// Our domain (to exclude from clone URLs)
     fn our_domain(&self) -> Option<&str>;
 }
+
+/// Real implementation of SyncContext with all dependencies
+pub struct RealSyncContext {
+    purgatory: Purgatory,
+    database: SharedDatabase,
+    git_data_path: PathBuf,
+    our_domain: Option<String>,
+    local_relay: Option<nostr_relay_builder::LocalRelay>,
+}
+
+impl RealSyncContext {
+    pub fn new(
+        purgatory: Purgatory,
+        database: SharedDatabase,
+        git_data_path: PathBuf,
+        our_domain: Option<String>,
+        local_relay: Option<nostr_relay_builder::LocalRelay>,
+    ) -> Self {
+        Self {
+            purgatory,
+            database,
+            git_data_path,
+            our_domain,
+            local_relay,
+        }
+    }
+}
+
+#[async_trait]
+impl SyncContext for RealSyncContext {
+    // ... other methods ...
+    
+    async fn process_satisfiable_events(&self, identifier: &str) -> Result<ProcessResult> {
+        // Get repository data and find source repo
+        let db_repo_data = fetch_repository_data(&self.database, identifier).await?;
+        let source_repo_path = self.find_target_repo(&db_repo_data)
+            .ok_or_else(|| anyhow::anyhow!("No target repo found"))?;
+        
+        // Call the standalone function with all dependencies
+        process_satisfiable_events_impl(
+            identifier,
+            &source_repo_path,
+            &db_repo_data,
+            &self.git_data_path,
+            &self.database,
+            self.local_relay.as_ref(),
+            &self.purgatory,
+        ).await
+    }
+    
+    // ... other methods ...
+}
 ```
+
+**Note**: The `SyncContext` trait abstracts away the dependencies for testability. The real implementation (`RealSyncContext`) holds references to purgatory, database, etc., and the `process_satisfiable_events` method uses them internally. This keeps the sync logic functions (`sync_identifier_next_url`, `sync_identifier_from_url`) clean and testable with mocks.
 
 ## Core Sync Logic
 
@@ -871,6 +975,188 @@ pub async fn sync_identifier_from_url<C: SyncContext>(
 }
 ```
 
+### process_satisfiable_events
+
+This is the core function that handles the "release from purgatory" logic. It's called after each successful fetch to check if any purgatory events can now be satisfied with the available git data.
+
+**Key Design Decision**: OID copying and ref alignment happen in `process_satisfiable_events`, NOT after the entire sync completes. This enables:
+
+1. **Incremental progress**: Events can be released as soon as their OIDs are available, even if other events for the same identifier still need data
+2. **Partial success**: If we fetch OIDs for one state event but not another, the first can be released immediately
+3. **Cleaner separation**: `sync_identifier_from_url` only fetches; `process_satisfiable_events` handles all the "what to do with the data" logic
+
+```rust
+/// Result of processing satisfiable events
+#[derive(Debug, Default)]
+pub struct ProcessResult {
+    /// Number of state events released from purgatory
+    pub states_released: usize,
+    /// Number of PR events released from purgatory
+    pub prs_released: usize,
+    /// Number of repositories synced (OIDs copied + refs aligned)
+    pub repos_synced: usize,
+    /// Errors encountered
+    pub errors: Vec<String>,
+}
+
+/// Process purgatory events that can now be satisfied with available git data.
+/// 
+/// This function is called after each successful OID fetch. It:
+/// 1. Iterates through all purgatory events for this identifier
+/// 2. For each event, checks if all required OIDs are now available
+/// 3. For satisfiable events, performs the full "release" workflow
+/// 
+/// The release workflow for STATE events:
+/// 1. Check authorization: is this state author authorized by any owner's maintainer set?
+/// 2. Check priority: is this state newer than existing states for those owners?
+/// 3. Copy OIDs to all authorized owner repos (using sync_to_owner_repos logic)
+/// 4. Align refs with state in each authorized repo
+/// 5. Save state event to database
+/// 6. Notify WebSocket subscribers
+/// 7. Remove from purgatory
+/// 
+/// The release workflow for PR events:
+/// 1. Copy PR commit to owner repos that share maintainers with tagged owners
+/// 2. Create refs/nostr/<event-id> in each repo
+/// 3. Save PR event to database
+/// 4. Notify WebSocket subscribers
+/// 5. Remove from purgatory
+/// 
+/// Note: This is the implementation function called by RealSyncContext.
+/// The SyncContext trait method has a simpler signature because the 
+/// implementation has access to all dependencies via self.
+pub async fn process_satisfiable_events_impl(
+    identifier: &str,
+    source_repo_path: &Path,
+    db_repo_data: &RepositoryData,
+    git_data_path: &Path,
+    database: &SharedDatabase,
+    local_relay: Option<&nostr_relay_builder::LocalRelay>,
+    purgatory: &Purgatory,
+) -> Result<ProcessResult> {
+    let mut result = ProcessResult::default();
+    
+    // Process state events
+    let state_entries = purgatory.find_state(identifier);
+    for entry in state_entries {
+        // Parse the state event
+        let state = match RepositoryState::from_event(&entry.event) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    event_id = %entry.event.id,
+                    error = %e,
+                    "Failed to parse state event from purgatory"
+                );
+                continue;
+            }
+        };
+        
+        // Check if all OIDs are available in the source repo
+        let missing_oids = identify_missing_oids(&state, source_repo_path);
+        if !missing_oids.is_empty() {
+            tracing::debug!(
+                event_id = %entry.event.id,
+                missing = missing_oids.len(),
+                "State event still missing OIDs, skipping"
+            );
+            continue;
+        }
+        
+        // All OIDs available - proceed with release
+        tracing::info!(
+            identifier = %identifier,
+            event_id = %entry.event.id,
+            "All OIDs available, releasing state event from purgatory"
+        );
+        
+        // Sync to owner repos (copy OIDs + align refs)
+        // This handles authorization checks internally
+        let sync_result = sync_to_owner_repos(
+            source_repo_path,
+            &state,
+            db_repo_data,
+            git_data_path,
+        );
+        result.repos_synced += sync_result.repos_synced;
+        
+        if sync_result.repos_synced == 0 {
+            tracing::warn!(
+                identifier = %identifier,
+                event_id = %entry.event.id,
+                "No repos synced - state author may not be authorized"
+            );
+            // Don't remove from purgatory - maybe authorization will change
+            continue;
+        }
+        
+        // Save to database
+        match database.save_event(&entry.event).await {
+            Ok(_) => {
+                tracing::info!(
+                    identifier = %identifier,
+                    event_id = %entry.event.id,
+                    "Saved state event to database"
+                );
+                
+                // Notify WebSocket subscribers
+                if let Some(relay) = local_relay {
+                    relay.notify_event(entry.event.clone());
+                }
+                
+                // Remove from purgatory
+                purgatory.remove_state_event(identifier, &entry.event.id);
+                result.states_released += 1;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    event_id = %entry.event.id,
+                    error = %e,
+                    "Failed to save state event to database"
+                );
+                result.errors.push(format!("Failed to save state {}: {}", entry.event.id, e));
+            }
+        }
+    }
+    
+    // TODO: Process PR events similarly
+    // For now, PR events are handled separately
+    
+    Ok(result)
+}
+
+/// Identify OIDs in a state that are missing from a repository
+fn identify_missing_oids(state: &RepositoryState, repo_path: &Path) -> Vec<String> {
+    let mut missing = Vec::new();
+    
+    for branch in &state.branches {
+        if !branch.commit.starts_with("ref: ") && !oid_exists(repo_path, &branch.commit) {
+            missing.push(branch.commit.clone());
+        }
+    }
+    
+    for tag in &state.tags {
+        if !tag.commit.starts_with("ref: ") && !oid_exists(repo_path, &tag.commit) {
+            missing.push(tag.commit.clone());
+        }
+    }
+    
+    missing
+}
+```
+
+**Why this design?**
+
+The key insight is that `process_satisfiable_events` is called after *each* successful URL fetch, not just at the end of the sync. This means:
+
+1. **Early release**: If we fetch from `server1.com` and get all OIDs for state event A, we immediately release A even if state event B still needs OIDs from `server2.com`
+
+2. **Idempotent**: The function can be called multiple times safely. It only processes events that are actually satisfiable.
+
+3. **Atomic per-event**: Each event is processed independently. If saving one event fails, others can still succeed.
+
+4. **Authorization at release time**: We check authorization when releasing, not when adding to purgatory. This handles the case where maintainer sets change while an event is in purgatory.
+
 ### The Sync Identifier Loop (Main Sync)
 
 ```rust
@@ -1087,9 +1373,9 @@ mod tests {
             Ok(self.fetch_results.borrow().get(url).cloned().unwrap_or_default())
         }
         
-        async fn process_satisfiable_events(&self, _id: &str) -> Result<()> {
+        async fn process_satisfiable_events(&self, _id: &str) -> Result<ProcessResult> {
             *self.processed_count.borrow_mut() += 1;
-            Ok(())
+            Ok(ProcessResult::default())
         }
         
         fn has_pending_events(&self, _id: &str) -> bool {
