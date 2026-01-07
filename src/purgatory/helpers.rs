@@ -3,10 +3,23 @@
 //! These functions handle the late-binding extraction and matching of git refs
 //! from state events. Refs are extracted at git push time rather than event
 //! arrival time to enable flexible matching logic.
+//!
+//! ## Key Functions
+//!
+//! - [`can_satisfy_state`]: Used for **push authorization** - checks if a push
+//!   would transform the current refs into the declared state. This validates
+//!   that the pushed refspecs match what the state event declares.
+//!
+//! - [`can_apply_state`]: Used for **purgatory processing** - checks if we have
+//!   all the git OIDs needed to apply a state event. This validates that the
+//!   git data is available locally, regardless of current ref state.
 
 use super::{RefPair, RefUpdate};
 use nostr_sdk::prelude::*;
 use std::collections::HashMap;
+use std::path::Path;
+
+use crate::git::oid_exists;
 
 /// Extract ref pairs from a state event (kind 30618).
 ///
@@ -61,7 +74,55 @@ pub fn extract_refs_from_state(event: &Event) -> Vec<RefPair> {
         .collect()
 }
 
+/// Check if a state event can be applied given the available git data.
+///
+/// This is used for **purgatory processing** to determine if we have all the
+/// git objects needed to apply a state event. Unlike `can_satisfy_state` which
+/// validates push authorization, this function only checks OID availability.
+///
+/// Returns true if all OIDs referenced in the state event exist in the repository.
+/// Symbolic refs (starting with "ref: ") are skipped as they don't require OID lookup.
+///
+/// # Arguments
+/// * `event` - The state event to check
+/// * `repo_path` - Path to the git repository to check OIDs against
+///
+/// # Returns
+/// true if all required OIDs exist in the repository, false otherwise
+///
+/// # Example
+/// ```ignore
+/// // State event declares:
+/// //   refs/heads/main -> abc123
+/// //   refs/heads/dev -> def456
+/// //   refs/heads/symlink -> ref: refs/heads/main (symbolic)
+/// //
+/// // If abc123 and def456 exist in repo: returns true
+/// // If abc123 exists but def456 doesn't: returns false
+/// // The symbolic ref doesn't require an OID check
+/// ```
+pub fn can_apply_state(event: &Event, repo_path: &Path) -> bool {
+    let state_refs = extract_refs_from_state(event);
+
+    for ref_pair in state_refs {
+        // Skip symbolic refs (they don't require OID lookup)
+        if ref_pair.object_sha.starts_with("ref: ") {
+            continue;
+        }
+
+        // Check if the OID exists in the repository
+        if !oid_exists(repo_path, &ref_pair.object_sha) {
+            return false;
+        }
+    }
+
+    true
+}
+
 /// Check if a state event can be satisfied by ref updates plus local refs.
+///
+/// This is used for **push authorization** to validate that a push would
+/// transform the current refs into the declared state.
 ///
 /// Returns true if applying the ref updates to local state results in exactly
 /// the state declared in the event. This means:
@@ -431,5 +492,194 @@ mod tests {
         assert_eq!(unpushed.len(), 1);
         assert_eq!(unpushed[0].ref_name, "refs/heads/main");
         assert_eq!(unpushed[0].object_sha, "abc123");
+    }
+
+    // =========================================================================
+    // can_apply_state tests
+    // =========================================================================
+
+    /// Helper to create a temporary bare git repository with a commit.
+    /// Returns (temp_dir, commit_hash) where commit_hash is Some if a commit was created.
+    fn create_test_repo_with_commit() -> (tempfile::TempDir, Option<String>) {
+        use std::process::Command;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let bare_path = temp_dir.path();
+
+        // Initialize bare repo
+        Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(bare_path)
+            .output()
+            .expect("Failed to init bare git repo");
+
+        // Create a working repo to generate a commit
+        let work_dir = tempfile::tempdir().unwrap();
+        
+        Command::new("git")
+            .args(["init"])
+            .current_dir(work_dir.path())
+            .output()
+            .expect("Failed to init work repo");
+
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(work_dir.path())
+            .output()
+            .expect("Failed to set email");
+
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(work_dir.path())
+            .output()
+            .expect("Failed to set name");
+
+        // Create a commit
+        std::fs::write(work_dir.path().join("file.txt"), "content").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(work_dir.path())
+            .output()
+            .expect("Failed to add");
+
+        Command::new("git")
+            .args(["commit", "-m", "test"])
+            .current_dir(work_dir.path())
+            .output()
+            .expect("Failed to commit");
+
+        // Get the commit hash from the working repo
+        let output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(work_dir.path())
+            .output()
+            .expect("Failed to get commit hash");
+
+        let commit_hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+        // Push to bare repo
+        Command::new("git")
+            .args(["push", bare_path.to_str().unwrap(), "HEAD:refs/heads/main"])
+            .current_dir(work_dir.path())
+            .output()
+            .expect("Failed to push");
+
+        (temp_dir, Some(commit_hash))
+    }
+
+    /// Helper to create an empty bare git repository (no commits).
+    fn create_empty_test_repo() -> tempfile::TempDir {
+        use std::process::Command;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        
+        Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(temp_dir.path())
+            .output()
+            .expect("Failed to init bare git repo");
+
+        temp_dir
+    }
+
+    #[test]
+    fn test_can_apply_state_with_existing_oid() {
+        // Create a repo with a real commit
+        let (temp_repo, commit_hash) = create_test_repo_with_commit();
+        let repo_path = temp_repo.path();
+        let commit_hash = commit_hash.expect("Should have a commit");
+
+        // Create a state event referencing that commit
+        let event = create_test_state_event(
+            "test-repo",
+            vec![("refs/heads/main", &commit_hash)],
+        );
+
+        // Should return true since the OID exists
+        assert!(can_apply_state(&event, repo_path));
+    }
+
+    #[test]
+    fn test_can_apply_state_with_missing_oid() {
+        // Create an empty repo
+        let temp_repo = create_empty_test_repo();
+        let repo_path = temp_repo.path();
+
+        // Create a state event referencing a non-existent commit
+        let event = create_test_state_event(
+            "test-repo",
+            vec![("refs/heads/main", "0000000000000000000000000000000000000000")],
+        );
+
+        // Should return false since the OID doesn't exist
+        assert!(!can_apply_state(&event, repo_path));
+    }
+
+    #[test]
+    fn test_can_apply_state_with_symbolic_ref() {
+        // Create an empty repo (no commits needed for symbolic refs)
+        let temp_repo = create_empty_test_repo();
+        let repo_path = temp_repo.path();
+
+        // Create a state event with only a symbolic ref
+        let event = create_test_state_event(
+            "test-repo",
+            vec![("refs/heads/main", "ref: refs/heads/other")],
+        );
+
+        // Should return true - symbolic refs don't require OID lookup
+        assert!(can_apply_state(&event, repo_path));
+    }
+
+    #[test]
+    fn test_can_apply_state_mixed_existing_and_missing() {
+        // Create a repo with a real commit
+        let (temp_repo, commit_hash) = create_test_repo_with_commit();
+        let repo_path = temp_repo.path();
+        let commit_hash = commit_hash.expect("Should have a commit");
+
+        // Create a state event with one existing and one missing OID
+        let event = create_test_state_event(
+            "test-repo",
+            vec![
+                ("refs/heads/main", &commit_hash),  // exists
+                ("refs/heads/dev", "0000000000000000000000000000000000000000"),  // doesn't exist
+            ],
+        );
+
+        // Should return false since one OID is missing
+        assert!(!can_apply_state(&event, repo_path));
+    }
+
+    #[test]
+    fn test_can_apply_state_empty_event() {
+        let temp_repo = create_empty_test_repo();
+        let repo_path = temp_repo.path();
+
+        // Empty state event (no refs declared)
+        let event = create_test_state_event("test-repo", vec![]);
+
+        // Should return true - nothing to check
+        assert!(can_apply_state(&event, repo_path));
+    }
+
+    #[test]
+    fn test_can_apply_state_mixed_symbolic_and_real() {
+        // Create a repo with a real commit
+        let (temp_repo, commit_hash) = create_test_repo_with_commit();
+        let repo_path = temp_repo.path();
+        let commit_hash = commit_hash.expect("Should have a commit");
+
+        // Create a state event with both a real OID and a symbolic ref
+        let event = create_test_state_event(
+            "test-repo",
+            vec![
+                ("refs/heads/main", &commit_hash),  // real OID that exists
+                ("refs/heads/alias", "ref: refs/heads/main"),  // symbolic ref
+            ],
+        );
+
+        // Should return true - real OID exists, symbolic ref skipped
+        assert!(can_apply_state(&event, repo_path));
     }
 }

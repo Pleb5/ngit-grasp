@@ -43,7 +43,7 @@ use crate::git::authorization::{
 use crate::git::{self, oid_exists};
 use crate::nostr::builder::SharedDatabase;
 use crate::nostr::events::RepositoryState;
-use crate::purgatory::{can_satisfy_state, Purgatory};
+use crate::purgatory::{can_apply_state, Purgatory};
 
 /// Result of processing newly available git data.
 ///
@@ -837,15 +837,9 @@ pub async fn process_newly_available_git_data(
         "Processing newly available git data"
     );
 
-    // Get current refs from the repository for state matching
-    let current_refs: HashMap<String, String> = git::list_refs(source_repo_path)
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
-
     // Process state events from purgatory
     let state_result =
-        process_purgatory_state_events(&identifier, source_repo_path, &current_refs, database, local_relay, purgatory, git_data_path).await;
+        process_purgatory_state_events(&identifier, source_repo_path, database, local_relay, purgatory, git_data_path).await;
     result.merge(state_result);
 
     // Process PR events from purgatory
@@ -866,11 +860,15 @@ pub async fn process_newly_available_git_data(
     Ok(result)
 }
 
-/// Process state events from purgatory that can now be satisfied.
+/// Process state events from purgatory that can now be applied.
+///
+/// This checks if we have all the git OIDs needed to apply each state event.
+/// Unlike push authorization (which uses `can_satisfy_state` to check if a push
+/// would transform refs correctly), this uses `can_apply_state` to simply check
+/// if the required git data is available.
 async fn process_purgatory_state_events(
     identifier: &str,
     source_repo_path: &Path,
-    current_refs: &HashMap<String, String>,
     database: &SharedDatabase,
     local_relay: Option<&nostr_relay_builder::LocalRelay>,
     purgatory: &Purgatory,
@@ -887,27 +885,17 @@ async fn process_purgatory_state_events(
     debug!(
         identifier = %identifier,
         purgatory_states_count = purgatory_states.len(),
-        "Checking purgatory state events for satisfaction"
+        "Checking purgatory state events for available git data"
     );
 
-    // Build ref updates from current refs (treating all as "creations" for matching purposes)
-    let ref_updates: Vec<crate::purgatory::RefUpdate> = current_refs
-        .iter()
-        .map(|(ref_name, commit)| crate::purgatory::RefUpdate {
-            old_oid: "0000000000000000000000000000000000000000".to_string(),
-            new_oid: commit.clone(),
-            ref_name: ref_name.clone(),
-        })
-        .collect();
-
-    // Check which state events can be satisfied
+    // Check which state events can be applied (have all required OIDs)
     for entry in &purgatory_states {
-        // Check if this state event can be satisfied with current refs
-        if !can_satisfy_state(&entry.event, &ref_updates, current_refs) {
+        // Check if we have all the git data needed to apply this state event
+        if !can_apply_state(&entry.event, source_repo_path) {
             debug!(
                 identifier = %identifier,
                 event_id = %entry.event.id,
-                "State event cannot be satisfied with current refs"
+                "State event cannot be applied - missing git OIDs"
             );
             continue;
         }

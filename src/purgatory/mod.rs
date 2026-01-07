@@ -16,7 +16,7 @@ pub mod sync;
 mod types;
 
 use anyhow::{bail, Result};
-pub use helpers::{can_satisfy_state, extract_refs_from_state, get_unpushed_refs};
+pub use helpers::{can_apply_state, can_satisfy_state, extract_refs_from_state, get_unpushed_refs};
 pub use types::{PrPurgatoryEntry, RefPair, RefUpdate, StatePurgatoryEntry};
 
 use dashmap::DashMap;
