@@ -134,8 +134,13 @@ pub async fn authorize_push(
                             e
                         )));
                     }
+                    
+                    // Create placeholder for git-data-first scenario
+                    // This allows cleanup if the PR event never arrives
+                    purgatory.add_pr_placeholder(event_id_hex.to_string(), new_oid.clone());
+                    
                     debug!(
-                        "No purgatory entry for {} - validated against database",
+                        "Created placeholder for {} - awaiting PR event (will expire in 30min if event doesn't arrive)",
                         event_id_hex
                     );
                 }
