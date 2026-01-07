@@ -1272,7 +1272,8 @@ impl MockSyncContext {
 | ThrottleManager | `src/purgatory/sync/throttle.rs` | Phase 3 |
 | Core sync functions | `src/purgatory/sync/functions.rs` | Phase 5-6 |
 | Queue integration | `src/purgatory/mod.rs` | Phase 7 |
-| Integration tests | `tests/purgatory_sync.rs` | Phase 10 |
+| Unified function helpers | `src/git/sync.rs` | Phase 9 |
+| Integration tests | `tests/purgatory_sync.rs` | Phase 12 |
 
 ## Implementation Phases
 
@@ -1637,7 +1638,146 @@ impl Purgatory {
 
 ---
 
-### Phase 9: RealSyncContext Implementation
+### Phase 9: Unified `process_newly_available_git_data` Function
+
+**Goal**: Implement the unified function that handles all post-git-data-available processing.
+
+This is the core function described in [Unified Git Data Sync](unify-git-data-sync.md). It will be called by both:
+- `handle_receive_pack` after a successful git push
+- `RealSyncContext::process_newly_available_git_data` after purgatory sync fetches OIDs
+
+**Files**:
+- `src/git/sync.rs` (new)
+- `src/purgatory/mod.rs` (extend - add secondary index for PR events by identifier)
+
+**Deliverables**:
+```rust
+/// Result of processing newly available git data
+#[derive(Debug, Default)]
+pub struct ProcessResult {
+    pub states_released: usize,
+    pub prs_released: usize,
+    pub repos_synced: usize,
+    pub refs_created: usize,
+    pub refs_updated: usize,
+    pub refs_deleted: usize,
+    pub errors: Vec<String>,
+}
+
+/// Unified processing of newly available git data.
+///
+/// Called whenever git data becomes available, whether from:
+/// - A successful `git push` (handle_receive_pack)
+/// - Purgatory sync fetching OIDs from remote servers
+pub async fn process_newly_available_git_data(
+    source_repo_path: &Path,
+    new_oids: &HashSet<String>,
+    database: &SharedDatabase,
+    local_relay: Option<&nostr_relay_builder::LocalRelay>,
+    purgatory: &Purgatory,
+    git_data_path: &Path,
+) -> Result<ProcessResult>;
+
+// Helper functions
+fn extract_identifier_from_repo_path(repo_path: &Path, git_data_path: &Path) -> Option<String>;
+fn extract_identifier_from_pr_event(event: &Event) -> Option<String>;
+
+// Purgatory additions
+impl Purgatory {
+    /// Find all PR events for an identifier (uses secondary index)
+    pub fn find_prs_for_identifier(&self, identifier: &str) -> Vec<PrPurgatoryEntry>;
+}
+```
+
+**Unit Tests** (3 tests):
+```rust
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn extract_identifier_from_repo_path_valid() {
+        // {git_data_path}/{npub}/{identifier}.git → identifier
+    }
+    
+    #[test]
+    fn extract_identifier_from_pr_event_valid() {
+        // Event with "a" tag "30617:<pubkey>:<identifier>" → identifier
+    }
+    
+    #[test]
+    fn extract_identifier_from_pr_event_missing_tag() {
+        // Event without "a" tag → None
+    }
+}
+```
+
+**Success Criteria**:
+- [ ] `process_newly_available_git_data` discovers satisfiable events from purgatory
+- [ ] State events: syncs OIDs to owner repos, aligns refs, sets HEAD, saves to DB, notifies WS, removes from purgatory
+- [ ] PR events: syncs commit to owner repos, creates refs/nostr/<event-id>, saves to DB, notifies WS, removes from purgatory
+- [ ] Secondary index `pr_events_by_identifier` maintained correctly
+- [ ] All 3 unit tests pass
+
+---
+
+### Phase 10: Update `handle_receive_pack` to Use Unified Function
+
+**Goal**: Refactor the push authorization handler to use `process_newly_available_git_data`.
+
+This replaces ~100 lines of duplicated post-push processing with a single call to the unified function.
+
+**Files**:
+- `src/git/handlers.rs` (modify)
+
+**Before** (current code):
+```rust
+// After git receive-pack succeeds:
+// - try_set_head_if_available()
+// - database.save_event()
+// - remove_state_event() / remove_pr()
+// - relay.notify_event()
+// - sync_to_owner_repos()
+// - sync_pr_refs_to_tagged_owner_repos()
+// ... ~100 lines of processing
+```
+
+**After** (simplified):
+```rust
+// After git receive-pack succeeds:
+let new_oids: HashSet<String> = pushed_refs
+    .iter()
+    .filter(|(_, new_oid, _)| new_oid != "0000000000000000000000000000000000000000")
+    .map(|(_, new_oid, _)| new_oid.clone())
+    .collect();
+
+let result = process_newly_available_git_data(
+    &repo_path,
+    &new_oids,
+    &database,
+    Some(&relay),
+    &purgatory,
+    Path::new(git_data_path),
+).await;
+
+info!(
+    "Processed push: {} states, {} PRs released, {} repos synced",
+    result.states_released,
+    result.prs_released,
+    result.repos_synced
+);
+```
+
+**Unit Tests** (0 tests):
+- Behavior tested via existing integration tests which should continue to pass
+
+**Success Criteria**:
+- [ ] `handle_receive_pack` uses `process_newly_available_git_data`
+- [ ] Duplicate code removed (~100 lines)
+- [ ] All existing push-related tests still pass
+- [ ] Push behavior unchanged (same events saved, same refs created)
+
+---
+
+### Phase 11: RealSyncContext Implementation
 
 **Goal**: Implement the production `SyncContext` that connects to real systems.
 
@@ -1663,18 +1803,18 @@ impl SyncContext for RealSyncContext { ... }
 **Success Criteria**:
 - [ ] All `SyncContext` methods implemented
 - [ ] Connects to real database, git, and relay
-- [ ] `process_newly_available_git_data` releases events from purgatory
+- [ ] `process_newly_available_git_data` method delegates to unified function from Phase 9
 
 ---
 
-### Phase 10: Integration Tests
+### Phase 12: Integration Tests
 
 **Goal**: Verify end-to-end sync behavior with real relay instances.
 
 **Files**:
 - `tests/purgatory_sync.rs` (new)
 
-**Integration Tests** (4 tests):
+**Integration Tests** (5 tests):
 ```rust
 #[tokio::test]
 async fn state_event_syncs_from_remote() {
@@ -1695,17 +1835,24 @@ async fn concurrent_state_and_pr_sync() {
 async fn partial_oid_aggregation_from_multiple_servers() {
     // OIDs aggregated when no single server has all
 }
+
+#[tokio::test]
+async fn push_triggers_unified_processing() {
+    // Git push triggers process_newly_available_git_data
+    // Verifies Phase 10 integration
+}
 ```
 
 **Success Criteria**:
-- [ ] All 4 integration tests pass
+- [ ] All 5 integration tests pass
 - [ ] State events release after git sync
 - [ ] PR events release after commit sync
 - [ ] Partial OID scenarios handled correctly
+- [ ] Push path uses unified function (same behavior as purgatory sync)
 
 ---
 
-### Phase 11: Cleanup
+### Phase 13: Cleanup
 
 **Goal**: Remove old `start_state_sync` code and wire up new system.
 
@@ -1738,10 +1885,12 @@ async fn partial_oid_aggregation_from_multiple_servers() {
 | 6. sync_identifier | 2 | - | 2 |
 | 7. Queue Integration | 1 | - | 1 |
 | 8. Sync Loop | 0 | - | 0 |
-| 9. RealSyncContext | 0 | - | 0 |
-| 10. Integration | - | 4 | 4 |
-| 11. Cleanup | 0 | - | 0 |
-| **Total** | **13** | **4** | **17** |
+| 9. Unified Function | 3 | - | 3 |
+| 10. Push Handler Update | 0 | - | 0 |
+| 11. RealSyncContext | 0 | - | 0 |
+| 12. Integration | - | 5 | 5 |
+| 13. Cleanup | 0 | - | 0 |
+| **Total** | **16** | **5** | **21** |
 
 ## Configuration
 
