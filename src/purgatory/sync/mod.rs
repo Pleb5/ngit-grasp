@@ -5,9 +5,11 @@
 //! - Domain-based throttling (configurable requests/minute per domain)
 //! - Exponential backoff per identifier (20s → 2m, then 2m intervals)
 //! - Debouncing for burst event arrivals
+//! - Background sync loop processing ready identifiers every 1 second
 
 mod context;
 mod functions;
+mod r#loop;
 mod queue;
 mod throttle;
 
