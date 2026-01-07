@@ -28,8 +28,9 @@
 mod common;
 
 use common::{
-    create_repo_announcement, create_state_event, create_test_repo_with_commit, push_to_relay,
-    verify_event_not_served, wait_for_event_served, CommitVariant, TestRelay,
+    check_ref_at_commit, create_repo_announcement, create_state_event,
+    create_test_repo_with_commit, push_to_relay, verify_event_not_served, wait_for_event_served,
+    wait_for_sync_connection, CommitVariant, TestRelay,
 };
 use nostr_sdk::prelude::*;
 use std::time::Duration;
@@ -123,4 +124,156 @@ async fn test_push_triggers_unified_processing() {
     // Cleanup
     client.disconnect().await;
     relay.stop().await;
+}
+
+/// Test that a state event entering purgatory triggers remote git fetch
+/// and is released once the git data is available.
+///
+/// Scenario:
+/// 1. Start source relay with git repository containing test commit
+/// 2. Start syncing relay that syncs from source
+/// 3. Syncing relay syncs state event (goes to purgatory - no local git data)
+/// 4. Wait for sync to fetch git data from source's clone URL
+/// 5. Verify state event is released and served on syncing relay
+#[tokio::test]
+async fn test_state_event_syncs_from_remote() {
+    // 1. Start source relay
+    let source_relay = TestRelay::start().await;
+    let keys = Keys::generate();
+    let identifier = "state-sync-test-repo";
+
+    // Pre-allocate syncing relay port so we can include it in announcement
+    let syncing_port = TestRelay::find_free_port();
+    let syncing_domain = format!("127.0.0.1:{}", syncing_port);
+
+    // 2. Create test repository locally with deterministic commit
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let commit_hash = create_test_repo_with_commit(temp_dir.path(), CommitVariant::StateTest)
+        .expect("Failed to create test repo");
+
+    let npub = keys.public_key().to_bech32().expect("Failed to get npub");
+
+    // 3. Create and send announcement listing BOTH relays
+    // This ensures the syncing relay will accept the state event when it syncs
+    let announcement = create_repo_announcement(
+        &keys,
+        &[&source_relay.domain(), &syncing_domain],
+        identifier,
+    );
+
+    let source_client = Client::new(keys.clone());
+    source_client
+        .add_relay(source_relay.url())
+        .await
+        .expect("Failed to add source relay");
+    source_client.connect().await;
+
+    // Wait for connection
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Send announcement to source relay
+    source_client
+        .send_event(&announcement)
+        .await
+        .expect("Failed to send announcement to source");
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // 4. Create and send state event BEFORE pushing
+    // The state event goes to purgatory on source relay, which authorizes the push
+    let clone_urls = [
+        format!(
+            "http://{}/{}/{}.git",
+            source_relay.domain(),
+            npub,
+            identifier
+        ),
+        format!("http://{}/{}/{}.git", syncing_domain, npub, identifier),
+    ];
+    let relay_urls = [
+        source_relay.url().to_string(),
+        format!("ws://{}", syncing_domain),
+    ];
+
+    let state_event = create_state_event(
+        &keys,
+        identifier,
+        &[("main", &commit_hash)],
+        &[],
+        &[&clone_urls[0], &clone_urls[1]],
+        &[&relay_urls[0], &relay_urls[1]],
+    )
+    .expect("Failed to create state event");
+
+    let state_event_id = state_event.id;
+
+    // Send state event to source relay (goes to purgatory - no git data yet)
+    source_client
+        .send_event(&state_event)
+        .await
+        .expect("Failed to send state event to source");
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // 5. Push git data to source relay
+    // The state event in purgatory authorizes this push
+    push_to_relay(temp_dir.path(), &source_relay.domain(), &npub, identifier)
+        .expect("Push to source should succeed");
+
+    // After push, state event should be released from purgatory on source relay
+    // Verify source relay is serving the state event
+    wait_for_event_served(source_relay.url(), &state_event_id, Duration::from_secs(5))
+        .await
+        .expect("State event should be served on source relay after push");
+
+    // 6. Start syncing relay (syncs from source)
+    let syncing_relay = TestRelay::start_on_port_with_options(
+        syncing_port,
+        Some(source_relay.url().to_string()),
+        false,
+    )
+    .await;
+
+    // Wait for sync connection to establish
+    wait_for_sync_connection(syncing_relay.url(), 1, Duration::from_secs(5))
+        .await
+        .expect("Sync connection should establish");
+
+    // 7. Wait for state event to be released on syncing relay
+    // The sync should:
+    // a) Fetch the announcement and state event from source relay
+    // b) Accept announcement (creates bare repo structure)
+    // c) Put state event in purgatory (git data missing on syncing relay)
+    // d) Fetch git data from source relay's clone URL
+    // e) Release the state event from purgatory
+    let found = wait_for_event_served(
+        syncing_relay.url(),
+        &state_event_id,
+        Duration::from_secs(30), // Allow time for sync + git fetch
+    )
+    .await;
+
+    assert!(
+        found.is_ok(),
+        "State event should be served after sync fetches git data: {:?}",
+        found.err()
+    );
+
+    // 8. Verify refs are correct on syncing relay
+    let ref_correct = check_ref_at_commit(
+        &syncing_domain,
+        &npub,
+        identifier,
+        "refs/heads/main",
+        &commit_hash,
+    )
+    .await
+    .expect("Failed to check ref");
+
+    assert!(ref_correct, "main branch should point to correct commit");
+
+    // Cleanup
+    source_client.disconnect().await;
+    syncing_relay.stop().await;
+    source_relay.stop().await;
 }

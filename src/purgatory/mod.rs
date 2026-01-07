@@ -189,6 +189,8 @@ impl Purgatory {
     ///
     /// Automatically enqueues the identifier for background sync with the default delay
     /// (3 minutes), giving time for a git push to arrive after the nostr event.
+    /// For sync-triggered events, the SyncManager calls `enqueue_sync_immediate` separately
+    /// to override this delay.
     ///
     /// # Arguments
     /// * `event` - The state event (kind 30618) to hold
@@ -210,6 +212,7 @@ impl Purgatory {
             .push(entry);
 
         // Enqueue for background sync with default delay
+        // (SyncManager will call enqueue_sync_immediate for sync-triggered events)
         self.enqueue_sync_default(&identifier);
     }
 

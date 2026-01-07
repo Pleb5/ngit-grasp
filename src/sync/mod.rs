@@ -1046,6 +1046,40 @@ impl SyncManager {
                             }
                         }
 
+                        // For sync-triggered events that go to purgatory, trigger immediate sync
+                        // (instead of the default 3-minute delay for user-submitted events)
+                        if result == ProcessResult::Purgatory {
+                            // State events (kind 30618) - extract identifier and trigger immediate sync
+                            if event.kind.as_u16() == 30618 {
+                                if let Some(identifier) = event.tags.iter().find_map(|tag| {
+                                    let tag_vec = tag.clone().to_vec();
+                                    if tag_vec.len() >= 2 && tag_vec[0] == "d" {
+                                        Some(tag_vec[1].clone())
+                                    } else {
+                                        None
+                                    }
+                                }) {
+                                    tracing::debug!(
+                                        event_id = %event.id,
+                                        identifier = %identifier,
+                                        "Triggering immediate sync for synced state event in purgatory"
+                                    );
+                                    write_policy.purgatory().enqueue_sync_immediate(&identifier);
+                                }
+                            }
+                            // PR events (kind 1617/1618) - extract identifier from 'a' tag
+                            else if event.kind.as_u16() == 1617 || event.kind.as_u16() == 1618 {
+                                if let Some(identifier) = crate::git::sync::extract_identifier_from_pr_event(&event) {
+                                    tracing::debug!(
+                                        event_id = %event.id,
+                                        identifier = %identifier,
+                                        "Triggering immediate sync for synced PR event in purgatory"
+                                    );
+                                    write_policy.purgatory().enqueue_sync_immediate(&identifier);
+                                }
+                            }
+                        }
+
                         // Track pagination state for this subscription
                         if result == ProcessResult::Saved || result == ProcessResult::Duplicate {
                             let mut pending = pending_sync_index.write().await;
