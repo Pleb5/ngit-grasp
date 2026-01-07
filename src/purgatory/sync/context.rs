@@ -63,6 +63,18 @@ impl ProcessResult {
 /// with mocks.
 #[async_trait]
 pub trait SyncContext: Send + Sync {
+    /// Collect clone URLs from PR events in purgatory for a given identifier.
+    ///
+    /// PR events (kind 1618) and PR Update events (kind 1619) can include `clone` tags
+    /// specifying where the PR commits can be fetched from. This method extracts those
+    /// URLs to supplement the clone URLs from repository announcements.
+    ///
+    /// # Arguments
+    /// * `identifier` - The repository identifier
+    ///
+    /// # Returns
+    /// Set of clone URLs from PR events in purgatory for this identifier
+    fn collect_pr_clone_urls(&self, identifier: &str) -> HashSet<String>;
     /// Get repository data (announcements, clone URLs, etc.) from the database.
     ///
     /// # Arguments
@@ -232,6 +244,30 @@ impl RealSyncContext {
 
 #[async_trait]
 impl SyncContext for RealSyncContext {
+    fn collect_pr_clone_urls(&self, identifier: &str) -> HashSet<String> {
+        let mut urls = HashSet::new();
+
+        for entry in self.purgatory.find_prs_for_identifier(identifier) {
+            if let Some(ref event) = entry.event {
+                for tag in event.tags.iter() {
+                    let tag_vec = tag.clone().to_vec();
+                    if tag_vec.len() >= 2 && tag_vec[0] == "clone" {
+                        // Clone tags can have multiple URLs: ["clone", "url1", "url2", ...]
+                        urls.extend(tag_vec[1..].iter().cloned());
+                    }
+                }
+            }
+        }
+
+        debug!(
+            identifier = %identifier,
+            pr_clone_urls_count = urls.len(),
+            "Collected clone URLs from PR events in purgatory"
+        );
+
+        urls
+    }
+
     async fn fetch_repository_data(&self, identifier: &str) -> Result<RepositoryData> {
         crate::git::authorization::fetch_repository_data(&self.database, identifier).await
     }
@@ -450,8 +486,11 @@ pub mod mock {
         /// Repository data to return from fetch_repository_data
         repo_data: RwLock<Option<RepositoryData>>,
 
-        /// Clone URLs available for the repository
+        /// Clone URLs available for the repository (from announcements)
         clone_urls: Vec<String>,
+
+        /// Clone URLs from PR events in purgatory
+        pr_clone_urls: HashSet<String>,
 
         /// OIDs still needed (decremented when "fetched")
         needed_oids: RwLock<HashSet<String>>,
@@ -490,6 +529,7 @@ pub mod mock {
             Self {
                 repo_data: RwLock::new(None),
                 clone_urls: Vec::new(),
+                pr_clone_urls: HashSet::new(),
                 needed_oids: RwLock::new(HashSet::new()),
                 url_provides_oids: HashMap::new(),
                 fetch_log: RwLock::new(Vec::new()),
@@ -501,9 +541,15 @@ pub mod mock {
             }
         }
 
-        /// Configure clone URLs for the repository.
+        /// Configure clone URLs for the repository (from announcements).
         pub fn with_urls(mut self, urls: &[&str]) -> Self {
             self.clone_urls = urls.iter().map(|s| s.to_string()).collect();
+            self
+        }
+
+        /// Configure clone URLs from PR events in purgatory.
+        pub fn with_pr_clone_urls(mut self, urls: &[&str]) -> Self {
+            self.pr_clone_urls = urls.iter().map(|s| s.to_string()).collect();
             self
         }
 
@@ -580,6 +626,10 @@ pub mod mock {
 
     #[async_trait]
     impl SyncContext for MockSyncContext {
+        fn collect_pr_clone_urls(&self, _identifier: &str) -> HashSet<String> {
+            self.pr_clone_urls.clone()
+        }
+
         async fn fetch_repository_data(&self, _identifier: &str) -> Result<RepositoryData> {
             // Return stored repo_data or create a minimal one with clone URLs
             if let Some(data) = self.repo_data.read().unwrap().as_ref() {
@@ -790,6 +840,29 @@ pub mod mock {
 
             mock.set_pending_events(false);
             assert!(!mock.has_pending_events("test-repo"));
+        }
+
+        #[test]
+        fn mock_collect_pr_clone_urls_returns_configured_urls() {
+            let mock = MockSyncContext::new().with_pr_clone_urls(&[
+                "https://fork-server.com/repo.git",
+                "https://another-fork.com/repo.git",
+            ]);
+
+            let urls = mock.collect_pr_clone_urls("any-identifier");
+
+            assert_eq!(urls.len(), 2);
+            assert!(urls.contains("https://fork-server.com/repo.git"));
+            assert!(urls.contains("https://another-fork.com/repo.git"));
+        }
+
+        #[test]
+        fn mock_collect_pr_clone_urls_empty_by_default() {
+            let mock = MockSyncContext::new();
+
+            let urls = mock.collect_pr_clone_urls("any-identifier");
+
+            assert!(urls.is_empty());
         }
     }
 }

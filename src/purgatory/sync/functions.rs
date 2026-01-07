@@ -110,13 +110,24 @@ pub async fn sync_identifier_next_url<C: SyncContext + ?Sized>(
         }
     };
 
-    // 4. Collect clone URLs, excluding our domain
+    // 4. Collect clone URLs from announcements AND PR events in purgatory
     let our_domain = ctx.our_domain();
-    let all_urls: HashSet<String> = repo_data
+    
+    // Get clone URLs from repository announcements
+    let announcement_urls: HashSet<String> = repo_data
         .announcements
         .iter()
         .flat_map(|a| a.clone_urls.iter().cloned())
+        .collect();
+    
+    // Get clone URLs from PR events in purgatory
+    let pr_urls = ctx.collect_pr_clone_urls(identifier);
+    
+    // Merge and filter out our domain
+    let all_urls: HashSet<String> = announcement_urls
+        .union(&pr_urls)
         .filter(|url| our_domain.map_or(true, |d| !url.contains(d)))
+        .cloned()
         .collect();
 
     if all_urls.is_empty() {
@@ -206,11 +217,22 @@ pub async fn get_throttled_domains_with_untried_urls<C: SyncContext + ?Sized>(
     };
 
     let our_domain = ctx.our_domain();
-    let all_urls: HashSet<String> = repo_data
+    
+    // Get clone URLs from repository announcements
+    let announcement_urls: HashSet<String> = repo_data
         .announcements
         .iter()
         .flat_map(|a| a.clone_urls.iter().cloned())
+        .collect();
+    
+    // Get clone URLs from PR events in purgatory
+    let pr_urls = ctx.collect_pr_clone_urls(identifier);
+    
+    // Merge and filter out our domain
+    let all_urls: HashSet<String> = announcement_urls
+        .union(&pr_urls)
         .filter(|url| our_domain.map_or(true, |d| !url.contains(d)))
+        .cloned()
         .collect();
 
     let urls_by_domain: HashMap<String, Vec<String>> =
@@ -853,6 +875,184 @@ mod tests {
         assert!(
             throttle_manager.is_throttled("github.com"),
             "Expected github.com to still be throttled"
+        );
+    }
+
+    // =========================================================================
+    // PR Clone URL Tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_collect_pr_clone_urls_returns_configured_urls() {
+        // Test that MockSyncContext returns configured PR clone URLs
+        let mock = MockSyncContext::new()
+            .with_pr_clone_urls(&[
+                "https://pr-server.com/fork.git",
+                "https://another-server.com/fork.git",
+            ]);
+
+        let pr_urls = mock.collect_pr_clone_urls("test-repo");
+
+        assert_eq!(pr_urls.len(), 2);
+        assert!(pr_urls.contains("https://pr-server.com/fork.git"));
+        assert!(pr_urls.contains("https://another-server.com/fork.git"));
+    }
+
+    #[tokio::test]
+    async fn test_sync_identifier_next_url_includes_pr_clone_urls() {
+        // Set up mock with announcement URLs and PR clone URLs
+        let mock = MockSyncContext::new()
+            .with_urls(&["https://github.com/owner/repo.git"]) // From announcement
+            .with_pr_clone_urls(&["https://pr-author.com/fork.git"]) // From PR event
+            .with_needed_oids(&["abc123"])
+            .with_pending_events(true);
+
+        let throttle_manager = ThrottleManager::new(5, 100);
+        let tried_urls = HashSet::new();
+
+        // Get first URL
+        let first_url =
+            sync_identifier_next_url(&mock, "test-repo", None, &tried_urls, &throttle_manager)
+                .await
+                .expect("Should return a URL");
+
+        // Try the first URL
+        let mut tried = HashSet::new();
+        tried.insert(first_url.clone());
+
+        // Get second URL
+        let second_url =
+            sync_identifier_next_url(&mock, "test-repo", None, &tried, &throttle_manager)
+                .await
+                .expect("Should return a second URL");
+
+        // Both URLs should be available (one from announcement, one from PR)
+        let both_urls = vec![first_url, second_url];
+        assert!(
+            both_urls.iter().any(|u| u.contains("github.com")),
+            "Should include announcement URL"
+        );
+        assert!(
+            both_urls.iter().any(|u| u.contains("pr-author.com")),
+            "Should include PR clone URL"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pr_clone_urls_filtered_by_our_domain() {
+        // Set up mock with PR clone URL pointing to our domain
+        let mock = MockSyncContext::new()
+            .with_urls(&["https://github.com/owner/repo.git"])
+            .with_pr_clone_urls(&[
+                "https://our-relay.com/fork.git", // Should be filtered
+                "https://external.com/fork.git", // Should be included
+            ])
+            .with_our_domain("our-relay.com")
+            .with_needed_oids(&["abc123"])
+            .with_pending_events(true);
+
+        let throttle_manager = ThrottleManager::new(5, 100);
+        let mut tried_urls = HashSet::new();
+
+        // Collect all available URLs
+        let mut available_urls = Vec::new();
+        while let Some(url) =
+            sync_identifier_next_url(&mock, "test-repo", None, &tried_urls, &throttle_manager)
+                .await
+        {
+            available_urls.push(url.clone());
+            tried_urls.insert(url);
+        }
+
+        // Should have 2 URLs (github.com and external.com), not 3
+        assert_eq!(
+            available_urls.len(),
+            2,
+            "Expected 2 URLs after filtering our domain, got: {:?}",
+            available_urls
+        );
+
+        // our-relay.com should be filtered out
+        assert!(
+            !available_urls.iter().any(|u| u.contains("our-relay.com")),
+            "Our domain should be filtered out"
+        );
+
+        // github.com and external.com should be present
+        assert!(
+            available_urls.iter().any(|u| u.contains("github.com")),
+            "github.com should be present"
+        );
+        assert!(
+            available_urls.iter().any(|u| u.contains("external.com")),
+            "external.com should be present"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_throttled_domains_includes_pr_clone_urls() {
+        // Set up mock with throttled PR clone URL domain
+        let mock = MockSyncContext::new()
+            .with_urls(&["https://github.com/owner/repo.git"])
+            .with_pr_clone_urls(&["https://pr-server.com/fork.git"])
+            .with_needed_oids(&["abc123"])
+            .with_pending_events(true);
+
+        let throttle_manager = ThrottleManager::new(1, 100);
+
+        // Throttle both domains
+        throttle_manager.start_request("github.com");
+        throttle_manager.start_request("pr-server.com");
+
+        let tried_urls = HashSet::new();
+
+        let throttled =
+            get_throttled_domains_with_untried_urls(&mock, "test-repo", &tried_urls, &throttle_manager)
+                .await;
+
+        // Should include both throttled domains
+        let domains: Vec<&str> = throttled.iter().map(|t| t.domain.as_str()).collect();
+        assert!(
+            domains.contains(&"github.com"),
+            "Should include github.com"
+        );
+        assert!(
+            domains.contains(&"pr-server.com"),
+            "Should include pr-server.com from PR clone URLs"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sync_identifier_uses_pr_clone_urls_when_announcement_urls_fail() {
+        // Set up mock where only PR clone URL can provide the needed OID
+        let mock = MockSyncContext::new()
+            .with_urls(&["https://github.com/owner/repo.git"]) // Doesn't have the OID
+            .with_pr_clone_urls(&["https://pr-author.com/fork.git"]) // Has the OID
+            .with_needed_oids(&["pr-commit-123"])
+            .with_pending_events(true)
+            .url_provides("https://pr-author.com/fork.git", &["pr-commit-123"]);
+        // Note: github.com doesn't provide any OIDs
+
+        let throttle_manager = Arc::new(ThrottleManager::new(5, 100));
+
+        // Run sync_identifier
+        let complete = sync_identifier(&mock, "test-repo", &throttle_manager).await;
+
+        // Should complete successfully using PR clone URL
+        assert!(complete, "Sync should complete using PR clone URL");
+
+        // Verify PR clone URL was tried
+        let fetch_log = mock.fetch_log();
+        assert!(
+            fetch_log.iter().any(|u| u.contains("pr-author.com")),
+            "PR clone URL should have been tried: {:?}",
+            fetch_log
+        );
+
+        // OID should be fetched
+        assert!(
+            mock.current_needed_oids().is_empty(),
+            "OID should be fetched from PR clone URL"
         );
     }
 }
