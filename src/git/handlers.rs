@@ -6,6 +6,7 @@ use http_body_util::Full;
 use hyper::{body::Bytes, Response, StatusCode};
 use nostr_relay_builder::LocalRelay;
 use nostr_sdk::prelude::*;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -15,10 +16,9 @@ use super::protocol::{GitService, PktLine};
 use super::subprocess::GitSubprocess;
 use super::try_set_head_if_available;
 
-use crate::git::authorization::{authorize_push, fetch_repository_data, parse_pushed_refs};
-use crate::git::sync::{sync_pr_refs_to_tagged_owner_repos, sync_to_owner_repos};
+use crate::git::authorization::{authorize_push, parse_pushed_refs};
+use crate::git::sync::process_newly_available_git_data;
 use crate::nostr::builder::SharedDatabase;
-use crate::nostr::events::{KIND_PR, KIND_PR_UPDATE, KIND_REPOSITORY_STATE};
 use crate::purgatory::Purgatory;
 
 /// Handle GET /info/refs?service=git-{upload,receive}-pack
@@ -280,6 +280,10 @@ pub async fn handle_receive_pack(
     // GRASP-01: Set HEAD after git data is received
     // "MUST set repository HEAD per repository state announcement
     // as soon as the git data related to that branch has been received."
+    //
+    // Note: HEAD setting is also handled by process_newly_available_git_data via
+    // align_repository_with_state, but we do it here first for the pushed-to repo
+    // to ensure it's set immediately after the push succeeds.
     if let Some(ref state) = auth_result.state {
         if let Some(head_ref) = &state.head {
             if let Some(branch_name) = state.get_head_branch() {
@@ -303,148 +307,57 @@ pub async fn handle_receive_pack(
         }
     }
 
-    // Save all events from purgatory that authorized this push and remove them from purgatory
-    // This includes state events, PR events, and PR-update events
-    info!(
-        "Saving {} purgatory event(s) to database after successful push",
-        auth_result.purgatory_events.len()
-    );
-
-    for event in &auth_result.purgatory_events {
-        match database.save_event(event).await {
-            Ok(_) => {
-                // Remove from purgatory based on event kind
-                if event.kind == Kind::from(KIND_REPOSITORY_STATE) {
-                    info!("Saved purgatory state event {} to database", event.id);
-                    purgatory.remove_state_event(identifier, &event.id);
-                    info!("Removed saved state event {} from purgatory", event.id);
-                } else if event.kind == Kind::from(KIND_PR)
-                    || event.kind == Kind::from(KIND_PR_UPDATE)
-                {
-                    info!("Saved purgatory PR event {} to database", event.id);
-                    // Extract event ID from the event itself (it's the event.id)
-                    let event_id_hex = event.id.to_hex();
-                    purgatory.remove_pr(&event_id_hex);
-                    info!("Removed saved PR event {} from purgatory", event.id);
-                }
-                // Broadcast to WebSocket subscribers
-                if relay.notify_event(event.clone()) {
-                    info!(
-                        "Broadcast purgatory event {} to websocket listeners",
-                        event.id
-                    );
-                } else {
-                    warn!(
-                        "Failed to broadcast purgatory event {} to websocket listeners",
-                        event.id
-                    );
-                }
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to save purgatory event {} to database: {}",
-                    event.id, e
-                );
-            }
-        }
-    }
-
-    // TODO figure out what atomic pushes look like in GRASP (we cant accepted differnte state events changing different branches at the same time)
-
-    // Sync git data to other owner repositories that authorize the same state event
-    // This ensures all owners who share maintainers get the same git data
-    if let Some(ref state) = auth_result.state {
-        // Fetch repository data for sync
-        match fetch_repository_data(&database, identifier).await {
-            Ok(db_repo_data) => {
-                let git_data_path_buf = std::path::PathBuf::from(git_data_path);
-                let sync_result =
-                    sync_to_owner_repos(&repo_path, state, &db_repo_data, &git_data_path_buf);
-
-                if sync_result.repos_synced > 0 {
-                    info!(
-                        "Synced git data to {} other owner repositories for {}",
-                        sync_result.repos_synced, identifier
-                    );
-                }
-
-                if !sync_result.errors.is_empty() {
-                    for (repo, error) in &sync_result.errors {
-                        warn!("Error syncing to {}: {}", repo, error);
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to fetch repository data for sync after push to {}: {}",
-                    identifier, e
-                );
-            }
-        }
-    }
-
-    // Sync PR data (refs/nostr/<event-id>) to other owner repositories
-    // Parse pushed refs to find refs/nostr/* refs
+    // Process newly available git data using the unified function
+    // This handles:
+    // - Discovering satisfiable events from purgatory (state events and PR events)
+    // - Syncing OIDs to authorized owner repos
+    // - Aligning refs (+ setting HEAD) in all owner repos
+    // - Saving events to database
+    // - Notifying WebSocket subscribers
+    // - Removing from purgatory
+    //
+    // Parse pushed refs to collect new OIDs
     let pushed_refs = parse_pushed_refs(&request_body);
-    let pr_refs: Vec<(String, String)> = pushed_refs
+    let new_oids: HashSet<String> = pushed_refs
         .iter()
-        .filter_map(|(_, new_oid, ref_name)| {
-            ref_name
-                .strip_prefix("refs/nostr/")
-                .map(|event_id| (event_id.to_string(), new_oid.clone()))
-        })
+        .filter(|(_, new_oid, _)| new_oid != "0000000000000000000000000000000000000000")
+        .map(|(_, new_oid, _)| new_oid.clone())
         .collect();
 
-    if !pr_refs.is_empty() {
-        // Extract PR events from purgatory_events (filter for KIND_PR and KIND_PR_UPDATE)
-        let purgatory_pr_events: Vec<_> = auth_result
-            .purgatory_events
-            .iter()
-            .filter(|e| e.kind == Kind::from(KIND_PR) || e.kind == Kind::from(KIND_PR_UPDATE))
-            .cloned()
-            .collect();
+    let git_data_path_buf = std::path::Path::new(git_data_path);
 
-        match fetch_repository_data(&database, identifier).await {
-            Ok(db_repo_data) => {
-                let git_data_path_buf = std::path::PathBuf::from(git_data_path);
-
-                // sync to owner repos and repos of other owners that list them as maintainers
-                // This uses the `a` tags from PR events to find tagged owner repos
-                if !purgatory_pr_events.is_empty() {
-                    let tagged_sync_result = sync_pr_refs_to_tagged_owner_repos(
-                        &repo_path,
-                        &pr_refs,
-                        &purgatory_pr_events,
-                        &db_repo_data,
-                        &git_data_path_buf,
-                        owner_pubkey,
-                    );
-
-                    if tagged_sync_result.repos_synced > 0 {
-                        info!(
-                            "Synced {} PR refs to {} other owner repositories for {} (via tagged owners)",
-                            tagged_sync_result.refs_created,
-                            tagged_sync_result.repos_synced,
-                            identifier
-                        );
-                    }
-
-                    if !tagged_sync_result.errors.is_empty() {
-                        for (repo, error) in &tagged_sync_result.errors {
-                            warn!(
-                                "Error syncing PR ref to {} (via tagged owner): {}",
-                                repo, error
-                            );
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to fetch repository data for PR sync after push to {}: {}",
-                    identifier, e
+    match process_newly_available_git_data(
+        &repo_path,
+        &new_oids,
+        &database,
+        Some(&relay),
+        &purgatory,
+        git_data_path_buf,
+    )
+    .await
+    {
+        Ok(result) => {
+            if result.released_any() {
+                info!(
+                    "Processed push for {}: {} states released, {} PRs released, {} repos synced",
+                    identifier,
+                    result.states_released,
+                    result.prs_released,
+                    result.repos_synced
                 );
             }
+
+            if !result.errors.is_empty() {
+                for error in &result.errors {
+                    warn!("Error during post-push processing for {}: {}", identifier, error);
+                }
+            }
+        }
+        Err(e) => {
+            warn!(
+                "Failed to process newly available git data after push to {}: {}",
+                identifier, e
+            );
         }
     }
 

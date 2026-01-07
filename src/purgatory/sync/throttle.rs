@@ -343,6 +343,7 @@ impl ThrottleManager {
     ///
     /// Decrements in-flight count and cleans up old timestamps.
     /// Does not trigger processing of queued identifiers.
+    #[cfg(test)]
     fn complete_request_internal(&self, domain: &str) {
         if let Some(entry) = self.throttles.get(domain) {
             let mut throttle = entry.lock().unwrap();
@@ -377,6 +378,7 @@ impl ThrottleManager {
     ///
     /// If the identifier is already queued for this domain, merges the tried_urls sets.
     /// Does not trigger processing.
+    #[cfg(test)]
     fn enqueue_identifier_internal(
         &self,
         domain: &str,
