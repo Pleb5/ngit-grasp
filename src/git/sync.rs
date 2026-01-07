@@ -908,12 +908,9 @@ async fn process_purgatory_state_events(
         }
     };
 
-    // Collect authorized maintainers per owner (computed once)
-    let by_owner = collect_authorized_maintainers(&db_repo_data.announcements);
-
     // Process each state event in chronological order
     for entry in &purgatory_states {
-        // Step 0: Check if we have all the git data needed to apply this state event
+        // Check if we have all the git data needed to apply this state event
         if !can_apply_state(&entry.event, source_repo_path) {
             debug!(
                 identifier = %identifier,
@@ -940,122 +937,19 @@ async fn process_purgatory_state_events(
             }
         };
 
-        let state_author = state.event.pubkey.to_hex();
+        // Use unified processing function
+        let process_result = crate::git::process::process_state_with_git_data(
+            &state,
+            source_repo_path,
+            &db_repo_data,
+            git_data_path,
+        );
 
-        // Step 1: Identify owner repos that the state event author is maintainer for
-        let authorized_owners: Vec<&String> = by_owner
-            .iter()
-            .filter(|(_, maintainers)| maintainers.contains(&state_author))
-            .map(|(owner, _)| owner)
-            .collect();
-
-        if authorized_owners.is_empty() {
-            debug!(
-                identifier = %identifier,
-                event_id = %entry.event.id,
-                pubkey = %state_author,
-                "State event author not authorized for any owner - skipping"
-            );
-            continue;
-        }
-
-        // Track if we applied to at least one owner repo
-        let mut applied_to_any = false;
-
-        // Process each owner repo that authorizes this state event author
-        for owner in &authorized_owners {
-            let maintainers = by_owner.get(*owner).unwrap();
-
-            // Step 2: Check if this state event is the latest authorized for this owner
-            // Only consider database states, not other purgatory states
-            let is_latest = is_latest_authorized_state(
-                &state,
-                maintainers,
-                &db_repo_data.states,
-            );
-
-            if !is_latest {
-                debug!(
-                    identifier = %identifier,
-                    event_id = %entry.event.id,
-                    owner = %owner,
-                    "Skipping owner - a newer authorized state exists"
-                );
-                continue;
-            }
-
-            // Find the announcement for this owner
-            let announcement = db_repo_data
-                .announcements
-                .iter()
-                .find(|a| a.event.pubkey.to_hex() == **owner);
-
-            let Some(announcement) = announcement else {
-                continue;
-            };
-
-            let target_repo_path = git_data_path.join(announcement.repo_path());
-
-            // Step 3: Check git repo exists for that owner
-            if !target_repo_path.exists() {
-                debug!(
-                    identifier = %identifier,
-                    owner = %owner,
-                    repo_path = %target_repo_path.display(),
-                    "Skipping owner - repository doesn't exist"
-                );
-                continue;
-            }
-
-            // Step 4: Copy all required OIDs to that repo (unless it's source_repo_path)
-            if target_repo_path != source_repo_path {
-                if let Err(e) =
-                    copy_missing_oids_between_repos(source_repo_path, &target_repo_path, &state)
-                {
-                    warn!(
-                        identifier = %identifier,
-                        source = %source_repo_path.display(),
-                        target = %target_repo_path.display(),
-                        error = %e,
-                        "Failed to copy OIDs between repos"
-                    );
-                    result
-                        .errors
-                        .push((target_repo_path.display().to_string(), e).1);
-                    // Continue anyway - we'll try to align what we can
-                }
-            }
-
-            // Step 5: Reset the git state in that repo to match the state event
-            // (excluding refs/nostr/*)
-            let align_result = align_repository_with_state(&target_repo_path, &state);
-            result.repos_synced += 1;
-            result.refs_created += align_result.refs_created;
-            result.refs_updated += align_result.refs_updated;
-            result.refs_deleted += align_result.refs_deleted;
-
-            info!(
-                identifier = %identifier,
-                owner = %owner,
-                event_id = %entry.event.id,
-                repo_path = %target_repo_path.display(),
-                refs_created = align_result.refs_created,
-                refs_updated = align_result.refs_updated,
-                refs_deleted = align_result.refs_deleted,
-                head_set = align_result.head_set,
-                "Aligned repository with state from purgatory"
-            );
-
-            applied_to_any = true;
-        }
-
-        // We have the git data now, so we should release from purgatory regardless of
-        // whether we applied to any repo. The question is: should we save to DB or just remove?
-        //
-        // - If there's a newer state event from the same author already in the DB, just remove
-        //   (no point saving an older event that will never be used)
-        // - Otherwise, save it to the DB (even if we didn't apply to any repo, because in the
-        //   future the currently-authorized state event might be deleted and this one should apply)
+        result.repos_synced += process_result.repos_synced;
+        result.refs_created += process_result.refs_created;
+        result.refs_updated += process_result.refs_updated;
+        result.refs_deleted += process_result.refs_deleted;
+        result.errors.extend(process_result.errors);
 
         // Check if there's a newer state from the same author in the database
         let has_newer_from_same_author = db_repo_data.states.iter().any(|s| {
@@ -1073,17 +967,16 @@ async fn process_purgatory_state_events(
             debug!(
                 identifier = %identifier,
                 event_id = %entry.event.id,
-                author = %state_author,
                 "Removed older state event from purgatory - newer event from same author exists in DB"
             );
         } else {
-            // Save to database (even if we didn't apply to any repo)
+            // Save to database
             match database.save_event(&entry.event).await {
                 Ok(_) => {
                     info!(
                         identifier = %identifier,
                         event_id = %entry.event.id,
-                        applied_to_repos = applied_to_any,
+                        repos_synced = process_result.repos_synced,
                         "Saved purgatory state event to database"
                     );
 
@@ -1169,6 +1062,25 @@ fn is_latest_authorized_state(
     }
 }
 
+/// Check if a state event is the latest authorized state for a given maintainer set.
+///
+/// Only considers states already in the database, not other purgatory states.
+///
+/// # Arguments
+/// * `state` - The state event to check
+/// * `maintainers` - The set of authorized maintainers for the owner
+/// * `db_states` - State events from the database
+///
+/// # Returns
+/// true if this state is the latest (or equal latest) among all authorized states in the DB
+pub fn is_latest_authorized_state_public(
+    state: &RepositoryState,
+    maintainers: &[String],
+    db_states: &[RepositoryState],
+) -> bool {
+    is_latest_authorized_state(state, maintainers, db_states)
+}
+
 /// Process PR events from purgatory that can now be satisfied.
 async fn process_purgatory_pr_events(
     identifier: &str,
@@ -1224,39 +1136,23 @@ async fn process_purgatory_pr_events(
             continue;
         }
 
-        // Sync PR ref to owner repos
-        let pr_refs = vec![(event.id.to_hex(), entry.commit.clone())];
-        let pr_events = vec![event.clone()];
-
-        // Get owner pubkey from source repo path
+        // Extract owner pubkey
         let owner_pubkey = extract_owner_from_repo_path(source_repo_path, git_data_path)
             .unwrap_or_default();
 
-        let sync_result = sync_pr_refs_to_tagged_owner_repos(
+        // Use unified processing function
+        let process_result = crate::git::process::process_pr_with_git_data(
+            event,
+            &entry.commit,
             source_repo_path,
-            &pr_refs,
-            &pr_events,
             &db_repo_data,
             git_data_path,
             &owner_pubkey,
         );
-        result.repos_synced += sync_result.repos_synced;
-        result.refs_created += sync_result.refs_created;
 
-        // Create the ref in the source repo if it doesn't exist
-        let ref_name = format!("refs/nostr/{}", event.id.to_hex());
-        if git::get_ref_commit(source_repo_path, &ref_name).is_none() {
-            if let Err(e) = git::update_ref(source_repo_path, &ref_name, &entry.commit) {
-                warn!(
-                    identifier = %identifier,
-                    event_id = %event.id,
-                    error = %e,
-                    "Failed to create PR ref in source repo"
-                );
-            } else {
-                result.refs_created += 1;
-            }
-        }
+        result.repos_synced += process_result.repos_synced;
+        result.refs_created += process_result.refs_created;
+        result.errors.extend(process_result.errors);
 
         // Save event to database
         match database.save_event(event).await {
@@ -1307,7 +1203,7 @@ async fn process_purgatory_pr_events(
 /// Extract owner pubkey from a repository path.
 ///
 /// Given a path like `{git_data_path}/{npub}/{identifier}.git`, extracts the npub.
-fn extract_owner_from_repo_path(repo_path: &Path, git_data_path: &Path) -> Option<String> {
+pub fn extract_owner_from_repo_path(repo_path: &Path, git_data_path: &Path) -> Option<String> {
     let relative = repo_path.strip_prefix(git_data_path).ok()?;
     let components: Vec<_> = relative.components().collect();
     if !components.is_empty() {

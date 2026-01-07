@@ -19,6 +19,7 @@
 
 pub mod authorization;
 pub mod handlers;
+pub mod process;
 pub mod protocol;
 pub mod subprocess;
 pub mod sync;

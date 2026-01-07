@@ -27,7 +27,7 @@ impl PrEventPolicy {
     /// 2. Commit existence in referenced repositories
     /// 3. Deletion of incorrect refs/nostr/<event-id> refs
     /// 4. Deletion of incorrect placeholders
-    /// 5. Copying git data to all referenced repositories when found
+    /// 5. Processing PR event with unified function
     ///
     /// # Returns
     /// - `Ok(true)` if git data ready (commit exists and is synced to all repos)
@@ -64,7 +64,6 @@ impl PrEventPolicy {
                 );
                 // Remove placeholder - event processing will continue normally
                 self.ctx.purgatory.remove_pr(&event_id);
-                // Continue to validate and sync refs across all repos
             } else {
                 // Placeholder has different commit - incoming event supersedes
                 tracing::info!(
@@ -75,8 +74,7 @@ impl PrEventPolicy {
                 );
                 // Remove incorrect placeholder
                 self.ctx.purgatory.remove_pr(&event_id);
-                // Delete incorrect git data (refs/nostr/<event-id>) from all repos
-                // This will be handled below when we validate refs
+                // Delete incorrect git data (refs/nostr/<event-id>) will be handled below
             }
         }
 
@@ -87,9 +85,8 @@ impl PrEventPolicy {
             return Ok(false);
         }
 
-        // delete incorrect refs/nostr/<event-id>
+        // Delete incorrect refs/nostr/<event-id>
         for repo_path in &repo_paths {
-            // First, validate/delete any incorrect refs/nostr/<event-id>
             match git::validate_nostr_ref(repo_path, &event_id, &commit) {
                 Ok(true) => {
                     tracing::info!(
@@ -110,10 +107,9 @@ impl PrEventPolicy {
             }
         }
 
-        // find location of correct git data (if exists)
+        // Find location of correct git data (if exists)
         let mut source_repo: Option<std::path::PathBuf> = None;
         for repo_path in &repo_paths {
-            // Check if commit exists in this repository
             if git::commit_exists(repo_path, &commit) {
                 source_repo = Some(repo_path.clone());
                 tracing::debug!(
@@ -125,59 +121,50 @@ impl PrEventPolicy {
             }
         }
 
-        // Copy commit to all other referenced repositories
         if let Some(source_repo) = source_repo {
-            for repo_path in &repo_paths {
-                if repo_path == &source_repo {
-                    // Skip source repo
-                    continue;
-                }
+            // Extract identifier
+            let identifier = crate::git::sync::extract_identifier_from_pr_event(event)
+                .ok_or_else(|| anyhow::anyhow!("No identifier in PR event"))?;
 
-                // Check if repository exists
-                if !repo_path.exists() {
-                    tracing::debug!(
-                        "Repository {} does not exist, skipping sync",
-                        repo_path.display()
+            // Fetch repository data
+            let db_repo_data = fetch_repository_data(&self.ctx.database, &identifier).await?;
+
+            // Extract owner pubkey from source repo path
+            let owner_pubkey = crate::git::sync::extract_owner_from_repo_path(
+                &source_repo,
+                &self.ctx.git_data_path,
+            )
+            .unwrap_or_default();
+
+            // Use unified processing function
+            let result = crate::git::process::process_pr_with_git_data(
+                event,
+                &commit,
+                &source_repo,
+                &db_repo_data,
+                &self.ctx.git_data_path,
+                &owner_pubkey,
+            );
+
+            tracing::info!(
+                identifier = %identifier,
+                event_id = %event_id,
+                repos_synced = result.repos_synced,
+                refs_created = result.refs_created,
+                "Processed PR event with git data already available"
+            );
+
+            if !result.errors.is_empty() {
+                for error in &result.errors {
+                    tracing::warn!(
+                        identifier = %identifier,
+                        event_id = %event_id,
+                        error = %error,
+                        "Error processing PR event"
                     );
-                    continue;
-                }
-
-                // Check if commit already exists
-                if git::commit_exists(repo_path, &commit) {
-                    tracing::debug!(
-                        "Commit {} already exists in {}, skipping sync",
-                        commit,
-                        repo_path.display()
-                    );
-                    continue;
-                }
-
-                // Fetch commit from source repo to target repo
-                tracing::info!(
-                    "Syncing commit {} from {} to {}",
-                    commit,
-                    source_repo.display(),
-                    repo_path.display()
-                );
-
-                match self.copy_commit(&source_repo, repo_path, &commit).await {
-                    Ok(()) => {
-                        tracing::info!(
-                            "Successfully synced commit {} to {}",
-                            commit,
-                            repo_path.display()
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to sync commit {} to {}: {}",
-                            commit,
-                            repo_path.display(),
-                            e
-                        );
-                    }
                 }
             }
+
             Ok(true)
         } else {
             tracing::debug!(
@@ -250,40 +237,5 @@ impl PrEventPolicy {
 
         Ok(repo_paths)
     }
-    /// Copy a commit from source repository to target repository
-    ///
-    /// Uses `git fetch` to copy a specific commit between local repositories.
-    ///
-    /// # Arguments
-    /// * `source_repo` - Path to repository containing the commit
-    /// * `target_repo` - Path to repository to receive the commit
-    /// * `commit` - Commit hash to copy
-    ///
-    /// # Returns
-    /// Ok(()) on success, Err with error message on failure
-    async fn copy_commit(
-        &self,
-        source_repo: &std::path::Path,
-        target_repo: &std::path::Path,
-        commit: &str,
-    ) -> Result<(), String> {
-        use std::process::Command;
 
-        let output = Command::new("git")
-            .args([
-                "fetch",
-                source_repo.to_str().ok_or("Invalid source path")?,
-                commit,
-            ])
-            .current_dir(target_repo)
-            .output()
-            .map_err(|e| format!("Failed to execute git fetch: {}", e))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("git fetch failed: {}", stderr));
-        }
-
-        Ok(())
-    }
 }

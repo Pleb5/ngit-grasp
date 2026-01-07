@@ -9,9 +9,8 @@ use nostr_relay_builder::builder::WritePolicyResult;
 use nostr_relay_builder::prelude::Event;
 
 use super::PolicyContext;
-use crate::git::authorization::{collect_authorized_maintainers, fetch_repository_data};
-use crate::git::sync::align_repository_with_state;
-use crate::git::{self};
+use crate::git::authorization::fetch_repository_data;
+use crate::git;
 use crate::nostr::events::{validate_state, RepositoryAnnouncement, RepositoryState};
 
 /// Result of state policy evaluation
@@ -50,7 +49,7 @@ impl StatePolicy {
         let state =
             RepositoryState::from_event(event.clone()).context("Failed to parse state event")?;
 
-        // duplicate check in purgatory
+        // Duplicate check in purgatory
         if self
             .ctx
             .purgatory
@@ -63,95 +62,65 @@ impl StatePolicy {
                 event.id,
             );
             return Ok(WritePolicyResult::Reject {
-                status: true, // Client sees OK
+                status: true,
                 message: "duplicate: in purgatory".into(),
             });
         }
-        // get all repositories and state events from db with identifier
+
+        // Get all repositories and state events from db with identifier
         let db_repo_data = fetch_repository_data(&self.ctx.database, &state.identifier).await?;
 
-        // duplicate check in db
+        // Duplicate check in db
         if db_repo_data.states.iter().any(|e| e.event.id.eq(&event.id)) {
-            tracing::debug!("processed state event duplicate (in db): {}", event.id,);
+            tracing::debug!("processed state event duplicate (in db): {}", event.id);
             return Ok(WritePolicyResult::Reject {
-                status: true, // Client sees OK
+                status: true,
                 message: "duplicate".into(),
             });
         }
 
-        // check if git data is avialable
+        // Check if git data is available
         if let Some(repo_with_git_data) =
             find_repo_with_git_data(&db_repo_data.announcements, &state, &self.ctx.git_data_path)
         {
             tracing::debug!(
-                "processing state event git as data already available: {}",
+                "processing state event as git data already available: {}",
                 event.id,
             );
-            // find repos for which this state is authorised and align the git refs to this state
-            let by_owner = collect_authorized_maintainers(&db_repo_data.announcements);
-            let mut repo_count = 0;
-            for (owner, maintainers) in by_owner {
-                if maintainers.contains(&event.pubkey.to_string()) {
-                    if let Some(previous_state) = db_repo_data
-                        .states
-                        .iter()
-                        .filter(|e| maintainers.contains(&e.event.pubkey.to_string()))
-                        .max_by_key(|e| e.event.created_at)
-                    {
-                        // TODO in event of a tie the event with the biggest event id wins
-                        if state.event.created_at > previous_state.event.created_at {
-                            if let Some(annoucement) = db_repo_data
-                                .announcements
-                                .iter()
-                                .find(|a| a.event.pubkey.to_string().eq(&owner))
-                            {
-                                let repo_path =
-                                    self.ctx.git_data_path.join(annoucement.repo_path().clone());
 
-                                if !repo_path.exists() {
-                                    // eg if annoucement doesnt list repo (but stored as its in maintainer set)
-                                    continue;
-                                }
-                                // If repo_path != repo_with_git_data, copy missing oids first
-                                if repo_path != repo_with_git_data {
-                                    if let Err(e) = self.copy_missing_oids(
-                                        &repo_with_git_data,
-                                        &repo_path,
-                                        &state,
-                                    ) {
-                                        tracing::warn!(
-                                            "Failed to copy oids from {} to {}: {}",
-                                            repo_with_git_data.display(),
-                                            repo_path.display(),
-                                            e
-                                        );
-                                    }
-                                }
+            // Use unified processing function
+            let result = crate::git::process::process_state_with_git_data(
+                &state,
+                &repo_with_git_data,
+                &db_repo_data,
+                &self.ctx.git_data_path,
+            );
 
-                                let result = align_repository_with_state(&repo_path, &state);
-                                repo_count += 1;
-                                tracing::info!(
-                                    "Aligned {} with state: created={}, updated={}, deleted={}, head_set={}",
-                                    repo_path.display(),
-                                    result.refs_created,
-                                    result.refs_updated,
-                                    result.refs_deleted,
-                                    result.head_set
-                                );
-                            }
-                        }
-                    }
+            tracing::info!(
+                identifier = %state.identifier,
+                event_id = %event.id,
+                repos_synced = result.repos_synced,
+                refs_created = result.refs_created,
+                refs_updated = result.refs_updated,
+                refs_deleted = result.refs_deleted,
+                "Processed state event with git data already available"
+            );
+
+            if !result.errors.is_empty() {
+                for error in &result.errors {
+                    tracing::warn!(
+                        identifier = %state.identifier,
+                        event_id = %event.id,
+                        error = %error,
+                        "Error processing state event"
+                    );
                 }
             }
 
-            tracing::info!(
-                "immediately accepting state event. Was latest authorised state and git data updated for {repo_count} repositories: eventid: {}",
-                state.event.id,
-            );
-            // immediately accept the event, bypassing purgatory
-            Ok(WritePolicyResult::Accept) // event should be saved and broadcast
+            // Event will be saved and broadcast by relay builder
+            Ok(WritePolicyResult::Accept)
         } else {
-            // if no git data - add to purgatory
+            // If no git data - add to purgatory
             // (add_state automatically enqueues for background sync)
             self.ctx
                 .purgatory
@@ -163,96 +132,13 @@ impl StatePolicy {
                 state.identifier,
             );
             Ok(WritePolicyResult::Reject {
-                status: true, // Client sees OK
+                status: true,
                 message: "purgatory: won't be served until git data arrives".into(),
             })
         }
     }
 
-    /// Copy missing OIDs from a source repository to a target repository
-    ///
-    /// Identifies commits referenced in the state that are missing from the target
-    /// repository and copies them from the source repository using git fetch.
-    ///
-    /// # Arguments
-    /// * `source_repo` - Path to repository containing the commits
-    /// * `target_repo` - Path to repository to receive the commits
-    /// * `state` - Repository state containing commit references
-    ///
-    /// # Returns
-    /// Ok(()) on success, Err with error message on failure
-    fn copy_missing_oids(
-        &self,
-        source_repo: &Path,
-        target_repo: &Path,
-        state: &RepositoryState,
-    ) -> Result<(), String> {
-        use std::process::Command;
 
-        // Collect all commits referenced in the state
-        let mut commits_to_check = Vec::new();
-
-        for branch in &state.branches {
-            if !branch.commit.starts_with("ref: ") {
-                commits_to_check.push(&branch.commit);
-            }
-        }
-
-        for tag in &state.tags {
-            if !tag.commit.starts_with("ref: ") {
-                commits_to_check.push(&tag.commit);
-            }
-        }
-
-        // Identify missing commits
-        let mut missing_commits = Vec::new();
-        for commit in commits_to_check {
-            if !git::oid_exists(target_repo, commit) {
-                missing_commits.push(commit);
-            }
-        }
-
-        if missing_commits.is_empty() {
-            tracing::debug!(
-                "No missing commits to copy from {} to {}",
-                source_repo.display(),
-                target_repo.display()
-            );
-            return Ok(());
-        }
-
-        tracing::info!(
-            "Copying {} missing commits from {} to {}",
-            missing_commits.len(),
-            source_repo.display(),
-            target_repo.display()
-        );
-
-        // Fetch each missing commit from source to target
-        for commit in &missing_commits {
-            let output = Command::new("git")
-                .args([
-                    "fetch",
-                    source_repo.to_str().ok_or("Invalid source path")?,
-                    commit,
-                ])
-                .current_dir(target_repo)
-                .output()
-                .map_err(|e| format!("Failed to execute git fetch: {}", e))?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(format!(
-                    "git fetch failed for commit {}: {}",
-                    commit, stderr
-                ));
-            }
-
-            tracing::debug!("Copied commit {} to {}", commit, target_repo.display());
-        }
-
-        Ok(())
-    }
 }
 
 fn find_repo_with_git_data(
