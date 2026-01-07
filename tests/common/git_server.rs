@@ -390,10 +390,11 @@ mod tests {
         // Start server
         let server = SimpleGitServer::start(temp_dir.path()).await;
 
-        // Run git ls-remote against the server
-        let output = Command::new("git")
+        // Run git ls-remote against the server (using tokio::process::Command)
+        let output = tokio::process::Command::new("git")
             .args(["ls-remote", server.url()])
             .output()
+            .await
             .expect("Failed to run git ls-remote");
 
         assert!(
@@ -433,27 +434,30 @@ mod tests {
         // Create a destination repo to fetch into
         let dest_dir = tempfile::tempdir().expect("Failed to create dest dir");
         
-        // Initialize empty repo
-        let output = Command::new("git")
+        // Initialize empty repo (using tokio::process::Command)
+        let output = tokio::process::Command::new("git")
             .args(["init"])
             .current_dir(dest_dir.path())
             .output()
+            .await
             .expect("Failed to init dest repo");
         assert!(output.status.success());
 
         // Add the server as a remote
-        let output = Command::new("git")
+        let output = tokio::process::Command::new("git")
             .args(["remote", "add", "origin", server.url()])
             .current_dir(dest_dir.path())
             .output()
+            .await
             .expect("Failed to add remote");
         assert!(output.status.success());
 
         // Fetch from the server
-        let output = Command::new("git")
+        let output = tokio::process::Command::new("git")
             .args(["fetch", "origin"])
             .current_dir(dest_dir.path())
             .output()
+            .await
             .expect("Failed to fetch");
 
         assert!(
@@ -463,10 +467,11 @@ mod tests {
         );
 
         // Verify the commit was fetched
-        let output = Command::new("git")
+        let output = tokio::process::Command::new("git")
             .args(["rev-parse", "origin/main"])
             .current_dir(dest_dir.path())
             .output()
+            .await
             .expect("Failed to rev-parse");
 
         assert!(output.status.success());
@@ -538,12 +543,10 @@ impl SmartGitServer {
     /// # Panics
     /// Panics if the git operations fail or the server cannot start
     pub async fn start(source_repo: &Path) -> Self {
-        println!("[SmartGitServer::start] Creating temp dir");
         // 1. Create temp directory for bare repo
         let temp_dir = tempfile::tempdir().expect("Failed to create temp dir for git server");
         let bare_repo_path = temp_dir.path().join("repo.git");
 
-        println!("[SmartGitServer::start] Cloning bare repo from {:?}", source_repo);
         // 2. Create bare clone
         let output = Command::new("git")
             .args(["clone", "--bare"])
@@ -558,44 +561,41 @@ impl SmartGitServer {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-        println!("[SmartGitServer::start] Bare clone created");
 
-        // 3. Find a free port
-        println!("[SmartGitServer::start] Finding free port");
-        let port = find_free_port();
-        println!("[SmartGitServer::start] Found port {}", port);
-        let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+        // 3. Create and bind listener (eliminates port race condition)
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("Failed to bind to random port");
+        let port = std_listener.local_addr()
+            .expect("Failed to get local addr")
+            .port();
+        
+        // Convert to tokio listener (keeps port bound)
+        std_listener.set_nonblocking(true)
+            .expect("Failed to set non-blocking");
+        let listener = TcpListener::from_std(std_listener)
+            .expect("Failed to convert to tokio listener");
 
         // 4. Create shutdown channel
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
 
-        println!("[SmartGitServer::start] Binding to {}", addr);
         // 5. Start the HTTP server
         let repo_path = Arc::new(bare_repo_path);
-        let listener = TcpListener::bind(addr)
-            .await
-            .expect("Failed to bind to address");
-        println!("[SmartGitServer::start] Listener bound successfully");
 
         let handle = tokio::spawn(async move {
-            eprintln!("[SmartGitServer] Server loop started, waiting for connections...");
             loop {
                 tokio::select! {
                     accept_result = listener.accept() => {
                         match accept_result {
-                            Ok((stream, addr)) => {
-                                eprintln!("[SmartGitServer] Accepted connection from {}", addr);
+                            Ok((stream, _addr)) => {
                                 let repo_path = Arc::clone(&repo_path);
                                 let io = TokioIo::new(stream);
 
                                 tokio::spawn(async move {
-                                    eprintln!("[SmartGitServer] Spawning handler for connection");
                                     let service = service_fn(move |req| {
                                         let repo_path = Arc::clone(&repo_path);
                                         async move { handle_smart_request(req, &repo_path).await }
                                     });
 
-                                    eprintln!("[SmartGitServer] About to serve_connection");
                                     if let Err(e) = http1::Builder::new()
                                         .serve_connection(io, service)
                                         .await
@@ -605,7 +605,6 @@ impl SmartGitServer {
                                             eprintln!("SmartGitServer connection error: {}", e);
                                         }
                                     }
-                                    eprintln!("[SmartGitServer] Connection handler finished");
                                 });
                             }
                             Err(e) => {
@@ -615,20 +614,16 @@ impl SmartGitServer {
                     }
                     _ = &mut shutdown_rx => {
                         // Shutdown signal received
-                        eprintln!("[SmartGitServer] Shutdown signal received");
                         break;
                     }
                 }
             }
-            eprintln!("[SmartGitServer] Server loop exited");
         });
 
         let url = format!("http://127.0.0.1:{}", port);
 
-        println!("[SmartGitServer::start] Waiting for server to be ready on port {}", port);
         // 6. Wait for server to be ready
         wait_for_server_ready(port).await;
-        println!("[SmartGitServer::start] Server is ready!");
 
         Self {
             shutdown_tx: Some(shutdown_tx),
@@ -684,9 +679,6 @@ async fn handle_smart_request(
     let query = req.uri().query().unwrap_or("");
     let method = req.method();
 
-    println!("[SmartGitServer] {} {} query={}", method, path, query);
-    eprintln!("[SmartGitServer] {} {} query={}", method, path, query);
-
     // Extract Git-Protocol header (for protocol version 2)
     // We need to clone it to avoid borrowing issues when moving req
     let git_protocol = req
@@ -694,10 +686,6 @@ async fn handle_smart_request(
         .get("Git-Protocol")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
-
-    if let Some(ref proto) = git_protocol {
-        eprintln!("[SmartGitServer] Git-Protocol: {}", proto);
-    }
 
     // Route: GET /info/refs?service=git-upload-pack
     if method == hyper::Method::GET && path.ends_with("/info/refs") {
@@ -714,7 +702,6 @@ async fn handle_smart_request(
 
         match service {
             Some("git-upload-pack") => {
-                eprintln!("[SmartGitServer] Handling info/refs for upload-pack");
                 return handle_info_refs_upload_pack(repo_path, git_protocol.as_deref()).await;
             }
             Some("git-receive-pack") => {
@@ -735,7 +722,6 @@ async fn handle_smart_request(
 
     // Route: POST /git-upload-pack
     if method == hyper::Method::POST && path.ends_with("/git-upload-pack") {
-        eprintln!("[SmartGitServer] Handling POST /git-upload-pack");
         return handle_upload_pack(req, repo_path, git_protocol.as_deref()).await;
     }
 
@@ -986,31 +972,20 @@ mod smart_git_server_tests {
 
     #[tokio::test]
     async fn test_smart_git_server_ls_remote() {
-        println!("[TEST] Starting test_smart_git_server_ls_remote");
-        eprintln!("[TEST] Starting test_smart_git_server_ls_remote");
-        
         // Create a test repo
         let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-        println!("[TEST] Created temp dir");
         let commit_hash = create_test_repo_with_commit(temp_dir.path(), CommitVariant::StateTest)
             .expect("Failed to create test repo");
-        println!("[TEST] Created test repo with commit {}", commit_hash);
 
         // Start server
-        println!("[TEST] About to start SmartGitServer");
         let server = SmartGitServer::start(temp_dir.path()).await;
-        println!("[TEST] Server started at {}", server.url());
-        
-        // Give the server loop task a chance to print
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        // Run git ls-remote against the server
-        println!("[TEST] Running git ls-remote {}", server.url());
-        let output = Command::new("git")
+        // Run git ls-remote against the server (using tokio::process::Command)
+        let output = tokio::process::Command::new("git")
             .args(["ls-remote", server.url()])
             .output()
+            .await
             .expect("Failed to run git ls-remote");
-        println!("[TEST] git ls-remote completed");
 
         assert!(
             output.status.success(),
@@ -1050,26 +1025,29 @@ mod smart_git_server_tests {
         let dest_dir = tempfile::tempdir().expect("Failed to create dest dir");
 
         // Initialize empty repo
-        let output = Command::new("git")
+        let output = tokio::process::Command::new("git")
             .args(["init"])
             .current_dir(dest_dir.path())
             .output()
+            .await
             .expect("Failed to init dest repo");
         assert!(output.status.success());
 
         // Add the server as a remote
-        let output = Command::new("git")
+        let output = tokio::process::Command::new("git")
             .args(["remote", "add", "origin", server.url()])
             .current_dir(dest_dir.path())
             .output()
+            .await
             .expect("Failed to add remote");
         assert!(output.status.success());
 
         // Fetch from the server
-        let output = Command::new("git")
+        let output = tokio::process::Command::new("git")
             .args(["fetch", "origin"])
             .current_dir(dest_dir.path())
             .output()
+            .await
             .expect("Failed to fetch");
 
         assert!(
@@ -1079,10 +1057,11 @@ mod smart_git_server_tests {
         );
 
         // Verify the commit was fetched
-        let output = Command::new("git")
+        let output = tokio::process::Command::new("git")
             .args(["rev-parse", "origin/main"])
             .current_dir(dest_dir.path())
             .output()
+            .await
             .expect("Failed to rev-parse");
 
         assert!(output.status.success());
@@ -1111,26 +1090,29 @@ mod smart_git_server_tests {
         let dest_dir = tempfile::tempdir().expect("Failed to create dest dir");
 
         // Initialize empty repo
-        let output = Command::new("git")
+        let output = tokio::process::Command::new("git")
             .args(["init"])
             .current_dir(dest_dir.path())
             .output()
+            .await
             .expect("Failed to init dest repo");
         assert!(output.status.success());
 
         // Add the server as a remote
-        let output = Command::new("git")
+        let output = tokio::process::Command::new("git")
             .args(["remote", "add", "origin", server.url()])
             .current_dir(dest_dir.path())
             .output()
+            .await
             .expect("Failed to add remote");
         assert!(output.status.success());
 
         // Shallow fetch from the server - THIS IS WHAT PURGATORY SYNC USES
-        let output = Command::new("git")
+        let output = tokio::process::Command::new("git")
             .args(["fetch", "--depth=1", "origin", &commit_hash])
             .current_dir(dest_dir.path())
             .output()
+            .await
             .expect("Failed to fetch");
 
         assert!(
@@ -1140,10 +1122,11 @@ mod smart_git_server_tests {
         );
 
         // Verify the commit was fetched
-        let output = Command::new("git")
+        let output = tokio::process::Command::new("git")
             .args(["cat-file", "-t", &commit_hash])
             .current_dir(dest_dir.path())
             .output()
+            .await
             .expect("Failed to cat-file");
 
         assert!(

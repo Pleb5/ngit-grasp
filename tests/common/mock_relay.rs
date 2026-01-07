@@ -72,14 +72,35 @@ impl MockRelay {
     /// The relay accepts all events without validation and stores them
     /// in an in-memory database.
     pub async fn start() -> Self {
-        let port = find_free_port();
-        Self::start_on_port(port).await
+        // Create and bind listener (eliminates port race condition)
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("Failed to bind to random port");
+        let port = std_listener
+            .local_addr()
+            .expect("Failed to get local addr")
+            .port();
+
+        // Convert to tokio listener (keeps port bound)
+        std_listener
+            .set_nonblocking(true)
+            .expect("Failed to set non-blocking");
+        let listener = TcpListener::from_std(std_listener)
+            .expect("Failed to convert to tokio listener");
+
+        Self::start_with_listener(listener, port).await
     }
 
     /// Start a mock relay on a specific port.
     pub async fn start_on_port(port: u16) -> Self {
         let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+        let listener = TcpListener::bind(addr)
+            .await
+            .expect("Failed to bind to address");
+        Self::start_with_listener(listener, port).await
+    }
 
+    /// Internal method to start the relay with an existing listener.
+    async fn start_with_listener(listener: TcpListener, port: u16) -> Self {
         // Create a simple relay with no write policy (accepts all events)
         let relay = LocalRelayBuilder::default().build();
 
@@ -88,11 +109,6 @@ impl MockRelay {
 
         // Clone relay for the server task
         let server_relay = relay.clone();
-
-        // Start the HTTP/WebSocket server
-        let listener = TcpListener::bind(addr)
-            .await
-            .expect("Failed to bind to address");
 
         let handle = tokio::spawn(async move {
             loop {
@@ -243,19 +259,6 @@ fn derive_accept_key(request_key: &[u8]) -> String {
     engine.input(WS_GUID);
     let hash = Sha1Hash::from_engine(engine);
     base64::Engine::encode(&base64::engine::general_purpose::STANDARD, hash.as_byte_array())
-}
-
-/// Find a free port to use for the server.
-fn find_free_port() -> u16 {
-    use std::net::TcpListener;
-
-    let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind to random port");
-    let port = listener
-        .local_addr()
-        .expect("Failed to get local addr")
-        .port();
-    drop(listener);
-    port
 }
 
 /// Wait for the server to be ready to accept connections.
