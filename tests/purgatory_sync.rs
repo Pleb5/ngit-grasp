@@ -28,9 +28,10 @@
 mod common;
 
 use common::{
-    check_ref_at_commit, create_repo_announcement, create_state_event,
-    create_test_repo_with_commit, push_to_relay, verify_event_not_served, wait_for_event_served,
-    wait_for_sync_connection, CommitVariant, TestRelay,
+    build_repo_coord, check_ref_at_commit, create_pr_event, create_repo_announcement,
+    create_state_event, create_test_repo_with_commit, push_ref_to_relay, push_to_relay,
+    verify_event_not_served, wait_for_event_served, wait_for_sync_connection, CommitVariant,
+    TestRelay,
 };
 use nostr_sdk::prelude::*;
 use std::time::Duration;
@@ -274,6 +275,167 @@ async fn test_state_event_syncs_from_remote() {
 
     // Cleanup
     source_client.disconnect().await;
+    syncing_relay.stop().await;
+    source_relay.stop().await;
+}
+
+/// Test that a PR event entering purgatory triggers remote commit fetch
+/// and is released once the commit is available.
+///
+/// Scenario:
+/// 1. Start source relay with repository announcement
+/// 2. Create PR event (goes to purgatory - no git data yet)
+/// 3. Push commit to refs/nostr/<event-id> (authorized by PR event in purgatory)
+/// 4. PR event gets released from purgatory on source relay
+/// 5. Start syncing relay
+/// 6. Syncing relay syncs PR event (goes to purgatory - no local git data)
+/// 7. Syncing relay fetches commit from source's clone URL
+/// 8. Verify PR event is released and refs/nostr/<event-id> created on syncing relay
+#[tokio::test]
+async fn test_pr_event_syncs_from_remote() {
+    // 1. Start source relay
+    let source_relay = TestRelay::start().await;
+    let owner_keys = Keys::generate();
+    let pr_author_keys = Keys::generate();
+    let identifier = "pr-sync-test-repo";
+
+    // Pre-allocate syncing relay port so we can include it in announcement
+    let syncing_port = TestRelay::find_free_port();
+    let syncing_domain = format!("127.0.0.1:{}", syncing_port);
+
+    // 2. Create test repository locally with PR commit
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let commit_hash = create_test_repo_with_commit(temp_dir.path(), CommitVariant::PrTest)
+        .expect("Failed to create test repo");
+
+    let npub = owner_keys
+        .public_key()
+        .to_bech32()
+        .expect("Failed to get npub");
+
+    // 3. Create and send announcement listing BOTH relays
+    // This ensures the syncing relay will accept the PR event when it syncs
+    let announcement = create_repo_announcement(
+        &owner_keys,
+        &[&source_relay.domain(), &syncing_domain],
+        identifier,
+    );
+
+    let source_client = Client::new(owner_keys.clone());
+    source_client
+        .add_relay(source_relay.url())
+        .await
+        .expect("Failed to add source relay");
+    source_client.connect().await;
+
+    // Wait for connection
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Send announcement to source relay (creates bare repo)
+    source_client
+        .send_event(&announcement)
+        .await
+        .expect("Failed to send announcement to source");
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // 4. Create and send PR event BEFORE pushing
+    // The PR event goes to purgatory on source relay, which authorizes the push
+    let repo_coord = build_repo_coord(&owner_keys, identifier);
+
+    let pr_event = create_pr_event(&pr_author_keys, &repo_coord, &commit_hash, "Test PR for sync")
+        .expect("Failed to create PR event");
+
+    let pr_event_id = pr_event.id;
+
+    // Send PR event to source relay using PR author's client
+    let pr_client = Client::new(pr_author_keys.clone());
+    pr_client
+        .add_relay(source_relay.url())
+        .await
+        .expect("Failed to add source relay for PR");
+    pr_client.connect().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    pr_client
+        .send_event(&pr_event)
+        .await
+        .expect("Failed to send PR event to source");
+
+    // Small delay to ensure PR event is processed into purgatory
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // 5. Push commit to refs/nostr/<event-id> on source relay
+    // The PR event in purgatory authorizes this push
+    let ref_name = format!("refs/nostr/{}", pr_event_id.to_hex());
+    push_ref_to_relay(
+        temp_dir.path(),
+        &source_relay.domain(),
+        &npub,
+        identifier,
+        &commit_hash,
+        &ref_name,
+    )
+    .expect("Push to refs/nostr/<event-id> should succeed");
+
+    // After push, PR event should be released from purgatory on source relay
+    wait_for_event_served(source_relay.url(), &pr_event_id, Duration::from_secs(5))
+        .await
+        .expect("PR event should be served on source relay after push");
+
+    // 6. Start syncing relay (syncs from source)
+    let syncing_relay = TestRelay::start_on_port_with_options(
+        syncing_port,
+        Some(source_relay.url().to_string()),
+        false,
+    )
+    .await;
+
+    // Wait for sync connection to establish
+    wait_for_sync_connection(syncing_relay.url(), 1, Duration::from_secs(5))
+        .await
+        .expect("Sync connection should establish");
+
+    // 7. Wait for PR event to be released on syncing relay
+    // The sync should:
+    // a) Fetch the announcement and PR event from source relay
+    // b) Accept announcement (creates bare repo structure)
+    // c) Put PR event in purgatory (commit missing on syncing relay)
+    // d) Fetch commit from source relay's clone URL
+    // e) Release the PR event from purgatory
+    // f) Create refs/nostr/<event-id> pointing to the commit
+    let found = wait_for_event_served(
+        syncing_relay.url(),
+        &pr_event_id,
+        Duration::from_secs(30), // Allow time for sync + git fetch
+    )
+    .await;
+
+    assert!(
+        found.is_ok(),
+        "PR event should be served after sync fetches commit: {:?}",
+        found.err()
+    );
+
+    // 8. Verify refs/nostr/<event-id> was created on syncing relay
+    let ref_correct = check_ref_at_commit(
+        &syncing_domain,
+        &npub,
+        identifier,
+        &ref_name,
+        &commit_hash,
+    )
+    .await
+    .expect("Failed to check PR ref");
+
+    assert!(
+        ref_correct,
+        "refs/nostr/<event-id> should point to PR commit"
+    );
+
+    // Cleanup
+    source_client.disconnect().await;
+    pr_client.disconnect().await;
     syncing_relay.stop().await;
     source_relay.stop().await;
 }

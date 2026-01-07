@@ -529,6 +529,73 @@ pub fn push_to_relay(
     Ok(())
 }
 
+/// Push a specific ref to a relay.
+///
+/// This is used for pushing to refs/nostr/<event-id> for PR events.
+/// Unlike `push_to_relay` which pushes all refs, this pushes a specific
+/// commit to a specific ref name.
+///
+/// # Arguments
+/// * `local_path` - Path to local git repository
+/// * `relay_domain` - The relay domain (e.g., "127.0.0.1:8080")
+/// * `npub` - Owner's npub
+/// * `repo_id` - Repository identifier
+/// * `commit_hash` - The commit to push
+/// * `ref_name` - The ref name to push to (e.g., "refs/nostr/<event-id>")
+///
+/// # Returns
+/// * `Ok(())` - Push successful
+/// * `Err(String)` - Push failed
+pub fn push_ref_to_relay(
+    local_path: &Path,
+    relay_domain: &str,
+    npub: &str,
+    repo_id: &str,
+    commit_hash: &str,
+    ref_name: &str,
+) -> Result<(), String> {
+    let remote_url = format!("http://{}/{}/{}.git", relay_domain, npub, repo_id);
+
+    // Check if origin already exists
+    let check_output = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(local_path)
+        .output()
+        .map_err(|e| format!("Failed to check remote: {}", e))?;
+
+    if check_output.status.success() {
+        // Remote exists, update it
+        let _ = Command::new("git")
+            .args(["remote", "set-url", "origin", &remote_url])
+            .current_dir(local_path)
+            .output();
+    } else {
+        // Add new remote
+        let _ = Command::new("git")
+            .args(["remote", "add", "origin", &remote_url])
+            .current_dir(local_path)
+            .output();
+    }
+
+    // Push specific commit to specific ref
+    // Format: git push origin <commit>:<ref>
+    let refspec = format!("{}:{}", commit_hash, ref_name);
+    let output = Command::new("git")
+        .args(["push", "origin", &refspec])
+        .current_dir(local_path)
+        .output()
+        .map_err(|e| format!("Failed to run git push: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "git push failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
