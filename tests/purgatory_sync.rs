@@ -29,9 +29,10 @@ mod common;
 
 use common::{
     add_commit_to_repo, build_repo_coord, check_ref_at_commit, create_pr_event,
-    create_repo_announcement, create_state_event, create_test_repo_with_commit, push_ref_to_relay,
-    push_to_relay, verify_event_not_served, wait_for_event_served, wait_for_sync_connection,
-    CommitVariant, TestRelay,
+    create_pr_event_with_clone, create_repo_announcement, create_state_event,
+    create_test_repo_with_commit, push_ref_to_relay, push_to_relay, verify_event_not_served,
+    wait_for_event_served, wait_for_sync_connection, CommitVariant, MockRelay, SimpleGitServer,
+    TestRelay,
 };
 use nostr_sdk::prelude::*;
 use std::time::Duration;
@@ -55,9 +56,8 @@ async fn test_push_triggers_unified_processing() {
 
     // 2. Create test repository locally with deterministic commit
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-    let commit_hash =
-        create_test_repo_with_commit(temp_dir.path(), CommitVariant::StateTest)
-            .expect("Failed to create test repo");
+    let commit_hash = create_test_repo_with_commit(temp_dir.path(), CommitVariant::StateTest)
+        .expect("Failed to create test repo");
 
     // 3. Create and send announcement
     let announcement = create_repo_announcement(&keys, &[&relay.domain()], identifier);
@@ -343,8 +343,13 @@ async fn test_pr_event_syncs_from_remote() {
     // The PR event goes to purgatory on source relay, which authorizes the push
     let repo_coord = build_repo_coord(&owner_keys, identifier);
 
-    let pr_event = create_pr_event(&pr_author_keys, &repo_coord, &commit_hash, "Test PR for sync")
-        .expect("Failed to create PR event");
+    let pr_event = create_pr_event(
+        &pr_author_keys,
+        &repo_coord,
+        &commit_hash,
+        "Test PR for sync",
+    )
+    .expect("Failed to create PR event");
 
     let pr_event_id = pr_event.id;
 
@@ -418,15 +423,10 @@ async fn test_pr_event_syncs_from_remote() {
     );
 
     // 8. Verify refs/nostr/<event-id> was created on syncing relay
-    let ref_correct = check_ref_at_commit(
-        &syncing_domain,
-        &npub,
-        identifier,
-        &ref_name,
-        &commit_hash,
-    )
-    .await
-    .expect("Failed to check PR ref");
+    let ref_correct =
+        check_ref_at_commit(&syncing_domain, &npub, identifier, &ref_name, &commit_hash)
+            .await
+            .expect("Failed to check PR ref");
 
     assert!(
         ref_correct,
@@ -624,8 +624,8 @@ async fn test_concurrent_state_and_pr_sync() {
         state_found.err()
     );
 
-    let pr_found = wait_for_event_served(syncing_relay.url(), &pr_event_id, Duration::from_secs(30))
-        .await;
+    let pr_found =
+        wait_for_event_served(syncing_relay.url(), &pr_event_id, Duration::from_secs(30)).await;
 
     assert!(
         pr_found.is_ok(),
@@ -673,4 +673,462 @@ async fn test_concurrent_state_and_pr_sync() {
     pr_client.disconnect().await;
     syncing_relay.stop().await;
     source_relay.stop().await;
+}
+
+/// Test PR event clone tag sync with relay discovery from announcement tags and partial git data sync
+/// from multiple servers (state and pr git data from different places)
+///
+/// This comprehensive test verifies:
+/// 1. Relay discovery: syncing_relay discovers other relays from announcement's `relays` tag
+/// 2. PR clone tag sync: PR events with `clone` tags have their URLs used during purgatory sync
+/// 3. OID aggregation: OIDs can be aggregated from multiple sources when no single server has all data
+///
+/// ## Key Difference from Bootstrap-Based Sync
+///
+/// Unlike tests that use bootstrap relay configuration, this test:
+/// - Starts syncing_relay with NO bootstrap relay
+/// - Publishes announcement DIRECTLY to syncing_relay
+/// - syncing_relay discovers source_grasp and mock_relay from announcement's `relays` tag
+///
+/// This validates the relay discovery mechanism that allows GRASP relays to find
+/// and sync from other relays listed in repository announcements.
+///
+/// ## Architecture
+///
+/// ```text
+/// ┌─────────────────────────┐     ┌─────────────────────────┐     ┌─────────────────────────┐
+/// │   source_grasp          │     │   mock_relay            │     │   git_server            │
+/// │   (GRASP relay)         │     │   (rust-nostr relay)    │     │   (SimpleGitServer)     │
+/// │                         │     │                         │     │                         │
+/// │ Has:                    │     │ Has:                    │     │ Has:                    │
+/// │ - Announcement          │     │ - PR event              │     │ - PR commit (commit_b)  │
+/// │ - State event (served)  │     │   (served immediately,  │     │   at refs/heads/main    │
+/// │ - refs/heads/main       │     │    no purgatory)        │     │                         │
+/// │   → commit_a            │     │                         │     │ Does NOT have:          │
+/// │                         │     │ PR event has clone tag  │     │ - commit_a              │
+/// │ Does NOT have:          │     │ pointing to git_server  │     │                         │
+/// │ - PR commit (commit_b)  │     │                         │     │                         │
+/// └─────────────────────────┘     └─────────────────────────┘     └─────────────────────────┘
+///             │                               │                               │
+///             └───────────────────────────────┼───────────────────────────────┘
+///                                             ▼
+/// ┌─────────────────────────────────────────────────────────────────────────────────────────┐
+/// │                         syncing_relay (GRASP relay under test)                          │
+/// │                                                                                         │
+/// │ Flow:                                                                                   │
+/// │ 1. Started with NO bootstrap relay (sync enabled but no initial connections)            │
+/// │ 2. Announcement published DIRECTLY to syncing_relay                                     │
+/// │ 3. Relay discovers source_grasp and mock_relay from announcement's `relays` tag         │
+/// │ 4. Syncs state event from source_grasp → purgatory (no commit_a locally)               │
+/// │ 5. Syncs PR event from mock_relay → purgatory (no commit_b locally)                    │
+/// │ 6. Purgatory sync triggers                                                              │
+/// │ 7. Fetches commit_a from source_grasp clone URL (from announcement clone tag)          │
+/// │ 8. Fetches commit_b from git_server (from PR event's clone tag)                        │
+/// │ 9. Both events released when all OIDs available                                         │
+/// │                                                                                         │
+/// │ Result:                                                                                 │
+/// │ - State event served                                                                    │
+/// │ - PR event served                                                                       │
+/// │ - refs/heads/main → commit_a (from source_grasp)                                       │
+/// │ - refs/nostr/<event-id> → commit_b (from git_server via PR clone tag)                  │
+/// └─────────────────────────────────────────────────────────────────────────────────────────┘
+/// ```
+#[tokio::test]
+async fn test_pr_event_clone_tag_sync_with_partial_oid_aggregation_from_multiple_server() {
+    // ========================================================================
+    // Step 1: Setup Repositories
+    // ========================================================================
+
+    // Repo A: main branch with commit_a (for state event)
+    let repo_a = tempfile::tempdir().expect("Failed to create temp dir for repo_a");
+    let commit_a = create_test_repo_with_commit(repo_a.path(), CommitVariant::StateTest)
+        .expect("Failed to create commit_a");
+
+    // Repo B: PR commit (commit_b) - different content
+    let repo_b = tempfile::tempdir().expect("Failed to create temp dir for repo_b");
+    let commit_b = create_test_repo_with_commit(repo_b.path(), CommitVariant::PrTest)
+        .expect("Failed to create commit_b");
+
+    // ========================================================================
+    // Step 2: Start Servers
+    // ========================================================================
+
+    // 1. source_grasp - GRASP relay with main branch data
+    let source_grasp = TestRelay::start().await;
+
+    // 2. mock_relay - rust-nostr relay for PR event (no validation, no purgatory)
+    let mock_relay = MockRelay::start().await;
+
+    // 3. git_server - SimpleGitServer with PR commit only
+    let git_server = SimpleGitServer::start(repo_b.path()).await;
+
+    // 4. Pre-allocate syncing_relay port for announcement tags
+    let syncing_port = TestRelay::find_free_port();
+    let syncing_domain = format!("127.0.0.1:{}", syncing_port);
+
+    // ========================================================================
+    // Step 3: Setup source_grasp with announcement and state event
+    // ========================================================================
+
+    let owner_keys = Keys::generate();
+    let pr_author_keys = Keys::generate();
+    let identifier = "pr-clone-partial-oid-test";
+    let npub = owner_keys
+        .public_key()
+        .to_bech32()
+        .expect("Failed to get npub");
+
+    // Build URLs for announcement
+    // - clone tag: ONLY source_grasp (has main branch data)
+    // - relays tag: source_grasp + mock_relay (mock_relay will serve PR event)
+    let clone_url_source = format!(
+        "http://{}/{}/{}.git",
+        source_grasp.domain(),
+        npub,
+        identifier
+    );
+    let clone_url_syncing = format!("http://{}/{}/{}.git", syncing_domain, npub, identifier);
+
+    // Create announcement with custom clone/relay URLs
+    // Clone URLs: source_grasp + syncing (NOT git_server - PR commit only via PR's clone tag)
+    // Relay URLs: source_grasp + mock_relay + syncing
+    let announcement = nostr_sdk::EventBuilder::new(
+        nostr_sdk::Kind::Custom(30617),
+        "Repository for PR clone tag + partial OID test",
+    )
+    .tags(vec![
+        nostr_sdk::Tag::identifier(identifier),
+        nostr_sdk::Tag::custom(
+            nostr_sdk::TagKind::custom("clone"),
+            vec![clone_url_source.clone(), clone_url_syncing.clone()],
+        ),
+        nostr_sdk::Tag::custom(
+            nostr_sdk::TagKind::custom("relays"),
+            vec![
+                source_grasp.url().to_string(),
+                mock_relay.url().to_string(),
+                format!("ws://{}", syncing_domain),
+            ],
+        ),
+    ])
+    .sign_with_keys(&owner_keys)
+    .expect("Failed to sign announcement");
+
+    // Connect to source_grasp and send announcement
+    let source_client = Client::new(owner_keys.clone());
+    source_client
+        .add_relay(source_grasp.url())
+        .await
+        .expect("Failed to add source_grasp relay");
+    source_client.connect().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    source_client
+        .send_event(&announcement)
+        .await
+        .expect("Failed to send announcement to source_grasp");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Create state event referencing commit_a
+    let state_event = create_state_event(
+        &owner_keys,
+        identifier,
+        &[("main", &commit_a)],
+        &[],
+        &[&clone_url_source, &clone_url_syncing],
+        &[
+            source_grasp.url(),
+            mock_relay.url(),
+            &format!("ws://{}", syncing_domain),
+        ],
+    )
+    .expect("Failed to create state event");
+
+    let state_event_id = state_event.id;
+
+    // Send state event to source_grasp (goes to purgatory - no git data yet)
+    source_client
+        .send_event(&state_event)
+        .await
+        .expect("Failed to send state event to source_grasp");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Push main branch (commit_a) to source_grasp - releases state event
+    push_to_relay(repo_a.path(), &source_grasp.domain(), &npub, identifier)
+        .expect("Push to source_grasp should succeed");
+
+    // Verify state event is served on source_grasp
+    wait_for_event_served(source_grasp.url(), &state_event_id, Duration::from_secs(5))
+        .await
+        .expect("State event should be served on source_grasp after push");
+
+    // ========================================================================
+    // Step 4: Setup mock_relay with PR event
+    // ========================================================================
+
+    // First, send announcement to mock_relay so it has the repo context
+    // This is needed because the sync system filters events based on whether
+    // they reference repos that list our relay
+    let mock_client = Client::new(owner_keys.clone());
+    mock_client
+        .add_relay(mock_relay.url())
+        .await
+        .expect("Failed to add mock_relay for announcement");
+    mock_client.connect().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    mock_client
+        .send_event(&announcement)
+        .await
+        .expect("Failed to send announcement to mock_relay");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let repo_coord = build_repo_coord(&owner_keys, identifier);
+
+    // Create PR event with clone tag pointing to git_server
+    // This is the KEY part - the PR's clone tag provides the URL for commit_b
+    let pr_event = create_pr_event_with_clone(
+        &pr_author_keys,
+        &repo_coord,
+        &commit_b,
+        "Test PR for partial OID aggregation",
+        &[git_server.url()], // Clone URL points to SimpleGitServer
+    )
+    .expect("Failed to create PR event");
+
+    let pr_event_id = pr_event.id;
+
+    // Send PR event to mock_relay
+    // MockRelay accepts all events without validation (no purgatory)
+    let pr_client = Client::new(pr_author_keys.clone());
+    pr_client
+        .add_relay(mock_relay.url())
+        .await
+        .expect("Failed to add mock_relay");
+    pr_client.connect().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    pr_client
+        .send_event(&pr_event)
+        .await
+        .expect("Failed to send PR event to mock_relay");
+
+    // Verify PR event is served on mock_relay (immediate, no purgatory)
+    wait_for_event_served(mock_relay.url(), &pr_event_id, Duration::from_secs(5))
+        .await
+        .expect("PR event should be served on mock_relay immediately");
+
+    // ========================================================================
+    // Step 5: Start syncing_relay WITHOUT bootstrap and publish announcement directly
+    // ========================================================================
+
+    // Start syncing_relay with sync enabled but NO bootstrap relay
+    // This tests relay discovery from announcement's `relays` tag
+    // Note: We disable negentropy because MockRelay doesn't support NIP-77,
+    // and the sync system doesn't properly fall back to REQ+EOSE when negentropy fails.
+    let syncing_relay = TestRelay::start_on_port_with_options(
+        syncing_port,
+        None, // NO bootstrap - relay discovery via announcement tags
+        true, // Disable negentropy - MockRelay doesn't support NIP-77
+    )
+    .await;
+
+    // Publish announcement DIRECTLY to syncing_relay
+    // This triggers relay discovery from the announcement's `relays` tag
+    let syncing_client = Client::new(owner_keys.clone());
+    syncing_client
+        .add_relay(syncing_relay.url())
+        .await
+        .expect("Failed to add syncing_relay");
+    syncing_client.connect().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    syncing_client
+        .send_event(&announcement)
+        .await
+        .expect("Failed to send announcement to syncing_relay");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Wait for relay discovery and sync connections to establish
+    // syncing_relay should discover source_grasp and mock_relay from announcement's relays tag
+    println!("=== Waiting for sync connections ===");
+    println!("syncing_relay URL: {}", syncing_relay.url());
+    println!("source_grasp URL: {}", source_grasp.url());
+    println!("mock_relay URL: {}", mock_relay.url());
+    println!("git_server URL: {}", git_server.url());
+
+    wait_for_sync_connection(syncing_relay.url(), 2, Duration::from_secs(10))
+        .await
+        .expect(
+            "Sync connections should establish to discovered relays (source_grasp + mock_relay)",
+        );
+    println!("Sync connections established!");
+
+    // Debug: Check metrics to see what relays are connected
+    let metrics_url = syncing_relay
+        .url()
+        .replace("ws://", "http://")
+        .replace("/", "")
+        + "/metrics";
+    println!("Checking metrics at: {}", metrics_url);
+    if let Ok(response) = reqwest::get(&metrics_url).await {
+        if let Ok(metrics) = response.text().await {
+            // Print sync-related metrics
+            for line in metrics.lines() {
+                if line.contains("sync") && !line.starts_with('#') {
+                    println!("  {}", line);
+                }
+            }
+        }
+    }
+
+    // Give some time for sync to happen
+    println!("Waiting 10s for events to sync...");
+    tokio::time::sleep(Duration::from_secs(10)).await;
+
+    // Check metrics again after waiting
+    println!("=== Checking metrics after sync wait ===");
+    if let Ok(response) = reqwest::get(&metrics_url).await {
+        if let Ok(metrics) = response.text().await {
+            for line in metrics.lines() {
+                if line.contains("sync") && !line.starts_with('#') {
+                    println!("  {}", line);
+                }
+            }
+        }
+    }
+
+    // Debug: Check if PR event is still on mock_relay
+    println!("=== Debug: Checking PR event on mock_relay ===");
+    let pr_on_mock =
+        wait_for_event_served(mock_relay.url(), &pr_event_id, Duration::from_secs(2)).await;
+    println!("PR event on mock_relay: {:?}", pr_on_mock.is_ok());
+    if let Ok(ref pr) = pr_on_mock {
+        println!("PR event tags:");
+        for tag in pr.tags.iter() {
+            println!("  {:?}", tag.as_slice());
+        }
+    }
+
+    // Debug: Check repo coordinate
+    let repo_coord = build_repo_coord(&owner_keys, identifier);
+    println!("Expected repo coordinate: {}", repo_coord);
+
+    // Debug: Test if mock_relay responds to tag-based filter (Layer 2 style)
+    println!("=== Debug: Testing mock_relay tag filter response ===");
+    let test_client = Client::new(Keys::generate());
+    test_client
+        .add_relay(mock_relay.url())
+        .await
+        .expect("Failed to add mock_relay");
+    test_client.connect().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Build a Layer 2 style filter (by 'a' tag)
+    let tag_filter =
+        Filter::new().custom_tag(SingleLetterTag::lowercase(Alphabet::A), repo_coord.as_str());
+    println!("Tag filter: {:?}", tag_filter);
+
+    let tag_results = test_client
+        .fetch_events(tag_filter, Duration::from_secs(5))
+        .await;
+    match tag_results {
+        Ok(events) => {
+            println!("Tag filter returned {} events", events.len());
+            for event in events.iter() {
+                println!("  Event ID: {}, Kind: {}", event.id, event.kind.as_u16());
+            }
+        }
+        Err(e) => {
+            println!("Tag filter query failed: {:?}", e);
+        }
+    }
+    test_client.disconnect().await;
+
+    // The syncing relay will:
+    // 1. Receive announcement directly (creates bare repo)
+    // 2. Discover source_grasp and mock_relay from announcement's `relays` tag
+    // 3. Connect to discovered relays
+    // 4. Sync state event from source_grasp → purgatory (no commit_a locally)
+    // 5. Sync PR event from mock_relay → purgatory (no commit_b locally)
+    // 6. Purgatory sync triggers
+    // 7. Fetches commit_a from source_grasp clone URL (from announcement clone tag)
+    // 8. Fetches commit_b from git_server (from PR event's clone tag)
+    // 9. Both events released when all OIDs available
+
+    // ========================================================================
+    // Step 6: Verify Results
+    // ========================================================================
+
+    println!("=== Step 6: Verify Results ===");
+    println!("State event ID: {}", state_event_id);
+    println!("PR event ID: {}", pr_event_id);
+    println!("commit_a: {}", commit_a);
+    println!("commit_b: {}", commit_b);
+
+    // Wait for state event to be served on syncing_relay
+    println!("Waiting for state event on syncing_relay...");
+    let state_found = wait_for_event_served(
+        syncing_relay.url(),
+        &state_event_id,
+        Duration::from_secs(30),
+    )
+    .await;
+    println!("State event result: {:?}", state_found);
+    assert!(
+        state_found.is_ok(),
+        "State event should be served on syncing_relay: {:?}",
+        state_found.err()
+    );
+
+    // Wait for PR event to be served on syncing_relay
+    println!("Waiting for PR event on syncing_relay...");
+    let pr_found =
+        wait_for_event_served(syncing_relay.url(), &pr_event_id, Duration::from_secs(30)).await;
+    println!("PR event result: {:?}", pr_found);
+    assert!(
+        pr_found.is_ok(),
+        "PR event should be served on syncing_relay (fetched commit_b from git_server via PR clone tag): {:?}",
+        pr_found.err()
+    );
+
+    // Verify refs/heads/main → commit_a (from source_grasp)
+    let main_correct = check_ref_at_commit(
+        &syncing_domain,
+        &npub,
+        identifier,
+        "refs/heads/main",
+        &commit_a,
+    )
+    .await
+    .expect("Failed to check main ref");
+    assert!(
+        main_correct,
+        "main should point to commit_a ({}) from source_grasp",
+        commit_a
+    );
+
+    // Verify refs/nostr/<event-id> → commit_b (from git_server via PR clone tag)
+    let pr_ref = format!("refs/nostr/{}", pr_event_id.to_hex());
+    let pr_correct = check_ref_at_commit(&syncing_domain, &npub, identifier, &pr_ref, &commit_b)
+        .await
+        .expect("Failed to check PR ref");
+    assert!(
+        pr_correct,
+        "PR ref should point to commit_b ({}) fetched from git_server via PR clone tag",
+        commit_b
+    );
+
+    // ========================================================================
+    // Step 7: Cleanup
+    // ========================================================================
+
+    source_client.disconnect().await;
+    mock_client.disconnect().await;
+    pr_client.disconnect().await;
+    syncing_client.disconnect().await;
+    git_server.stop().await;
+    mock_relay.stop().await;
+    syncing_relay.stop().await;
+    source_grasp.stop().await;
 }

@@ -271,6 +271,60 @@ pub fn create_pr_event(
         .map_err(|e| format!("Failed to sign PR event: {}", e))
 }
 
+/// Create a PR event (kind 1618) with clone URLs.
+///
+/// Creates a properly formatted NIP-34 PR event that references a repository
+/// via an `a` tag, includes the commit hash via a `c` tag, and specifies
+/// clone URLs where the PR commit can be fetched from.
+///
+/// Per NIP-34, PR events can include a `clone` tag:
+/// ```jsonc
+/// {
+///   "kind": 1618,
+///   "tags": [
+///     ["c", "<current-commit-id>"],
+///     ["clone", "<clone-url>", ...], // at least one git clone url where commit can be downloaded
+///     // ...
+///   ]
+/// }
+/// ```
+///
+/// # Arguments
+/// * `keys` - Keys for signing
+/// * `repo_coord` - Repository coordinate (format: "30617:pubkey_hex:identifier")
+/// * `commit_hash` - The commit hash (c-tag)
+/// * `title` - PR title (used as content)
+/// * `clone_urls` - Clone URLs where the PR commit can be fetched
+///
+/// # Returns
+/// * `Ok(Event)` - Signed PR event ready to send
+/// * `Err(String)` - If signing fails
+pub fn create_pr_event_with_clone(
+    keys: &Keys,
+    repo_coord: &str,
+    commit_hash: &str,
+    title: &str,
+    clone_urls: &[&str],
+) -> Result<Event, String> {
+    let mut tags = vec![
+        // a-tag referencing the repository
+        Tag::custom(TagKind::custom("a"), vec![repo_coord.to_string()]),
+        // c-tag with the commit hash
+        Tag::custom(TagKind::custom("c"), vec![commit_hash.to_string()]),
+    ];
+
+    // Add clone URLs if provided
+    if !clone_urls.is_empty() {
+        let urls: Vec<String> = clone_urls.iter().map(|s| s.to_string()).collect();
+        tags.push(Tag::custom(TagKind::Clone, urls));
+    }
+
+    EventBuilder::new(Kind::Custom(KIND_PR), title)
+        .tags(tags)
+        .sign_with_keys(keys)
+        .map_err(|e| format!("Failed to sign PR event: {}", e))
+}
+
 /// Build a repository coordinate string for use in 'a' tags.
 ///
 /// Format: `30617:pubkey_hex:identifier`
@@ -737,5 +791,66 @@ mod tests {
         assert!(output.status.success());
         let branch_commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
         assert_eq!(branch_commit, commit_hash);
+    }
+
+    #[test]
+    fn test_create_pr_event_with_clone_has_correct_tags() {
+        let keys = Keys::generate();
+        let repo_coord = build_repo_coord(&keys, "test-repo");
+        let event = create_pr_event_with_clone(
+            &keys,
+            &repo_coord,
+            "abc123def456",
+            "Test PR with clone",
+            &["http://fork-server.com/repo.git", "http://another-server.com/repo.git"],
+        )
+        .expect("Failed to create PR event with clone");
+
+        assert_eq!(event.kind.as_u16(), KIND_PR);
+
+        // Check a-tag
+        let has_a_tag = event.tags.iter().any(|tag| {
+            let slice = tag.as_slice();
+            slice.first().is_some_and(|t| t == "a") && slice.get(1).is_some_and(|v| v == &repo_coord)
+        });
+        assert!(has_a_tag, "Event should have 'a' tag");
+
+        // Check c-tag
+        let has_c_tag = event.tags.iter().any(|tag| {
+            let slice = tag.as_slice();
+            slice.first().is_some_and(|t| t == "c")
+                && slice.get(1).is_some_and(|v| v == "abc123def456")
+        });
+        assert!(has_c_tag, "Event should have 'c' tag with commit");
+
+        // Check clone tag with both URLs
+        let has_clone_tag = event.tags.iter().any(|tag| {
+            let slice = tag.as_slice();
+            slice.first().is_some_and(|t| t == "clone")
+                && slice.get(1).is_some_and(|v| v == "http://fork-server.com/repo.git")
+                && slice.get(2).is_some_and(|v| v == "http://another-server.com/repo.git")
+        });
+        assert!(has_clone_tag, "Event should have 'clone' tag with URLs");
+    }
+
+    #[test]
+    fn test_create_pr_event_with_clone_empty_urls() {
+        let keys = Keys::generate();
+        let repo_coord = build_repo_coord(&keys, "test-repo");
+        let event = create_pr_event_with_clone(
+            &keys,
+            &repo_coord,
+            "abc123def456",
+            "Test PR without clone URLs",
+            &[], // Empty clone URLs
+        )
+        .expect("Failed to create PR event");
+
+        // Should not have clone tag when no URLs provided
+        let has_clone_tag = event.tags.iter().any(|tag| {
+            let slice = tag.as_slice();
+            slice.first().is_some_and(|t| t == "clone")
+        });
+        assert!(!has_clone_tag, "Event should not have 'clone' tag when no URLs provided");
     }
 }
