@@ -13,7 +13,10 @@ mod state;
 pub use announcement::{AnnouncementPolicy, AnnouncementResult};
 pub use pr_event::PrEventPolicy;
 pub use related::{ReferenceResult, RelatedEventPolicy};
-pub use state::{AlignmentResult, StatePolicy, StateResult};
+pub use state::{StatePolicy, StateResult};
+
+// Re-export AlignmentResult from git::sync (canonical location)
+pub use crate::git::sync::AlignmentResult;
 
 use super::SharedDatabase;
 use crate::purgatory::Purgatory;

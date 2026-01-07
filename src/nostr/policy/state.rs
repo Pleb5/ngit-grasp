@@ -10,27 +10,9 @@ use nostr_relay_builder::prelude::Event;
 
 use super::PolicyContext;
 use crate::git::authorization::{collect_authorized_maintainers, fetch_repository_data};
+use crate::git::sync::align_repository_with_state;
 use crate::git::{self};
 use crate::nostr::events::{validate_state, RepositoryAnnouncement, RepositoryState};
-
-/// Result of aligning a repository with authorized state
-#[derive(Debug, Default)]
-pub struct AlignmentResult {
-    /// Number of refs created
-    pub refs_created: usize,
-    /// Number of refs updated
-    pub refs_updated: usize,
-    /// Number of refs deleted
-    pub refs_deleted: usize,
-    /// Whether HEAD was set
-    pub head_set: bool,
-}
-
-impl AlignmentResult {
-    pub fn has_changes(&self) -> bool {
-        self.refs_created > 0 || self.refs_updated > 0 || self.refs_deleted > 0 || self.head_set
-    }
-}
 
 /// Result of state policy evaluation
 #[derive(Debug)]
@@ -146,7 +128,7 @@ impl StatePolicy {
                                     }
                                 }
 
-                                let result = self.align_repository_with_state(&repo_path, &state);
+                                let result = align_repository_with_state(&repo_path, &state);
                                 repo_count += 1;
                                 tracing::info!(
                                     "Aligned {} with state: created={}, updated={}, deleted={}, head_set={}",
@@ -192,177 +174,6 @@ impl StatePolicy {
                 message: "purgatory: won't be served until git data arrives".into(),
             })
         }
-    }
-
-    /// Align a repository's refs with the authorized state
-    ///
-    /// This function:
-    /// 1. Deletes refs that are in the repo but not in the state (for refs/heads/ and refs/tags/)
-    /// 2. Updates refs that exist in state if we have the commit
-    /// 3. Sets HEAD if the HEAD branch's commit is available
-    pub fn align_repository_with_state(
-        &self,
-        repo_path: &std::path::Path,
-        state: &RepositoryState,
-    ) -> AlignmentResult {
-        let mut result = AlignmentResult::default();
-
-        // Check if repository exists
-        if !repo_path.exists() {
-            tracing::debug!(
-                "Repository not found at {}, cannot align with state",
-                repo_path.display()
-            );
-            return result;
-        }
-
-        // Get current refs from the repository
-        let current_refs = match git::list_refs(repo_path) {
-            Ok(refs) => refs,
-            Err(e) => {
-                tracing::warn!("Failed to list refs in {}: {}", repo_path.display(), e);
-                return result;
-            }
-        };
-
-        // Build expected refs from state
-        let mut expected_refs: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-
-        for branch in &state.branches {
-            let ref_name = format!("refs/heads/{}", branch.name);
-            expected_refs.insert(ref_name, branch.commit.clone());
-        }
-
-        for tag in &state.tags {
-            let ref_name = format!("refs/tags/{}", tag.name);
-            expected_refs.insert(ref_name, tag.commit.clone());
-        }
-
-        // Process current refs: update or delete as needed
-        for (ref_name, current_commit) in &current_refs {
-            // Only process refs/heads/ and refs/tags/
-            if !ref_name.starts_with("refs/heads/") && !ref_name.starts_with("refs/tags/") {
-                continue;
-            }
-
-            match expected_refs.get(ref_name) {
-                Some(expected_commit) => {
-                    // Ref should exist - check if commit matches
-                    if current_commit != expected_commit {
-                        // Check if we have the expected commit
-                        if git::commit_exists(repo_path, expected_commit) {
-                            // Update the ref
-                            match git::update_ref(repo_path, ref_name, expected_commit) {
-                                Ok(()) => {
-                                    tracing::info!(
-                                        "Updated {} from {} to {} in {}",
-                                        ref_name,
-                                        current_commit,
-                                        expected_commit,
-                                        repo_path.display()
-                                    );
-                                    result.refs_updated += 1;
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Failed to update {} in {}: {}",
-                                        ref_name,
-                                        repo_path.display(),
-                                        e
-                                    );
-                                }
-                            }
-                        } else {
-                            tracing::debug!(
-                                "Commit {} not available for {} in {}",
-                                expected_commit,
-                                ref_name,
-                                repo_path.display()
-                            );
-                        }
-                    }
-                }
-                None => {
-                    // Ref should not exist - delete it
-                    match git::delete_ref(repo_path, ref_name) {
-                        Ok(()) => {
-                            tracing::info!(
-                                "Deleted {} (not in state) from {}",
-                                ref_name,
-                                repo_path.display()
-                            );
-                            result.refs_deleted += 1;
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to delete {} from {}: {}",
-                                ref_name,
-                                repo_path.display(),
-                                e
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        // Add refs that exist in state but not in repo (if we have the commit)
-        for (ref_name, expected_commit) in &expected_refs {
-            let exists = current_refs.iter().any(|(r, _)| r == ref_name);
-            if !exists && git::commit_exists(repo_path, expected_commit) {
-                match git::update_ref(repo_path, ref_name, expected_commit) {
-                    Ok(()) => {
-                        tracing::info!(
-                            "Created {} at {} in {}",
-                            ref_name,
-                            expected_commit,
-                            repo_path.display()
-                        );
-                        result.refs_created += 1;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to create {} in {}: {}",
-                            ref_name,
-                            repo_path.display(),
-                            e
-                        );
-                    }
-                }
-            }
-        }
-
-        // Set HEAD if specified in state
-        if let Some(head_ref) = &state.head {
-            if let Some(branch_name) = state.get_head_branch() {
-                if let Some(head_commit) = state.get_branch_commit(branch_name) {
-                    match git::try_set_head_if_available(repo_path, head_ref, head_commit) {
-                        Ok(true) => {
-                            tracing::info!(
-                                "Set HEAD to {} in {} (from state by {})",
-                                head_ref,
-                                repo_path.display(),
-                                state.event.pubkey.to_hex()
-                            );
-                            result.head_set = true;
-                        }
-                        Ok(false) => {
-                            tracing::debug!(
-                                "HEAD commit {} not available yet in {}",
-                                head_commit,
-                                repo_path.display()
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to set HEAD in {}: {}", repo_path.display(), e);
-                        }
-                    }
-                }
-            }
-        }
-
-        result
     }
 
     /// Copy missing OIDs from a source repository to a target repository
