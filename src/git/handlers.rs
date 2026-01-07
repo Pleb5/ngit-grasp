@@ -181,6 +181,7 @@ pub async fn handle_upload_pack(
 /// * `identifier` - The repository identifier (d tag) for authorization lookup
 /// * `owner_pubkey` - The owner's public key (hex) from the URL path, scoping authorization
 /// * `git_data_path` - Base path for git repositories (for syncing to other owner repos)
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_receive_pack(
     repo_path: PathBuf,
     request_body: Bytes,
@@ -204,7 +205,7 @@ pub async fn handle_receive_pack(
     );
 
     // check push is authorised
-    let auth_result = match authorize_push(
+    let _auth_result = match authorize_push(
         &database,
         identifier,
         owner_pubkey,

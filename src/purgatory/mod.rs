@@ -61,7 +61,7 @@ pub struct Purgatory {
     /// Maps repository identifier to sync queue entry with timing/backoff state.
     sync_queue: Arc<DashMap<String, SyncQueueEntry>>,
 
-    git_data_path: PathBuf,
+    _git_data_path: PathBuf,
 }
 
 impl Purgatory {
@@ -71,7 +71,7 @@ impl Purgatory {
             state_events: Arc::new(DashMap::new()),
             pr_events: Arc::new(DashMap::new()),
             sync_queue: Arc::new(DashMap::new()),
-            git_data_path: git_data_path.into(),
+            _git_data_path: git_data_path.into(),
         }
     }
 
@@ -135,7 +135,7 @@ impl Purgatory {
         if self
             .state_events
             .get(identifier)
-            .map_or(false, |entries| !entries.is_empty())
+            .is_some_and(|entries| !entries.is_empty())
         {
             return true;
         }

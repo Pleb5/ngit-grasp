@@ -1310,7 +1310,7 @@ async fn process_purgatory_pr_events(
 fn extract_owner_from_repo_path(repo_path: &Path, git_data_path: &Path) -> Option<String> {
     let relative = repo_path.strip_prefix(git_data_path).ok()?;
     let components: Vec<_> = relative.components().collect();
-    if components.len() >= 1 {
+    if !components.is_empty() {
         components[0].as_os_str().to_str().map(|s| s.to_string())
     } else {
         None

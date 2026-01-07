@@ -35,7 +35,7 @@ fn extract_domain(url: &str) -> Option<String> {
     let url = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
     
     // Remove user info if present (e.g., "user@host" -> "host")
-    let url = url.split('@').last()?;
+    let url = url.split('@').next_back()?;
     
     // Extract host (before first '/' or ':')
     let host = url.split('/').next()?;
@@ -63,7 +63,7 @@ fn extract_domain(url: &str) -> Option<String> {
 /// * `ctx` - The sync context providing repository data and OID information
 /// * `identifier` - The repository identifier (d-tag value)
 /// * `domain` - If Some, only return URLs from this specific domain.
-///              If None, return any non-throttled URL.
+///   If None, return any non-throttled URL.
 /// * `tried_urls` - URLs that have already been tried (will be skipped)
 /// * `throttle_manager` - Used to check if domains are throttled (when domain is None)
 ///
@@ -126,7 +126,7 @@ pub async fn sync_identifier_next_url<C: SyncContext + ?Sized>(
     // Merge and filter out our domain
     let all_urls: HashSet<String> = announcement_urls
         .union(&pr_urls)
-        .filter(|url| our_domain.map_or(true, |d| !url.contains(d)))
+        .filter(|url| our_domain.is_none_or(|d| !url.contains(d)))
         .cloned()
         .collect();
 
@@ -231,7 +231,7 @@ pub async fn get_throttled_domains_with_untried_urls<C: SyncContext + ?Sized>(
     // Merge and filter out our domain
     let all_urls: HashSet<String> = announcement_urls
         .union(&pr_urls)
-        .filter(|url| our_domain.map_or(true, |d| !url.contains(d)))
+        .filter(|url| our_domain.is_none_or(|d| !url.contains(d)))
         .cloned()
         .collect();
 

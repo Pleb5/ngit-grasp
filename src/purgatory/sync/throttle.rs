@@ -152,7 +152,7 @@ impl DomainThrottle {
         while self
             .request_times
             .front()
-            .map_or(false, |t| now.duration_since(*t) >= window)
+            .is_some_and(|t| now.duration_since(*t) >= window)
         {
             self.request_times.pop_front();
         }
@@ -299,7 +299,7 @@ impl ThrottleManager {
     /// Returns true if the domain has no capacity for another request,
     /// either due to concurrent limit or rate limit.
     pub fn is_throttled(&self, domain: &str) -> bool {
-        self.throttles.get(domain).map_or(false, |entry| {
+        self.throttles.get(domain).is_some_and(|entry| {
             let throttle = entry.lock().unwrap();
             !throttle.has_capacity()
         })
