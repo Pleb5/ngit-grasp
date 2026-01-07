@@ -7,5 +7,7 @@
 //! - Debouncing for burst event arrivals
 
 mod queue;
+mod throttle;
 
 pub use queue::SyncQueueEntry;
+pub use throttle::DomainThrottle;

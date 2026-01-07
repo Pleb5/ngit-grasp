@@ -1435,6 +1435,7 @@ dependencies = [
  "http-body-util",
  "hyper 1.8.1",
  "hyper-util",
+ "indexmap",
  "lazy_static",
  "nostr-lmdb",
  "nostr-relay-builder",
