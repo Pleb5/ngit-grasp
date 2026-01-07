@@ -7,10 +7,15 @@
 //! - Debouncing for burst event arrivals
 
 mod context;
+mod functions;
 mod queue;
 mod throttle;
 
 pub use context::{ProcessResult, SyncContext};
+pub use functions::{
+    get_throttled_domains_with_untried_urls, sync_identifier_from_url, sync_identifier_next_url,
+    ThrottledDomainInfo,
+};
 pub use queue::SyncQueueEntry;
 pub use throttle::{DomainThrottle, ThrottleManager};
 
