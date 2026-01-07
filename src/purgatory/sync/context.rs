@@ -1,0 +1,546 @@
+//! Sync context abstraction for testability.
+//!
+//! This module provides the `SyncContext` trait which abstracts external dependencies
+//! for sync operations. This allows unit testing of sync logic by mocking:
+//! - Repository data fetching
+//! - OID existence checks
+//! - Git fetch operations
+//! - Event processing
+//!
+//! The real implementation (`RealSyncContext`) connects to actual database, git,
+//! and relay systems. The mock implementation (`MockSyncContext`) is used in tests.
+
+use anyhow::Result;
+use async_trait::async_trait;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
+use crate::git::authorization::RepositoryData;
+
+/// Result of processing newly available git data.
+///
+/// This struct captures what happened when we tried to release events from
+/// purgatory after new git data became available.
+#[derive(Debug, Default, Clone)]
+pub struct ProcessResult {
+    /// Number of state events released from purgatory
+    pub states_released: usize,
+    /// Number of PR events released from purgatory
+    pub prs_released: usize,
+    /// Number of repositories synced (OIDs copied + refs aligned)
+    pub repos_synced: usize,
+    /// Number of refs created across all repos
+    pub refs_created: usize,
+    /// Number of refs updated across all repos
+    pub refs_updated: usize,
+    /// Number of refs deleted across all repos
+    pub refs_deleted: usize,
+    /// Errors encountered (non-fatal)
+    pub errors: Vec<String>,
+}
+
+impl ProcessResult {
+    /// Check if any events were released
+    pub fn released_any(&self) -> bool {
+        self.states_released > 0 || self.prs_released > 0
+    }
+}
+
+/// Abstraction over external dependencies for sync operations.
+///
+/// This trait allows unit testing of sync logic by mocking:
+/// - Repository data fetching
+/// - OID existence checks
+/// - Git fetch operations
+/// - Event processing
+///
+/// # Implementation Notes
+///
+/// The real implementation (`RealSyncContext`) holds references to purgatory,
+/// database, etc., and the `process_newly_available_git_data` method delegates
+/// to the unified function. This keeps the sync logic functions
+/// (`sync_identifier_next_url`, `sync_identifier_from_url`) clean and testable
+/// with mocks.
+#[async_trait]
+pub trait SyncContext: Send + Sync {
+    /// Get repository data (announcements, clone URLs, etc.) from the database.
+    ///
+    /// # Arguments
+    /// * `identifier` - The repository identifier (d-tag value)
+    ///
+    /// # Returns
+    /// Repository data including announcements and state events
+    async fn fetch_repository_data(&self, identifier: &str) -> Result<RepositoryData>;
+
+    /// Get all OIDs needed for purgatory events with this identifier.
+    ///
+    /// This collects commit hashes from:
+    /// - State events in purgatory (branch/tag commits)
+    /// - PR events in purgatory (commit hash from c-tag)
+    ///
+    /// # Arguments
+    /// * `identifier` - The repository identifier
+    ///
+    /// # Returns
+    /// Set of OID strings (commit hashes) that are still needed
+    fn collect_needed_oids(&self, identifier: &str) -> HashSet<String>;
+
+    /// Check if an OID exists locally in a repository.
+    ///
+    /// # Arguments
+    /// * `repo_path` - Path to the git repository
+    /// * `oid` - The object ID (commit hash) to check
+    ///
+    /// # Returns
+    /// true if the OID exists in the repository
+    fn oid_exists(&self, repo_path: &Path, oid: &str) -> bool;
+
+    /// Fetch OIDs from a remote server.
+    ///
+    /// Attempts to fetch the specified OIDs from the given URL into the
+    /// local repository.
+    ///
+    /// # Arguments
+    /// * `repo_path` - Path to the local git repository
+    /// * `url` - Remote URL to fetch from
+    /// * `oids` - List of OIDs to fetch
+    ///
+    /// # Returns
+    /// List of OIDs that were successfully fetched
+    async fn fetch_oids(
+        &self,
+        repo_path: &Path,
+        url: &str,
+        oids: &[String],
+    ) -> Result<Vec<String>>;
+
+    /// Process newly available git data.
+    ///
+    /// This is called after each successful OID fetch to check if any purgatory
+    /// events can now be satisfied with the available git data.
+    ///
+    /// The function:
+    /// 1. Discovers satisfiable events from purgatory
+    /// 2. Syncs OIDs to authorized owner repos
+    /// 3. Aligns refs (+ sets HEAD)
+    /// 4. Saves events to database
+    /// 5. Notifies WebSocket subscribers
+    /// 6. Removes from purgatory
+    ///
+    /// # Arguments
+    /// * `source_repo_path` - Path to the repository that has the new git data
+    /// * `new_oids` - Set of OIDs that were just fetched
+    ///
+    /// # Returns
+    /// Result describing what was processed
+    async fn process_newly_available_git_data(
+        &self,
+        source_repo_path: &Path,
+        new_oids: &HashSet<String>,
+    ) -> Result<ProcessResult>;
+
+    /// Check if there are still pending events for this identifier.
+    ///
+    /// Returns true if purgatory has state events or PR events for this identifier.
+    ///
+    /// # Arguments
+    /// * `identifier` - The repository identifier
+    fn has_pending_events(&self, identifier: &str) -> bool;
+
+    /// Find the best local repository to fetch into.
+    ///
+    /// Given repository data from the database, finds an existing local repository
+    /// that can be used as the fetch target. Typically returns the first owner's
+    /// repository that exists on disk.
+    ///
+    /// # Arguments
+    /// * `db_repo_data` - Repository data from the database
+    ///
+    /// # Returns
+    /// Path to the target repository, or None if no suitable repo exists
+    fn find_target_repo(&self, db_repo_data: &RepositoryData) -> Option<PathBuf>;
+
+    /// Get our domain (to exclude from clone URLs).
+    ///
+    /// When syncing, we don't want to fetch from ourselves. This returns our
+    /// domain so it can be filtered out of clone URL lists.
+    fn our_domain(&self) -> Option<&str>;
+}
+
+// =============================================================================
+// Mock Implementation for Testing
+// =============================================================================
+
+#[cfg(test)]
+pub mod mock {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::RwLock;
+
+    /// Mock context for testing sync logic without I/O.
+    ///
+    /// This mock allows tests to:
+    /// - Configure repository data (URLs, announcements)
+    /// - Specify which OIDs are needed
+    /// - Configure which URLs provide which OIDs
+    /// - Track fetch attempts for assertions
+    /// - Control whether events are "pending"
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mock = MockSyncContext::new()
+    ///     .with_urls(&["https://github.com/foo/bar.git", "https://gitlab.com/foo/bar.git"])
+    ///     .with_needed_oids(&["abc123", "def456"])
+    ///     .url_provides("https://github.com/foo/bar.git", &["abc123"]);
+    ///
+    /// // Use mock in tests...
+    /// assert_eq!(mock.fetch_log(), vec!["https://github.com/foo/bar.git"]);
+    /// ```
+    pub struct MockSyncContext {
+        /// Repository data to return from fetch_repository_data
+        repo_data: RwLock<Option<RepositoryData>>,
+
+        /// Clone URLs available for the repository
+        clone_urls: Vec<String>,
+
+        /// OIDs still needed (decremented when "fetched")
+        needed_oids: RwLock<HashSet<String>>,
+
+        /// Which OIDs each URL can provide
+        url_provides_oids: HashMap<String, HashSet<String>>,
+
+        /// Track fetch attempts for assertions
+        fetch_log: RwLock<Vec<String>>,
+
+        /// Whether there are pending events
+        has_pending: RwLock<bool>,
+
+        /// Our domain (to exclude from clone URLs)
+        our_domain: Option<String>,
+
+        /// Path to return from find_target_repo
+        target_repo_path: Option<PathBuf>,
+
+        /// Whether fetch_oids should fail
+        fetch_should_fail: RwLock<HashSet<String>>,
+
+        /// Results from process_newly_available_git_data calls
+        process_results: RwLock<Vec<ProcessResult>>,
+    }
+
+    impl Default for MockSyncContext {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl MockSyncContext {
+        /// Create a new mock context with default settings.
+        pub fn new() -> Self {
+            Self {
+                repo_data: RwLock::new(None),
+                clone_urls: Vec::new(),
+                needed_oids: RwLock::new(HashSet::new()),
+                url_provides_oids: HashMap::new(),
+                fetch_log: RwLock::new(Vec::new()),
+                has_pending: RwLock::new(true),
+                our_domain: None,
+                target_repo_path: Some(PathBuf::from("/tmp/test-repo")),
+                fetch_should_fail: RwLock::new(HashSet::new()),
+                process_results: RwLock::new(Vec::new()),
+            }
+        }
+
+        /// Configure clone URLs for the repository.
+        pub fn with_urls(mut self, urls: &[&str]) -> Self {
+            self.clone_urls = urls.iter().map(|s| s.to_string()).collect();
+            self
+        }
+
+        /// Configure OIDs that are still needed.
+        pub fn with_needed_oids(self, oids: &[&str]) -> Self {
+            *self.needed_oids.write().unwrap() = oids.iter().map(|s| s.to_string()).collect();
+            self
+        }
+
+        /// Configure which OIDs a specific URL can provide.
+        pub fn url_provides(mut self, url: &str, oids: &[&str]) -> Self {
+            self.url_provides_oids.insert(
+                url.to_string(),
+                oids.iter().map(|s| s.to_string()).collect(),
+            );
+            self
+        }
+
+        /// Configure our domain (to be excluded from clone URLs).
+        pub fn with_our_domain(mut self, domain: &str) -> Self {
+            self.our_domain = Some(domain.to_string());
+            self
+        }
+
+        /// Configure the target repo path.
+        pub fn with_target_repo(mut self, path: &str) -> Self {
+            self.target_repo_path = Some(PathBuf::from(path));
+            self
+        }
+
+        /// Configure whether there are pending events.
+        pub fn with_pending_events(self, has_pending: bool) -> Self {
+            *self.has_pending.write().unwrap() = has_pending;
+            self
+        }
+
+        /// Configure a URL to fail when fetched.
+        pub fn url_should_fail(self, url: &str) -> Self {
+            self.fetch_should_fail
+                .write()
+                .unwrap()
+                .insert(url.to_string());
+            self
+        }
+
+        /// Get the log of fetch attempts (URLs that were fetched from).
+        pub fn fetch_log(&self) -> Vec<String> {
+            self.fetch_log.read().unwrap().clone()
+        }
+
+        /// Clear the fetch log.
+        pub fn clear_fetch_log(&self) {
+            self.fetch_log.write().unwrap().clear();
+        }
+
+        /// Get the current set of needed OIDs.
+        pub fn current_needed_oids(&self) -> HashSet<String> {
+            self.needed_oids.read().unwrap().clone()
+        }
+
+        /// Set whether there are pending events (can be called during test).
+        pub fn set_pending_events(&self, has_pending: bool) {
+            *self.has_pending.write().unwrap() = has_pending;
+        }
+
+        /// Mark specific OIDs as no longer needed (simulates successful fetch).
+        pub fn mark_oids_fetched(&self, oids: &[&str]) {
+            let mut needed = self.needed_oids.write().unwrap();
+            for oid in oids {
+                needed.remove(*oid);
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SyncContext for MockSyncContext {
+        async fn fetch_repository_data(&self, _identifier: &str) -> Result<RepositoryData> {
+            // Return stored repo_data or create a minimal one with clone URLs
+            if let Some(data) = self.repo_data.read().unwrap().as_ref() {
+                // Clone the data - this is a test mock so efficiency isn't critical
+                Ok(RepositoryData {
+                    announcements: data.announcements.clone(),
+                    states: data.states.clone(),
+                })
+            } else {
+                // Create minimal repo data with just clone URLs
+                // In real tests, you'd set up proper announcements
+                use crate::nostr::events::RepositoryAnnouncement;
+                use nostr_sdk::{EventBuilder, Keys, Kind};
+
+                let keys = Keys::generate();
+                let mut announcements = Vec::new();
+
+                if !self.clone_urls.is_empty() {
+                    // Create a minimal announcement with the clone URLs
+                    let mut tags = vec![nostr_sdk::Tag::custom(
+                        nostr_sdk::TagKind::Custom("d".into()),
+                        vec!["test-repo".to_string()],
+                    )];
+
+                    for url in &self.clone_urls {
+                        tags.push(nostr_sdk::Tag::custom(
+                            nostr_sdk::TagKind::Custom("clone".into()),
+                            vec![url.clone()],
+                        ));
+                    }
+
+                    let event = EventBuilder::new(Kind::from(30617), "")
+                        .tags(tags)
+                        .sign_with_keys(&keys)
+                        .unwrap();
+
+                    if let Ok(ann) = RepositoryAnnouncement::from_event(event) {
+                        announcements.push(ann);
+                    }
+                }
+
+                Ok(RepositoryData {
+                    announcements,
+                    states: Vec::new(),
+                })
+            }
+        }
+
+        fn collect_needed_oids(&self, _identifier: &str) -> HashSet<String> {
+            self.needed_oids.read().unwrap().clone()
+        }
+
+        fn oid_exists(&self, _repo_path: &Path, oid: &str) -> bool {
+            // OID exists if it's NOT in the needed set
+            !self.needed_oids.read().unwrap().contains(oid)
+        }
+
+        async fn fetch_oids(
+            &self,
+            _repo_path: &Path,
+            url: &str,
+            oids: &[String],
+        ) -> Result<Vec<String>> {
+            // Log the fetch attempt
+            self.fetch_log.write().unwrap().push(url.to_string());
+
+            // Check if this URL should fail
+            if self.fetch_should_fail.read().unwrap().contains(url) {
+                return Err(anyhow::anyhow!("Simulated fetch failure for {}", url));
+            }
+
+            // Get OIDs this URL can provide
+            let provides = self
+                .url_provides_oids
+                .get(url)
+                .cloned()
+                .unwrap_or_default();
+
+            // Find which requested OIDs this URL can provide
+            let fetched: Vec<String> = oids
+                .iter()
+                .filter(|oid| provides.contains(*oid))
+                .cloned()
+                .collect();
+
+            // Remove fetched OIDs from needed set
+            {
+                let mut needed = self.needed_oids.write().unwrap();
+                for oid in &fetched {
+                    needed.remove(oid);
+                }
+            }
+
+            Ok(fetched)
+        }
+
+        async fn process_newly_available_git_data(
+            &self,
+            _source_repo_path: &Path,
+            _new_oids: &HashSet<String>,
+        ) -> Result<ProcessResult> {
+            // Return a default result - tests can check if this was called
+            let result = ProcessResult::default();
+            self.process_results.write().unwrap().push(result.clone());
+            Ok(result)
+        }
+
+        fn has_pending_events(&self, _identifier: &str) -> bool {
+            *self.has_pending.read().unwrap()
+        }
+
+        fn find_target_repo(&self, _db_repo_data: &RepositoryData) -> Option<PathBuf> {
+            self.target_repo_path.clone()
+        }
+
+        fn our_domain(&self) -> Option<&str> {
+            self.our_domain.as_deref()
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn mock_tracks_fetch_attempts() {
+            let mock = MockSyncContext::new()
+                .with_urls(&["https://github.com/foo/bar.git"])
+                .with_needed_oids(&["abc123"]);
+
+            // Fetch should log the URL
+            let _ = mock
+                .fetch_oids(
+                    Path::new("/tmp"),
+                    "https://github.com/foo/bar.git",
+                    &["abc123".to_string()],
+                )
+                .await;
+
+            assert_eq!(
+                mock.fetch_log(),
+                vec!["https://github.com/foo/bar.git".to_string()]
+            );
+        }
+
+        #[tokio::test]
+        async fn mock_provides_configured_oids() {
+            let mock = MockSyncContext::new()
+                .with_needed_oids(&["abc123", "def456"])
+                .url_provides("https://github.com/foo/bar.git", &["abc123"]);
+
+            let fetched = mock
+                .fetch_oids(
+                    Path::new("/tmp"),
+                    "https://github.com/foo/bar.git",
+                    &["abc123".to_string(), "def456".to_string()],
+                )
+                .await
+                .unwrap();
+
+            // Only abc123 should be fetched (it's what the URL provides)
+            assert_eq!(fetched, vec!["abc123".to_string()]);
+
+            // abc123 should no longer be needed
+            let needed = mock.current_needed_oids();
+            assert!(!needed.contains("abc123"));
+            assert!(needed.contains("def456"));
+        }
+
+        #[tokio::test]
+        async fn mock_url_failure() {
+            let mock = MockSyncContext::new()
+                .with_needed_oids(&["abc123"])
+                .url_should_fail("https://bad-server.com/repo.git");
+
+            let result = mock
+                .fetch_oids(
+                    Path::new("/tmp"),
+                    "https://bad-server.com/repo.git",
+                    &["abc123".to_string()],
+                )
+                .await;
+
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn mock_oid_exists_reflects_needed_state() {
+            let mock = MockSyncContext::new().with_needed_oids(&["abc123"]);
+
+            // abc123 is needed, so it doesn't exist
+            assert!(!mock.oid_exists(Path::new("/tmp"), "abc123"));
+
+            // def456 is not needed, so it "exists"
+            assert!(mock.oid_exists(Path::new("/tmp"), "def456"));
+
+            // Mark abc123 as fetched
+            mock.mark_oids_fetched(&["abc123"]);
+
+            // Now it exists
+            assert!(mock.oid_exists(Path::new("/tmp"), "abc123"));
+        }
+
+        #[test]
+        fn mock_pending_events_controllable() {
+            let mock = MockSyncContext::new().with_pending_events(true);
+            assert!(mock.has_pending_events("test-repo"));
+
+            mock.set_pending_events(false);
+            assert!(!mock.has_pending_events("test-repo"));
+        }
+    }
+}

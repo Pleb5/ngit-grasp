@@ -6,8 +6,13 @@
 //! - Exponential backoff per identifier (20s → 2m, then 2m intervals)
 //! - Debouncing for burst event arrivals
 
+mod context;
 mod queue;
 mod throttle;
 
+pub use context::{ProcessResult, SyncContext};
 pub use queue::SyncQueueEntry;
 pub use throttle::{DomainThrottle, ThrottleManager};
+
+#[cfg(test)]
+pub use context::mock::MockSyncContext;
