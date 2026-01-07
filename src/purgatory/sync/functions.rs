@@ -20,16 +20,32 @@ use super::throttle::ThrottleManager;
 
 /// Extract domain from a URL.
 ///
+/// Supports HTTP(S) URLs. SSH URLs (git@...) are not supported.
+///
 /// # Examples
 ///
 /// ```ignore
 /// assert_eq!(extract_domain("https://github.com/foo/bar.git"), Some("github.com".to_string()));
+/// assert_eq!(extract_domain("http://example.com:8080/repo.git"), Some("example.com".to_string()));
 /// assert_eq!(extract_domain("git@github.com:foo/bar.git"), None); // SSH URLs not supported
 /// ```
 fn extract_domain(url: &str) -> Option<String> {
-    url::Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(|s| s.to_string()))
+    // Simple URL parsing for HTTP(S) URLs
+    // Format: scheme://[user@]host[:port]/path
+    let url = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
+    
+    // Remove user info if present (e.g., "user@host" -> "host")
+    let url = url.split('@').last()?;
+    
+    // Extract host (before first '/' or ':')
+    let host = url.split('/').next()?;
+    let host = host.split(':').next()?;
+    
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
 }
 
 /// Find the next URL to try for an identifier.

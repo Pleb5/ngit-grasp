@@ -365,6 +365,33 @@ impl Purgatory {
         })
     }
 
+    /// Find all PR events for a specific repository identifier.
+    ///
+    /// PR events reference repositories via `a` tags with format `30617:<owner_pubkey>:<identifier>`.
+    /// This function scans all PR entries and returns those that reference the given identifier.
+    ///
+    /// Note: This is a linear scan since PR events are indexed by event_id, not by identifier.
+    /// For repositories with many PR events, this could be optimized with a secondary index.
+    ///
+    /// # Arguments
+    /// * `identifier` - The repository identifier to search for
+    ///
+    /// # Returns
+    /// Vector of PR purgatory entries that reference this identifier
+    pub fn find_prs_for_identifier(&self, identifier: &str) -> Vec<PrPurgatoryEntry> {
+        self.pr_events
+            .iter()
+            .filter(|entry| {
+                if let Some(ref event) = entry.value().event {
+                    Self::event_references_identifier(event, identifier)
+                } else {
+                    false
+                }
+            })
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+
     /// Remove a state event from purgatory.
     ///
     /// Removes all entries for the given identifier.
