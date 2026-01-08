@@ -94,6 +94,8 @@ pub struct Config {
 
     /// URL of bootstrap relay to sync from on startup (optional)
     /// Sync discovers additional relays from repository announcements that list our service
+    /// If no scheme is provided (wss:// or ws://), wss:// is assumed
+    /// Examples: "relay.example.com" -> "wss://relay.example.com", "wss://relay.example.com" -> unchanged
     #[arg(long, env = "NGIT_SYNC_BOOTSTRAP_RELAY_URL")]
     pub sync_bootstrap_relay_url: Option<String>,
 

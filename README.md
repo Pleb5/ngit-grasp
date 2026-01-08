@@ -321,7 +321,7 @@ NGIT_OWNER_NPUB=npub1... ngit-grasp --domain relay.example.com
 
 **Sync Notes:**
 
-- **Bootstrap relay**: Optional starting point for relay discovery. System automatically discovers additional relays from repository announcements.
+- **Bootstrap relay**: Optional starting point for relay discovery. System automatically discovers additional relays from repository announcements. URL scheme is optional - if not provided, `wss://` is assumed (e.g., `git.shakespeare.diy` → `wss://git.shakespeare.diy`).
 - **Backoff settings**: Controls exponential backoff for failed connections (`base * 2^(failures-1)`, capped at max).
 - **Negentropy**: Can be disabled for testing REQ+EOSE fallback behavior.
 - **Batch window**: Self-subscriber batches events for this duration before triggering sync filters.

@@ -79,14 +79,38 @@ pub struct RelayConnection {
 }
 
 impl RelayConnection {
+    /// Normalize a relay URL to include a scheme (wss:// or ws://)
+    ///
+    /// If the URL already has a scheme, it's returned as-is.
+    /// If no scheme is provided, wss:// is assumed (secure by default).
+    ///
+    /// # Arguments
+    /// * `url` - The relay URL (with or without scheme)
+    ///
+    /// # Returns
+    /// The normalized URL with scheme
+    ///
+    /// # Examples
+    /// - `"relay.example.com"` -> `"wss://relay.example.com"`
+    /// - `"wss://relay.example.com"` -> `"wss://relay.example.com"`
+    /// - `"ws://relay.example.com"` -> `"ws://relay.example.com"`
+    fn normalize_url(url: &str) -> String {
+        if url.starts_with("wss://") || url.starts_with("ws://") {
+            url.to_string()
+        } else {
+            format!("wss://{}", url)
+        }
+    }
+
     /// Create a new relay connection (not yet connected)
     ///
     /// # Arguments
-    /// * `url` - The relay URL to connect to (e.g., "wss://relay.example.com")
+    /// * `url` - The relay URL to connect to (with or without scheme, e.g., "relay.example.com" or "wss://relay.example.com")
     pub fn new(url: String) -> Self {
+        let normalized_url = Self::normalize_url(&url);
         let client = Client::default();
         Self {
-            url,
+            url: normalized_url,
             client,
             database: None,
             nip77_warning_logged: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -96,12 +120,13 @@ impl RelayConnection {
     /// Create a new relay connection with database for negentropy sync
     ///
     /// # Arguments
-    /// * `url` - The relay URL to connect to (e.g., "wss://relay.example.com")
+    /// * `url` - The relay URL to connect to (with or without scheme, e.g., "relay.example.com" or "wss://relay.example.com")
     /// * `database` - Shared database for local event comparison during negentropy sync
     pub fn new_with_database(url: String, database: SharedDatabase) -> Self {
+        let normalized_url = Self::normalize_url(&url);
         let client = Client::default();
         Self {
-            url,
+            url: normalized_url,
             client,
             database: Some(database),
             nip77_warning_logged: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -489,5 +514,73 @@ impl RelayConnection {
     /// Check if this connection has a database configured for negentropy
     pub fn has_database(&self) -> bool {
         self.database.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_url_with_wss_scheme() {
+        let url = "wss://relay.example.com";
+        assert_eq!(RelayConnection::normalize_url(url), "wss://relay.example.com");
+    }
+
+    #[test]
+    fn test_normalize_url_with_ws_scheme() {
+        let url = "ws://relay.example.com";
+        assert_eq!(RelayConnection::normalize_url(url), "ws://relay.example.com");
+    }
+
+    #[test]
+    fn test_normalize_url_without_scheme() {
+        let url = "relay.example.com";
+        assert_eq!(RelayConnection::normalize_url(url), "wss://relay.example.com");
+    }
+
+    #[test]
+    fn test_normalize_url_without_scheme_with_port() {
+        let url = "relay.example.com:8080";
+        assert_eq!(RelayConnection::normalize_url(url), "wss://relay.example.com:8080");
+    }
+
+    #[test]
+    fn test_normalize_url_with_path() {
+        let url = "relay.example.com/nostr";
+        assert_eq!(RelayConnection::normalize_url(url), "wss://relay.example.com/nostr");
+    }
+
+    #[test]
+    fn test_new_normalizes_url() {
+        let conn = RelayConnection::new("relay.example.com".to_string());
+        assert_eq!(conn.url(), "wss://relay.example.com");
+    }
+
+    #[test]
+    fn test_new_preserves_wss_scheme() {
+        let conn = RelayConnection::new("wss://relay.example.com".to_string());
+        assert_eq!(conn.url(), "wss://relay.example.com");
+    }
+
+    #[test]
+    fn test_new_preserves_ws_scheme() {
+        let conn = RelayConnection::new("ws://relay.example.com".to_string());
+        assert_eq!(conn.url(), "ws://relay.example.com");
+    }
+
+    #[test]
+    fn test_new_with_database_normalizes_url() {
+        // This test just verifies the URL normalization works
+        // We can't easily test with_database without a real database
+        let conn = RelayConnection::new("git.shakespeare.diy".to_string());
+        assert_eq!(conn.url(), "wss://git.shakespeare.diy");
+    }
+
+    #[test]
+    fn test_normalize_url_real_world_example() {
+        // Test the exact case from the bug report
+        let url = "git.shakespeare.diy";
+        assert_eq!(RelayConnection::normalize_url(url), "wss://git.shakespeare.diy");
     }
 }

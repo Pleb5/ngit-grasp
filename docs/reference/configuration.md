@@ -29,6 +29,7 @@ Configuration is loaded at startup and validated before the server starts.
 **Required:** No
 
 **Examples:**
+
 ```bash
 # Localhost only (development)
 NGIT_BIND_ADDRESS=127.0.0.1:8080
@@ -44,6 +45,7 @@ NGIT_BIND_ADDRESS=127.0.0.1:3000
 ```
 
 **Notes:**
+
 - Use `127.0.0.1` for local development
 - Use `0.0.0.0` for production (behind reverse proxy)
 - Ensure firewall rules allow the port
@@ -58,6 +60,7 @@ NGIT_BIND_ADDRESS=127.0.0.1:3000
 **Required:** Yes
 
 **Examples:**
+
 ```bash
 NGIT_DOMAIN=gitnostr.com
 NGIT_DOMAIN=git.example.org
@@ -65,12 +68,14 @@ NGIT_DOMAIN=localhost:8080  # Development only
 ```
 
 **Used for:**
+
 - NIP-11 relay information document
 - Generating repository URLs
 - CORS configuration
 - Webhook URLs (future)
 
 **Notes:**
+
 - Must be accessible from the internet for production
 - Include port if non-standard (e.g., `localhost:8080`)
 - Used in repository clone URLs: `https://{NGIT_DOMAIN}/{npub}/{repo}.git`
@@ -87,16 +92,19 @@ NGIT_DOMAIN=localhost:8080  # Development only
 **Required:** Yes
 
 **Examples:**
+
 ```bash
 NGIT_OWNER_NPUB=npub1alice...
 ```
 
 **Used for:**
+
 - NIP-11 relay information document
 - Contact information
 - Administrative operations (future)
 
 **Notes:**
+
 - Must be valid npub format (starts with `npub1`)
 - Can be generated with Nostr tools
 - Publicly visible in relay metadata
@@ -111,12 +119,14 @@ NGIT_OWNER_NPUB=npub1alice...
 **Required:** No
 
 **Examples:**
+
 ```bash
 NGIT_RELAY_NAME="GitNostr Community Relay"
 NGIT_RELAY_NAME="Alice's GRASP Server"
 ```
 
 **Used for:**
+
 - NIP-11 relay information document
 - Client display
 - Relay discovery
@@ -131,12 +141,14 @@ NGIT_RELAY_NAME="Alice's GRASP Server"
 **Required:** No
 
 **Examples:**
+
 ```bash
 NGIT_RELAY_DESCRIPTION="Public GRASP relay for open source projects"
 NGIT_RELAY_DESCRIPTION="Private relay for ACME Corp repositories"
 ```
 
 **Used for:**
+
 - NIP-11 relay information document
 - User information
 - Relay selection
@@ -153,6 +165,7 @@ NGIT_RELAY_DESCRIPTION="Private relay for ACME Corp repositories"
 **Required:** No
 
 **Examples:**
+
 ```bash
 # Relative path (development)
 NGIT_GIT_DATA_PATH=./data/git
@@ -165,6 +178,7 @@ NGIT_GIT_DATA_PATH=/mnt/storage/git-repos
 ```
 
 **Storage structure:**
+
 ```
 {NGIT_GIT_DATA_PATH}/
   ├── {npub1}/
@@ -178,6 +192,7 @@ NGIT_GIT_DATA_PATH=/mnt/storage/git-repos
 ```
 
 **Notes:**
+
 - Directory must be writable by ngit-grasp process
 - Ensure sufficient disk space
 - Consider backup strategy
@@ -193,6 +208,7 @@ NGIT_GIT_DATA_PATH=/mnt/storage/git-repos
 **Required:** No
 
 **Examples:**
+
 ```bash
 # Relative path (development)
 NGIT_RELAY_DATA_PATH=./data/relay
@@ -205,6 +221,7 @@ NGIT_RELAY_DATA_PATH=/mnt/ssd/relay-data
 ```
 
 **Storage structure:**
+
 ```
 {NGIT_RELAY_DATA_PATH}/
   ├── events/
@@ -217,6 +234,7 @@ NGIT_RELAY_DATA_PATH=/mnt/ssd/relay-data
 ```
 
 **Notes:**
+
 - Directory must be writable
 - Consider SSD for better query performance
 - Size grows with event count
@@ -232,11 +250,13 @@ NGIT_RELAY_DATA_PATH=/mnt/ssd/relay-data
 **Required:** No
 
 **Valid Values:**
+
 - `memory` - In-memory database (default, fastest, no persistence)
 - `nostrdb` - NostrDB backend (persistent, optimized for Nostr) [Not yet implemented]
 - `lmdb` - LMDB backend (persistent, general purpose) [Not yet implemented]
 
 **Examples:**
+
 ```bash
 # Development (default, no persistence)
 NGIT_DATABASE_BACKEND=memory
@@ -250,13 +270,14 @@ NGIT_DATABASE_BACKEND=lmdb
 
 **Comparison:**
 
-| Backend | Persistence | Performance | Use Case |
-|---------|-------------|-------------|----------|
-| memory | No | Fastest | Development, testing |
-| nostrdb | Yes | High | Production (Nostr-optimized) |
-| lmdb | Yes | High | Production (general purpose) |
+| Backend | Persistence | Performance | Use Case                     |
+| ------- | ----------- | ----------- | ---------------------------- |
+| memory  | No          | Fastest     | Development, testing         |
+| nostrdb | Yes         | High        | Production (Nostr-optimized) |
+| lmdb    | Yes         | High        | Production (general purpose) |
 
 **Notes:**
+
 - `memory` backend loses all data on restart
 - NostrDB and LMDB backends will use `NGIT_RELAY_DATA_PATH` for storage
 - NostrDB and LMDB are planned features, not yet available
@@ -277,6 +298,7 @@ These options configure the proactive sync feature that synchronizes events from
 **Required:** No
 
 **Examples:**
+
 ```bash
 # Sync from a public relay
 NGIT_SYNC_BOOTSTRAP_RELAY_URL=wss://relay.example.com
@@ -289,11 +311,12 @@ NGIT_SYNC_BOOTSTRAP_RELAY_URL=ws://127.0.0.1:8081
 ```
 
 **Notes:**
+
 - Bootstrap relay provides initial sync source on startup
 - Additional relays are **automatically discovered** from repository announcements that list our service
 - Even without a bootstrap relay, sync will discover relays from stored announcements
 - Synced events go through the same validation as directly-submitted events
-- Use WebSocket protocol (`ws://` or `wss://`)
+- Use WebSocket protocol (`ws://` or `wss://`) or defaults to wss://
 
 ---
 
@@ -305,6 +328,7 @@ NGIT_SYNC_BOOTSTRAP_RELAY_URL=ws://127.0.0.1:8081
 **Required:** No
 
 **Examples:**
+
 ```bash
 # Default: 1 hour max backoff
 NGIT_SYNC_MAX_BACKOFF_SECS=3600
@@ -317,6 +341,7 @@ NGIT_SYNC_MAX_BACKOFF_SECS=7200
 ```
 
 **Notes:**
+
 - Backoff starts at 5 seconds and doubles on each failure
 - Capped at this maximum value
 - After 24 hours of failures, relay is marked "dead" and retried daily
@@ -332,6 +357,7 @@ NGIT_SYNC_MAX_BACKOFF_SECS=7200
 **Required:** No
 
 **Examples:**
+
 ```bash
 # Default: 30 second delay
 NGIT_SYNC_STARTUP_DELAY_SECS=30
@@ -344,6 +370,7 @@ NGIT_SYNC_STARTUP_DELAY_SECS=60
 ```
 
 **Notes:**
+
 - Allows connections to stabilize before catchup
 - Reduces load on remote relays at startup
 - Set to 0 for immediate catchup (not recommended)
@@ -358,6 +385,7 @@ NGIT_SYNC_STARTUP_DELAY_SECS=60
 **Required:** No
 
 **Examples:**
+
 ```bash
 # Default: 10 second delay
 NGIT_SYNC_RECONNECT_DELAY_SECS=10
@@ -370,6 +398,7 @@ NGIT_SYNC_RECONNECT_DELAY_SECS=30
 ```
 
 **Notes:**
+
 - Prevents rate limiting from remote relays
 - Applied after each successful reconnection
 - Only catches up on recent events (see lookback days)
@@ -384,6 +413,7 @@ NGIT_SYNC_RECONNECT_DELAY_SECS=30
 **Required:** No
 
 **Examples:**
+
 ```bash
 # Default: 3 days lookback
 NGIT_SYNC_RECONNECT_LOOKBACK_DAYS=3
@@ -396,6 +426,7 @@ NGIT_SYNC_RECONNECT_LOOKBACK_DAYS=7
 ```
 
 **Notes:**
+
 - Limits catchup queries to recent events only
 - Reduces load compared to full historical sync
 - Balance between completeness and performance
@@ -413,6 +444,7 @@ NGIT_SYNC_RECONNECT_LOOKBACK_DAYS=7
 **Required:** No
 
 **Examples:**
+
 ```bash
 # Simple levels
 RUST_LOG=error    # Errors only
@@ -429,6 +461,7 @@ RUST_LOG=debug,hyper=info,tokio=warn
 ```
 
 **Log levels (most to least verbose):**
+
 1. `trace` - Very detailed, performance impact
 2. `debug` - Detailed debugging information
 3. `info` - General information (default)
@@ -436,6 +469,7 @@ RUST_LOG=debug,hyper=info,tokio=warn
 5. `error` - Errors only
 
 **Production recommendation:**
+
 ```bash
 RUST_LOG=info,ngit_grasp=debug
 ```
@@ -452,6 +486,7 @@ RUST_LOG=info,ngit_grasp=debug
 **Status:** 🔜 Planned
 
 **Examples:**
+
 ```bash
 NGIT_AUTH_REQUIRED=true   # Require auth
 NGIT_AUTH_REQUIRED=false  # Public relay
@@ -467,6 +502,7 @@ NGIT_AUTH_REQUIRED=false  # Public relay
 **Status:** 🔜 Planned
 
 **Examples:**
+
 ```bash
 NGIT_RATE_LIMIT_ENABLED=true
 NGIT_RATE_LIMIT_ENABLED=false
@@ -491,6 +527,7 @@ RUST_LOG=debug
 ```
 
 **Notes:**
+
 - Never commit `.env` to version control
 - Use `.env.example` as a template
 - Environment variables override `.env` values
@@ -510,6 +547,7 @@ Error: Invalid configuration
 ```
 
 **Validation checks:**
+
 - Required fields are present
 - Values have correct format
 - Paths are accessible and writable
@@ -533,6 +571,7 @@ RUST_LOG=info,ngit_grasp=debug
 ```
 
 **Additional production considerations:**
+
 - Use reverse proxy (nginx, Caddy) for HTTPS
 - Set up log rotation
 - Configure monitoring
@@ -573,6 +612,7 @@ RUST_LOG=debug
 ```
 
 **Testing notes:**
+
 - Use temporary directories
 - Use non-standard ports
 - Clean up after tests
@@ -590,6 +630,7 @@ When multiple configuration sources exist:
 4. **Default values** (lowest priority)
 
 **Example:**
+
 ```bash
 # .env file
 NGIT_BIND_ADDRESS=127.0.0.1:8080
@@ -610,4 +651,4 @@ NGIT_BIND_ADDRESS=0.0.0.0:3000 cargo run
 
 ---
 
-*Part of the [ngit-grasp reference documentation](./)*
+_Part of the [ngit-grasp reference documentation](./)_
