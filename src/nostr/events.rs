@@ -76,6 +76,17 @@ impl RepositoryAnnouncement {
             })
             .collect();
 
+        // return error if mutliple clone tags (incorrect formatting)
+        let clone_tag_count = event
+            .tags
+            .iter()
+            .filter(|t| matches!(t.kind(), TagKind::Clone))
+            .count();
+
+        if clone_tag_count > 1 {
+            return Err(anyhow::anyhow!("multiple clone tags found. correct format is single clone tag with multiple values"));
+        }
+
         // Extract relays
         let relays = event
             .tags
