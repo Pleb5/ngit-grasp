@@ -198,6 +198,8 @@ See [Monitoring Overview](docs/explanation/monitoring.md) and [Prometheus Setup 
 
 Git data related to deleted Repositories should be archvied (and deleted after 90 days), also events related to ONLY this repository.
 
+Delete Request Disrepector - so that events dont get removes - its problematic if someone elses PR event and comments gets deleted if the owner deletes the repo. having at least some archival grasp servers retaining it so it can be recovered is important. also we need to make left-pad impossible.
+
 ### Grasp Server Removed from Announcement Event
 
 Unless GRASP-05, This should cause the git data and events related ONLY to this repository to be archived (and deleted after 90 days).
@@ -217,6 +219,10 @@ This a useful feature of other git servers.
 **Future enhancement**: We aspire to also accept and weekly sync kind 10002 (user relay lists) and kind 0 (user metadata) events, but only for authors of accepted events. This would require an additional state-driven layer 2 filter (see Roadmap in GRASP-02 Proactive Sync documentation).
 
 **Future enhancement**: should we periodically scan relays in UserGraspLists to check for announcements that list our relay?
+
+### GRASP-5 Archive
+
+This not only is an important stand alone feature, it can be used to help to test sync features and have a local backup thats easy to deploy (set as bootstrap).
 
 ## Technology Stack
 
