@@ -9,20 +9,12 @@
 use anyhow::{anyhow, Result};
 use nostr_sdk::{Event, Kind, TagKind, ToBech32};
 
-/// NIP-34 Repository Announcement (kind 30617)
-pub const KIND_REPOSITORY_ANNOUNCEMENT: u16 = 30617;
-
-/// NIP-34 Repository State Announcement (kind 30618)
-pub const KIND_REPOSITORY_STATE: u16 = 30618;
-
-/// NIP-34 Pull Request (kind 1618) - has `c` tag for commit
-pub const KIND_PR: u16 = 1618;
-
-/// NIP-34 Pull Request Update (kind 1619) - has `c` tag for commit
-pub const KIND_PR_UPDATE: u16 = 1619;
-
-/// User Grasp List (kind 10317) - user's personal list of GRASP repositories
-pub const KIND_USER_GRASP_LIST: u16 = 10317;
+// NOTE: Using rust-nostr Kind variants instead of hardcoded constants:
+// - KIND_REPOSITORY_ANNOUNCEMENT -> Kind::GitRepoAnnouncement (30617)
+// - KIND_REPOSITORY_STATE -> Kind::RepoState (30618)
+// - KIND_PR -> Kind::GitPullRequest (1618)
+// - KIND_PR_UPDATE -> Kind::GitPullRequestUpdate (1619)
+// - KIND_USER_GRASP_LIST -> Kind::GitUserGraspList (10317)
 
 /// Repository announcement details extracted from NIP-34 event
 #[derive(Debug, Clone)]
@@ -40,10 +32,10 @@ pub struct RepositoryAnnouncement {
 impl RepositoryAnnouncement {
     /// Parse a repository announcement from a NIP-34 kind 30617 event
     pub fn from_event(event: Event) -> Result<Self> {
-        if event.kind != Kind::from(KIND_REPOSITORY_ANNOUNCEMENT) {
+        if event.kind != Kind::GitRepoAnnouncement {
             return Err(anyhow!(
                 "Invalid event kind: expected {}, got {}",
-                KIND_REPOSITORY_ANNOUNCEMENT,
+                Kind::GitRepoAnnouncement,
                 event.kind
             ));
         }
@@ -197,10 +189,10 @@ pub struct TagState {
 impl RepositoryState {
     /// Parse a repository state from a NIP-34 kind 30618 event
     pub fn from_event(event: Event) -> Result<Self> {
-        if event.kind != Kind::from(KIND_REPOSITORY_STATE) {
+        if event.kind != Kind::RepoState {
             return Err(anyhow!(
                 "Invalid event kind: expected {}, got {}",
-                KIND_REPOSITORY_STATE,
+                Kind::RepoState,
                 event.kind
             ));
         }
@@ -346,10 +338,10 @@ impl RepositoryState {
 /// Returns Ok(()) if valid, Err with reason if invalid.
 pub fn validate_announcement(event: &Event, domain: &str) -> Result<()> {
     // Must be kind 30617
-    if event.kind != Kind::from(KIND_REPOSITORY_ANNOUNCEMENT) {
+    if event.kind != Kind::GitRepoAnnouncement {
         return Err(anyhow!(
             "Invalid kind: expected {}",
-            KIND_REPOSITORY_ANNOUNCEMENT
+            Kind::GitRepoAnnouncement
         ));
     }
 
@@ -381,8 +373,8 @@ pub fn validate_announcement(event: &Event, domain: &str) -> Result<()> {
 /// Returns Ok(()) if valid, Err with reason if invalid.
 pub fn validate_state(event: &Event) -> Result<()> {
     // Must be kind 30618
-    if event.kind != Kind::from(KIND_REPOSITORY_STATE) {
-        return Err(anyhow!("Invalid kind: expected {}", KIND_REPOSITORY_STATE));
+    if event.kind != Kind::RepoState {
+        return Err(anyhow!("Invalid kind: expected {}", Kind::RepoState));
     }
 
     // Must have identifier
@@ -433,7 +425,7 @@ mod tests {
             ));
         }
 
-        EventBuilder::new(Kind::from(KIND_REPOSITORY_ANNOUNCEMENT), "Test repository")
+        EventBuilder::new(Kind::GitRepoAnnouncement, "Test repository")
             .tags(tags)
             .sign_with_keys(keys)
             .unwrap()
@@ -454,7 +446,7 @@ mod tests {
             ));
         }
 
-        EventBuilder::new(Kind::from(KIND_REPOSITORY_STATE), "")
+        EventBuilder::new(Kind::RepoState, "")
             .tags(tags)
             .sign_with_keys(keys)
             .unwrap()
@@ -483,7 +475,7 @@ mod tests {
     #[test]
     fn test_parse_announcement_missing_identifier() {
         let keys = create_test_keys();
-        let event = EventBuilder::new(Kind::from(KIND_REPOSITORY_ANNOUNCEMENT), "Test repository")
+        let event = EventBuilder::new(Kind::GitRepoAnnouncement, "Test repository")
             .sign_with_keys(&keys)
             .unwrap();
 
@@ -579,7 +571,7 @@ mod tests {
     #[test]
     fn test_validate_state_missing_identifier() {
         let keys = create_test_keys();
-        let event = EventBuilder::new(Kind::from(KIND_REPOSITORY_STATE), "")
+        let event = EventBuilder::new(Kind::RepoState, "")
             .sign_with_keys(&keys)
             .unwrap();
 
@@ -614,7 +606,7 @@ mod tests {
             vec![maintainer_keys.public_key().to_hex()],
         ));
 
-        let event = EventBuilder::new(Kind::from(KIND_REPOSITORY_ANNOUNCEMENT), "Test repository")
+        let event = EventBuilder::new(Kind::GitRepoAnnouncement, "Test repository")
             .tags(tags)
             .sign_with_keys(&keys)
             .unwrap();
@@ -649,7 +641,7 @@ mod tests {
             vec!["e5f6g7h8".to_string()],
         ));
 
-        let event = EventBuilder::new(Kind::from(KIND_REPOSITORY_STATE), "")
+        let event = EventBuilder::new(Kind::RepoState, "")
             .tags(tags)
             .sign_with_keys(&keys)
             .unwrap();
@@ -683,7 +675,7 @@ mod tests {
             vec!["ref: refs/heads/main".to_string()],
         ));
 
-        let event = EventBuilder::new(Kind::from(KIND_REPOSITORY_STATE), "")
+        let event = EventBuilder::new(Kind::RepoState, "")
             .tags(tags)
             .sign_with_keys(&keys)
             .unwrap();
@@ -716,7 +708,7 @@ mod tests {
             vec!["refs/heads/develop".to_string()],
         ));
 
-        let event = EventBuilder::new(Kind::from(KIND_REPOSITORY_STATE), "")
+        let event = EventBuilder::new(Kind::RepoState, "")
             .tags(tags)
             .sign_with_keys(&keys)
             .unwrap();
@@ -740,7 +732,7 @@ mod tests {
             ),
         ];
 
-        let event = EventBuilder::new(Kind::from(KIND_REPOSITORY_STATE), "")
+        let event = EventBuilder::new(Kind::RepoState, "")
             .tags(tags)
             .sign_with_keys(&keys)
             .unwrap();
@@ -773,7 +765,7 @@ mod tests {
             vec!["refs/heads/develop".to_string()],
         ));
 
-        let event = EventBuilder::new(Kind::from(KIND_REPOSITORY_STATE), "")
+        let event = EventBuilder::new(Kind::RepoState, "")
             .tags(tags)
             .sign_with_keys(&keys)
             .unwrap();

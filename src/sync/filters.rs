@@ -20,9 +20,9 @@ use nostr_sdk::prelude::*;
 /// Note: 10317 (User Grasp List) is synced for better GRASP discovery.
 pub fn build_announcement_filter(since: Option<Timestamp>) -> Filter {
     let filter = Filter::new().kinds([
-        Kind::Custom(30617), // Repository announcements
-        Kind::Custom(30618), // Maintainer lists
-        Kind::Custom(10317), // User Grasp List
+        Kind::GitRepoAnnouncement, // Repository announcements
+        Kind::RepoState,           // Repository state
+        Kind::GitUserGraspList,    // User Grasp List
     ]);
 
     match since {

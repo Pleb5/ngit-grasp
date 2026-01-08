@@ -36,11 +36,9 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use crate::nostr::builder::SharedDatabase;
-use crate::nostr::events::{
-    RepositoryAnnouncement, RepositoryState, KIND_PR, KIND_PR_UPDATE, KIND_REPOSITORY_ANNOUNCEMENT,
-    KIND_REPOSITORY_STATE,
-};
+use crate::nostr::events::{RepositoryAnnouncement, RepositoryState};
 use crate::purgatory::Purgatory;
+use nostr_sdk::Kind;
 
 /// Perform GRASP authorization for a push operation
 ///
@@ -241,10 +239,7 @@ pub async fn fetch_repository_data(
     identifier: &str,
 ) -> Result<RepositoryData> {
     let filter = Filter::new()
-        .kinds([
-            Kind::from(KIND_REPOSITORY_ANNOUNCEMENT),
-            Kind::from(KIND_REPOSITORY_STATE),
-        ])
+        .kinds([Kind::GitRepoAnnouncement, Kind::RepoState])
         .custom_tag(
             SingleLetterTag::lowercase(Alphabet::D),
             identifier.to_string(),
@@ -268,11 +263,11 @@ pub async fn fetch_repository_data(
     let mut states = Vec::new();
 
     for event in events {
-        if event.kind == Kind::from(KIND_REPOSITORY_ANNOUNCEMENT) {
+        if event.kind == Kind::GitRepoAnnouncement {
             if let Ok(announcement) = RepositoryAnnouncement::from_event(event) {
                 announcements.push(announcement);
             }
-        } else if event.kind == Kind::from(KIND_REPOSITORY_STATE) {
+        } else if event.kind == Kind::RepoState {
             if let Ok(state) = RepositoryState::from_event(event) {
                 states.push(state);
             }
@@ -714,10 +709,7 @@ impl AuthorizationContext {
     /// This matches the reference implementation's filter logic
     pub fn create_filter(identifier: &str) -> Filter {
         Filter::new()
-            .kinds([
-                Kind::from(KIND_REPOSITORY_ANNOUNCEMENT),
-                Kind::from(KIND_REPOSITORY_STATE),
-            ])
+            .kinds([Kind::GitRepoAnnouncement, Kind::RepoState])
             .custom_tag(
                 SingleLetterTag::lowercase(Alphabet::D),
                 identifier.to_string(),
@@ -754,7 +746,7 @@ impl AuthorizationContext {
 
         for event in &self.events {
             // Check if it's a repository state event
-            if event.kind != Kind::from(KIND_REPOSITORY_STATE) {
+            if event.kind != Kind::RepoState {
                 continue;
             }
 
@@ -806,7 +798,7 @@ impl AuthorizationContext {
 
         for event in &self.events {
             // Only look at announcements
-            if event.kind != Kind::from(KIND_REPOSITORY_ANNOUNCEMENT) {
+            if event.kind != Kind::GitRepoAnnouncement {
                 continue;
             }
 
@@ -838,7 +830,7 @@ impl AuthorizationContext {
     pub fn is_state_authorized(&self, state_pubkey: &str, identifier: &str) -> bool {
         for event in &self.events {
             // Only look at announcements
-            if event.kind != Kind::from(KIND_REPOSITORY_ANNOUNCEMENT) {
+            if event.kind != Kind::GitRepoAnnouncement {
                 continue;
             }
 
@@ -1093,7 +1085,7 @@ pub async fn get_event_commit_tag(
     // Query for PR (1618) and PR Update (1619) events with this ID
     let filter = Filter::new()
         .ids([*event_id])
-        .kinds([Kind::from(KIND_PR), Kind::from(KIND_PR_UPDATE)]);
+        .kinds([Kind::GitPullRequest, Kind::GitPullRequestUpdate]);
 
     let events: Vec<Event> = database
         .query(filter)
@@ -1224,7 +1216,7 @@ mod tests {
             vec!["wss://example.com".to_string()],
         ));
 
-        EventBuilder::new(Kind::from(KIND_REPOSITORY_ANNOUNCEMENT), "Test repo")
+        EventBuilder::new(Kind::GitRepoAnnouncement, "Test repo")
             .tags(tags)
             .sign_with_keys(keys)
             .unwrap()
@@ -1240,7 +1232,7 @@ mod tests {
             ));
         }
 
-        EventBuilder::new(Kind::from(KIND_REPOSITORY_STATE), "")
+        EventBuilder::new(Kind::RepoState, "")
             .tags(tags)
             .sign_with_keys(keys)
             .unwrap()

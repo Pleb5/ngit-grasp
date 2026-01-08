@@ -115,7 +115,7 @@ async fn test_live_sync_layer2_events() {
 
     // 9. Wait and verify event syncs to relay_b
     let filter = Filter::new()
-        .kind(Kind::Custom(KIND_ISSUE))
+        .kind(Kind::GitIssue)
         .author(keys.public_key())
         .id(issue_id);
 
@@ -237,7 +237,7 @@ async fn test_live_sync_layer3_events() {
     // 6. Now wait for issue to sync to relay_b (this triggers Layer 3 filter creation)
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    let issue_filter = Filter::new().kind(Kind::Custom(KIND_ISSUE)).id(issue_id);
+    let issue_filter = Filter::new().kind(Kind::GitIssue).id(issue_id);
     let issue_synced =
         wait_for_event_on_relay(relay_b.url(), issue_filter, Duration::from_secs(3)).await;
     println!("Issue synced to relay_b: {}", issue_synced);
@@ -247,7 +247,7 @@ async fn test_live_sync_layer3_events() {
 
     // 7. Wait and verify comment syncs to relay_b
     let comment_filter = Filter::new()
-        .kind(Kind::Custom(KIND_COMMENT))
+        .kind(Kind::Comment)
         .author(keys.public_key())
         .id(comment_id);
 
@@ -267,9 +267,7 @@ async fn test_live_sync_layer3_events() {
             client.connect().await;
             tokio::time::sleep(Duration::from_millis(500)).await;
 
-            let fetch_filter = Filter::new()
-                .kind(Kind::Custom(KIND_COMMENT))
-                .id(comment_id);
+            let fetch_filter = Filter::new().kind(Kind::Comment).id(comment_id);
 
             if let Ok(events) = client
                 .fetch_events(fetch_filter, Duration::from_secs(2))
@@ -418,9 +416,7 @@ async fn test_live_sync_event_ordering() {
         client.connect().await;
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        let filter = Filter::new()
-            .kind(Kind::Custom(KIND_ISSUE))
-            .author(keys.public_key());
+        let filter = Filter::new().kind(Kind::GitIssue).author(keys.public_key());
 
         match client.fetch_events(filter, Duration::from_secs(3)).await {
             Ok(events) => {

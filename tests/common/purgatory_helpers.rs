@@ -16,11 +16,9 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-/// NIP-34 Repository State (kind 30618)
-pub const KIND_STATE: u16 = 30618;
-
-/// NIP-34 Pull Request (kind 1618)
-pub const KIND_PR: u16 = 1618;
+// NOTE: Using rust-nostr Kind variants:
+// - Kind::RepoState.as_u16() -> Kind::RepoState (30618)
+// - Kind::GitPullRequest.as_u16() -> Kind::GitPullRequest (1618)
 
 /// Commit variants for deterministic test commits
 #[derive(Debug, Clone, Copy)]
@@ -236,7 +234,7 @@ pub fn create_state_event(
         ));
     }
 
-    EventBuilder::new(Kind::Custom(KIND_STATE), "")
+    EventBuilder::new(Kind::RepoState, "")
         .tags(event_tags)
         .sign_with_keys(keys)
         .map_err(|e| format!("Failed to sign state event: {}", e))
@@ -269,7 +267,7 @@ pub fn create_pr_event(
         Tag::custom(TagKind::custom("c"), vec![commit_hash.to_string()]),
     ];
 
-    EventBuilder::new(Kind::Custom(KIND_PR), title)
+    EventBuilder::new(Kind::GitPullRequest, title)
         .tags(tags)
         .sign_with_keys(keys)
         .map_err(|e| format!("Failed to sign PR event: {}", e))
@@ -323,7 +321,7 @@ pub fn create_pr_event_with_clone(
         tags.push(Tag::custom(TagKind::Clone, urls));
     }
 
-    EventBuilder::new(Kind::Custom(KIND_PR), title)
+    EventBuilder::new(Kind::GitPullRequest, title)
         .tags(tags)
         .sign_with_keys(keys)
         .map_err(|e| format!("Failed to sign PR event: {}", e))
@@ -705,7 +703,7 @@ mod tests {
         )
         .expect("Failed to create state event");
 
-        assert_eq!(event.kind.as_u16(), KIND_STATE);
+        assert_eq!(event.kind.as_u16(), Kind::RepoState.as_u16());
 
         // Check d-tag
         let has_d_tag = event.tags.iter().any(|tag| {
@@ -747,7 +745,7 @@ mod tests {
         let event = create_pr_event(&keys, &repo_coord, "def456abc123", "Test PR")
             .expect("Failed to create PR event");
 
-        assert_eq!(event.kind.as_u16(), KIND_PR);
+        assert_eq!(event.kind.as_u16(), Kind::GitPullRequest.as_u16());
 
         // Check a-tag
         let has_a_tag = event.tags.iter().any(|tag| {
@@ -815,7 +813,7 @@ mod tests {
         )
         .expect("Failed to create PR event with clone");
 
-        assert_eq!(event.kind.as_u16(), KIND_PR);
+        assert_eq!(event.kind.as_u16(), Kind::GitPullRequest.as_u16());
 
         // Check a-tag
         let has_a_tag = event.tags.iter().any(|tag| {

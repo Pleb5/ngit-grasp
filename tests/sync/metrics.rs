@@ -17,7 +17,7 @@ use nostr_sdk::prelude::*;
 use crate::common::{
     sync_helpers::{
         create_repo_announcement, fetch_metrics, wait_for_sync_connection, MetricsTestHarness,
-        ParsedMetrics, TestClient, KIND_REPOSITORY_STATE,
+        ParsedMetrics, TestClient,
     },
     TestRelay,
 };
@@ -175,8 +175,8 @@ async fn test_metric_values_are_numeric() {
 // Phase 2: Real Metrics Tests (Using MetricsTestHarness)
 // ============================================================================
 
-/// Kind 1617 - Patch event (NIP-34)
-const KIND_PATCH: u16 = 1617;
+// NOTE: Using rust-nostr Kind variant:
+// - Kind::GitPatch.as_u16() -> Kind::GitPatch (1617)
 
 /// Create an event referencing a repository coordinate via 'a' tag.
 ///
@@ -187,7 +187,7 @@ fn create_event_referencing_repo(keys: &Keys, repo_coord: &str, kind: u16, conte
         vec![repo_coord.to_string()],
     )];
 
-    EventBuilder::new(Kind::Custom(kind), content)
+    EventBuilder::new(Kind::from_u16(kind), content)
         .tags(tags)
         .sign_with_keys(keys)
         .expect("Failed to sign event")
@@ -239,7 +239,7 @@ async fn test_startup_sync_event_count() {
     // 5. Build the repo coordinate for the 'a' tag in the patches
     let repo_coord = format!(
         "{}:{}:{}",
-        KIND_REPOSITORY_STATE,
+        Kind::GitRepoAnnouncement.as_u16(),
         keys.public_key().to_hex(),
         "test-repo-metrics"
     );
@@ -250,7 +250,7 @@ async fn test_startup_sync_event_count() {
             create_event_referencing_repo(
                 &keys,
                 &repo_coord,
-                KIND_PATCH,
+                Kind::GitPatch.as_u16(),
                 &format!("Test patch {}", i),
             )
         })
@@ -320,7 +320,7 @@ async fn test_startup_sync_event_count() {
 
     // 12. Verify patches actually synced (functional check)
     let filter = Filter::new()
-        .kind(Kind::Custom(KIND_PATCH))
+        .kind(Kind::Custom(Kind::GitPatch.as_u16()))
         .author(keys.public_key());
 
     let patches_synced = crate::common::sync_helpers::wait_for_event_on_relay(

@@ -78,7 +78,7 @@ impl Nip01SmokeTests {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
             // Step 2: VERIFY - Query event back
-            let filter = Filter::new().kind(Kind::Custom(30617)).id(event_id);
+            let filter = Filter::new().kind(Kind::GitRepoAnnouncement).id(event_id);
 
             let events = client
                 .query(filter)
@@ -88,7 +88,7 @@ impl Nip01SmokeTests {
             if events.is_empty() {
                 // Debug: try querying without audit client filtering
                 eprintln!("Event not found with audit client query, trying direct client query...");
-                let direct_filter = Filter::new().kind(Kind::Custom(30617)).id(event_id);
+                let direct_filter = Filter::new().kind(Kind::GitRepoAnnouncement).id(event_id);
                 let direct_events = client
                     .client()
                     .fetch_events(direct_filter, std::time::Duration::from_secs(5))
@@ -140,7 +140,7 @@ impl Nip01SmokeTests {
 
             // Step 2: VERIFY - Subscribe to NIP-34 announcements from this author
             let filter = Filter::new()
-                .kind(Kind::Custom(30617))
+                .kind(Kind::GitRepoAnnouncement)
                 .author(client.public_key());
 
             let events = client

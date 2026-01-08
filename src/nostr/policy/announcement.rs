@@ -5,9 +5,7 @@
 use nostr_relay_builder::prelude::{Alphabet, Event, Filter, Kind, PublicKey, SingleLetterTag};
 
 use super::PolicyContext;
-use crate::nostr::events::{
-    validate_announcement, RepositoryAnnouncement, KIND_REPOSITORY_ANNOUNCEMENT,
-};
+use crate::nostr::events::{validate_announcement, RepositoryAnnouncement};
 
 /// Result of announcement policy evaluation
 #[derive(Debug)]
@@ -121,12 +119,10 @@ impl AnnouncementPolicy {
         author: &PublicKey,
     ) -> Result<bool, String> {
         // Query all announcements with this identifier that are already in the database
-        let filter = Filter::new()
-            .kind(Kind::from(KIND_REPOSITORY_ANNOUNCEMENT))
-            .custom_tag(
-                SingleLetterTag::lowercase(Alphabet::D),
-                identifier.to_string(),
-            );
+        let filter = Filter::new().kind(Kind::GitRepoAnnouncement).custom_tag(
+            SingleLetterTag::lowercase(Alphabet::D),
+            identifier.to_string(),
+        );
 
         let announcements: Vec<Event> = match self.ctx.database.query(filter).await {
             Ok(events) => events.into_iter().collect(),

@@ -149,7 +149,7 @@ impl SelfSubscriber {
         match notification {
             Ok(RelayPoolNotification::Event { event, .. }) => {
                 // Only process 30617 events that list our relay
-                if event.kind == Kind::Custom(30617) {
+                if event.kind == Kind::GitRepoAnnouncement {
                     if !self.lists_our_relay(&event) {
                         return LoopControl::Continue;
                     }
@@ -236,7 +236,7 @@ impl SelfSubscriber {
     /// Format: 30617:pubkey:identifier
     fn extract_repo_id(event: &Event) -> Option<String> {
         // For kind 30617, extract d tag and build addressable ref
-        if event.kind == Kind::Custom(30617) {
+        if event.kind == Kind::GitRepoAnnouncement {
             for tag in event.tags.iter() {
                 let tag_vec = tag.as_slice();
                 if tag_vec.len() >= 2 && tag_vec[0] == "d" {
@@ -296,21 +296,21 @@ impl SelfSubscriber {
             );
             Filter::new()
                 .kinds(vec![
-                    Kind::Custom(30617), // Repository Announcements
-                    Kind::Custom(1617),  // Patches
-                    Kind::Custom(1621),  // Issues
-                    Kind::Custom(1618),  // Pull Requests
-                    Kind::Custom(10317), // User Grasp List
+                    Kind::GitRepoAnnouncement, // Repository Announcements
+                    Kind::GitPatch,            // Patches
+                    Kind::GitIssue,            // Issues
+                    Kind::GitPullRequest,      // Pull Requests
+                    Kind::GitUserGraspList,    // User Grasp List
                 ])
                 .since(since)
         } else {
             // First connection - no since filter
             Filter::new().kinds(vec![
-                Kind::Custom(30617), // Repository Announcements
-                Kind::Custom(1617),  // Patches
-                Kind::Custom(1621),  // Issues
-                Kind::Custom(1618),  // Pull Requests
-                Kind::Custom(10317), // User Grasp List
+                Kind::GitRepoAnnouncement, // Repository Announcements
+                Kind::GitPatch,            // Patches
+                Kind::GitIssue,            // Issues
+                Kind::GitPullRequest,      // Pull Requests
+                Kind::GitUserGraspList,    // User Grasp List
             ])
         };
 

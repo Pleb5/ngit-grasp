@@ -56,7 +56,7 @@ async fn test_nip77_negentropy_sync_finds_events() {
     // Create a second event (issue referencing the repo)
     let repo_coord = format!(
         "{}:{}:{}",
-        KIND_REPOSITORY_STATE,
+        Kind::GitRepoAnnouncement.as_u16(),
         keys.public_key().to_hex(),
         "test-repo-nip77"
     );
@@ -103,10 +103,9 @@ async fn test_nip77_negentropy_sync_finds_events() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // 6. Perform negentropy sync with filter matching our events
-    let filter = Filter::new().author(keys.public_key()).kinds(vec![
-        Kind::Custom(KIND_REPOSITORY_STATE),
-        Kind::Custom(KIND_ISSUE),
-    ]);
+    let filter = Filter::new()
+        .author(keys.public_key())
+        .kinds(vec![Kind::GitRepoAnnouncement, Kind::GitIssue]);
 
     println!("Starting negentropy sync with filter: {:?}", filter);
 
@@ -183,7 +182,7 @@ async fn test_nip77_negentropy_sync_empty_result() {
     // 3. Sync with filter that won't match anything
     let filter = Filter::new()
         .author(keys.public_key()) // Random new key, no events exist
-        .kind(Kind::Custom(KIND_REPOSITORY_STATE));
+        .kind(Kind::GitRepoAnnouncement);
 
     println!("Starting negentropy sync with empty filter");
 

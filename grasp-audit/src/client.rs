@@ -492,7 +492,7 @@ impl AuditClient {
         // Add any additional tags
         tags.extend(additional_tags);
 
-        self.event_builder(Kind::Custom(1621), content)
+        self.event_builder(Kind::GitIssue, content)
             .tags(tags)
             .build(self.keys())
             .map_err(|e| anyhow!("Failed to build issue event: {}", e))
@@ -530,7 +530,7 @@ impl AuditClient {
         // Add any additional tags
         tags.extend(additional_tags);
 
-        self.event_builder(Kind::Custom(1111), content)
+        self.event_builder(Kind::Comment, content)
             .tags(tags)
             .build(self.keys())
             .map_err(|e| anyhow!("Failed to build comment event: {}", e))

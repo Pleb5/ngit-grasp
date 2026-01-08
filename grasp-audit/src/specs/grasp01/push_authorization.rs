@@ -877,7 +877,7 @@ impl PushAuthorizationTests {
         // Create a rogue state event announcing the new commit
         // This event has the correct repo_id but is signed by a non-maintainer
         let rogue_state = match client
-            .event_builder(Kind::Custom(30618), "")
+            .event_builder(Kind::RepoState, "")
             .tag(Tag::identifier(&repo_id))
             .tag(Tag::custom(
                 TagKind::custom("refs/heads/main"),
@@ -1591,7 +1591,7 @@ impl PushAuthorizationTests {
         // This references a commit that doesn't yet exist on the relay
         // ============================================================
         let state_event = match client
-            .event_builder(Kind::Custom(30618), "")
+            .event_builder(Kind::RepoState, "")
             .tag(Tag::identifier(&repo_id))
             .tag(Tag::custom(
                 TagKind::custom("HEAD"),

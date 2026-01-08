@@ -677,7 +677,7 @@ impl<'a> TestContext<'a> {
                 // Tag format: ["refs/heads/main", "<commit_hash>"]
                 // Note: We build the state but DON'T send it here - the caller will send it
                 self.client
-                    .event_builder(Kind::Custom(30618), "")
+                    .event_builder(Kind::RepoState, "")
                     .tag(Tag::identifier(&repo_id))
                     .tag(Tag::custom(
                         TagKind::custom("refs/heads/main"),
@@ -713,7 +713,7 @@ impl<'a> TestContext<'a> {
                 // Build NIP-34 PR event (kind 1618)
                 self.client
                     .event_builder(
-                        Kind::Custom(1618), // NIP-34 PR kind (has 'c' tag for commit)
+                        Kind::GitPullRequest, // NIP-34 PR kind (has 'c' tag for commit)
                         "Test PR for GRASP validation",
                     )
                     .tag(Tag::custom(
@@ -756,7 +756,7 @@ impl<'a> TestContext<'a> {
                 // Build NIP-34 PR event (kind 1618)
                 self.client
                     .event_builder(
-                        Kind::Custom(1618), // NIP-34 PR kind (has 'c' tag for commit)
+                        Kind::GitPullRequest, // NIP-34 PR kind (has 'c' tag for commit)
                         "Test PR for GRASP validation",
                     )
                     .tag(Tag::custom(
@@ -884,7 +884,7 @@ impl<'a> TestContext<'a> {
 
         let state_event = self
             .client
-            .event_builder(Kind::Custom(30618), "")
+            .event_builder(Kind::RepoState, "")
             .tag(Tag::identifier(&repo_id))
             .tag(Tag::custom(
                 TagKind::custom("refs/heads/main"),
@@ -1057,7 +1057,7 @@ impl<'a> TestContext<'a> {
 
         let maintainer_state_event = self
             .client
-            .event_builder(Kind::Custom(30618), "")
+            .event_builder(Kind::RepoState, "")
             .tag(Tag::identifier(&repo_id))
             .tag(Tag::custom(
                 TagKind::custom("refs/heads/main"),
@@ -1230,7 +1230,7 @@ impl<'a> TestContext<'a> {
 
         let recursive_maintainer_state_event = self
             .client
-            .event_builder(Kind::Custom(30618), "")
+            .event_builder(Kind::RepoState, "")
             .tag(Tag::identifier(&repo_id))
             .tag(Tag::custom(
                 TagKind::custom("refs/heads/main"),
@@ -1397,7 +1397,7 @@ impl<'a> TestContext<'a> {
 
         let develop_state_event = self
             .client
-            .event_builder(Kind::Custom(30618), "")
+            .event_builder(Kind::RepoState, "")
             .tag(Tag::identifier(&repo_id))
             .tag(Tag::custom(
                 TagKind::custom("HEAD"),

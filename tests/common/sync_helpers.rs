@@ -17,14 +17,10 @@ use nostr_sdk::prelude::*;
 
 use super::relay::TestRelay;
 
-/// Kind 1618 - Issue (NIP-34 git-related event)
-pub const KIND_ISSUE: u16 = 1621;
-
-/// Kind 1111 - NIP-22 Comment
-pub const KIND_COMMENT: u16 = 1111;
-
-/// Kind 30617 - Repository state/announcement (NIP-34)
-pub const KIND_REPOSITORY_STATE: u16 = 30617;
+// NOTE: Using rust-nostr Kind variants:
+// - Kind::GitIssue.as_u16() -> Kind::GitIssue (1621)
+// - Kind::Comment.as_u16() -> Kind::Comment (1111)
+// - Kind::GitRepoAnnouncement.as_u16() -> Kind::GitRepoAnnouncement (30617)
 
 /// Test client with built-in retry logic for connect and send operations.
 ///
@@ -225,7 +221,7 @@ fn build_layer2_issue_with_tag(
 
     let tags = vec![tag];
 
-    EventBuilder::new(Kind::Custom(KIND_ISSUE), title)
+    EventBuilder::new(Kind::GitIssue, title)
         .tags(tags)
         .sign_with_keys(keys)
         .map_err(|e| format!("Failed to sign Layer 2 issue event: {}", e))
@@ -240,7 +236,7 @@ fn build_layer2_issue_with_tag(
 /// * `keys` - Keys for signing the event
 /// * `parent_event_id` - Event ID being referenced (e.g., an issue or patch)
 /// * `content` - Comment content
-/// * `kind` - Event kind (Kind::Custom(1) for reply, Kind::Custom(1111) for NIP-22 comment)
+/// * `kind` - Event kind (Kind::TextNote for reply, Kind::Comment for NIP-22 comment)
 ///
 /// # Tag Types
 /// - For kind 1111: Uses uppercase 'E' tag (NIP-22 style)
@@ -258,7 +254,7 @@ pub fn build_layer3_comment_event(
     let kind_num = kind.as_u16();
 
     // Choose tag based on kind (NIP-22 uses E, NIP-10 style uses e)
-    let tag = if kind_num == KIND_COMMENT {
+    let tag = if kind_num == Kind::Comment.as_u16() {
         // NIP-22 comment: uppercase 'E' tag
         Tag::custom(TagKind::custom("E"), vec![parent_event_id.to_hex()])
     } else {
@@ -302,7 +298,7 @@ pub fn build_layer3_comment_with_uppercase_e_tag(
 ) -> Result<Event, String> {
     let tag = Tag::custom(TagKind::custom("E"), vec![parent_event_id.to_hex()]);
 
-    EventBuilder::new(Kind::Custom(KIND_COMMENT), content)
+    EventBuilder::new(Kind::Comment, content)
         .tags(vec![tag])
         .sign_with_keys(keys)
         .map_err(|e| format!("Failed to sign Layer 3 comment event: {}", e))
@@ -362,7 +358,7 @@ pub fn create_repo_announcement(keys: &Keys, domains: &[&str], identifier: &str)
         Tag::custom(TagKind::custom("relays"), relay_urls),
     ];
 
-    EventBuilder::new(Kind::Custom(KIND_REPOSITORY_STATE), "Repository state")
+    EventBuilder::new(Kind::GitRepoAnnouncement, "Repository state")
         .tags(tags)
         .sign_with_keys(keys)
         .expect("Failed to sign repo announcement")
@@ -503,7 +499,7 @@ fn check_sync_connections_in_metrics(metrics: &str, expected: usize) -> bool {
 /// # Example
 /// ```ignore
 /// let filter = Filter::new()
-///     .kind(Kind::Custom(1618))
+///     .kind(Kind::GitPullRequest)
 ///     .author(keys.public_key())
 ///     .id(event.id);
 ///
@@ -559,7 +555,7 @@ pub async fn wait_for_event_on_relay(relay_url: &str, filter: Filter, timeout: D
 pub fn repo_coord(keys: &Keys, identifier: &str) -> String {
     format!(
         "{}:{}:{}",
-        KIND_REPOSITORY_STATE,
+        Kind::GitRepoAnnouncement.as_u16(),
         keys.public_key().to_hex(),
         identifier
     )
@@ -897,7 +893,7 @@ mod tests {
             build_layer2_issue_event(&keys, &coord, "Test Issue").expect("Should create event");
 
         // nostr-sdk 0.43: use field access
-        assert_eq!(event.kind.as_u16(), KIND_ISSUE);
+        assert_eq!(event.kind.as_u16(), Kind::GitIssue.as_u16());
 
         // Check the tag exists
         let has_a_tag = event.tags.iter().any(|tag| {
@@ -942,15 +938,10 @@ mod tests {
         let keys = Keys::generate();
         let parent_id = EventId::all_zeros();
 
-        let event = build_layer3_comment_event(
-            &keys,
-            &parent_id,
-            "Test comment",
-            Kind::Custom(KIND_COMMENT),
-        )
-        .expect("Should create event");
+        let event = build_layer3_comment_event(&keys, &parent_id, "Test comment", Kind::Comment)
+            .expect("Should create event");
 
-        assert_eq!(event.kind.as_u16(), KIND_COMMENT);
+        assert_eq!(event.kind.as_u16(), Kind::Comment.as_u16());
 
         // NIP-22 comment should have uppercase 'E' tag
         let has_e_tag = event.tags.iter().any(|tag| {
@@ -1003,7 +994,7 @@ mod tests {
         let event = build_layer3_comment_with_uppercase_e_tag(&keys, &parent_id, "Comment content")
             .expect("Should create event");
 
-        assert_eq!(event.kind.as_u16(), KIND_COMMENT);
+        assert_eq!(event.kind.as_u16(), Kind::Comment.as_u16());
 
         let has_upper_e_tag = event.tags.iter().any(|tag| {
             let slice = tag.as_slice();
@@ -1123,7 +1114,7 @@ async fn send_to_relay(relay: &TestRelay, event: &Event) -> Result<(), String> {
 /// // Assert issue synced to result.syncing_relay
 ///
 /// // Live sync test
-/// let comment = build_layer3_comment_event(&keys, &issue.id, "Live Comment", Kind::Custom(1111))?;
+/// let comment = build_layer3_comment_event(&keys, &issue.id, "Live Comment", Kind::Comment)?;
 /// let result = run_sync_test(&[], &[comment]).await;
 /// // Assert comment synced to result.syncing_relay
 /// ```

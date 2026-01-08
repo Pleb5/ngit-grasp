@@ -14,8 +14,8 @@ use nostr_sdk::prelude::*;
 
 use crate::common::{sync_helpers::*, TestRelay};
 
-/// Kind 1617 - Patch event (NIP-34)
-const KIND_PATCH: u16 = 1617;
+// NOTE: Using rust-nostr Kind variant:
+// - Kind::GitPatch.as_u16() -> Kind::GitPatch (1617)
 
 /// Create an event referencing a repository coordinate via 'a' tag.
 ///
@@ -26,7 +26,7 @@ fn create_event_referencing_repo(keys: &Keys, repo_coord: &str, kind: u16, conte
         vec![repo_coord.to_string()],
     )];
 
-    EventBuilder::new(Kind::Custom(kind), content)
+    EventBuilder::new(Kind::from_u16(kind), content)
         .tags(tags)
         .sign_with_keys(keys)
         .expect("Failed to sign event")
@@ -82,14 +82,18 @@ async fn test_discovers_layer3_via_layer2() {
     // 5. Build the repo coordinate for the 'a' tag in the patch
     let repo_coord = format!(
         "{}:{}:{}",
-        KIND_REPOSITORY_STATE,
+        Kind::GitRepoAnnouncement.as_u16(),
         keys.public_key().to_hex(),
         "test-repo-discovery"
     );
 
     // 6. Create a patch event (Layer 2) that references the announcement
-    let patch =
-        create_event_referencing_repo(&keys, &repo_coord, KIND_PATCH, "Test patch proposal");
+    let patch = create_event_referencing_repo(
+        &keys,
+        &repo_coord,
+        Kind::GitPatch.as_u16(),
+        "Test patch proposal",
+    );
     let patch_id = patch.id;
 
     println!("Created patch {} (kind {})", patch_id, patch.kind.as_u16());
@@ -134,9 +138,7 @@ async fn test_discovers_layer3_via_layer2() {
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     // 10. Verify patch was synced to relay_b
-    let filter = Filter::new()
-        .kind(Kind::Custom(KIND_PATCH))
-        .author(keys.public_key());
+    let filter = Filter::new().kind(Kind::GitPatch).author(keys.public_key());
 
     let patch_synced = wait_for_event_on_relay(relay_b.url(), filter, Duration::from_secs(5)).await;
 
@@ -250,9 +252,7 @@ async fn test_relay_discovery_via_announcements_with_historic_sync() {
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     // 8. Verify Layer 2 event synced to relay_b
-    let issue_filter = Filter::new()
-        .kind(Kind::Custom(KIND_ISSUE))
-        .author(keys.public_key());
+    let issue_filter = Filter::new().kind(Kind::GitIssue).author(keys.public_key());
     let issue_synced =
         wait_for_event_on_relay(relay_b.url(), issue_filter, Duration::from_secs(5)).await;
 
@@ -389,7 +389,7 @@ async fn test_recursive_relay_discovery_via_announcements_with_historic_sync() {
 
     // 8. Verify announcement_x was synced to relay_a (from bootstrap relay_b)
     let filter_x = Filter::new()
-        .kind(Kind::Custom(KIND_REPOSITORY_STATE))
+        .kind(Kind::GitRepoAnnouncement)
         .author(keys_x.public_key());
 
     let announcement_x_synced =
@@ -402,7 +402,7 @@ async fn test_recursive_relay_discovery_via_announcements_with_historic_sync() {
 
     // 9. Verify announcement_y was synced to relay_a (from discovered relay_c)
     let filter_y = Filter::new()
-        .kind(Kind::Custom(KIND_REPOSITORY_STATE))
+        .kind(Kind::GitRepoAnnouncement)
         .author(keys_y.public_key());
 
     let announcement_y_synced =

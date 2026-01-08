@@ -795,7 +795,7 @@ async fn test_pr_event_clone_tag_sync_with_partial_oid_aggregation_from_multiple
     // Clone URLs: source_grasp + syncing (NOT git_server - PR commit only via PR's clone tag)
     // Relay URLs: source_grasp + mock_relay + syncing
     let announcement = nostr_sdk::EventBuilder::new(
-        nostr_sdk::Kind::Custom(30617),
+        Kind::GitRepoAnnouncement,
         "Repository for PR clone tag + partial OID test",
     )
     .tags(vec![

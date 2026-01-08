@@ -110,7 +110,7 @@ async fn test_layer2_sync_with_lowercase_a_tag() {
 
     // 5. Wait and verify event syncs to relay_b
     let filter = Filter::new()
-        .kind(Kind::Custom(KIND_ISSUE))
+        .kind(Kind::GitIssue)
         .author(keys.public_key())
         .id(issue_id);
 
@@ -212,7 +212,7 @@ async fn test_layer2_sync_with_uppercase_a_tag() {
 
     // 5. Wait and verify event syncs to relay_b
     let filter = Filter::new()
-        .kind(Kind::Custom(KIND_ISSUE))
+        .kind(Kind::GitIssue)
         .author(keys.public_key())
         .id(issue_id);
 
@@ -309,7 +309,7 @@ async fn test_layer2_sync_with_q_tag() {
 
     // 5. Wait and verify event syncs to relay_b
     let filter = Filter::new()
-        .kind(Kind::Custom(KIND_ISSUE))
+        .kind(Kind::GitIssue)
         .author(keys.public_key())
         .id(issue_id);
 
@@ -403,7 +403,7 @@ async fn test_layer3_sync_with_lowercase_e_tag() {
     println!("Layer 2 issue {} sent to relay_a", issue_id);
 
     // 5. Wait for issue to sync to relay_b
-    let issue_filter = Filter::new().kind(Kind::Custom(KIND_ISSUE)).id(issue_id);
+    let issue_filter = Filter::new().kind(Kind::GitIssue).id(issue_id);
     let issue_synced =
         wait_for_event_on_relay(relay_b.url(), issue_filter, Duration::from_secs(5)).await;
     println!("Issue synced to relay_b: {}", issue_synced);
@@ -527,7 +527,7 @@ async fn test_layer3_sync_with_uppercase_e_tag() {
     println!("Layer 2 issue {} sent to relay_a", issue_id);
 
     // 5. Wait for issue to sync to relay_b
-    let issue_filter = Filter::new().kind(Kind::Custom(KIND_ISSUE)).id(issue_id);
+    let issue_filter = Filter::new().kind(Kind::GitIssue).id(issue_id);
     let issue_synced =
         wait_for_event_on_relay(relay_b.url(), issue_filter, Duration::from_secs(5)).await;
     println!("Issue synced to relay_b: {}", issue_synced);
@@ -567,7 +567,7 @@ async fn test_layer3_sync_with_uppercase_e_tag() {
 
     // 7. Wait and verify comment syncs to relay_b
     let comment_filter = Filter::new()
-        .kind(Kind::Custom(KIND_COMMENT)) // Kind 1111
+        .kind(Kind::Comment) // Kind 1111
         .author(keys.public_key())
         .id(comment_id);
 
@@ -655,7 +655,7 @@ async fn test_layer3_sync_with_q_tag() {
     println!("Layer 2 issue {} sent to relay_a", issue_id);
 
     // 5. Wait for issue to sync to relay_b
-    let issue_filter = Filter::new().kind(Kind::Custom(KIND_ISSUE)).id(issue_id);
+    let issue_filter = Filter::new().kind(Kind::GitIssue).id(issue_id);
     let issue_synced =
         wait_for_event_on_relay(relay_b.url(), issue_filter, Duration::from_secs(5)).await;
     println!("Issue synced to relay_b: {}", issue_synced);

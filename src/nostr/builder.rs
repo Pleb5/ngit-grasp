@@ -12,10 +12,7 @@ use nostr_lmdb::NostrLmdb;
 use nostr_relay_builder::prelude::*;
 
 use crate::config::{Config, DatabaseBackend};
-use crate::nostr::events::{
-    RepositoryAnnouncement, KIND_PR, KIND_PR_UPDATE, KIND_REPOSITORY_ANNOUNCEMENT,
-    KIND_REPOSITORY_STATE, KIND_USER_GRASP_LIST,
-};
+use crate::nostr::events::RepositoryAnnouncement;
 use crate::nostr::policy::{
     AnnouncementPolicy, AnnouncementResult, PolicyContext, PrEventPolicy, ReferenceResult,
     RelatedEventPolicy, StatePolicy, StateResult,
@@ -377,11 +374,13 @@ impl WritePolicy for Nip34WritePolicy {
             // Sync uses localhost:0 as a dummy address
             let is_synced = addr.ip().is_loopback() && addr.port() == 0;
 
-            match event.kind.as_u16() {
-                KIND_REPOSITORY_ANNOUNCEMENT => self.handle_announcement(event).await,
-                KIND_REPOSITORY_STATE => self.handle_state(event, is_synced).await,
-                KIND_PR | KIND_PR_UPDATE => self.handle_pr_event(event, is_synced).await,
-                KIND_USER_GRASP_LIST => {
+            match event.kind {
+                Kind::GitRepoAnnouncement => self.handle_announcement(event).await,
+                Kind::RepoState => self.handle_state(event, is_synced).await,
+                Kind::GitPullRequest | Kind::GitPullRequestUpdate => {
+                    self.handle_pr_event(event, is_synced).await
+                }
+                Kind::GitUserGraspList => {
                     // Accept all kind 10317 (User Grasp List) events
                     // for better GRASP repository discovery
                     tracing::debug!(

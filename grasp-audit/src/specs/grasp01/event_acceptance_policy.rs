@@ -659,7 +659,7 @@ impl EventAcceptancePolicyTests {
             ];
 
             let comment = client
-                .event_builder(Kind::Custom(1111), "Comment on repo")
+                .event_builder(Kind::Comment, "Comment on repo")
                 .tags(tags)
                 .build(client.keys())
                 .map_err(|e| format!("Failed to build comment: {}", e))?;
@@ -935,7 +935,7 @@ impl EventAcceptancePolicyTests {
             ];
 
             let issue = client
-                .event_builder(Kind::Custom(1621), "issue content")
+                .event_builder(Kind::GitIssue, "issue content")
                 .tags(issue_tags)
                 .build(client.keys())
                 .map_err(|e| format!("Failed to build issue: {}", e))?;
@@ -995,7 +995,7 @@ impl EventAcceptancePolicyTests {
             ];
 
             let comment_b = client
-                .event_builder(Kind::Custom(1111), "Comment B quoting Comment A")
+                .event_builder(Kind::Comment, "Comment B quoting Comment A")
                 .tags(comment_b_tags)
                 .build(client.keys())
                 .map_err(|e| format!("Failed to build comment B: {}", e))?;
@@ -1172,7 +1172,7 @@ impl EventAcceptancePolicyTests {
             ];
 
             let comment = client
-                .event_builder(Kind::Custom(1111), "Comment on unaccepted repo")
+                .event_builder(Kind::Comment, "Comment on unaccepted repo")
                 .tags(tags)
                 .build(client.keys())
                 .map_err(|e| format!("Failed to build comment: {}", e))?;

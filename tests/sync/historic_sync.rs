@@ -29,7 +29,7 @@ async fn test_bootstrap_syncs_existing_layer2_events() {
 
     // Verify announcement synced to syncing relay
     let filter = Filter::new()
-        .kind(Kind::Custom(KIND_REPOSITORY_STATE))
+        .kind(Kind::GitRepoAnnouncement)
         .author(result.maintainer_keys.public_key());
 
     let synced =
@@ -64,7 +64,7 @@ async fn test_relay_replays_events_after_restart() {
 
     // Verify announcement synced on first run
     let filter = Filter::new()
-        .kind(Kind::Custom(KIND_REPOSITORY_STATE))
+        .kind(Kind::GitRepoAnnouncement)
         .author(result.maintainer_keys.public_key());
 
     let synced_first = wait_for_event_on_relay(
@@ -173,7 +173,7 @@ async fn test_announcement_not_listing_relay_is_not_synced() {
 
     // Verify announcement did NOT sync to syncing relay
     let filter = Filter::new()
-        .kind(Kind::Custom(KIND_REPOSITORY_STATE))
+        .kind(Kind::GitRepoAnnouncement)
         .author(keys.public_key());
 
     let synced = wait_for_event_on_relay(syncing.url(), filter, Duration::from_secs(2)).await;
@@ -274,7 +274,7 @@ async fn test_history_sync_without_negentropy() {
 
     // Verify announcement synced to syncing relay via HISTORY sync
     let filter = Filter::new()
-        .kind(Kind::Custom(KIND_REPOSITORY_STATE))
+        .kind(Kind::GitRepoAnnouncement)
         .author(keys.public_key());
 
     let synced = wait_for_event_on_relay(syncing.url(), filter, Duration::from_secs(5)).await;
@@ -339,7 +339,7 @@ async fn test_pagination_for_large_historic_sync() {
     // Create 40 issue events to test pagination (with limit=10, threshold=7)
     let repo_coord = format!(
         "{}:{}:{}",
-        KIND_REPOSITORY_STATE,
+        Kind::GitRepoAnnouncement.as_u16(),
         keys.public_key().to_hex(),
         repo_id
     );
@@ -416,16 +416,14 @@ async fn test_pagination_for_large_historic_sync() {
 
     // Verify announcement synced
     let announcement_filter = Filter::new()
-        .kind(Kind::Custom(KIND_REPOSITORY_STATE))
+        .kind(Kind::GitRepoAnnouncement)
         .author(keys.public_key());
 
     let announcement_synced =
         wait_for_event_on_relay(syncing.url(), announcement_filter, Duration::from_secs(3)).await;
 
     // Verify ALL 40 issues synced
-    let issues_filter = Filter::new()
-        .kind(Kind::Custom(KIND_ISSUE))
-        .author(keys.public_key());
+    let issues_filter = Filter::new().kind(Kind::GitIssue).author(keys.public_key());
 
     // Query for all issues
     let temp_keys = Keys::generate();
