@@ -282,7 +282,7 @@ fn is_safe_path(path: &Path, repo_path: &Path) -> bool {
 }
 
 /// Guess the content type for a git-related file.
-fn guess_content_type(path: &PathBuf) -> &'static str {
+fn guess_content_type(path: &Path) -> &'static str {
     let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
     if filename == "info/refs" || filename == "refs" {

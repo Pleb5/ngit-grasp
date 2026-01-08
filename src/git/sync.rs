@@ -1618,7 +1618,8 @@ mod tests {
         };
 
         // latest should be considered latest
-        let result = is_latest_authorized_state(&latest, &maintainers, &[older.clone()]);
+        let result =
+            is_latest_authorized_state(&latest, &maintainers, std::slice::from_ref(&older));
         assert!(result);
 
         // older should not be considered latest
@@ -1633,7 +1634,7 @@ mod tests {
         let maintainers = vec![keys.public_key().to_hex()];
 
         // When the state being checked is also in the db_states, it should be considered latest
-        let result = is_latest_authorized_state(&state, &maintainers, &[state.clone()]);
+        let result = is_latest_authorized_state(&state, &maintainers, std::slice::from_ref(&state));
         assert!(result);
     }
 }

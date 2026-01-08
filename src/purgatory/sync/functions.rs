@@ -930,7 +930,7 @@ mod tests {
                 .expect("Should return a second URL");
 
         // Both URLs should be available (one from announcement, one from PR)
-        let both_urls = vec![first_url, second_url];
+        let both_urls = [first_url, second_url];
         assert!(
             both_urls.iter().any(|u| u.contains("github.com")),
             "Should include announcement URL"

@@ -29,7 +29,7 @@
 ///
 /// Run `test_pr_test_commit_hash_discovery` to discover/verify this value.
 #[allow(dead_code)]
-const PR_TEST_COMMIT_HASH: &str = "5d40fb1555a0c28bf4d650515a73aaa54d4d9bfb";
+const PR_TEST_COMMIT_HASH: &str = "8935183ff722bf04e861928c6a7e50868c6ca4a6";
 
 use crate::{
     clone_repo, create_commit, create_deterministic_commit_with_variant, try_push, try_push_to_ref,
