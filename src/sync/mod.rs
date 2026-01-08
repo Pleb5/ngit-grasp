@@ -1069,7 +1069,9 @@ impl SyncManager {
                             }
                             // PR events (kind 1617/1618) - extract identifier from 'a' tag
                             else if event.kind.as_u16() == 1617 || event.kind.as_u16() == 1618 {
-                                if let Some(identifier) = crate::git::sync::extract_identifier_from_pr_event(&event) {
+                                if let Some(identifier) =
+                                    crate::git::sync::extract_identifier_from_pr_event(&event)
+                                {
                                     tracing::debug!(
                                         event_id = %event.id,
                                         identifier = %identifier,

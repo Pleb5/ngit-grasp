@@ -73,8 +73,8 @@ impl MockRelay {
     /// in an in-memory database.
     pub async fn start() -> Self {
         // Create and bind listener (eliminates port race condition)
-        let std_listener = std::net::TcpListener::bind("127.0.0.1:0")
-            .expect("Failed to bind to random port");
+        let std_listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("Failed to bind to random port");
         let port = std_listener
             .local_addr()
             .expect("Failed to get local addr")
@@ -84,8 +84,8 @@ impl MockRelay {
         std_listener
             .set_nonblocking(true)
             .expect("Failed to set non-blocking");
-        let listener = TcpListener::from_std(std_listener)
-            .expect("Failed to convert to tokio listener");
+        let listener =
+            TcpListener::from_std(std_listener).expect("Failed to convert to tokio listener");
 
         Self::start_with_listener(listener, port).await
     }
@@ -258,7 +258,10 @@ fn derive_accept_key(request_key: &[u8]) -> String {
     engine.input(request_key);
     engine.input(WS_GUID);
     let hash = Sha1Hash::from_engine(engine);
-    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, hash.as_byte_array())
+    base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        hash.as_byte_array(),
+    )
 }
 
 /// Wait for the server to be ready to accept connections.
@@ -275,10 +278,7 @@ async fn wait_for_server_ready(port: u16) {
             }
             Err(_) => {
                 if attempt == max_attempts - 1 {
-                    panic!(
-                        "MockRelay failed to start after {} attempts",
-                        max_attempts
-                    );
+                    panic!("MockRelay failed to start after {} attempts", max_attempts);
                 }
                 tokio::time::sleep(delay).await;
             }
@@ -309,7 +309,10 @@ mod tests {
         // Create a client and connect
         let keys = Keys::generate();
         let client = Client::new(keys.clone());
-        client.add_relay(mock.url()).await.expect("Failed to add relay");
+        client
+            .add_relay(mock.url())
+            .await
+            .expect("Failed to add relay");
         client.connect().await;
 
         // Wait for connection

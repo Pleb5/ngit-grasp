@@ -316,15 +316,13 @@ impl ThrottleManager {
         }
 
         // Create new throttle
-        self.throttles
-            .entry(domain.to_string())
-            .or_insert_with(|| {
-                Mutex::new(DomainThrottle::new(
-                    domain.to_string(),
-                    self.max_concurrent_per_domain,
-                    self.max_per_minute_per_domain,
-                ))
-            });
+        self.throttles.entry(domain.to_string()).or_insert_with(|| {
+            Mutex::new(DomainThrottle::new(
+                domain.to_string(),
+                self.max_concurrent_per_domain,
+                self.max_per_minute_per_domain,
+            ))
+        });
 
         // Return the entry (we know it exists now)
         self.throttles.get(domain).unwrap()
@@ -438,7 +436,9 @@ impl ThrottleManager {
             let domain = domain.to_string();
 
             tokio::spawn(async move {
-                manager.process_queued_identifier(&domain, &identifier).await;
+                manager
+                    .process_queued_identifier(&domain, &identifier)
+                    .await;
             });
         }
     }
@@ -480,14 +480,9 @@ impl ThrottleManager {
         };
 
         // Get next URL for this identifier on this specific domain
-        let url = sync_identifier_next_url(
-            ctx.as_ref(),
-            identifier,
-            Some(domain),
-            &tried_urls,
-            self,
-        )
-        .await;
+        let url =
+            sync_identifier_next_url(ctx.as_ref(), identifier, Some(domain), &tried_urls, self)
+                .await;
 
         match url {
             Some(url) => {

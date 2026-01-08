@@ -6,12 +6,15 @@
 //! - When events are released from purgatory (purgatory sync)
 //! - When git pushes trigger purgatory releases (receive-pack handler)
 
-use std::path::Path;
-use nostr_sdk::Event;
-use crate::git::authorization::{collect_authorized_maintainers, RepositoryData};
-use crate::git::sync::{align_repository_with_state, sync_pr_refs_to_tagged_owner_repos, copy_missing_oids_between_repos};
 use crate::git;
+use crate::git::authorization::{collect_authorized_maintainers, RepositoryData};
+use crate::git::sync::{
+    align_repository_with_state, copy_missing_oids_between_repos,
+    sync_pr_refs_to_tagged_owner_repos,
+};
 use crate::nostr::events::RepositoryState;
+use nostr_sdk::Event;
+use std::path::Path;
 
 /// Result of processing a state event with git data
 #[derive(Debug, Default, Clone)]
@@ -68,19 +71,19 @@ pub fn process_state_with_git_data(
     git_data_path: &Path,
 ) -> ProcessStateResult {
     let mut result = ProcessStateResult::default();
-    
+
     let state_author = state.event.pubkey.to_hex();
-    
+
     // Collect authorized maintainers per owner
     let by_owner = collect_authorized_maintainers(&db_repo_data.announcements);
-    
+
     // Step 1: Identify owner repos that the state event author is maintainer for
     let authorized_owners: Vec<&String> = by_owner
         .iter()
         .filter(|(_, maintainers)| maintainers.contains(&state_author))
         .map(|(owner, _)| owner)
         .collect();
-    
+
     if authorized_owners.is_empty() {
         tracing::debug!(
             identifier = %state.identifier,
@@ -89,18 +92,18 @@ pub fn process_state_with_git_data(
         );
         return result;
     }
-    
+
     // Process each owner repo that authorizes this state event author
     for owner in &authorized_owners {
         let maintainers = by_owner.get(*owner).unwrap();
-        
+
         // Step 2: Check if this state event is the latest authorized for this owner
         let is_latest = crate::git::sync::is_latest_authorized_state_public(
             state,
             maintainers,
             &db_repo_data.states,
         );
-        
+
         if !is_latest {
             tracing::debug!(
                 identifier = %state.identifier,
@@ -109,7 +112,7 @@ pub fn process_state_with_git_data(
             );
             continue;
         }
-        
+
         // Find the announcement for this owner
         let Some(announcement) = db_repo_data
             .announcements
@@ -118,9 +121,9 @@ pub fn process_state_with_git_data(
         else {
             continue;
         };
-        
+
         let target_repo_path = git_data_path.join(announcement.repo_path());
-        
+
         // Step 3: Check git repo exists for that owner
         if !target_repo_path.exists() {
             tracing::debug!(
@@ -131,14 +134,12 @@ pub fn process_state_with_git_data(
             );
             continue;
         }
-        
+
         // Step 4: Copy all required OIDs to that repo (unless it's source_repo_path)
         if target_repo_path != source_repo_path {
-            if let Err(e) = copy_missing_oids_between_repos(
-                source_repo_path,
-                &target_repo_path,
-                state,
-            ) {
+            if let Err(e) =
+                copy_missing_oids_between_repos(source_repo_path, &target_repo_path, state)
+            {
                 tracing::warn!(
                     identifier = %state.identifier,
                     source = %source_repo_path.display(),
@@ -150,14 +151,14 @@ pub fn process_state_with_git_data(
                 continue; // Skip this owner repo
             }
         }
-        
+
         // Step 5: Reset the git state in that repo to match the state event
         let align_result = align_repository_with_state(&target_repo_path, state);
         result.repos_synced += 1;
         result.refs_created += align_result.refs_created;
         result.refs_updated += align_result.refs_updated;
         result.refs_deleted += align_result.refs_deleted;
-        
+
         tracing::info!(
             identifier = %state.identifier,
             owner = %owner,
@@ -169,7 +170,7 @@ pub fn process_state_with_git_data(
             "Aligned repository with state"
         );
     }
-    
+
     result
 }
 
@@ -205,13 +206,13 @@ pub fn process_pr_with_git_data(
     source_owner_pubkey: &str,
 ) -> ProcessPrResult {
     let mut result = ProcessPrResult::default();
-    
+
     let event_id = event.id.to_hex();
-    
+
     // Sync PR ref to owner repos using tagged maintainer logic
     let pr_refs = vec![(event_id.clone(), commit.to_string())];
     let pr_events = vec![event.clone()];
-    
+
     let sync_result = sync_pr_refs_to_tagged_owner_repos(
         source_repo_path,
         &pr_refs,
@@ -222,13 +223,10 @@ pub fn process_pr_with_git_data(
     );
     result.repos_synced += sync_result.repos_synced;
     result.refs_created += sync_result.refs_created;
-    result.errors.extend(
-        sync_result
-            .errors
-            .into_iter()
-            .map(|(_, e)| e),
-    );
-    
+    result
+        .errors
+        .extend(sync_result.errors.into_iter().map(|(_, e)| e));
+
     // Create the ref in the source repo if it doesn't exist
     let ref_name = format!("refs/nostr/{}", event_id);
     if git::get_ref_commit(source_repo_path, &ref_name).is_none() {
@@ -250,6 +248,6 @@ pub fn process_pr_with_git_data(
             );
         }
     }
-    
+
     result
 }

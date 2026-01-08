@@ -9,8 +9,8 @@ use nostr_relay_builder::builder::WritePolicyResult;
 use nostr_relay_builder::prelude::Event;
 
 use super::PolicyContext;
-use crate::git::authorization::fetch_repository_data;
 use crate::git;
+use crate::git::authorization::fetch_repository_data;
 use crate::nostr::events::{validate_state, RepositoryAnnouncement, RepositoryState};
 
 /// Result of state policy evaluation
@@ -48,7 +48,11 @@ impl StatePolicy {
     /// * `is_synced` - True if this event came from proactive sync (vs user-submitted)
     ///
     /// Returns the true if git data already availale or false if added to purgatory
-    pub async fn process_state_event(&self, event: &Event, is_synced: bool) -> Result<WritePolicyResult> {
+    pub async fn process_state_event(
+        &self,
+        event: &Event,
+        is_synced: bool,
+    ) -> Result<WritePolicyResult> {
         // Parse state to get HEAD and branch info
         let state =
             RepositoryState::from_event(event.clone()).context("Failed to parse state event")?;
@@ -155,8 +159,6 @@ impl StatePolicy {
             })
         }
     }
-
-
 }
 
 fn find_repo_with_git_data(

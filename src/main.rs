@@ -146,7 +146,9 @@ async fn main() -> Result<()> {
         throttle_manager.set_context(sync_ctx.clone());
 
         // Start the sync loop
-        let _sync_loop_handle = purgatory.clone().start_sync_loop(sync_ctx, throttle_manager);
+        let _sync_loop_handle = purgatory
+            .clone()
+            .start_sync_loop(sync_ctx, throttle_manager);
         info!("Purgatory sync loop started (1s interval)");
 
         // Setup shutdown handler for purgatory cleanup

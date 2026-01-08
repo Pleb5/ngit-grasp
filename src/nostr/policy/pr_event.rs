@@ -237,5 +237,4 @@ impl PrEventPolicy {
 
         Ok(repo_paths)
     }
-
 }

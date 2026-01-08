@@ -119,12 +119,8 @@ pub trait SyncContext: Send + Sync {
     ///
     /// # Returns
     /// List of OIDs that were successfully fetched
-    async fn fetch_oids(
-        &self,
-        repo_path: &Path,
-        url: &str,
-        oids: &[String],
-    ) -> Result<Vec<String>>;
+    async fn fetch_oids(&self, repo_path: &Path, url: &str, oids: &[String])
+        -> Result<Vec<String>>;
 
     /// Process newly available git data.
     ///
@@ -368,10 +364,7 @@ impl SyncContext for RealSyncContext {
                         .cloned()
                         .collect();
 
-                    debug!(
-                        fetched_count = fetched.len(),
-                        "Successfully fetched OIDs"
-                    );
+                    debug!(fetched_count = fetched.len(), "Successfully fetched OIDs");
 
                     fetched
                 }
@@ -702,11 +695,7 @@ pub mod mock {
             }
 
             // Get OIDs this URL can provide
-            let provides = self
-                .url_provides_oids
-                .get(url)
-                .cloned()
-                .unwrap_or_default();
+            let provides = self.url_provides_oids.get(url).cloned().unwrap_or_default();
 
             // Find which requested OIDs this URL can provide
             let fetched: Vec<String> = oids

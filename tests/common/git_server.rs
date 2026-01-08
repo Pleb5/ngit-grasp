@@ -301,7 +301,10 @@ fn find_free_port() -> u16 {
     use std::net::TcpListener;
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind to random port");
-    let port = listener.local_addr().expect("Failed to get local addr").port();
+    let port = listener
+        .local_addr()
+        .expect("Failed to get local addr")
+        .port();
     drop(listener);
     port
 }
@@ -320,7 +323,10 @@ async fn wait_for_server_ready(port: u16) {
             }
             Err(_) => {
                 if attempt == max_attempts - 1 {
-                    panic!("SimpleGitServer failed to start after {} attempts", max_attempts);
+                    panic!(
+                        "SimpleGitServer failed to start after {} attempts",
+                        max_attempts
+                    );
                 }
                 tokio::time::sleep(delay).await;
             }
@@ -366,10 +372,13 @@ mod tests {
             .await
             .expect("Failed to fetch info/refs");
 
-        assert!(response.status().is_success(), "info/refs should be accessible");
+        assert!(
+            response.status().is_success(),
+            "info/refs should be accessible"
+        );
 
         let body = response.text().await.expect("Failed to read response body");
-        
+
         // Should contain at least one ref (HEAD or refs/heads/main)
         assert!(
             body.contains("refs/heads/main") || body.contains("HEAD"),
@@ -404,7 +413,7 @@ mod tests {
         );
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        
+
         // Should list the main branch with the correct commit
         assert!(
             stdout.contains(&commit_hash),
@@ -433,7 +442,7 @@ mod tests {
 
         // Create a destination repo to fetch into
         let dest_dir = tempfile::tempdir().expect("Failed to create dest dir");
-        
+
         // Initialize empty repo (using tokio::process::Command)
         let output = tokio::process::Command::new("git")
             .args(["init"])
@@ -487,14 +496,23 @@ mod tests {
     #[test]
     fn test_is_safe_path_blocks_traversal() {
         let repo_path = Path::new("/tmp/repo");
-        
+
         // Safe paths
         assert!(is_safe_path(Path::new("/tmp/repo/info/refs"), repo_path));
-        assert!(is_safe_path(Path::new("/tmp/repo/objects/pack/file.pack"), repo_path));
-        
+        assert!(is_safe_path(
+            Path::new("/tmp/repo/objects/pack/file.pack"),
+            repo_path
+        ));
+
         // Unsafe paths (path traversal)
-        assert!(!is_safe_path(Path::new("/tmp/repo/../etc/passwd"), repo_path));
-        assert!(!is_safe_path(Path::new("/tmp/repo/../../etc/passwd"), repo_path));
+        assert!(!is_safe_path(
+            Path::new("/tmp/repo/../etc/passwd"),
+            repo_path
+        ));
+        assert!(!is_safe_path(
+            Path::new("/tmp/repo/../../etc/passwd"),
+            repo_path
+        ));
     }
 }
 
@@ -563,17 +581,19 @@ impl SmartGitServer {
         }
 
         // 3. Create and bind listener (eliminates port race condition)
-        let std_listener = std::net::TcpListener::bind("127.0.0.1:0")
-            .expect("Failed to bind to random port");
-        let port = std_listener.local_addr()
+        let std_listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("Failed to bind to random port");
+        let port = std_listener
+            .local_addr()
             .expect("Failed to get local addr")
             .port();
-        
+
         // Convert to tokio listener (keeps port bound)
-        std_listener.set_nonblocking(true)
+        std_listener
+            .set_nonblocking(true)
             .expect("Failed to set non-blocking");
-        let listener = TcpListener::from_std(std_listener)
-            .expect("Failed to convert to tokio listener");
+        let listener =
+            TcpListener::from_std(std_listener).expect("Failed to convert to tokio listener");
 
         // 4. Create shutdown channel
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
@@ -690,15 +710,13 @@ async fn handle_smart_request(
     // Route: GET /info/refs?service=git-upload-pack
     if method == hyper::Method::GET && path.ends_with("/info/refs") {
         // Parse service from query string
-        let service = query
-            .split('&')
-            .find_map(|param| {
-                let mut parts = param.splitn(2, '=');
-                match (parts.next(), parts.next()) {
-                    (Some("service"), Some(svc)) => Some(svc),
-                    _ => None,
-                }
-            });
+        let service = query.split('&').find_map(|param| {
+            let mut parts = param.splitn(2, '=');
+            match (parts.next(), parts.next()) {
+                (Some("service"), Some(svc)) => Some(svc),
+                _ => None,
+            }
+        });
 
         match service {
             Some("git-upload-pack") => {
@@ -714,7 +732,9 @@ async fn handle_smart_request(
             _ => {
                 return Ok(Response::builder()
                     .status(StatusCode::BAD_REQUEST)
-                    .body(Full::new(Bytes::from("Missing or invalid service parameter")))
+                    .body(Full::new(Bytes::from(
+                        "Missing or invalid service parameter",
+                    )))
                     .unwrap());
             }
         }
@@ -740,8 +760,8 @@ async fn handle_info_refs_upload_pack(
     git_protocol_version: Option<&str>,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     use std::process::Stdio;
-    use tokio::process::Command as TokioCommand;
     use tokio::io::AsyncReadExt;
+    use tokio::process::Command as TokioCommand;
 
     // Spawn git upload-pack --advertise-refs
     let mut cmd = TokioCommand::new("git");
@@ -763,8 +783,7 @@ async fn handle_info_refs_upload_pack(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let mut child = match cmd.spawn()
-    {
+    let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
             eprintln!("Failed to spawn git upload-pack: {}", e);
@@ -800,7 +819,7 @@ async fn handle_info_refs_upload_pack(
     let len = service_line.len() + 4;
     response_body.extend_from_slice(format!("{:04x}", len).as_bytes());
     response_body.extend_from_slice(service_line.as_bytes());
-    
+
     // Flush packet
     response_body.extend_from_slice(b"0000");
 
@@ -809,7 +828,10 @@ async fn handle_info_refs_upload_pack(
 
     Ok(Response::builder()
         .status(StatusCode::OK)
-        .header("Content-Type", "application/x-git-upload-pack-advertisement")
+        .header(
+            "Content-Type",
+            "application/x-git-upload-pack-advertisement",
+        )
         .header("Cache-Control", "no-cache")
         .body(Full::new(Bytes::from(response_body)))
         .unwrap())
@@ -850,8 +872,7 @@ async fn handle_upload_pack(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let mut child = match cmd.spawn()
-    {
+    let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
             eprintln!("Failed to spawn git upload-pack: {}", e);
@@ -957,7 +978,10 @@ mod smart_git_server_tests {
             content_type
         );
 
-        let body = response.bytes().await.expect("Failed to read response body");
+        let body = response
+            .bytes()
+            .await
+            .expect("Failed to read response body");
 
         // Should start with service advertisement pkt-line
         let body_str = String::from_utf8_lossy(&body);
@@ -1077,7 +1101,7 @@ mod smart_git_server_tests {
     #[tokio::test]
     async fn test_smart_git_server_shallow_fetch() {
         // This is the KEY test - shallow fetch requires smart HTTP protocol
-        
+
         // Create a source repo with a commit
         let source_dir = tempfile::tempdir().expect("Failed to create source dir");
         let commit_hash = create_test_repo_with_commit(source_dir.path(), CommitVariant::StateTest)

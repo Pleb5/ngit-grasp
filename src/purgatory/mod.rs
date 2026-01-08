@@ -1134,7 +1134,8 @@ fn test_cleanup_expired_events() {
 
     // Manually set event1's expiry time to be old
     if let Some(mut entry) = purgatory.expired_events.get_mut(&event1_id) {
-        *entry.value_mut() = Instant::now() - Duration::from_secs(8 * 24 * 3600); // 8 days ago
+        *entry.value_mut() = Instant::now() - Duration::from_secs(8 * 24 * 3600);
+        // 8 days ago
     }
 
     // Clean up expired events older than 7 days

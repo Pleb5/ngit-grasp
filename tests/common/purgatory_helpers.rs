@@ -51,7 +51,7 @@ pub fn create_test_repo_with_commit(path: &Path, variant: CommitVariant) -> Resu
     // Configure git user for commits
     run_git(path, &["config", "user.email", "test@example.com"])?;
     run_git(path, &["config", "user.name", "Test User"])?;
-    
+
     // Disable GPG signing for tests (prevents yubikey prompts)
     run_git(path, &["config", "commit.gpgsign", "false"])?;
     run_git(path, &["config", "tag.gpgsign", "false"])?;
@@ -710,7 +710,8 @@ mod tests {
         // Check d-tag
         let has_d_tag = event.tags.iter().any(|tag| {
             let slice = tag.as_slice();
-            slice.first().is_some_and(|t| t == "d") && slice.get(1).is_some_and(|v| v == "test-repo")
+            slice.first().is_some_and(|t| t == "d")
+                && slice.get(1).is_some_and(|v| v == "test-repo")
         });
         assert!(has_d_tag, "Event should have 'd' tag with identifier");
 
@@ -751,7 +752,8 @@ mod tests {
         // Check a-tag
         let has_a_tag = event.tags.iter().any(|tag| {
             let slice = tag.as_slice();
-            slice.first().is_some_and(|t| t == "a") && slice.get(1).is_some_and(|v| v == &repo_coord)
+            slice.first().is_some_and(|t| t == "a")
+                && slice.get(1).is_some_and(|v| v == &repo_coord)
         });
         assert!(has_a_tag, "Event should have 'a' tag");
 
@@ -806,7 +808,10 @@ mod tests {
             &repo_coord,
             "abc123def456",
             "Test PR with clone",
-            &["http://fork-server.com/repo.git", "http://another-server.com/repo.git"],
+            &[
+                "http://fork-server.com/repo.git",
+                "http://another-server.com/repo.git",
+            ],
         )
         .expect("Failed to create PR event with clone");
 
@@ -815,7 +820,8 @@ mod tests {
         // Check a-tag
         let has_a_tag = event.tags.iter().any(|tag| {
             let slice = tag.as_slice();
-            slice.first().is_some_and(|t| t == "a") && slice.get(1).is_some_and(|v| v == &repo_coord)
+            slice.first().is_some_and(|t| t == "a")
+                && slice.get(1).is_some_and(|v| v == &repo_coord)
         });
         assert!(has_a_tag, "Event should have 'a' tag");
 
@@ -831,8 +837,12 @@ mod tests {
         let has_clone_tag = event.tags.iter().any(|tag| {
             let slice = tag.as_slice();
             slice.first().is_some_and(|t| t == "clone")
-                && slice.get(1).is_some_and(|v| v == "http://fork-server.com/repo.git")
-                && slice.get(2).is_some_and(|v| v == "http://another-server.com/repo.git")
+                && slice
+                    .get(1)
+                    .is_some_and(|v| v == "http://fork-server.com/repo.git")
+                && slice
+                    .get(2)
+                    .is_some_and(|v| v == "http://another-server.com/repo.git")
         });
         assert!(has_clone_tag, "Event should have 'clone' tag with URLs");
     }
@@ -855,6 +865,9 @@ mod tests {
             let slice = tag.as_slice();
             slice.first().is_some_and(|t| t == "clone")
         });
-        assert!(!has_clone_tag, "Event should not have 'clone' tag when no URLs provided");
+        assert!(
+            !has_clone_tag,
+            "Event should not have 'clone' tag when no URLs provided"
+        );
     }
 }

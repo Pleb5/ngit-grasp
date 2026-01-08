@@ -162,7 +162,11 @@ impl Nip34WritePolicy {
         match self.state_policy.validate(event) {
             StateResult::Accept => {
                 // Process state alignment asynchronously
-                match self.state_policy.process_state_event(event, is_synced).await {
+                match self
+                    .state_policy
+                    .process_state_event(event, is_synced)
+                    .await
+                {
                     Ok(poilicy_result) => poilicy_result,
                     Err(e) => {
                         tracing::warn!("Failed to process state event {}: {}", event_id_str, e);
@@ -247,7 +251,8 @@ impl Nip34WritePolicy {
                     );
                     return WritePolicyResult::Reject {
                         status: false,
-                        message: "invalid: previously expired from purgatory without git data".into(),
+                        message: "invalid: previously expired from purgatory without git data"
+                            .into(),
                     };
                 }
 

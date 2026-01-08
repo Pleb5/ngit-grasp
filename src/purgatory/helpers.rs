@@ -515,7 +515,7 @@ mod tests {
 
         // Create a working repo to generate a commit
         let work_dir = tempfile::tempdir().unwrap();
-        
+
         Command::new("git")
             .args(["init"])
             .current_dir(work_dir.path())
@@ -585,7 +585,7 @@ mod tests {
         use std::process::Command;
 
         let temp_dir = tempfile::tempdir().unwrap();
-        
+
         Command::new("git")
             .args(["init", "--bare"])
             .current_dir(temp_dir.path())
@@ -603,10 +603,7 @@ mod tests {
         let commit_hash = commit_hash.expect("Should have a commit");
 
         // Create a state event referencing that commit
-        let event = create_test_state_event(
-            "test-repo",
-            vec![("refs/heads/main", &commit_hash)],
-        );
+        let event = create_test_state_event("test-repo", vec![("refs/heads/main", &commit_hash)]);
 
         // Should return true since the OID exists
         assert!(can_apply_state(&event, repo_path));
@@ -621,7 +618,10 @@ mod tests {
         // Create a state event referencing a non-existent commit
         let event = create_test_state_event(
             "test-repo",
-            vec![("refs/heads/main", "0000000000000000000000000000000000000000")],
+            vec![(
+                "refs/heads/main",
+                "0000000000000000000000000000000000000000",
+            )],
         );
 
         // Should return false since the OID doesn't exist
@@ -655,8 +655,8 @@ mod tests {
         let event = create_test_state_event(
             "test-repo",
             vec![
-                ("refs/heads/main", &commit_hash),  // exists
-                ("refs/heads/dev", "0000000000000000000000000000000000000000"),  // doesn't exist
+                ("refs/heads/main", &commit_hash), // exists
+                ("refs/heads/dev", "0000000000000000000000000000000000000000"), // doesn't exist
             ],
         );
 
@@ -687,8 +687,8 @@ mod tests {
         let event = create_test_state_event(
             "test-repo",
             vec![
-                ("refs/heads/main", &commit_hash),  // real OID that exists
-                ("refs/heads/alias", "ref: refs/heads/main"),  // symbolic ref
+                ("refs/heads/main", &commit_hash), // real OID that exists
+                ("refs/heads/alias", "ref: refs/heads/main"), // symbolic ref
             ],
         );
 

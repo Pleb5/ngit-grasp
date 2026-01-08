@@ -837,13 +837,27 @@ pub async fn process_newly_available_git_data(
     );
 
     // Process state events from purgatory
-    let state_result =
-        process_purgatory_state_events(&identifier, source_repo_path, database, local_relay, purgatory, git_data_path).await;
+    let state_result = process_purgatory_state_events(
+        &identifier,
+        source_repo_path,
+        database,
+        local_relay,
+        purgatory,
+        git_data_path,
+    )
+    .await;
     result.merge(state_result);
 
     // Process PR events from purgatory
-    let pr_result =
-        process_purgatory_pr_events(&identifier, source_repo_path, database, local_relay, purgatory, git_data_path).await;
+    let pr_result = process_purgatory_pr_events(
+        &identifier,
+        source_repo_path,
+        database,
+        local_relay,
+        purgatory,
+        git_data_path,
+    )
+    .await;
     result.merge(pr_result);
 
     if result.released_any() {
@@ -1113,7 +1127,9 @@ async fn process_purgatory_pr_events(
                 error = %e,
                 "Failed to fetch repository data for PR events"
             );
-            result.errors.push(format!("Failed to fetch repo data: {}", e));
+            result
+                .errors
+                .push(format!("Failed to fetch repo data: {}", e));
             return result;
         }
     };
@@ -1137,8 +1153,8 @@ async fn process_purgatory_pr_events(
         }
 
         // Extract owner pubkey
-        let owner_pubkey = extract_owner_from_repo_path(source_repo_path, git_data_path)
-            .unwrap_or_default();
+        let owner_pubkey =
+            extract_owner_from_repo_path(source_repo_path, git_data_path).unwrap_or_default();
 
         // Use unified processing function
         let process_result = crate::git::process::process_pr_with_git_data(
@@ -1192,7 +1208,9 @@ async fn process_purgatory_pr_events(
                     error = %e,
                     "Failed to save PR event to database"
                 );
-                result.errors.push(format!("Failed to save PR event: {}", e));
+                result
+                    .errors
+                    .push(format!("Failed to save PR event: {}", e));
             }
         }
     }
@@ -1527,11 +1545,7 @@ mod tests {
     }
 
     // Helper function to create a test state event with specific timestamp
-    fn create_test_state_event(
-        keys: &Keys,
-        identifier: &str,
-        created_at: u64,
-    ) -> RepositoryState {
+    fn create_test_state_event(keys: &Keys, identifier: &str, created_at: u64) -> RepositoryState {
         create_test_state_event_with_nonce(keys, identifier, created_at, "")
     }
 

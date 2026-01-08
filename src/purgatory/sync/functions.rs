@@ -32,15 +32,17 @@ use super::throttle::ThrottleManager;
 fn extract_domain(url: &str) -> Option<String> {
     // Simple URL parsing for HTTP(S) URLs
     // Format: scheme://[user@]host[:port]/path
-    let url = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
-    
+    let url = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+
     // Remove user info if present (e.g., "user@host" -> "host")
     let url = url.split('@').next_back()?;
-    
+
     // Extract host (before first '/' or ':')
     let host = url.split('/').next()?;
     let host = host.split(':').next()?;
-    
+
     if host.is_empty() {
         None
     } else {
@@ -112,17 +114,17 @@ pub async fn sync_identifier_next_url<C: SyncContext + ?Sized>(
 
     // 4. Collect clone URLs from announcements AND PR events in purgatory
     let our_domain = ctx.our_domain();
-    
+
     // Get clone URLs from repository announcements
     let announcement_urls: HashSet<String> = repo_data
         .announcements
         .iter()
         .flat_map(|a| a.clone_urls.iter().cloned())
         .collect();
-    
+
     // Get clone URLs from PR events in purgatory
     let pr_urls = ctx.collect_pr_clone_urls(identifier);
-    
+
     // Merge and filter out our domain
     let all_urls: HashSet<String> = announcement_urls
         .union(&pr_urls)
@@ -151,11 +153,9 @@ pub async fn sync_identifier_next_url<C: SyncContext + ?Sized>(
     match domain {
         Some(specific_domain) => {
             // Only look at URLs from this specific domain
-            urls_by_domain.get(specific_domain).and_then(|urls| {
-                urls.iter()
-                    .find(|url| !tried_urls.contains(*url))
-                    .cloned()
-            })
+            urls_by_domain
+                .get(specific_domain)
+                .and_then(|urls| urls.iter().find(|url| !tried_urls.contains(*url)).cloned())
         }
         None => {
             // Try any non-throttled domain
@@ -217,17 +217,17 @@ pub async fn get_throttled_domains_with_untried_urls<C: SyncContext + ?Sized>(
     };
 
     let our_domain = ctx.our_domain();
-    
+
     // Get clone URLs from repository announcements
     let announcement_urls: HashSet<String> = repo_data
         .announcements
         .iter()
         .flat_map(|a| a.clone_urls.iter().cloned())
         .collect();
-    
+
     // Get clone URLs from PR events in purgatory
     let pr_urls = ctx.collect_pr_clone_urls(identifier);
-    
+
     // Merge and filter out our domain
     let all_urls: HashSet<String> = announcement_urls
         .union(&pr_urls)
@@ -766,9 +766,13 @@ mod tests {
         let mut tried_urls = HashSet::new();
         tried_urls.insert("https://github.com/foo/bar.git".to_string());
 
-        let throttled =
-            get_throttled_domains_with_untried_urls(&mock, "test-repo", &tried_urls, &throttle_manager)
-                .await;
+        let throttled = get_throttled_domains_with_untried_urls(
+            &mock,
+            "test-repo",
+            &tried_urls,
+            &throttle_manager,
+        )
+        .await;
 
         // Should only include gitlab.com (throttled with untried URLs)
         // github.com is throttled but URL was tried
@@ -885,11 +889,10 @@ mod tests {
     #[tokio::test]
     async fn test_collect_pr_clone_urls_returns_configured_urls() {
         // Test that MockSyncContext returns configured PR clone URLs
-        let mock = MockSyncContext::new()
-            .with_pr_clone_urls(&[
-                "https://pr-server.com/fork.git",
-                "https://another-server.com/fork.git",
-            ]);
+        let mock = MockSyncContext::new().with_pr_clone_urls(&[
+            "https://pr-server.com/fork.git",
+            "https://another-server.com/fork.git",
+        ]);
 
         let pr_urls = mock.collect_pr_clone_urls("test-repo");
 
@@ -945,7 +948,7 @@ mod tests {
             .with_urls(&["https://github.com/owner/repo.git"])
             .with_pr_clone_urls(&[
                 "https://our-relay.com/fork.git", // Should be filtered
-                "https://external.com/fork.git", // Should be included
+                "https://external.com/fork.git",  // Should be included
             ])
             .with_our_domain("our-relay.com")
             .with_needed_oids(&["abc123"])
@@ -957,8 +960,7 @@ mod tests {
         // Collect all available URLs
         let mut available_urls = Vec::new();
         while let Some(url) =
-            sync_identifier_next_url(&mock, "test-repo", None, &tried_urls, &throttle_manager)
-                .await
+            sync_identifier_next_url(&mock, "test-repo", None, &tried_urls, &throttle_manager).await
         {
             available_urls.push(url.clone());
             tried_urls.insert(url);
@@ -1006,16 +1008,17 @@ mod tests {
 
         let tried_urls = HashSet::new();
 
-        let throttled =
-            get_throttled_domains_with_untried_urls(&mock, "test-repo", &tried_urls, &throttle_manager)
-                .await;
+        let throttled = get_throttled_domains_with_untried_urls(
+            &mock,
+            "test-repo",
+            &tried_urls,
+            &throttle_manager,
+        )
+        .await;
 
         // Should include both throttled domains
         let domains: Vec<&str> = throttled.iter().map(|t| t.domain.as_str()).collect();
-        assert!(
-            domains.contains(&"github.com"),
-            "Should include github.com"
-        );
+        assert!(domains.contains(&"github.com"), "Should include github.com");
         assert!(
             domains.contains(&"pr-server.com"),
             "Should include pr-server.com from PR clone URLs"

@@ -62,7 +62,10 @@ impl Purgatory {
         ctx: Arc<dyn SyncContext>,
         throttle_manager: Arc<ThrottleManager>,
     ) -> JoinHandle<()> {
-        info!("Starting purgatory sync loop (interval: {:?})", SYNC_LOOP_INTERVAL);
+        info!(
+            "Starting purgatory sync loop (interval: {:?})",
+            SYNC_LOOP_INTERVAL
+        );
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(SYNC_LOOP_INTERVAL);

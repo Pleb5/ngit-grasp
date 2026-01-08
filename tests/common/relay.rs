@@ -144,7 +144,10 @@ impl TestRelay {
             .env("NGIT_SYNC_STARTUP_JITTER_MS", "0") // No jitter for tests
             .env("NGIT_SYNC_DISCONNECT_CHECK_INTERVAL_SECS", "1") // Fast reconnect attempts for tests
             .env("NGIT_SYNC_BASE_BACKOFF_SECS", "1") // Fast backoff for tests (1s instead of 5s default)
-            .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string())) // Use RUST_LOG from environment or default to info
+            .env(
+                "RUST_LOG",
+                std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
+            ) // Use RUST_LOG from environment or default to info
             .stdout(Stdio::null()) // Suppress stdout for cleaner test output
             .stderr(Stdio::null()); // Suppress stderr for cleaner test output
 
