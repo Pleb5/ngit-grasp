@@ -797,7 +797,7 @@ impl SyncManager {
 
         // 5. Spawn self-subscriber with shutdown receiver
         let self_subscriber = SelfSubscriber::new(
-            format!("ws://{}", self.service_domain),
+            format!("ws://{}", self.config.bind_address),
             self.service_domain.clone(),
             Arc::clone(&self.repo_sync_index),
             action_tx,
