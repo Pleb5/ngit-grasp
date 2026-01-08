@@ -535,6 +535,17 @@ mod tests {
             .current_dir(&work_dir)
             .output()
             .unwrap();
+        // Disable GPG signing for tests (prevents yubikey prompts)
+        Command::new("git")
+            .args(["config", "commit.gpgsign", "false"])
+            .current_dir(&work_dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "tag.gpgsign", "false"])
+            .current_dir(&work_dir)
+            .output()
+            .unwrap();
 
         // Create a file and commit
         fs::write(work_dir.join("README.md"), "# Test").unwrap();

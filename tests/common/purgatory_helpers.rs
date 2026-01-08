@@ -51,6 +51,10 @@ pub fn create_test_repo_with_commit(path: &Path, variant: CommitVariant) -> Resu
     // Configure git user for commits
     run_git(path, &["config", "user.email", "test@example.com"])?;
     run_git(path, &["config", "user.name", "Test User"])?;
+    
+    // Disable GPG signing for tests (prevents yubikey prompts)
+    run_git(path, &["config", "commit.gpgsign", "false"])?;
+    run_git(path, &["config", "tag.gpgsign", "false"])?;
 
     // Create a file based on variant
     let (filename, content) = match variant {

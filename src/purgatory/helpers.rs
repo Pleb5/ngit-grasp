@@ -534,6 +534,19 @@ mod tests {
             .output()
             .expect("Failed to set name");
 
+        // Disable GPG signing for tests (prevents yubikey prompts)
+        Command::new("git")
+            .args(["config", "commit.gpgsign", "false"])
+            .current_dir(work_dir.path())
+            .output()
+            .expect("Failed to disable commit.gpgsign");
+
+        Command::new("git")
+            .args(["config", "tag.gpgsign", "false"])
+            .current_dir(work_dir.path())
+            .output()
+            .expect("Failed to disable tag.gpgsign");
+
         // Create a commit
         std::fs::write(work_dir.path().join("file.txt"), "content").unwrap();
         Command::new("git")
