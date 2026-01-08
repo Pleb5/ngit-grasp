@@ -331,8 +331,6 @@ async fn run_health_and_metrics_checker(
     loop {
         tokio::select! {
             _ = tokio::time::sleep(interval) => {
-                tracing::debug!("Health and metrics checker running");
-
                 let mut manager = sync_manager.lock().await;
 
                 // 1. Check for disconnects and retry disconnected relays
