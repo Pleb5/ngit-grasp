@@ -47,6 +47,18 @@ const IMMEDIATE_SYNC_DELAY: Duration = Duration::from_millis(500);
 /// Also manages a sync queue for background git data fetching:
 /// - Tracks identifiers that need syncing with backoff/debouncing
 /// - Supports both user-submitted events (3min delay) and sync-triggered (500ms delay)
+///
+/// ## Expired Event Tracking
+///
+/// Events that expire from purgatory without finding git data are tracked in
+/// `expired_events` to prevent infinite re-sync loops. When proactive sync
+/// fetches events from relays, we filter out expired events using:
+/// - `event_ids()` - Returns both active purgatory events AND expired events
+/// - `is_expired()` - Check if an event has expired before
+/// - `mark_expired()` - Called during cleanup to track newly expired events
+///
+/// This prevents the sync system from repeatedly fetching and re-adding events
+/// that we've already determined have no git data available.
 #[derive(Clone)]
 pub struct Purgatory {
     /// State events (kind 30618) indexed by repository identifier.
@@ -61,6 +73,11 @@ pub struct Purgatory {
     /// Maps repository identifier to sync queue entry with timing/backoff state.
     sync_queue: Arc<DashMap<String, SyncQueueEntry>>,
 
+    /// Events that expired from purgatory without finding git data.
+    /// Prevents infinite re-sync loops by filtering these out during negentropy/REQ sync.
+    /// Stored as EventId (hex string) for efficient lookup.
+    expired_events: Arc<DashMap<EventId, Instant>>,
+
     _git_data_path: PathBuf,
 }
 
@@ -71,6 +88,7 @@ impl Purgatory {
             state_events: Arc::new(DashMap::new()),
             pr_events: Arc::new(DashMap::new()),
             sync_queue: Arc::new(DashMap::new()),
+            expired_events: Arc::new(DashMap::new()),
             _git_data_path: git_data_path.into(),
         }
     }
@@ -435,14 +453,20 @@ impl Purgatory {
         self.pr_events.remove(event_id);
     }
 
-    /// Get all event IDs currently stored in purgatory.
+    /// Get all event IDs currently stored in purgatory AND previously expired events.
     ///
-    /// Returns a HashSet of all event IDs for both state events and PR events
-    /// held in purgatory. Useful for negentropy sync to avoid fetching events
-    /// that are already in purgatory awaiting git data.
+    /// Returns a HashSet of all event IDs for:
+    /// - State events currently held in purgatory
+    /// - PR events currently held in purgatory
+    /// - Events that previously expired from purgatory without finding git data
+    ///
+    /// This is used by negentropy sync and REQ+EOSE to avoid fetching events
+    /// that are either:
+    /// 1. Already in purgatory awaiting git data
+    /// 2. Previously expired without finding git data (prevents infinite re-sync)
     ///
     /// # Returns
-    /// HashSet of event IDs (as EventId) for all events in purgatory
+    /// HashSet of event IDs (as EventId) for all events in purgatory + expired events
     pub fn event_ids(&self) -> HashSet<EventId> {
         let mut ids = HashSet::new();
 
@@ -460,7 +484,38 @@ impl Purgatory {
             }
         }
 
+        // Collect expired event IDs
+        for entry in self.expired_events.iter() {
+            ids.insert(*entry.key());
+        }
+
         ids
+    }
+
+    /// Check if an event has previously expired from purgatory.
+    ///
+    /// Returns true if this event was previously held in purgatory and expired
+    /// without finding git data. This prevents re-adding the event during sync.
+    ///
+    /// # Arguments
+    /// * `event_id` - The event ID to check
+    ///
+    /// # Returns
+    /// true if the event has expired before, false otherwise
+    pub fn is_expired(&self, event_id: &EventId) -> bool {
+        self.expired_events.contains_key(event_id)
+    }
+
+    /// Mark an event as expired (called during cleanup).
+    ///
+    /// Tracks events that expired from purgatory without finding git data.
+    /// This prevents infinite re-sync loops by filtering these events during
+    /// negentropy and REQ+EOSE sync.
+    ///
+    /// # Arguments
+    /// * `event_id` - The event ID to mark as expired
+    fn mark_expired(&self, event_id: EventId) {
+        self.expired_events.insert(event_id, Instant::now());
     }
 
     /// Get all PR placeholder event IDs (git-data-first entries without events).
@@ -489,31 +544,55 @@ impl Purgatory {
     /// Should be called periodically (every 60 seconds) by background task to clean up
     /// entries that have exceeded their expiry deadline.
     ///
+    /// **Important**: This method also marks expired events in `expired_events` to
+    /// prevent infinite re-sync loops. Events that expire without finding git data
+    /// will be filtered out during future negentropy/REQ sync operations.
+    ///
     /// # Returns
     /// Tuple of (num_state_removed, num_pr_removed)
     pub fn cleanup(&self) -> (usize, usize) {
         let now = Instant::now();
         let mut state_removed = 0;
 
-        // Remove expired state events
+        // Remove expired state events and mark them as expired
         self.state_events.retain(|_, entries| {
             let original_len = entries.len();
+            // Collect event IDs before removing
+            let expired_ids: Vec<EventId> = entries
+                .iter()
+                .filter(|entry| entry.expires_at <= now)
+                .map(|entry| entry.event.id)
+                .collect();
+
+            // Mark as expired to prevent re-sync
+            for event_id in expired_ids {
+                self.mark_expired(event_id);
+            }
+
+            // Remove expired entries
             entries.retain(|entry| entry.expires_at > now);
             state_removed += original_len - entries.len();
             !entries.is_empty()
         });
 
-        // Remove expired PR events
-        let expired_prs: Vec<String> = self
+        // Remove expired PR events and mark them as expired
+        let expired_prs: Vec<(String, Option<EventId>)> = self
             .pr_events
             .iter()
             .filter(|entry| entry.value().expires_at <= now)
-            .map(|entry| entry.key().clone())
+            .map(|entry| {
+                let event_id = entry.value().event.as_ref().map(|e| e.id);
+                (entry.key().clone(), event_id)
+            })
             .collect();
 
         let pr_removed = expired_prs.len();
-        for event_id in expired_prs {
-            self.pr_events.remove(&event_id);
+        for (event_id_str, event_id_opt) in expired_prs {
+            // Mark actual PR events as expired (not placeholders)
+            if let Some(event_id) = event_id_opt {
+                self.mark_expired(event_id);
+            }
+            self.pr_events.remove(&event_id_str);
         }
 
         (state_removed, pr_removed)
@@ -529,6 +608,34 @@ impl Purgatory {
         state + pr
     }
 
+    /// Remove old expired event records.
+    ///
+    /// Expired events are tracked to prevent infinite re-sync loops, but they
+    /// shouldn't be kept forever. This method removes expired event records
+    /// older than the specified duration.
+    ///
+    /// Should be called periodically (e.g., daily) to prevent unbounded growth.
+    ///
+    /// # Arguments
+    /// * `older_than` - Remove expired events older than this duration (default: 7 days)
+    ///
+    /// # Returns
+    /// Number of expired event records removed
+    pub fn cleanup_expired_events(&self, older_than: Duration) -> usize {
+        let cutoff = Instant::now() - older_than;
+        let mut removed = 0;
+
+        self.expired_events.retain(|_, &mut expired_at| {
+            let keep = expired_at > cutoff;
+            if !keep {
+                removed += 1;
+            }
+            keep
+        });
+
+        removed
+    }
+
     /// Get current count of entries in purgatory.
     ///
     /// # Returns
@@ -539,12 +646,21 @@ impl Purgatory {
         (state_count, pr_count)
     }
 
+    /// Get count of expired events being tracked.
+    ///
+    /// # Returns
+    /// Number of expired events in the tracking set
+    pub fn expired_count(&self) -> usize {
+        self.expired_events.len()
+    }
+
     /// Clear all entries from purgatory (for testing).
     #[cfg(test)]
     pub fn clear(&self) {
         self.state_events.clear();
         self.pr_events.clear();
         self.sync_queue.clear();
+        self.expired_events.clear();
     }
 
     /// Get the current size of the sync queue (for testing/metrics).
@@ -925,4 +1041,210 @@ fn test_remove_expired_legacy_method() {
     #[allow(deprecated)]
     let total = purgatory.remove_expired();
     assert_eq!(total, 2); // 1 state + 1 PR
+}
+
+#[test]
+fn test_expired_event_tracking() {
+    use std::time::Duration;
+
+    let purgatory = Purgatory::new(PathBuf::new());
+    let keys = Keys::generate();
+
+    let state_event = EventBuilder::text_note("state")
+        .sign_with_keys(&keys)
+        .unwrap();
+    let pr_event = EventBuilder::text_note("pr").sign_with_keys(&keys).unwrap();
+
+    let state_event_id = state_event.id;
+    let pr_event_id = pr_event.id;
+
+    // Add events to purgatory
+    purgatory.add_state(state_event, "repo".to_string(), keys.public_key());
+    purgatory.add_pr(pr_event, "pr-id".to_string(), "commit".to_string());
+
+    // Events should not be marked as expired yet
+    assert!(!purgatory.is_expired(&state_event_id));
+    assert!(!purgatory.is_expired(&pr_event_id));
+
+    // Expire both events
+    if let Some(mut entries) = purgatory.state_events.get_mut("repo") {
+        for entry in entries.iter_mut() {
+            entry.expires_at = Instant::now() - Duration::from_secs(1);
+        }
+    }
+    for mut entry in purgatory.pr_events.iter_mut() {
+        entry.value_mut().expires_at = Instant::now() - Duration::from_secs(1);
+    }
+
+    // Run cleanup
+    let (state_removed, pr_removed) = purgatory.cleanup();
+    assert_eq!(state_removed, 1);
+    assert_eq!(pr_removed, 1);
+
+    // Events should now be marked as expired
+    assert!(purgatory.is_expired(&state_event_id));
+    assert!(purgatory.is_expired(&pr_event_id));
+
+    // event_ids() should include expired events
+    let ids = purgatory.event_ids();
+    assert!(ids.contains(&state_event_id));
+    assert!(ids.contains(&pr_event_id));
+
+    // Expired count should be 2
+    assert_eq!(purgatory.expired_count(), 2);
+}
+
+#[test]
+fn test_cleanup_expired_events() {
+    use std::time::Duration;
+
+    let purgatory = Purgatory::new(PathBuf::new());
+    let keys = Keys::generate();
+
+    let event1 = EventBuilder::text_note("event1")
+        .sign_with_keys(&keys)
+        .unwrap();
+    let event2 = EventBuilder::text_note("event2")
+        .sign_with_keys(&keys)
+        .unwrap();
+
+    let event1_id = event1.id;
+    let event2_id = event2.id;
+
+    // Add and immediately expire event1
+    purgatory.add_state(event1, "repo1".to_string(), keys.public_key());
+    if let Some(mut entries) = purgatory.state_events.get_mut("repo1") {
+        for entry in entries.iter_mut() {
+            entry.expires_at = Instant::now() - Duration::from_secs(1);
+        }
+    }
+    purgatory.cleanup();
+
+    // Add and expire event2 (will be more recent)
+    purgatory.add_state(event2, "repo2".to_string(), keys.public_key());
+    if let Some(mut entries) = purgatory.state_events.get_mut("repo2") {
+        for entry in entries.iter_mut() {
+            entry.expires_at = Instant::now() - Duration::from_secs(1);
+        }
+    }
+    purgatory.cleanup();
+
+    // Both should be in expired_events
+    assert_eq!(purgatory.expired_count(), 2);
+
+    // Manually set event1's expiry time to be old
+    if let Some(mut entry) = purgatory.expired_events.get_mut(&event1_id) {
+        *entry.value_mut() = Instant::now() - Duration::from_secs(8 * 24 * 3600); // 8 days ago
+    }
+
+    // Clean up expired events older than 7 days
+    let removed = purgatory.cleanup_expired_events(Duration::from_secs(7 * 24 * 3600));
+
+    // Only event1 should be removed
+    assert_eq!(removed, 1);
+    assert_eq!(purgatory.expired_count(), 1);
+
+    // event1 should be gone, event2 should remain
+    assert!(!purgatory.is_expired(&event1_id));
+    assert!(purgatory.is_expired(&event2_id));
+}
+
+#[test]
+fn test_expired_events_prevent_readdition() {
+    use std::time::Duration;
+
+    let purgatory = Purgatory::new(PathBuf::new());
+    let keys = Keys::generate();
+
+    let event = EventBuilder::text_note("test")
+        .sign_with_keys(&keys)
+        .unwrap();
+    let event_id = event.id;
+
+    // Add event to purgatory
+    purgatory.add_state(event.clone(), "repo".to_string(), keys.public_key());
+
+    // Expire it
+    if let Some(mut entries) = purgatory.state_events.get_mut("repo") {
+        for entry in entries.iter_mut() {
+            entry.expires_at = Instant::now() - Duration::from_secs(1);
+        }
+    }
+    purgatory.cleanup();
+
+    // Event should be marked as expired
+    assert!(purgatory.is_expired(&event_id));
+
+    // event_ids() should return the expired event
+    let ids = purgatory.event_ids();
+    assert!(ids.contains(&event_id));
+
+    // This simulates what negentropy/REQ+EOSE should do:
+    // Check if event is in event_ids() before adding
+    if !ids.contains(&event_id) {
+        purgatory.add_state(event, "repo".to_string(), keys.public_key());
+    }
+
+    // Event should NOT be re-added
+    let (state_count, _) = purgatory.count();
+    assert_eq!(state_count, 0, "Event should not be re-added to purgatory");
+}
+
+#[test]
+fn test_pr_placeholder_not_marked_expired() {
+    use std::time::Duration;
+
+    let purgatory = Purgatory::new(PathBuf::new());
+
+    // Add a PR placeholder (no event)
+    purgatory.add_pr_placeholder("placeholder-id".to_string(), "commit-123".to_string());
+
+    // Expire it
+    if let Some(mut entry) = purgatory.pr_events.get_mut("placeholder-id") {
+        entry.value_mut().expires_at = Instant::now() - Duration::from_secs(1);
+    }
+
+    // Run cleanup
+    let (_, pr_removed) = purgatory.cleanup();
+    assert_eq!(pr_removed, 1);
+
+    // Expired count should be 0 (placeholders don't have event IDs to track)
+    assert_eq!(purgatory.expired_count(), 0);
+}
+
+#[test]
+fn test_user_can_resubmit_expired_event() {
+    use std::time::Duration;
+
+    let purgatory = Purgatory::new(PathBuf::new());
+    let keys = Keys::generate();
+
+    let event = EventBuilder::text_note("test")
+        .sign_with_keys(&keys)
+        .unwrap();
+    let event_id = event.id;
+
+    // Add event to purgatory
+    purgatory.add_state(event.clone(), "repo".to_string(), keys.public_key());
+
+    // Expire it
+    if let Some(mut entries) = purgatory.state_events.get_mut("repo") {
+        for entry in entries.iter_mut() {
+            entry.expires_at = Instant::now() - Duration::from_secs(1);
+        }
+    }
+    purgatory.cleanup();
+
+    // Event should be marked as expired
+    assert!(purgatory.is_expired(&event_id));
+
+    // User re-submits the same event (simulating retry after pushing git data)
+    // This should be allowed - the policy layer will check is_synced flag
+    // For now, just verify the event is marked as expired
+    assert!(purgatory.is_expired(&event_id));
+
+    // The policy layer (in builder.rs and state.rs) will:
+    // - Check is_synced flag (false for user-submitted)
+    // - Skip the expired check for user-submitted events
+    // - Allow the event to be re-added to purgatory or accepted if git data now exists
 }

@@ -43,8 +43,12 @@ impl StatePolicy {
 
     /// Process a state event: validate and align owner repositories
     ///
+    /// # Arguments
+    /// * `event` - The state event to process
+    /// * `is_synced` - True if this event came from proactive sync (vs user-submitted)
+    ///
     /// Returns the true if git data already availale or false if added to purgatory
-    pub async fn process_state_event(&self, event: &Event) -> Result<WritePolicyResult> {
+    pub async fn process_state_event(&self, event: &Event, is_synced: bool) -> Result<WritePolicyResult> {
         // Parse state to get HEAD and branch info
         let state =
             RepositoryState::from_event(event.clone()).context("Failed to parse state event")?;
@@ -120,6 +124,20 @@ impl StatePolicy {
             // Event will be saved and broadcast by relay builder
             Ok(WritePolicyResult::Accept)
         } else {
+            // Only reject expired events if they're from sync (not user-submitted)
+            // User-submitted events should be allowed to retry in case git data became available
+            if is_synced && self.ctx.purgatory.is_expired(&event.id) {
+                tracing::debug!(
+                    event_id = %event.id,
+                    identifier = %state.identifier,
+                    "State event previously expired from purgatory (synced), rejecting to prevent re-sync loop"
+                );
+                return Ok(WritePolicyResult::Reject {
+                    status: false,
+                    message: "invalid: previously expired from purgatory without git data".into(),
+                });
+            }
+
             // If no git data - add to purgatory
             // (add_state automatically enqueues for background sync)
             self.ctx

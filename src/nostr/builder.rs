@@ -152,13 +152,17 @@ impl Nip34WritePolicy {
     }
 
     /// Handle repository state event
-    async fn handle_state(&self, event: &Event) -> WritePolicyResult {
+    ///
+    /// # Arguments
+    /// * `event` - The state event to validate
+    /// * `is_synced` - True if this event came from proactive sync (vs user-submitted)
+    async fn handle_state(&self, event: &Event, is_synced: bool) -> WritePolicyResult {
         let event_id_str = event.id.to_bech32().unwrap_or_else(|_| event.id.to_hex());
 
         match self.state_policy.validate(event) {
             StateResult::Accept => {
                 // Process state alignment asynchronously
-                match self.state_policy.process_state_event(event).await {
+                match self.state_policy.process_state_event(event, is_synced).await {
                     Ok(poilicy_result) => poilicy_result,
                     Err(e) => {
                         tracing::warn!("Failed to process state event {}: {}", event_id_str, e);
@@ -178,7 +182,11 @@ impl Nip34WritePolicy {
     }
 
     /// Handle PR or PR Update event
-    async fn handle_pr_event(&self, event: &Event) -> WritePolicyResult {
+    ///
+    /// # Arguments
+    /// * `event` - The PR event to validate
+    /// * `is_synced` - True if this event came from proactive sync (vs user-submitted)
+    async fn handle_pr_event(&self, event: &Event, is_synced: bool) -> WritePolicyResult {
         let event_id_str = event.id.to_bech32().unwrap_or_else(|_| event.id.to_hex());
 
         // duplicate check in purgatory
@@ -230,6 +238,19 @@ impl Nip34WritePolicy {
         // Check if git data exists (delete any incorrect commits at refs/nostr/<event-id>, copies correct data to relivant repositories)
         match self.pr_event_policy.git_data_check(event).await {
             Ok(false) => {
+                // Only reject expired events if they're from sync (not user-submitted)
+                // User-submitted events should be allowed to retry in case git data became available
+                if is_synced && self.ctx.purgatory.is_expired(&event.id) {
+                    tracing::debug!(
+                        event_id = %event_id_str,
+                        "PR event previously expired from purgatory (synced), rejecting to prevent re-sync loop"
+                    );
+                    return WritePolicyResult::Reject {
+                        status: false,
+                        message: "invalid: previously expired from purgatory without git data".into(),
+                    };
+                }
+
                 // No git data exists - add to purgatory
                 let commit = event
                     .tags
@@ -344,13 +365,17 @@ impl WritePolicy for Nip34WritePolicy {
     fn admit_event<'a>(
         &'a self,
         event: &'a nostr_relay_builder::prelude::Event,
-        _addr: &'a SocketAddr,
+        addr: &'a SocketAddr,
     ) -> BoxedFuture<'a, WritePolicyResult> {
         Box::pin(async move {
+            // Detect if this is a synced event (from proactive sync) vs user-submitted
+            // Sync uses localhost:0 as a dummy address
+            let is_synced = addr.ip().is_loopback() && addr.port() == 0;
+
             match event.kind.as_u16() {
                 KIND_REPOSITORY_ANNOUNCEMENT => self.handle_announcement(event).await,
-                KIND_REPOSITORY_STATE => self.handle_state(event).await,
-                KIND_PR | KIND_PR_UPDATE => self.handle_pr_event(event).await,
+                KIND_REPOSITORY_STATE => self.handle_state(event, is_synced).await,
+                KIND_PR | KIND_PR_UPDATE => self.handle_pr_event(event, is_synced).await,
                 KIND_USER_GRASP_LIST => {
                     // Accept all kind 10317 (User Grasp List) events
                     // for better GRASP repository discovery

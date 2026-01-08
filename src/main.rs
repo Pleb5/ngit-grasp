@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
             sync_manager.run().await;
         });
 
-        // Spawn background cleanup task
+        // Spawn background cleanup task for purgatory entries (60s interval)
         let cleanup_purgatory = purgatory.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
@@ -110,6 +110,26 @@ async fn main() -> Result<()> {
             }
         });
         info!("Purgatory cleanup task started (60s interval)");
+
+        // Spawn daily cleanup task for old expired event records (prevent unbounded growth)
+        let expired_cleanup_purgatory = purgatory.clone();
+        tokio::spawn(async move {
+            // Run immediately on startup, then every 24 hours
+            let mut interval = tokio::time::interval(Duration::from_secs(24 * 3600));
+            loop {
+                interval.tick().await;
+                // Remove expired event records older than 7 days
+                let removed = expired_cleanup_purgatory
+                    .cleanup_expired_events(Duration::from_secs(7 * 24 * 3600));
+                if removed > 0 {
+                    info!(
+                        "Expired event cleanup: removed {} old expired event records (>7 days)",
+                        removed
+                    );
+                }
+            }
+        });
+        info!("Expired event cleanup task started (24h interval, keeps 7 days)");
 
         // Start purgatory sync loop for background git data fetching
         let sync_ctx = Arc::new(RealSyncContext::new(
