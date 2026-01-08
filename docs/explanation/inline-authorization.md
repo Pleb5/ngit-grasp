@@ -37,16 +37,18 @@ Client              Server
 ```
 
 **Pros:**
+
 - Standard Git mechanism
 - Language-agnostic (hook can be any executable)
 - Well-documented
 
 **Cons:**
+
 - Hook output goes to stderr (client sees as `remote:` messages)
 - Hard to provide structured error messages
 - Requires hook installation and management
 - Difficult to test (needs Git repository setup)
-- Hook runs *after* Git has started processing
+- Hook runs _after_ Git has started processing
 
 ---
 
@@ -60,7 +62,7 @@ Client              Server (ngit-grasp)
   |--- git push ----->|--- HTTP handler receives request
   |                   |
   |                   |--- Parse ref updates from request
-  |                   |--- Query Nostr relay for state
+  |                   |--- Query database + purgatory for state
   |                   |--- Validate push against state
   |                   |
   |                   |--- If invalid: return HTTP error
@@ -71,13 +73,16 @@ Client              Server (ngit-grasp)
 ```
 
 **Pros:**
+
 - Full control over error messages (HTTP response)
 - Can skip spawning Git entirely for invalid pushes
 - Easier testing (pure Rust, no Git setup needed)
 - Shared state between Git and Nostr components
 - Better performance (early rejection)
+- Can check both database and purgatory for authorization
 
 **Cons:**
+
 - Requires parsing Git protocol ourselves
 - Less standard than hooks
 - Tighter coupling to Git HTTP protocol
@@ -86,9 +91,41 @@ Client              Server (ngit-grasp)
 
 ## Why Inline Authorization Is Better for GRASP
 
-### 1. Better Error Messages
+### 1. Purgatory Integration
+
+**Critical advantage:** Inline authorization allows checking **both database and purgatory** during authorization:
+
+```rust
+// From src/git/authorization.rs
+pub async fn authorize_push(
+    database: &SharedDatabase,
+    identifier: &str,
+    owner_pubkey: &str,
+    request_body: &Bytes,
+    purgatory: &Arc<Purgatory>,  // Can check purgatory!
+    repo_path: &std::path::Path,
+) -> anyhow::Result<AuthorizationResult>
+```
+
+**Why this matters:** State events go to purgatory when git data doesn't exist yet. Without inline authorization checking purgatory, we'd have a deadlock:
+
+1. State event arrives → No git data → Goes to **purgatory** (not database)
+2. Git push arrives → Hook checks **database only** → No state found → **REJECTED** ❌
+
+With inline authorization:
+
+1. State event arrives → No git data → Goes to purgatory
+2. Git push arrives → Checks **database + purgatory** → State found → **AUTHORIZED** ✅
+3. After push succeeds → Save event to database → Remove from purgatory
+
+See [`src/git/authorization.rs:342-400`](../../src/git/authorization.rs) for implementation.
+
+otherwise we'd need another way of storing purgatory events.
+
+### 2. Better Error Messages
 
 **With hooks:**
+
 ```
 $ git push
 remote: error: Push rejected - not authorized for ref refs/heads/main
@@ -98,39 +135,37 @@ To https://gitnostr.com/alice/myrepo.git
 ```
 
 **With inline authorization:**
+
 ```
 $ git push
 error: RPC failed; HTTP 403 Forbidden
-error: {
-  "error": "unauthorized",
-  "ref": "refs/heads/main",
-  "required_state": "event_id_abc123",
-  "your_pubkey": "npub1alice...",
-  "docs": "https://docs.gitnostr.com/errors/unauthorized"
-}
+error: Push rejected: No state event found in purgatory from authorized publishers
 ```
 
-The inline approach can return **structured JSON** with actionable information.
+The inline approach provides clear, actionable error messages directly in the HTTP response.
 
-### 2. Performance Benefits
+### 3. Performance Benefits
 
 **With hooks:**
+
 - Git process spawns
 - Git starts receiving pack data
 - Hook runs (might query Nostr relay)
 - If rejected, Git throws away received data
 
 **With inline authorization:**
-- Parse ref updates from HTTP request
-- Validate against Nostr state (cached)
-- If rejected, return HTTP 403 immediately
+
+- Parse ref updates from HTTP request (pkt-line format)
+- Validate against database + purgatory state
+- If rejected, return HTTP error immediately
 - Never spawn Git for invalid pushes
 
-**Result:** Faster rejection, less resource usage.
+**Result:** Faster rejection, less resource usage, no wasted pack data transfer.
 
-### 3. Easier Testing
+### 4. Easier Testing
 
 **With hooks:**
+
 ```bash
 # Test setup
 mkdir -p /tmp/test-repo
@@ -147,6 +182,7 @@ rm -rf /tmp/test-repo
 ```
 
 **With inline authorization:**
+
 ```rust
 #[tokio::test]
 async fn test_unauthorized_push() {
@@ -161,43 +197,55 @@ async fn test_unauthorized_push() {
 
 See [`tests/push_authorization.rs`](tests/push_authorization.rs) for actual test examples.
 
-### 4. Shared State and Types
+### 5. Shared State and Types
 
 **With hooks:**
+
 - Hook is separate process
 - Must query Nostr relay over WebSocket
 - Can't share in-memory cache
+- Can't access purgatory
 - Separate error types
 
 **With inline authorization:**
+
 ```rust
 // From src/git/handlers.rs
 pub async fn handle_receive_pack(
     repo_path: PathBuf,
     body: Bytes,
-    database: SharedDatabase,  // Shared with Nostr relay!
+    database: Option<SharedDatabase>,  // Shared with Nostr relay!
+    purgatory: Option<Arc<Purgatory>>, // Shared purgatory access!
     npub: &str,
     identifier: &str,
 ) -> Result<Response<Full<Bytes>>, GitError> {
-    // Direct database access for authorization
-    let auth = get_authorization_for_owner(&database, pubkey, identifier).await?;
+    // Direct database + purgatory access for authorization
+    let auth = authorize_push(
+        &database,
+        identifier,
+        owner_pubkey,
+        &body,
+        &purgatory,  // Can check purgatory!
+        &repo_path
+    ).await?;
     // ...
 }
 ```
 
-**Result:** Better performance, type safety, simpler architecture.
+**Result:** Better performance, type safety, simpler architecture, purgatory integration.
 
-### 5. Simpler Deployment
+### 6. Simpler Deployment
 
 **With hooks (ngit-relay):**
+
 ```
 Docker container:
   - nginx (HTTP frontend)
   - git-http-backend (C binary)
-  - pre-receive hook (Go binary) 
+  - pre-receive hook (Go binary)
   - Khatru relay (Go binary)
   - supervisord (process manager)
-  
+
 Setup steps:
   1. Install all components
   2. Configure nginx
@@ -207,13 +255,14 @@ Setup steps:
 ```
 
 **With inline authorization (ngit-grasp):**
+
 ```
 Single Rust binary:
   - HTTP server (Hyper)
   - Git protocol handler
   - Nostr relay (nostr-relay-builder)
   - Authorization logic
-  
+
 Setup steps:
   1. Run binary
   2. Configure environment variables
@@ -227,66 +276,95 @@ Setup steps:
 
 ### How We Parse Ref Updates
 
-The Git HTTP protocol sends ref updates in the request body:
+The Git HTTP protocol sends ref updates in pkt-line format:
 
 ```
 POST /alice/myrepo.git/git-receive-pack HTTP/1.1
 Content-Type: application/x-git-receive-pack-request
 
-0000000000000000000000000000000000000000 abc123... refs/heads/main\0 report-status
+00a5 0000...0000 abc123...def456 refs/heads/main\0 report-status\n
+0000
+PACK...
 ```
 
-We parse this **before** spawning Git. See [`src/git/authorization.rs`](src/git/authorization.rs) for the implementation:
+We parse this **before** spawning Git. See [`src/git/authorization.rs:695-778`](../../src/git/authorization.rs) for the implementation:
 
 ```rust
-/// Parse ref updates from git-receive-pack request body
-pub fn parse_pushed_refs(body: &[u8]) -> Result<Vec<PushedRef>, AuthorizationError> {
-    // Parse pkt-line format
-    // Extract ref updates
-    // Return structured data
+/// Parse the refs being updated from a Git pack
+///
+/// The receive-pack protocol sends ref updates in pkt-line format:
+/// - 4-byte hex length prefix (e.g., "00a5")
+/// - Payload: `<old-oid> <new-oid> <ref-name>\0<capabilities>\n`
+/// - Flush packet "0000" terminates the list
+pub fn parse_pushed_refs(data: &[u8]) -> Vec<(String, String, String)> {
+    // Handles both pkt-line format (real Git clients)
+    // and simple text format (for unit tests)
 }
 ```
 
 ### How We Validate
 
-Validation checks (from [`src/git/authorization.rs`](src/git/authorization.rs)):
-
-1. Does pusher's pubkey have write access?
-2. Are they listed as a maintainer in the latest state event?
-3. Do the refs match the state event?
+The authorization flow (from [`src/git/authorization.rs:51-162`](../../src/git/authorization.rs)):
 
 ```rust
-/// Validate that pushed refs match the authorized state
-pub fn validate_push_refs(
-    pushed_refs: &[PushedRef],
-    state: &RepositoryState,
-) -> Result<(), AuthorizationError> {
-    for pushed_ref in pushed_refs {
-        if pushed_ref.ref_name.starts_with("refs/heads/") {
-            // Validate branch against state
-        } else if pushed_ref.ref_name.starts_with("refs/tags/") {
-            // Validate tag against state
-        } else if pushed_ref.ref_name.starts_with("refs/nostr/") {
-            // Allow refs/nostr/<event-id> for PRs
-        }
-    }
-    Ok(())
+pub async fn authorize_push(
+    database: &SharedDatabase,
+    identifier: &str,
+    owner_pubkey: &str,
+    request_body: &Bytes,
+    purgatory: &Arc<Purgatory>,
+    repo_path: &std::path::Path,
+) -> anyhow::Result<AuthorizationResult> {
+    // 1. Parse refs from push request
+    let pushed_refs = parse_pushed_refs(request_body);
+
+    // 2. Separate refs/nostr/ refs from state refs
+    let (nostr_refs, state_refs) = partition_refs(&pushed_refs);
+
+    // 3. Handle refs/nostr/ refs (PR events)
+    //    - Validate event ID format
+    //    - Check purgatory for PR event
+    //    - Create placeholder if git-data-first scenario
+
+    // 4. Handle normal refs (state events)
+    //    - Check database + purgatory for state events
+    //    - Collect authorized maintainers
+    //    - Find latest authorized state
+    //    - Validate refs match state
+
+    // 5. Return authorization result with purgatory events
 }
 ```
+
+**Key validation checks:**
+
+1. **For state refs** (`refs/heads/*`, `refs/tags/*`):
+
+   - Query database for announcements → collect authorized maintainers
+   - Check **purgatory** for matching state events (critical for purgatory flow!)
+   - Filter to events from authorized maintainers
+   - Find latest state event
+   - Validate pushed refs match state event refs
+
+2. **For PR refs** (`refs/nostr/<event-id>`):
+   - Validate event ID format
+   - Check purgatory for PR event with matching commit
+   - If no event found, create placeholder (git-data-first scenario)
+   - Collect PR events from purgatory for post-push processing
 
 ---
 
 ## Comparison with Reference Implementation
 
-| Aspect | ngit-relay (hooks) | ngit-grasp (inline) |
-|--------|-------------------|---------------------|
-| **Components** | nginx + git-http-backend + hook + Khatru | Single Rust binary |
-| **Validation** | Pre-receive hook (separate process) | Inline HTTP handler |
-| **Error messages** | Hook stderr → `remote:` | HTTP response JSON |
-| **Performance** | Spawns Git first | Validates first |
-| **Testing** | Shell scripts + Go tests | Pure Rust tests |
-| **Deployment** | Docker + supervisord | Single binary |
-| **State sharing** | WebSocket query | Direct database access |
+| Aspect             | ngit-relay (hooks)                       | ngit-grasp (inline)    |
+| ------------------ | ---------------------------------------- | ---------------------- |
+| **Components**     | nginx + git-http-backend + hook + Khatru | Single Rust binary     |
+| **Validation**     | Pre-receive hook (separate process)      | Inline HTTP handler    |
+| **Error messages** | Hook stderr → `remote:`                  | HTTP response JSON     |
+| **Performance**    | Spawns Git first                         | Validates first        |
+| **Testing**        | Shell scripts + Go tests                 | Pure Rust tests        |
+| **Deployment**     | Docker + supervisord                     | Single binary          |
+| **State sharing**  | WebSocket query                          | Direct database access |
 
 Both are GRASP-compliant, but inline authorization is simpler and more efficient.
 
@@ -295,24 +373,30 @@ Both are GRASP-compliant, but inline authorization is simpler and more efficient
 ## Trade-offs and Limitations
 
 ### What We Gain
+
+- ✅ **Purgatory integration** - Can check database + purgatory during authorization
+- ✅ **Prevents deadlock** - State events in purgatory can authorize pushes
 - ✅ Better error messages
-- ✅ Better performance
-- ✅ Easier testing
-- ✅ Simpler deployment
-- ✅ Tighter integration
+- ✅ Better performance (early rejection)
+- ✅ Easier testing (pure Rust)
+- ✅ Simpler deployment (single binary)
+- ✅ Tighter integration (shared state)
 
 ### What We Lose
+
 - ❌ Non-standard approach (not using Git's hook system)
 - ❌ Tighter coupling to Git HTTP protocol
-- ❌ Must parse protocol ourselves
+- ❌ Must parse pkt-line protocol ourselves
 
 ### Is It Worth It?
 
-**Yes**, because:
-1. We handle protocol parsing in [`src/git/protocol.rs`](src/git/protocol.rs)
-2. GRASP is already non-standard (Nostr authorization)
-3. Benefits far outweigh the coupling cost
-4. We can still add hook support later if needed
+**Absolutely**, because:
+
+1. **Purgatory integration is essential** - Without it, we'd have a deadlock where state events in purgatory can't authorize pushes
+2. Protocol parsing is isolated in [`src/git/authorization.rs`](../../src/git/authorization.rs)
+3. GRASP is already non-standard (Nostr authorization)
+4. Benefits far outweigh the coupling cost
+5. We can still add hook support later if needed (but purgatory checking would still need inline access)
 
 ---
 
@@ -320,14 +404,15 @@ Both are GRASP-compliant, but inline authorization is simpler and more efficient
 
 Key files in the ngit-grasp implementation:
 
-| Component | Location |
-|-----------|----------|
-| HTTP routing | [`src/http/mod.rs`](src/http/mod.rs) |
-| Git handlers | [`src/git/handlers.rs`](src/git/handlers.rs) |
-| Push authorization | [`src/git/authorization.rs`](src/git/authorization.rs) |
-| Git protocol parsing | [`src/git/protocol.rs`](src/git/protocol.rs) |
-| Subprocess management | [`src/git/subprocess.rs`](src/git/subprocess.rs) |
-| Event acceptance policy | [`src/nostr/builder.rs:51`](src/nostr/builder.rs:51) - `Nip34WritePolicy` |
+| Component               | Location                                                                  |
+| ----------------------- | ------------------------------------------------------------------------- |
+| HTTP routing            | [`src/http/mod.rs`](../../src/http/mod.rs)                                |
+| Git handlers            | [`src/git/handlers.rs`](../../src/git/handlers.rs)                        |
+| Push authorization      | [`src/git/authorization.rs`](../../src/git/authorization.rs)              |
+| Pkt-line parsing        | [`src/git/authorization.rs:695-778`](../../src/git/authorization.rs)      |
+| Subprocess management   | [`src/git/subprocess.rs`](../../src/git/subprocess.rs)                    |
+| Purgatory integration   | [`src/purgatory/mod.rs`](../../src/purgatory/mod.rs)                      |
+| Event acceptance policy | [`src/nostr/builder.rs`](../../src/nostr/builder.rs) - `Nip34WritePolicy` |
 
 ---
 
@@ -345,6 +430,7 @@ pub struct GitConfig {
 ```
 
 This would allow:
+
 - Migration path for hook-based systems
 - Extra validation for paranoid deployments
 - Compatibility with other Git tools
@@ -352,6 +438,7 @@ This would allow:
 ### If Git Protocol Changes
 
 The protocol parsing is isolated in [`src/git/protocol.rs`](src/git/protocol.rs). If the Git protocol changes:
+
 - Update the protocol module
 - Tests will catch any breakage
 
@@ -361,18 +448,21 @@ The protocol parsing is isolated in [`src/git/protocol.rs`](src/git/protocol.rs)
 
 **Inline authorization is the right choice for ngit-grasp** because:
 
-1. It provides better error messages for users
-2. It's more performant (early rejection)
-3. It's easier to test (pure Rust)
-4. It's simpler to deploy (single binary)
-5. It enables better integration (shared database)
+1. **Purgatory integration** - Without inline authorization, state events in purgatory couldn't authorize pushes, creating a deadlock
+2. **Better error messages** - Direct HTTP responses with clear rejection reasons
+3. **Better performance** - Early rejection before spawning Git
+4. **Easier testing** - Pure Rust unit tests, no Git setup needed
+5. **Simpler deployment** - Single binary with shared state
+6. **Shared database + purgatory** - Both authorization sources accessible during validation
 
 The trade-off (coupling to Git HTTP protocol) is acceptable because:
-- The protocol is stable and well-specified
-- Protocol handling is isolated in one module
+
+- The pkt-line protocol is stable and well-specified
+- Protocol parsing is isolated in [`src/git/authorization.rs`](../../src/git/authorization.rs)
+- Purgatory integration requires inline access anyway
 - Benefits far outweigh the cost
 
-This decision aligns with our goal of creating a **developer-friendly, production-ready GRASP implementation**.
+This decision aligns with our goal of creating a **developer-friendly, production-ready GRASP implementation** that properly handles the event-git-data ordering problem via purgatory.
 
 ---
 
@@ -386,4 +476,4 @@ This decision aligns with our goal of creating a **developer-friendly, productio
 
 ---
 
-*Part of the [ngit-grasp explanation docs](./)*
+_Part of the [ngit-grasp explanation docs](./)_

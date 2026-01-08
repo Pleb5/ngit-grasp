@@ -4,6 +4,8 @@
 
 Proactively Sync Nostr Events from other relays listed in accepted repository announcements.
 
+**Note**: This document covers **relay-to-relay event sync**. For automatic git data fetching when events arrive without their data, see [GRASP-02 Purgatory Git Data Fetching](grasp-02-proactive-sync-purgatory-git-data.md).
+
 Features:
 
 - Fetches all repository announcements from connected relays to discover new repos listing our service
@@ -13,6 +15,7 @@ Features:
 - Plays nicely with other relays - connection backoff and rate-limiting detection with cooldown
 - Does a full reconciliation daily
 - Prometheus metrics
+- **Triggers purgatory git data sync**: When events arrive via sync, they're enqueued for immediate git data fetching (500ms delay to batch bursts)
 
 Key Architectural Points:
 

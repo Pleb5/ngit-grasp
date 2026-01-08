@@ -80,6 +80,77 @@ Explanation documentation helps you **understand concepts** and design decisions
 
 ---
 
+### [Purgatory Design](purgatory-design.md)
+**In-memory holding area for events awaiting git data**
+
+**Topics:**
+- The "which arrives first?" problem
+- Separate storage for state vs PR events
+- Late binding for state events
+- Bidirectional waiting for PR events
+- Authorization during push
+
+**Read when:** You want to understand how ngit-grasp handles out-of-order event/git data arrival
+
+---
+
+### [GRASP-02 Proactive Sync](grasp-02-proactive-sync.md)
+**Relay-to-relay synchronization for repository discovery**
+
+**Topics:**
+- Negentropy-based event sync
+- Repository announcement discovery
+- Relay management and reconnection
+- Layer 2 filtering
+- Bootstrap and dynamic relay discovery
+
+**Read when:** You want to understand how ngit-grasp discovers and syncs repositories across relays
+
+---
+
+### [GRASP-02 Purgatory Git Data Fetching](grasp-02-proactive-sync-purgatory-git-data.md)
+**Proactive git data fetching from remote servers**
+
+**Topics:**
+- Identifier-based batching
+- Exponential backoff with fresh start
+- Domain throttling (5 concurrent, 30/min)
+- Debounced delays (3min user, 500ms sync)
+- 30-minute expiry
+- Mock-based testability
+
+**Read when:** You want to understand how purgatory automatically fetches missing git data
+
+---
+
+### [Unified Git Data Sync](unify-git-data-sync.md)
+**Shared processing for git push and purgatory sync paths**
+
+**Topics:**
+- Why unify push and sync processing
+- OID syncing to owner repos
+- Ref alignment logic
+- Event release from purgatory
+- WebSocket notification
+
+**Read when:** You want to understand how git data is processed consistently regardless of arrival method
+
+---
+
+### [Monitoring Overview](monitoring.md)
+**Prometheus metrics and observability**
+
+**Topics:**
+- Metrics philosophy
+- Connection tracking
+- Git operation metrics
+- Nostr event metrics
+- Privacy considerations
+
+**Read when:** You want to understand how to monitor ngit-grasp in production
+
+---
+
 ## Planned Explanation Documentation
 
 ### GRASP Protocol Design

@@ -2,6 +2,21 @@
 
 A [GRASP](https://gitworkshop.dev/danconwaydev.com/grasp) (Git Relays Authorized via Signed-Nostr Proofs) implementation in Rust.
 
+## What's New 🎉
+
+**Full GRASP-02 Implementation Complete!**
+
+ngit-grasp now features a sophisticated proactive sync system that automatically discovers relays, syncs events using NIP-77 negentropy, and hunts for missing git data across clone URLs. Key highlights:
+
+- ✨ **NIP-77 Negentropy**: Efficient set reconciliation with automatic REQ+EOSE fallback
+- ✨ **Intelligent Purgatory**: Auto-fetches missing git data from clone URLs (500ms for synced events, 3min for user pushes)
+- ✨ **Multi-Maintainer First-Class**: Pushed git data automatically syncs to all maintainer repositories
+- ✨ **Smart Throttling**: Respectful rate limiting (5 concurrent, 30/min per domain) with exponential backoff
+- ✨ **Live & Historic Sync**: Real-time event streaming plus daily full reconciliation
+- ✨ **Connection Health**: Exponential backoff, rate limit detection, dead relay handling
+
+See [GRASP-02 Proactive Sync](docs/explanation/grasp-02-proactive-sync.md) and [Purgatory Git Data Sync](docs/explanation/grasp-02-proactive-sync-purgatory-git-data.md) for details.
+
 ## Overview
 
 `ngit-grasp` is a Rust-based implementation of the GRASP protocol, which enables decentralized Git repository hosting with Nostr-based authorization. This implementation combines:
@@ -14,15 +29,25 @@ Unlike the reference implementation ([ngit-relay](https://gitworkshop.dev/npub15
 
 ## Status
 
+**Production Ready** - Full GRASP-01 and GRASP-02 implementation with comprehensive test coverage.
+
 ## Key Features
 
 - **Pure Rust Implementation**: Single binary, no external dependencies beyond Git itself
 - **Integrated Authorization**: Push validation happens inline during the Git receive-pack operation
 - **GRASP-01 Compliant**: Core service requirements for Git hosting with Nostr authorization
-- **Extensible Architecture**: Designed to support GRASP-02 (Proactive Sync) and GRASP-05 (Archive) extensions
+- **GRASP-02 Proactive Sync**: Sophisticated relay-to-relay event and git data synchronization
+  - **NIP-77 Negentropy**: Efficient set reconciliation with automatic fallback to REQ+EOSE
+  - **Live & Historic Sync**: Real-time event streaming plus catch-up for past events
+  - **Smart Throttling**: Respectful rate limiting (5 concurrent, 30/min per domain) with exponential backoff
+  - **Multi-Maintainer First-Class**: Internal sync of pushed git data across all maintainer repositories
+  - **Intelligent Purgatory**: Auto-fetches missing git data from clone URLs when events arrive first
+  - **Discovery-Driven**: Dynamically connects to relays listed in repository announcements
 - **Developer-Friendly**: Built with modern Rust async patterns using tokio and actix-web
 
 ## Architecture Highlights
+
+### Inline Authorization (GRASP-01)
 
 The key architectural decision is **inline authorization** rather than Git hooks:
 
@@ -38,9 +63,50 @@ This approach provides:
 - **Tighter integration**: Shared state between Git and Nostr components
 - **Easier testing**: Pure Rust unit and integration tests
 
+### Sophisticated Sync System (GRASP-02)
+
+The proactive sync implementation is production-grade with advanced features:
+
+**NIP-77 Negentropy with Intelligent Fallback:**
+
+- Attempts efficient set reconciliation via NIP-77 for full syncs
+- Automatically falls back to REQ+EOSE with pagination when negentropy unavailable
+- Combines live subscriptions (`limit:0`) with historic catch-up
+
+**Multi-Layer Filter Strategy:**
+
+- **Layer 1**: Repository announcements and maintainer lists (connection-level)
+- **Layer 2**: Events tagging repositories (a/A/q tags, batched per 100 repos)
+- **Layer 3**: Events tagging root events (e/E/q tags, batched per 100 IDs)
+
+**Connection Health Management:**
+
+- Exponential backoff for failed connections (5s → 1 hour)
+- Rate limit detection with 65-second cooldown
+- Dead relay handling (24h+ failures → minimal retry)
+- Quick reconnect (<15min) vs fresh start (>15min or daily)
+
+**Intelligent Purgatory with Active Git Data Hunting:**
+
+- Events without git data held in-memory for 30 minutes
+- **User events**: 3-minute delay (expect git push to follow)
+- **Synced events**: 500ms delay (batch burst arrivals, then hunt immediately)
+- Proactively fetches missing data from clone URLs every 2 minutes
+- Respectful throttling: 5 concurrent, 30 requests/min per domain
+- Round-robin fairness across repositories
+- Auto-release when data arrives, auto-expire after 30 minutes
+
+**First-Class Multi-Maintainer Support:**
+
+- Git data pushed to one maintainer's repo automatically syncs to all other maintainers
+- Shared object databases for storage efficiency (planned)
+- Seamless collaboration without manual coordination
+
+See [GRASP-02 Proactive Sync](docs/explanation/grasp-02-proactive-sync.md) for full architectural details.
+
 ## GRASP Compliance
 
-### GRASP-01 (Core Service Requirements)
+### GRASP-01 (Core Service Requirements) ✅
 
 - ✅ NIP-01 compliant Nostr relay at `/`
 - ✅ Accepts NIP-34 repository announcements and state events
@@ -50,12 +116,25 @@ This approach provides:
 - ✅ Support for `refs/nostr/<event-id>` for PRs
 - ✅ CORS support for web-based Git clients
 - ✅ NIP-11 relay information document
+- ✅ **Purgatory**: Events without git data held for 30 minutes, auto-released when data arrives
 
-### GRASP-02 (Proactive Sync) - Planned
+### GRASP-02 (Proactive Sync) ✅
 
-- 🔄 Proactive event sync from listed relays
-- 🔄 Proactive Git data sync from listed clone URLs
-- 🔄 PR data fetching and serving
+- ✅ **Relay Discovery**: Automatically connects to relays listed in repository announcements
+- ✅ **Event Sync**: Proactive sync from discovered relays using NIP-77 negentropy with REQ+EOSE fallback
+  - Live subscriptions (`limit:0`) for real-time event streaming
+  - Historic sync with automatic pagination for large result sets
+  - Daily full reconciliation to detect drift
+  - Connection health tracking with exponential backoff
+- ✅ **Git Data Sync**: Automatic fetching of missing git data from clone URLs
+  - Smart timing: 3min delay for user events, 500ms for synced events
+  - Respectful throttling: 5 concurrent requests, 30/min per domain
+  - Round-robin fairness across repositories
+  - Exponential backoff with fresh start on new events
+- ✅ **Multi-Maintainer Support**: Pushed git data automatically synced to all maintainer repositories
+- ✅ **Comprehensive Monitoring**: Prometheus metrics for sync health, bandwidth, and relay status
+
+**See**: [GRASP-02 Proactive Sync](docs/explanation/grasp-02-proactive-sync.md) and [Purgatory Git Data Sync](docs/explanation/grasp-02-proactive-sync-purgatory-git-data.md)
 
 ### GRASP-05 (Archive) - Planned
 
@@ -64,53 +143,52 @@ This approach provides:
 
 ## Roadmap
 
-### Purgatory
+### GRASP-02 Enhancements
 
-State events / PR / PR Update events without git data should be accepted with msg: "won't be served until git data arrives" or "in puratory awaiting git data" and not served by the main relay.
-When the git data arrives, they get released from puratory. If git data doesn't arrive within 1 day, the events get deleted.
+**Proactive Sync Plus:**
 
-This ensures the grasp serve only serves these events when it can provide the git data to support them.
+- 🔄 Scan read/write relays of repo/PR/Patch/Issue authors for related comments
+- 🔄 Stricter anti-spam mechanisms for author relay events
+- 🔄 Periodic scanning of relays in User Grasp Lists for announcements listing our relay
 
-Why this is useful:
+### Data Efficiency
 
-1. owner submits updated state event but loses connectivity before sending the new git data. The relay causing ngit-cli to fail to clone and other clients to show a warning that the git servers state doesn't align with nostr as relays only serve the latest state event (as its addressable).
-   a. clients could be made more resilient if they know older versions of the state event served by a grasp server relate to the state they are currently storing.
-   b. if clients just start using grasp servers (instead of other relays) then they will always be able to find the git data related to the latest versin of the event servered by a grasp server
+**Git Object Deduplication:**
 
-2. serving PR events where the git data isn't accessable isn't useful.
+- 🔄 Shared object database across repositories
+- 🔄 Use `GIT_ALTERNATE_OBJECT_DIRECTORIES` or `.git/objects/info/alternates`
+- 🔄 Significant storage savings for multi-maintainer repositories
 
-### GRASP-02 (Proactive Sync)
+### Monitoring & Observability
 
-- rust-nostr client websocket connection to other grasp servers listening for our repo.
-- negentropy catchup
-- look for missing data (from state or PR / PR update) then try and fetch from other grasp servers. for efficency look for it from other repos (ie repos of other maintainers). Do this on new state event / PR / PR update evnet and on a timer for events we know we don't have the data for.
+ngit-grasp exposes comprehensive Prometheus metrics at `/metrics` for:
 
-#### Proactive Sync +
+**Git Operations:**
 
-. look for announcement events on other relays / grasp servers that list our service.
-. look on read/write relays of repo / PR / Patch / Issue author to get related comments. pass through stricter anti SPAM mechanism?
+- Clone/fetch/push rates and bandwidth
+- Authorization results (accepted/rejected)
+- Top N repositories by bandwidth
 
-### Data effiency
+**Nostr Events:**
 
-dedupe git data = shared object database or (GIT_ALTERNATE_OBJECT_DIRECTORIES or .git/objects/info/alternates)
+- WebSocket connections (active, unique IPs, flagged abusers)
+- Events received, stored, rejected by kind
+- Purgatory status (events waiting for git data)
 
-### Monitoring
+**Sync Health (GRASP-02):**
 
-ngit-grasp exposes Prometheus metrics at `/metrics` for connection tracking, Git operations, and Nostr events.
+- Per-relay connection status and health states
+- Event sync rates and bandwidth
+- Git data fetch attempts and success rates
+- Domain throttling metrics
 
 **Configuration Options:**
 
-| Option | CLI Flag | Environment Variable | Default |
-|--------|----------|---------------------|---------|
-| Metrics enabled | `--metrics-enabled` | `NGIT_METRICS_ENABLED` | `true` |
-| Connection abuse threshold | `--metrics-connection-per-ip-abuse-threshold` | `NGIT_METRICS_CONNECTION_PER_IP_ABUSE_THRESHOLD` | `10` |
-| Top N repos | `--metrics-top-n-repos` | `NGIT_METRICS_TOP_N_REPOS` | `10` |
-
-**Key Metrics:**
-- WebSocket connections (active, unique IPs, flagged abusers)
-- Git operations (clone/fetch/push rates, bandwidth, authorization results)
-- Nostr events (received, stored, rejected by kind)
-- Top N repositories by bandwidth
+| Option                     | CLI Flag                                      | Environment Variable                             | Default |
+| -------------------------- | --------------------------------------------- | ------------------------------------------------ | ------- |
+| Metrics enabled            | `--metrics-enabled`                           | `NGIT_METRICS_ENABLED`                           | `true`  |
+| Connection abuse threshold | `--metrics-connection-per-ip-abuse-threshold` | `NGIT_METRICS_CONNECTION_PER_IP_ABUSE_THRESHOLD` | `10`    |
+| Top N repos                | `--metrics-top-n-repos`                       | `NGIT_METRICS_TOP_N_REPOS`                       | `10`    |
 
 **Privacy:** IP addresses are never exposed in metrics - only aggregate counts.
 
@@ -154,6 +232,7 @@ This a useful feature of other git servers.
 ```bash
 # install ngit
 curl -Ls https://ngit.dev/install.sh | bash
+
 # Clone the repository
 git clone nostr://danconwaydev.com/relay.ngit.dev/ngit-grasp
 cd ngit-grasp
@@ -164,6 +243,8 @@ nix develop -c cargo build --release
 # Configure
 cp .env.example .env
 # Edit .env with your settings
+# Required: NGIT_DOMAIN=your-domain.com
+# Optional: NGIT_SYNC_BOOTSTRAP_RELAY_URL=wss://relay.example.com
 
 # Run
 nix develop -c cargo run --release
@@ -171,6 +252,14 @@ nix develop -c cargo run --release
 # Run tests
 nix develop -c cargo test --lib
 ```
+
+**What happens on startup:**
+
+- Git HTTP server starts on configured bind address
+- Nostr relay begins accepting WebSocket connections
+- If bootstrap relay configured, sync system connects and discovers repositories
+- Purgatory system activates, ready to hunt for missing git data
+- Prometheus metrics exposed at `/metrics`
 
 **Don't have Nix?** See [Getting Started Tutorial](docs/tutorials/getting-started.md) for alternative setup methods.
 
@@ -200,6 +289,8 @@ NGIT_OWNER_NPUB=npub1... ngit-grasp --domain relay.example.com
 
 ### Configuration Options
 
+#### Core Settings
+
 | Option            | CLI Flag              | Environment Variable     | Default                                      |
 | ----------------- | --------------------- | ------------------------ | -------------------------------------------- |
 | Domain            | `--domain`            | `NGIT_DOMAIN`            | (required)                                   |
@@ -210,6 +301,24 @@ NGIT_OWNER_NPUB=npub1... ngit-grasp --domain relay.example.com
 | Relay data path   | `--relay-data-path`   | `NGIT_RELAY_DATA_PATH`   | `./data/relay` (temp dir for memory backend) |
 | Bind address      | `--bind-address`      | `NGIT_BIND_ADDRESS`      | `127.0.0.1:8080`                             |
 | Database backend  | `--database-backend`  | `NGIT_DATABASE_BACKEND`  | `lmdb`                                       |
+
+#### GRASP-02 Sync Settings
+
+| Option                    | CLI Flag                                | Environment Variable                       | Default         |
+| ------------------------- | --------------------------------------- | ------------------------------------------ | --------------- |
+| Bootstrap relay           | `--sync-bootstrap-relay-url`            | `NGIT_SYNC_BOOTSTRAP_RELAY_URL`            | (optional)      |
+| Base backoff              | `--sync-base-backoff-secs`              | `NGIT_SYNC_BASE_BACKOFF_SECS`              | `5` seconds     |
+| Max backoff               | `--sync-max-backoff-secs`               | `NGIT_SYNC_MAX_BACKOFF_SECS`               | `3600` (1 hour) |
+| Disconnect check interval | `--sync-disconnect-check-interval-secs` | `NGIT_SYNC_DISCONNECT_CHECK_INTERVAL_SECS` | `60` seconds    |
+| Disable negentropy        | `--sync-disable-negentropy`             | `NGIT_SYNC_DISABLE_NEGENTROPY`             | `false`         |
+| Batch window              | N/A                                     | `NGIT_SYNC_BATCH_WINDOW_MS`                | `5000` ms       |
+
+**Sync Notes:**
+
+- **Bootstrap relay**: Optional starting point for relay discovery. System automatically discovers additional relays from repository announcements.
+- **Backoff settings**: Controls exponential backoff for failed connections (`base * 2^(failures-1)`, capped at max).
+- **Negentropy**: Can be disabled for testing REQ+EOSE fallback behavior.
+- **Batch window**: Self-subscriber batches events for this duration before triggering sync filters.
 
 ### Database Backends
 
@@ -227,8 +336,23 @@ export NGIT_DOMAIN=gitnostr.com
 export NGIT_OWNER_NPUB=npub1...
 export NGIT_BIND_ADDRESS=0.0.0.0:8080
 export NGIT_DATABASE_BACKEND=lmdb
+
+# Optional: Enable proactive sync from a bootstrap relay
+export NGIT_SYNC_BOOTSTRAP_RELAY_URL=wss://relay.damus.io
+
+# Optional: Tune sync behavior
+export NGIT_SYNC_BASE_BACKOFF_SECS=5      # Start backoff at 5 seconds
+export NGIT_SYNC_MAX_BACKOFF_SECS=3600    # Cap backoff at 1 hour
+
 ngit-grasp
 ```
+
+**Production Tips:**
+
+- Set `NGIT_SYNC_BOOTSTRAP_RELAY_URL` to a well-connected relay for initial repository discovery
+- The system will automatically discover and connect to additional relays listed in repository announcements
+- Monitor sync health via Prometheus metrics at `/metrics`
+- Purgatory will automatically fetch missing git data from clone URLs
 
 ### Example: Development
 
@@ -331,11 +455,11 @@ ngit-grasp/
 ├── src/
 │   ├── main.rs              # Entry point, server setup
 │   ├── lib.rs               # Library exports
-│   ├── config.rs            # Configuration
+│   ├── config.rs            # Configuration (core + sync settings)
 │   ├── git/
 │   │   ├── mod.rs           # Git module + repository operations
 │   │   ├── handlers.rs      # Git HTTP handlers
-│   │   ├── authorization.rs # Push validation logic
+│   │   ├── authorization.rs # Push validation logic (checks DB + purgatory)
 │   │   ├── protocol.rs      # Git protocol encoding
 │   │   └── subprocess.rs    # Git subprocess management
 │   ├── nostr/
@@ -348,30 +472,60 @@ ngit-grasp/
 │   │       ├── state.rs     # State event validation + ref alignment
 │   │       ├── pr_event.rs  # PR/PR Update validation
 │   │       └── related.rs   # Forward/backward reference checking
+│   ├── sync/                # GRASP-02 Proactive Sync (relay-to-relay)
+│   │   ├── mod.rs           # SyncManager, main loop, data structures
+│   │   ├── algorithms.rs    # derive_relay_targets(), compute_actions()
+│   │   ├── filters.rs       # 3-layer filter building (announcements, repos, events)
+│   │   ├── health.rs        # RelayHealthTracker (backoff, rate limits)
+│   │   ├── relay_connection.rs # RelayConnection, event loop lifecycle
+│   │   ├── self_subscriber.rs  # SelfSubscriber (batched event discovery)
+│   │   └── metrics.rs       # SyncMetrics for Prometheus
+│   ├── purgatory/           # In-memory holding area for events awaiting git data
+│   │   ├── mod.rs           # Purgatory core (state/PR storage, 30min expiry)
+│   │   ├── helpers.rs       # State event ref matching, PR lookup
+│   │   ├── processing.rs    # Unified git data processing (push + sync paths)
+│   │   └── sync/            # Proactive git data fetching
+│   │       ├── mod.rs       # Public API (enqueue, main loop)
+│   │       ├── loop.rs      # Sync loop (1s interval, debounced delays)
+│   │       ├── functions.rs # Core sync logic (try URLs, handle results)
+│   │       ├── queue.rs     # SyncQueue (backoff, fresh start on new events)
+│   │       ├── throttle.rs  # DomainThrottle (5 concurrent, 30/min, round-robin)
+│   │       └── context.rs   # SyncContext trait + mock for testing
 │   ├── http/
 │   │   ├── mod.rs           # HTTP module
 │   │   ├── landing.rs       # Landing page handler
 │   │   └── nip11.rs         # NIP-11 relay info document
 │   └── metrics/
-│       ├── mod.rs           # Prometheus metrics
+│       ├── mod.rs           # Prometheus metrics (Git, Nostr, Sync)
 │       ├── bandwidth.rs     # Bandwidth tracking
 │       └── connection.rs    # Connection tracking
 ├── docs/                    # Documentation (Diátaxis framework)
-├── tests/                   # Integration tests
+│   ├── explanation/         # Architecture, decisions, GRASP-02 deep-dives
+│   ├── how-to/              # Deployment, configuration guides
+│   ├── tutorials/           # Getting started, first steps
+│   └── reference/           # API docs, test strategy
+├── tests/                   # Integration tests (NIP-01, NIP-34, purgatory)
 ├── grasp-audit/             # Compliance audit subproject
 └── README.md
 ```
 
 ## Comparison with ngit-relay
 
-| Feature       | ngit-relay (Go)                           | ngit-grasp (Rust)             |
-| ------------- | ----------------------------------------- | ----------------------------- |
-| Language      | Go                                        | Rust                          |
-| Components    | nginx + git-http-backend + hooks + Khatru | Single integrated binary      |
-| Authorization | Pre-receive Git hook                      | Inline during receive-pack    |
-| Deployment    | Docker + supervisord                      | Single binary                 |
-| Testing       | Go tests + shell scripts                  | Rust unit + integration tests |
-| Performance   | Good                                      | Excellent (zero-copy, async)  |
+| Feature             | ngit-relay (Go)                           | ngit-grasp (Rust)                                    |
+| ------------------- | ----------------------------------------- | ---------------------------------------------------- |
+| Language            | Go                                        | Rust                                                 |
+| Components          | nginx + git-http-backend + hooks + Khatru | Single integrated binary                             |
+| Authorization       | Pre-receive Git hook                      | Inline during receive-pack                           |
+| GRASP-01            | ✅ Complete                               | ✅ Complete                                          |
+| GRASP-02 Event Sync | ✅ Limited                                | ✅ Advanced (NIP-77 negentropy + fallback)           |
+| GRASP-02 Git Sync   | ✅ Basic                                  | ✅ Automatic purgatory hunting                       |
+| Multi-Maintainer    | ✅ Supported                              | ✅ First-class (auto-sync across repos)              |
+| Purgatory           | ✅ 24-hour expiry                         | ✅ 30-minute expiry + proactive git data fetching    |
+| Health Tracking     | Basic                                     | Advanced (exponential backoff, rate limit detection) |
+| Deployment          | Docker + supervisord                      | Single binary                                        |
+| Testing             | Go tests + shell scripts                  | Rust unit + integration tests                        |
+| Performance         | Good                                      | Excellent (zero-copy, async)                         |
+| Monitoring          | Basic logs                                | Comprehensive Prometheus metrics                     |
 
 ## Contributing
 
