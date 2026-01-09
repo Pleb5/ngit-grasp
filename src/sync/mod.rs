@@ -16,6 +16,7 @@ pub mod algorithms;
 pub mod filters;
 pub mod health;
 pub mod metrics;
+pub mod rejected_index;
 pub mod relay_connection;
 pub mod self_subscriber;
 
@@ -24,6 +25,11 @@ pub use algorithms::{AddFilters, RelaySyncNeeds};
 
 // Re-export metrics types
 pub use metrics::SyncMetrics;
+
+// Re-export rejected index types
+pub use rejected_index::{RejectionReason};
+// Note: RejectedEventsIndex struct exists in rejected_index.rs but not yet used
+// Current code still uses the simple HashSet type alias below
 
 // Re-export relay connection types
 pub use relay_connection::{NegentropySyncResult, RelayConnection, RelayEvent};
@@ -67,7 +73,10 @@ pub type PendingSyncIndex = Arc<RwLock<HashMap<String, Vec<PendingBatch>>>>;
 /// Tracks EventIds of announcement events (30617/30618) that were rejected during sync.
 /// These events are excluded from negentropy sync and skipped during REQ+EOSE processing
 /// to avoid repeatedly fetching and rejecting the same events.
-pub type RejectedEventsIndex = Arc<RwLock<HashSet<EventId>>>;
+/// 
+/// NOTE: This is a temporary simple implementation. PR2 will replace this with the
+/// two-tier RejectedEventsIndex from rejected_index.rs (hot cache + cold index).
+type RejectedEventsIndexSimple = Arc<RwLock<HashSet<EventId>>>;
 
 // =============================================================================
 // Supporting Data Structures
@@ -436,7 +445,7 @@ pub struct SyncManager {
     /// In-flight subscription batches
     pending_sync_index: PendingSyncIndex,
     /// Rejected announcement event IDs (30617/30618) - excluded from sync
-    rejected_events_index: RejectedEventsIndex,
+    rejected_events_index: RejectedEventsIndexSimple,
     /// Active relay connections - keyed by relay URL
     connections: HashMap<String, RelayConnection>,
     /// Health tracker for relay connection state
@@ -1992,7 +2001,7 @@ impl SyncManager {
         database: &SharedDatabase,
         write_policy: &Nip34WritePolicy,
         local_relay: &LocalRelay,
-        rejected_events_index: &RejectedEventsIndex,
+        rejected_events_index: &RejectedEventsIndexSimple,
     ) -> ProcessResult {
         use nostr_relay_builder::prelude::{WritePolicy, WritePolicyResult};
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -2880,7 +2889,7 @@ mod tests {
     #[tokio::test]
     async fn test_rejected_events_index_tracks_announcements() {
         // Create a rejected events index
-        let rejected_index: RejectedEventsIndex = Arc::new(RwLock::new(HashSet::new()));
+        let rejected_index: RejectedEventsIndexSimple = Arc::new(RwLock::new(HashSet::new()));
 
         // Create test announcement event (kind 30617)
         let keys = Keys::generate();
