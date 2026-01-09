@@ -908,8 +908,22 @@ impl SyncManager {
         // Release lock before checking if historic sync is complete
         drop(relay_index);
         
-        // Check if all historic sync is complete (no more pending batches)
-        self.check_and_complete_historic_sync(relay_url).await;
+        // Spawn background task to check if historic sync is complete
+        // This avoids blocking the confirm_batch flow for 6 seconds
+        let relay_url = relay_url.to_string();
+        let pending_index = self.pending_sync_index.clone();
+        let relay_index = self.relay_sync_index.clone();
+        let metrics = self.metrics.clone();
+        
+        tokio::spawn(async move {
+            Self::check_and_complete_historic_sync_impl(
+                &relay_url,
+                pending_index,
+                relay_index,
+                metrics,
+            )
+            .await;
+        });
     }
 
     /// Check if historic sync is complete and transition to Connected status
@@ -930,11 +944,17 @@ impl SyncManager {
     /// - Buffer for processing: 1 second
     ///
     /// Called after each batch is confirmed to detect completion.
-    async fn check_and_complete_historic_sync(&self, relay_url: &str) {
+    /// Spawned as a background task to avoid blocking the confirm_batch flow.
+    async fn check_and_complete_historic_sync_impl(
+        relay_url: &str,
+        pending_index: PendingSyncIndex,
+        relay_index: RelaySyncIndex,
+        metrics: Option<SyncMetrics>,
+    ) {
         // First check: Are there any pending batches?
         let has_pending = {
-            let pending = self.pending_sync_index.read().await;
-            pending.get(relay_url).map_or(false, |batches| !batches.is_empty())
+            let pending = pending_index.read().await;
+            pending.get(relay_url).is_some_and(|batches| !batches.is_empty())
         };
         
         if has_pending {
@@ -948,8 +968,8 @@ impl SyncManager {
         
         // Second check: Are there still no pending batches?
         let has_pending = {
-            let pending = self.pending_sync_index.read().await;
-            pending.get(relay_url).map_or(false, |batches| !batches.is_empty())
+            let pending = pending_index.read().await;
+            pending.get(relay_url).is_some_and(|batches| !batches.is_empty())
         };
         
         if has_pending {
@@ -958,8 +978,8 @@ impl SyncManager {
         }
         
         // No pending batches after waiting - safe to transition to Connected or ConnectedDegraded
-        let mut relay_index = self.relay_sync_index.write().await;
-        if let Some(state) = relay_index.get_mut(relay_url) {
+        let mut relay_index_guard = relay_index.write().await;
+        if let Some(state) = relay_index_guard.get_mut(relay_url) {
             if state.connection_status == ConnectionStatus::Syncing {
                 // Check if any batches failed during historic sync
                 let new_status = if state.historic_sync_had_failures {
@@ -983,7 +1003,7 @@ impl SyncManager {
                 );
                 
                 // Update metrics
-                if let Some(ref metrics) = self.metrics {
+                if let Some(ref metrics) = metrics {
                     metrics.record_connection_status(relay_url, new_status);
                 }
             }
@@ -1215,7 +1235,9 @@ impl SyncManager {
                 );
                 return;
             }
-            Some(status) if status.is_live_sync_active() => {
+            Some(ConnectionStatus::Syncing) 
+            | Some(ConnectionStatus::Connected) 
+            | Some(ConnectionStatus::ConnectedHistoricSyncFailures) => {
                 // Continue to subscribe - live sync is active, can accept new filters
             }
         }
@@ -1736,6 +1758,9 @@ impl SyncManager {
                     repos: HashSet::new(),
                     root_events: HashSet::new(),
                     announcements_synced: false,
+                    historic_sync_completed: false,
+                    historic_sync_completed_at: None,
+                    historic_sync_had_failures: false,
                 };
                 index.insert(relay_url.clone(), new_state);
                 true

@@ -648,10 +648,9 @@ pub mod mock {
                     )];
 
                     // Create a single clone tag with multiple values (NIP-34 format)
-                    let clone_values: Vec<String> = self.clone_urls.iter().cloned().collect();
                     tags.push(nostr_sdk::Tag::custom(
                         nostr_sdk::TagKind::Custom("clone".into()),
-                        clone_values,
+                        self.clone_urls.to_vec(),
                     ));
 
                     let event = EventBuilder::new(Kind::from(30617), "")

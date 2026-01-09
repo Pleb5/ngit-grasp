@@ -349,6 +349,9 @@ mod tests {
                 last_connected: None,
                 disconnected_at: None,
                 announcements_synced: false,
+                historic_sync_completed: false,
+                historic_sync_completed_at: None,
+                historic_sync_had_failures: false,
             },
         );
 
@@ -442,6 +445,9 @@ mod tests {
                 last_connected: None,
                 disconnected_at: None,
                 announcements_synced: false,
+                historic_sync_completed: false,
+                historic_sync_completed_at: None,
+                historic_sync_had_failures: false,
             },
         );
 
@@ -476,6 +482,9 @@ mod tests {
                 last_connected: None,
                 disconnected_at: None,
                 announcements_synced: false,
+                historic_sync_completed: false,
+                historic_sync_completed_at: None,
+                historic_sync_had_failures: false,
             },
         );
 
@@ -537,6 +546,9 @@ mod tests {
                 last_connected: None,
                 disconnected_at: None,
                 announcements_synced: false,
+                historic_sync_completed: false,
+                historic_sync_completed_at: None,
+                historic_sync_had_failures: false,
             },
         );
 

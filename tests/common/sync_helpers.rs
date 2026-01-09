@@ -708,7 +708,7 @@ impl ParsedMetrics {
     /// Check if a specific relay is connected
     pub fn relay_connected(&self, relay: &str) -> Option<bool> {
         self.gauge("ngit_sync_relay_connected", &[("relay", relay)])
-            .map(|v| v == 1)
+            .map(|v| v >= 2)  // Syncing (2), Connected (3), or ConnectedHistoricSyncFailures (4)
     }
 
     /// Get total number of connected relays
@@ -1052,7 +1052,7 @@ mod tests {
 
     #[test]
     fn test_parse_metric_with_relay_url_label() {
-        let text = r#"ngit_sync_relay_connected{relay="ws://127.0.0.1:12345"} 1"#;
+        let text = r#"ngit_sync_relay_connected{relay="ws://127.0.0.1:12345"} 3"#;
         let metrics = ParsedMetrics::parse(text);
         assert_eq!(metrics.relay_connected("ws://127.0.0.1:12345"), Some(true));
     }
