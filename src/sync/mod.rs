@@ -1649,7 +1649,9 @@ impl SyncManager {
                                 metrics.record_health_state(&relay_url_clone, state);
                             }
                         } else {
-                            tracing::debug!(
+                            // Log at TRACE level to avoid duplicate with nostr_relay_pool's DEBUG log
+                            // (nostr-sdk already logs all NOTICE messages at DEBUG level)
+                            tracing::trace!(
                                 relay = %relay_url_clone,
                                 notice = %notice,
                                 "Relay issued notice"
