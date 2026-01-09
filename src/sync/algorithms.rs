@@ -402,6 +402,8 @@ mod tests {
                 outstanding_subs: HashSet::new(),
                 sync_method: SyncMethod::ReqEose,
                 pagination_state: HashMap::new(),
+                requested_event_ids: None,
+                received_event_ids: None,
             }],
         );
 
@@ -514,6 +516,8 @@ mod tests {
                 outstanding_subs: HashSet::new(),
                 sync_method: SyncMethod::ReqEose,
                 pagination_state: HashMap::new(),
+                requested_event_ids: None,
+                received_event_ids: None,
             }],
         );
 
