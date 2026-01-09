@@ -15,12 +15,13 @@ This guide operates in two modes:
 
 1. Check for active issues: `ls work/active-issues/`
 2. Pick the most important issue to fix
-3. Implement the fix
-4. Run `cargo test` to verify tests pass
-5. Run `cargo clippy` to check for warnings
-6. Run `cargo fmt` to format code
-7. Commit changes with descriptive message
-8. Report back - **DO NOT** do another issue or run more tests
+3. **Review proposed fix and ask for permission before implementing**
+4. Implement the fix (after approval)
+5. Run `cargo test` to verify tests pass
+6. Run `cargo clippy` to check for warnings
+7. Run `cargo fmt` to format code
+8. Commit changes with descriptive message
+9. Report back - **DO NOT** do another issue or run more tests
 
 ### Mode 2: Discover New Issues
 **When:** No active issues in `work/active-issues/`
@@ -208,11 +209,23 @@ Review issue files and select based on:
 - Impact (functionality > performance > UX)
 - Complexity (quick fixes first to clear backlog)
 
-### Step 3: Implement the Fix
+### Step 3: Review Proposed Fix and Get Permission
 
-Make the necessary code changes based on the issue description.
+**IMPORTANT:** Before implementing any changes:
 
-### Step 4: Test, Lint, Format
+1. Read relevant code files to understand the issue
+2. Analyze the root cause
+3. Propose a fix with explanation of what will change and why
+4. Summarize the proposed fix in 2-3 sentences
+5. **Ask for user permission to proceed**
+
+**Do NOT implement changes without explicit approval.**
+
+### Step 4: Implement the Fix
+
+After receiving permission, make the necessary code changes based on the issue description and approved plan.
+
+### Step 5: Test, Lint, Format
 
 ```bash
 # Run tests
@@ -225,14 +238,14 @@ cargo clippy
 cargo fmt
 ```
 
-### Step 5: Commit
+### Step 6: Commit
 
 ```bash
 git add .
 git commit -m "fix: [brief description of what was fixed]"
 ```
 
-### Step 6: Report Back
+### Step 7: Report Back
 
 **STOP HERE.** Report what was fixed. Do NOT:
 - Fix another issue
@@ -388,7 +401,9 @@ Check work/active-issues/
     │
     ├─ Has issues? ──► Mode 1: Pick one issue
     │                          │
-    │                          ├─ Fix code
+    │                          ├─ Review & propose fix
+    │                          ├─ Ask permission
+    │                          ├─ Fix code (after approval)
     │                          ├─ cargo test
     │                          ├─ cargo clippy
     │                          ├─ cargo fmt
