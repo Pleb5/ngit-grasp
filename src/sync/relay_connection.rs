@@ -106,9 +106,10 @@ impl RelayConnection {
     ///
     /// # Arguments
     /// * `url` - The relay URL to connect to (with or without scheme, e.g., "relay.example.com" or "wss://relay.example.com")
-    pub fn new(url: String) -> Self {
+    /// * `keys` - Cryptographic keys for NIP-42 authentication (typically the relay operator's keys)
+    pub fn new(url: String, keys: Keys) -> Self {
         let normalized_url = Self::normalize_url(&url);
-        let client = Client::default();
+        let client = Client::new(keys);
         Self {
             url: normalized_url,
             client,
@@ -122,9 +123,10 @@ impl RelayConnection {
     /// # Arguments
     /// * `url` - The relay URL to connect to (with or without scheme, e.g., "relay.example.com" or "wss://relay.example.com")
     /// * `database` - Shared database for local event comparison during negentropy sync
-    pub fn new_with_database(url: String, database: SharedDatabase) -> Self {
+    /// * `keys` - Cryptographic keys for NIP-42 authentication (typically the relay operator's keys)
+    pub fn new_with_database(url: String, database: SharedDatabase, keys: Keys) -> Self {
         let normalized_url = Self::normalize_url(&url);
-        let client = Client::default();
+        let client = Client::new(keys);
         Self {
             url: normalized_url,
             client,
@@ -553,19 +555,22 @@ mod tests {
 
     #[test]
     fn test_new_normalizes_url() {
-        let conn = RelayConnection::new("relay.example.com".to_string());
+        let keys = Keys::generate();
+        let conn = RelayConnection::new("relay.example.com".to_string(), keys);
         assert_eq!(conn.url(), "wss://relay.example.com");
     }
 
     #[test]
     fn test_new_preserves_wss_scheme() {
-        let conn = RelayConnection::new("wss://relay.example.com".to_string());
+        let keys = Keys::generate();
+        let conn = RelayConnection::new("wss://relay.example.com".to_string(), keys);
         assert_eq!(conn.url(), "wss://relay.example.com");
     }
 
     #[test]
     fn test_new_preserves_ws_scheme() {
-        let conn = RelayConnection::new("ws://relay.example.com".to_string());
+        let keys = Keys::generate();
+        let conn = RelayConnection::new("ws://relay.example.com".to_string(), keys);
         assert_eq!(conn.url(), "ws://relay.example.com");
     }
 
@@ -573,7 +578,8 @@ mod tests {
     fn test_new_with_database_normalizes_url() {
         // This test just verifies the URL normalization works
         // We can't easily test with_database without a real database
-        let conn = RelayConnection::new("git.shakespeare.diy".to_string());
+        let keys = Keys::generate();
+        let conn = RelayConnection::new("git.shakespeare.diy".to_string(), keys);
         assert_eq!(conn.url(), "wss://git.shakespeare.diy");
     }
 

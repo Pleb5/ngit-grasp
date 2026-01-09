@@ -1396,8 +1396,12 @@ impl SyncManager {
     async fn register_relay(&mut self, relay_url: String) {
         // Create RelayConnection if not exists
         if !self.connections.contains_key(&relay_url) {
+            // Get relay owner keys for NIP-42 authentication
+            let keys = self.config.relay_owner_keys()
+                .expect("relay_owner_keys should be available");
+            
             let connection =
-                RelayConnection::new_with_database(relay_url.clone(), Arc::clone(&self.database));
+                RelayConnection::new_with_database(relay_url.clone(), Arc::clone(&self.database), keys);
             self.connections.insert(relay_url.clone(), connection);
             tracing::debug!(relay = %relay_url, "Registered new relay connection");
         }

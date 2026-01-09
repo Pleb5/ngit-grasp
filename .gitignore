@@ -13,5 +13,8 @@ work/*
 .env
 data/
 
+# Relay operator private key (auto-generated if not present)
+.relay-owner.nsec
+
 # direnv directory - used by nix
 .direnv

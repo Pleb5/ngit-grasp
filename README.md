@@ -287,10 +287,10 @@ This means CLI flags always take precedence over environment variables, which ta
 ngit-grasp --help
 
 # Run with CLI flags (override everything else)
-ngit-grasp --domain relay.example.com --owner-npub npub1... --bind-address 0.0.0.0:8080
+ngit-grasp --domain relay.example.com --relay-owner-nsec nsec1... --bind-address 0.0.0.0:8080
 
 # Mix CLI flags with environment variables
-NGIT_OWNER_NPUB=npub1... ngit-grasp --domain relay.example.com
+NGIT_RELAY_OWNER_NSEC=nsec1... ngit-grasp --domain relay.example.com
 ```
 
 ### Configuration Options
@@ -300,7 +300,7 @@ NGIT_OWNER_NPUB=npub1... ngit-grasp --domain relay.example.com
 | Option            | CLI Flag              | Environment Variable     | Default                                      |
 | ----------------- | --------------------- | ------------------------ | -------------------------------------------- |
 | Domain            | `--domain`            | `NGIT_DOMAIN`            | (required)                                   |
-| Owner npub        | `--owner-npub`        | `NGIT_OWNER_NPUB`        | (optional)                                   |
+| Relay owner nsec  | `--relay-owner-nsec`  | `NGIT_RELAY_OWNER_NSEC`  | `.relay-owner.nsec` file (auto-generated)    |
 | Relay name        | `--relay-name`        | `NGIT_RELAY_NAME`        | `${domain} grasp relay`                      |
 | Relay description | `--relay-description` | `NGIT_RELAY_DESCRIPTION` | `Git Nostr Relay - a grasp implementation`   |
 | Git data path     | `--git-data-path`     | `NGIT_GIT_DATA_PATH`     | `./data/git` (temp dir for memory backend)   |
@@ -339,7 +339,7 @@ NGIT_OWNER_NPUB=npub1... ngit-grasp --domain relay.example.com
 ```bash
 # Using environment variables (recommended for production)
 export NGIT_DOMAIN=gitnostr.com
-export NGIT_OWNER_NPUB=npub1...
+export NGIT_RELAY_OWNER_NSEC=nsec1...  # Or let it auto-generate from .relay-owner.nsec
 export NGIT_BIND_ADDRESS=0.0.0.0:8080
 export NGIT_DATABASE_BACKEND=lmdb
 

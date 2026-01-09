@@ -1,6 +1,9 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
+use nostr_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::PathBuf;
 
 /// Database backend type for the relay
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, ValueEnum)]
@@ -40,9 +43,18 @@ pub struct Config {
     #[arg(long, env = "NGIT_DOMAIN")]
     pub domain: String,
 
-    /// Owner's npub (optional, for relay info in NIP-11)
-    #[arg(long, env = "NGIT_OWNER_NPUB")]
-    pub owner_npub: Option<String>,
+    /// Relay operator's nsec (private key) for signing and authentication
+    ///
+    /// Used for:
+    /// - NIP-11 relay information document (pubkey field derived from this nsec)
+    /// - NIP-42 authentication when syncing from other relays
+    /// - Future: signing events, WoT-based rate limiting of syncing relays
+    ///
+    /// If not provided via CLI/env, will be loaded from/saved to `.relay-owner.nsec` file
+    /// in the current directory. If the file doesn't exist, a new key will be generated
+    /// and saved automatically.
+    #[arg(long, env = "NGIT_RELAY_OWNER_NSEC")]
+    pub relay_owner_nsec: Option<String>,
 
     /// Relay name for NIP-11 information document (defaults to "${domain} grasp relay")
     #[arg(long = "relay-name", env = "NGIT_RELAY_NAME")]
@@ -127,6 +139,9 @@ pub struct Config {
 }
 
 impl Config {
+    /// Path to the relay owner key file
+    const RELAY_OWNER_KEY_FILE: &'static str = ".relay-owner.nsec";
+
     /// Load configuration from CLI args, environment variables, and defaults.
     ///
     /// Priority (highest to lowest):
@@ -139,9 +154,64 @@ impl Config {
         dotenvy::dotenv().ok();
 
         // Parse CLI args (clap automatically handles env var fallback)
-        let config = Self::parse();
+        let mut config = Self::parse();
+
+        // If relay_owner_nsec not provided, load from file or generate
+        if config.relay_owner_nsec.is_none() {
+            config.relay_owner_nsec = Some(Self::load_or_generate_relay_owner_key()?);
+        }
 
         Ok(config)
+    }
+
+    /// Load relay owner key from file, or generate and save a new one
+    fn load_or_generate_relay_owner_key() -> Result<String> {
+        let key_path = PathBuf::from(Self::RELAY_OWNER_KEY_FILE);
+
+        // Try to load existing key
+        if key_path.exists() {
+            let nsec = fs::read_to_string(&key_path)
+                .context("Failed to read relay owner key file")?
+                .trim()
+                .to_string();
+
+            // Validate it's a valid nsec
+            Keys::parse(&nsec).context("Invalid nsec in relay owner key file")?;
+
+            tracing::info!(
+                "Loaded relay owner key from {}",
+                key_path.display()
+            );
+            return Ok(nsec);
+        }
+
+        // Generate new key
+        let keys = Keys::generate();
+        let nsec = keys.secret_key().to_bech32()?;
+
+        // Save to file
+        fs::write(&key_path, &nsec)
+            .context("Failed to write relay owner key file")?;
+
+        tracing::info!(
+            "Generated new relay owner key and saved to {}",
+            key_path.display()
+        );
+
+        Ok(nsec)
+    }
+
+    /// Get the relay owner's Keys object
+    pub fn relay_owner_keys(&self) -> Result<Keys> {
+        let nsec = self.relay_owner_nsec.as_ref()
+            .context("relay_owner_nsec not set (should be set by Config::load())")?;
+        Keys::parse(nsec).context("Invalid relay_owner_nsec")
+    }
+
+    /// Get the relay owner's public key (npub format) for NIP-11
+    pub fn relay_owner_npub(&self) -> Result<String> {
+        let keys = self.relay_owner_keys()?;
+        Ok(keys.public_key().to_bech32()?)
     }
 
     /// Get relay name (defaults to "${domain} grasp relay" if not set)
@@ -167,9 +237,13 @@ impl Config {
     /// Create config for testing
     #[cfg(test)]
     pub fn for_testing() -> Self {
+        // Generate a test key deterministically for consistent tests
+        let keys = Keys::generate();
+        let nsec = keys.secret_key().to_bech32().expect("Failed to generate test nsec");
+        
         Self {
             domain: "localhost:8080".to_string(),
-            owner_npub: Some("npub1test".to_string()),
+            relay_owner_nsec: Some(nsec),
             relay_name_override: Some("test relay".to_string()),
             relay_description: "test description".to_string(),
             git_data_path: "./test_data/git".to_string(),
@@ -256,12 +330,14 @@ mod tests {
     }
 
     #[test]
-    fn test_owner_npub_optional() {
-        let config = Config {
-            owner_npub: None,
-            ..Config::for_testing()
-        };
-        assert!(config.owner_npub.is_none());
+    fn test_relay_owner_keys() {
+        let config = Config::for_testing();
+        let keys = config.relay_owner_keys().expect("Should have valid keys");
+        let npub = config.relay_owner_npub().expect("Should derive npub");
+        
+        // Verify the npub matches the keys
+        assert_eq!(npub, keys.public_key().to_bech32().unwrap());
+        assert!(npub.starts_with("npub1"));
     }
 
     #[test]

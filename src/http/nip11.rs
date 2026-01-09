@@ -59,7 +59,7 @@ impl RelayInformationDocument {
         Self {
             name: config.relay_name(),
             description: config.relay_description.clone(),
-            pubkey: config.owner_npub.clone(),
+            pubkey: config.relay_owner_npub().ok(),
             contact: None, // Could be added to config if needed
             supported_nips: vec![
                 1,  // NIP-01: Basic protocol flow
@@ -93,30 +93,21 @@ mod tests {
 
     #[test]
     fn test_relay_information_document_structure() {
-        let config = Config {
-            domain: "relay.example.com".to_string(),
-            owner_npub: Some("npub1test".to_string()),
-            relay_name_override: Some("Test Relay".to_string()),
-            relay_description: "A test relay".to_string(),
-            git_data_path: "./data/git".to_string(),
-            relay_data_path: "./data/relay".to_string(),
-            bind_address: "127.0.0.1:8080".to_string(),
-            database_backend: crate::config::DatabaseBackend::Memory,
-            metrics_enabled: true,
-            metrics_connection_per_ip_abuse_threshold: 10,
-            metrics_top_n_repos: 10,
-            sync_bootstrap_relay_url: None,
-            sync_max_backoff_secs: 3600,
-            sync_disconnect_check_interval_secs: 60,
-            sync_base_backoff_secs: 5,
-            sync_disable_negentropy: false,
-        };
+        let mut config = Config::for_testing();
+        config.domain = "relay.example.com".to_string();
+        config.relay_name_override = Some("Test Relay".to_string());
+        config.relay_description = "A test relay".to_string();
 
         let doc = RelayInformationDocument::from_config(&config);
 
         assert_eq!(doc.name, "Test Relay");
         assert_eq!(doc.description, "A test relay");
-        assert_eq!(doc.pubkey, Some("npub1test".to_string()));
+        
+        // Verify pubkey is present and is a valid npub
+        assert!(doc.pubkey.is_some());
+        let pubkey = doc.pubkey.unwrap();
+        assert!(pubkey.starts_with("npub1"));
+        
         assert!(doc.supported_nips.contains(&1));
         assert!(doc.supported_nips.contains(&11));
         assert!(doc.supported_nips.contains(&34));
@@ -132,24 +123,10 @@ mod tests {
 
     #[test]
     fn test_relay_information_document_json() {
-        let config = Config {
-            domain: "relay.example.com".to_string(),
-            owner_npub: Some("npub1test".to_string()),
-            relay_name_override: Some("Test Relay".to_string()),
-            relay_description: "A test relay".to_string(),
-            git_data_path: "./data/git".to_string(),
-            relay_data_path: "./data/relay".to_string(),
-            bind_address: "127.0.0.1:8080".to_string(),
-            database_backend: crate::config::DatabaseBackend::Memory,
-            metrics_enabled: true,
-            metrics_connection_per_ip_abuse_threshold: 10,
-            metrics_top_n_repos: 10,
-            sync_bootstrap_relay_url: None,
-            sync_max_backoff_secs: 3600,
-            sync_disconnect_check_interval_secs: 60,
-            sync_base_backoff_secs: 5,
-            sync_disable_negentropy: false,
-        };
+        let mut config = Config::for_testing();
+        config.domain = "relay.example.com".to_string();
+        config.relay_name_override = Some("Test Relay".to_string());
+        config.relay_description = "A test relay".to_string();
 
         let doc = RelayInformationDocument::from_config(&config);
         let json = doc.to_json().expect("Failed to serialize to JSON");
