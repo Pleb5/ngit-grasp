@@ -628,10 +628,11 @@ impl SyncManager {
         let mut pending = self.pending_sync_index.write().await;
 
         let Some(batches) = pending.get_mut(relay_url) else {
-            tracing::warn!(
+            // This can happen during disconnect if EOSE arrives after relay cleanup
+            tracing::debug!(
                 relay = %relay_url,
                 sub_id = %sub_id,
-                "EOSE received for unknown relay"
+                "EOSE received for unknown relay (likely during disconnect)"
             );
             return;
         };
