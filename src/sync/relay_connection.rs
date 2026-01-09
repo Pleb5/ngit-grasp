@@ -76,6 +76,8 @@ pub struct RelayConnection {
     database: Option<SharedDatabase>,
     /// Whether we've logged NIP-77 not supported for this relay (log once)
     nip77_warning_logged: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Whether this relay supports NIP-77 negentropy (None = unknown, Some(false) = confirmed not supported)
+    nip77_supported: std::sync::Arc<std::sync::atomic::AtomicU8>,
 }
 
 impl RelayConnection {
@@ -115,6 +117,7 @@ impl RelayConnection {
             client,
             database: None,
             nip77_warning_logged: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            nip77_supported: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
         }
     }
 
@@ -132,6 +135,7 @@ impl RelayConnection {
             client,
             database: Some(database),
             nip77_warning_logged: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            nip77_supported: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
         }
     }
 
@@ -272,7 +276,25 @@ impl RelayConnection {
                                 }
                             }
                             RelayMessage::Notice(msg) => {
-                                tracing::debug!(relay = %url, message = %msg, "Received NOTICE");
+                                // Check if this is a negentropy-related notice
+                                let is_negentropy_notice = msg.contains("envelope")
+                                    || msg.contains("NEG-")
+                                    || msg.contains("negentropy");
+
+                                if is_negentropy_notice {
+                                    // Mark relay as not supporting NIP-77
+                                    self.nip77_supported
+                                        .store(2, std::sync::atomic::Ordering::Relaxed);
+
+                                    tracing::info!(
+                                        relay = %url,
+                                        notice = %msg,
+                                        "Relay does not support NIP-77 (negentropy)"
+                                    );
+                                } else {
+                                    tracing::debug!(relay = %url, message = %msg, "Received NOTICE");
+                                }
+
                                 let _ =
                                     event_sender.send(RelayEvent::Notice(msg.to_string())).await;
                                 // Don't break - continue processing events
@@ -427,7 +449,7 @@ impl RelayConnection {
 
     /// Check if negentropy sync should be attempted
     ///
-    /// Rather than relying on NIP-11 document detection (which can be unreliable),
+    /// For simplicity and robustness, we always try negentropy first. If it fails,
     /// this returns true to indicate we should try negentropy sync. The actual
     /// sync will handle failures gracefully with fallback to REQ+EOSE.
     ///
@@ -436,10 +458,23 @@ impl RelayConnection {
     /// - Some relays support NIP-77 but don't advertise it in NIP-11
     /// - Some relays claim NIP-77 support but have bugs
     /// - The nostr-sdk 0.44 API for relay document access varies
+    ///
+    /// # Returns
+    /// * `false` if we've confirmed this relay doesn't support NIP-77
+    /// * `true` if unknown or supported (will attempt and handle failure)
     pub async fn supports_negentropy(&self) -> bool {
-        // Always return true to attempt negentropy - we handle failure gracefully
-        // in negentropy_sync_filter() which logs a warning and returns an error
-        // that the caller can use to fall back to REQ+EOSE
+        // 0 = unknown (try it), 1 = supported, 2 = confirmed not supported
+        let status = self
+            .nip77_supported
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        if status == 2 {
+            // We've already confirmed this relay doesn't support NIP-77
+            tracing::trace!(relay = %self.url, "Skipping negentropy - relay confirmed not to support NIP-77");
+            return false;
+        }
+
+        // Unknown or supported - try it
         true
     }
 
@@ -488,6 +523,10 @@ impl RelayConnection {
                 // Check for any failures
                 // Note: Timeouts are common for relays without NIP-77 support
                 if !output.failed.is_empty() {
+                    // Mark relay as not supporting NIP-77 (timeout typically means no support)
+                    self.nip77_supported
+                        .store(2, std::sync::atomic::Ordering::Relaxed);
+
                     tracing::debug!(
                         relay = %self.url,
                         failures = ?output.failed,
