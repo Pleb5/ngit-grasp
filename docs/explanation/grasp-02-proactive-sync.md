@@ -75,7 +75,9 @@ pub enum ConnectionStatus {
     Disconnected,
     /// Connection attempt in progress
     Connecting,
-    /// Successfully connected and subscribed
+    /// Successfully connected, historic sync in progress
+    Syncing,
+    /// Successfully connected, historic sync completed
     Connected,
 }
 
@@ -97,6 +99,11 @@ pub struct RelayState {
     /// Whether announcement filter historic sync has completed for this relay
     /// Used to determine if we can use `since` filter on reconnect for Layer 1
     pub announcements_synced: bool,
+    /// Whether initial historic sync has fully completed (all layers)
+    /// Used to transition from Syncing -> Connected status
+    pub historic_sync_completed: bool,
+    /// When historic sync completed (None if never completed or cleared on fresh_start)
+    pub historic_sync_completed_at: Option<Timestamp>,
 }
 
 impl RelayState {
@@ -198,25 +205,52 @@ When a relay doesn't support NIP-77 Negentropy, historic sync falls back to trad
 stateDiagram-v2
     [*] --> Disconnected: discover relay → register_relay()
     Disconnected --> Connecting: retry_disconnected_relays → try_connect_relay
-    Connecting --> Connected: success → handle_connect_or_reconnect
+    Connecting --> Syncing: success → handle_connect_or_reconnect
     Connecting --> Disconnected: failure + record in health tracker
+    Syncing --> Connected: all historic batches complete → check_and_complete_historic_sync
+    Syncing --> Disconnected: connection lost → handle_disconnect
     Connected --> Disconnected: connection lost → handle_disconnect
     Connected --> [*]: intentional disconnect via check_disconnects
 
     note right of Disconnected: disconnected_at set for 15min rule<br/>RelayConnection kept in HashMap
-    note right of Connected: last_connected tracked for since filter<br/>Event loop spawned here
     note right of Connecting: connection attempt with timeout
+    note right of Syncing: historic sync in progress<br/>event loop spawned here
+    note right of Connected: historic sync complete<br/>last_connected tracked for since filter
 ```
 
 ### Connection Flow Methods
 
-| Method                          | Purpose                   | When Called                       | Actions                                                         |
-| ------------------------------- | ------------------------- | --------------------------------- | --------------------------------------------------------------- |
-| `register_relay()`              | Initialize relay tracking | Discovery via RepoSyncIndex       | Creates RelayConnection, stores in HashMap, returns immediately |
-| `try_connect_relay()`           | Attempt connection        | Health tracker allows retry       | Calls connection.connect(), sends notification on success       |
-| `handle_connect_or_reconnect()` | Setup after connection    | ConnectNotification received      | Spawns event loop, updates state, decides sync strategy         |
-| `handle_disconnect()`           | Cleanup after disconnect  | DisconnectNotification received   | Updates state, clears pending, KEEPS RelayConnection            |
-| `retry_disconnected_relays()`   | Periodic reconnection     | Every 2s (health & metrics timer) | For each ready relay: try_connect_relay()                       |
+| Method                              | Purpose                      | When Called                       | Actions                                                         |
+| ----------------------------------- | ---------------------------- | --------------------------------- | --------------------------------------------------------------- |
+| `register_relay()`                  | Initialize relay tracking    | Discovery via RepoSyncIndex       | Creates RelayConnection, stores in HashMap, returns immediately |
+| `try_connect_relay()`               | Attempt connection           | Health tracker allows retry       | Calls connection.connect(), sends notification on success       |
+| `handle_connect_or_reconnect()`     | Setup after connection       | ConnectNotification received      | Spawns event loop, sets Syncing, decides sync strategy          |
+| `check_and_complete_historic_sync()` | Detect sync completion       | After each batch confirmation     | Transitions Syncing → Connected when no pending batches        |
+| `handle_disconnect()`               | Cleanup after disconnect     | DisconnectNotification received   | Updates state, clears pending, KEEPS RelayConnection            |
+| `retry_disconnected_relays()`       | Periodic reconnection        | Every 2s (health & metrics timer) | For each ready relay: try_connect_relay()                       |
+
+### Historic Sync Completion
+
+When a relay first connects, it enters the **Syncing** state and begins historic sync:
+
+1. **Layer 1 (Announcements)**: Generic filter for all repository announcements
+2. **Layer 2 (Repo Events)**: Filters for events tagging discovered repositories  
+3. **Layer 3 (Root Events)**: Filters for events tagging discovered PRs/Issues/Patches
+
+Each layer creates one or more `PendingBatch` entries tracked in `PendingSyncIndex`. As EOSE messages arrive:
+
+- `handle_eose()` confirms each batch via `confirm_batch()`
+- `confirm_batch()` moves items to confirmed state and calls `check_and_complete_historic_sync()`
+- `check_and_complete_historic_sync()` checks if `PendingSyncIndex` is empty for this relay
+- When empty: transitions `Syncing` → `Connected`, sets `historic_sync_completed = true`
+
+**Metrics tracking**: The `ngit_sync_relay_connected` metric shows:
+- `0` = Disconnected
+- `1` = Connecting  
+- `2` = Syncing (historic sync in progress)
+- `3` = Connected (historic sync complete, live sync active)
+
+This allows operators to monitor sync progress and distinguish between "connected but still catching up" vs "fully synced and live".
 
 ### Event Loop Lifecycle
 

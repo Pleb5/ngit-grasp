@@ -53,7 +53,7 @@ impl SyncMetrics {
         let relay_connected = IntGaugeVec::new(
             Opts::new(
                 "ngit_sync_relay_connected",
-                "Relay connection status (1=connected, 0=disconnected)",
+                "Relay connection status (0=disconnected, 1=connecting, 2=syncing, 3=connected)",
             ),
             &["relay"],
         )?;
@@ -199,6 +199,33 @@ impl SyncMetrics {
         self.relay_status
             .with_label_values(&[relay])
             .set(state_value);
+    }
+
+    /// Record relay connection status change.
+    ///
+    /// Maps connection status to numeric values for Prometheus:
+    /// - Disconnected = 0 (not connected)
+    /// - Connecting = 1 (connection attempt in progress)
+    /// - Syncing = 2 (connected, historic sync in progress)
+    /// - Connected = 3 (connected, historic sync complete)
+    ///
+    /// This is separate from health state and provides more granular connection lifecycle tracking.
+    ///
+    /// # Arguments
+    ///
+    /// * `relay` - The relay URL
+    /// * `status` - The current connection status
+    pub fn record_connection_status(&self, relay: &str, status: super::ConnectionStatus) {
+        use super::ConnectionStatus;
+        let status_value = match status {
+            ConnectionStatus::Disconnected => 0,
+            ConnectionStatus::Connecting => 1,
+            ConnectionStatus::Syncing => 2,
+            ConnectionStatus::Connected => 3,
+        };
+        self.relay_connected
+            .with_label_values(&[relay])
+            .set(status_value);
     }
 
     /// Record relay failure count.

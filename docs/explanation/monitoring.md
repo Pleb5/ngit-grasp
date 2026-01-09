@@ -98,54 +98,64 @@ When GRASP-02 proactive sync is implemented, the following metrics will be added
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `ngit_sync_relay_connected` | Gauge | relay | 1 if connected, 0 if not |
+| `ngit_sync_relay_connected` | Gauge | relay | Connection status (0=disconnected, 1=connecting, 2=syncing, 3=connected) |
 | `ngit_sync_connection_attempts_total` | Counter | relay, result | Connection attempt outcomes |
-| `ngit_sync_relay_status` | Gauge | relay, status | 1 for current status, 0 otherwise |
+| `ngit_sync_relay_status` | Gauge | relay | Health status (1=healthy, 2=disconnected, 3=degraded, 4=dead, 5=rate_limited) |
 | `ngit_sync_relay_failures` | Gauge | relay | Current consecutive failure count |
-| `ngit_sync_events_total` | Counter | source | Events received by source type |
-| `ngit_sync_gap_events_total` | Counter | relay | Events found during catchup |
+| `ngit_sync_events_synced_total` | Counter | - | Events synced (newly saved events only) |
 | `ngit_sync_relays_tracked_total` | Gauge | - | Total relays discovered |
 | `ngit_sync_relays_connected_total` | Gauge | - | Currently connected relay count |
 | `ngit_sync_relays_dead_total` | Gauge | - | Relays marked as dead |
 
-### Event Sources
+### Connection Status Values
 
-The `source` label on `ngit_sync_events_total` tracks how events were received:
+The `ngit_sync_relay_connected` metric tracks the connection lifecycle:
 
-- `direct` - Submitted directly to our relay by a user
-- `live_sync` - Received via live WebSocket subscription (expected path)
-- `catchup` - Found during negentropy catchup after reconnect
-- `daily_catchup` - Found during daily reconciliation
+- `0` = **Disconnected** - Not currently connected
+- `1` = **Connecting** - Connection attempt in progress
+- `2` = **Syncing** - Connected, historic sync in progress
+- `3` = **Connected** - Connected, historic sync complete, live sync active
 
-**Catchup events indicate sync failures** - these should have been received via live sync. High catchup rates suggest connectivity issues or filter mismatches.
+This allows operators to distinguish between "connected but still catching up" (Syncing) vs "fully synced and live" (Connected).
 
 ### Relay Health States
 
-The `status` label on `ngit_sync_relay_status` tracks relay health:
+The `ngit_sync_relay_status` metric tracks relay health:
 
-- `healthy` - Normal operation, connections working
-- `backoff` - Exponential backoff after failures (5s → 10s → ... → 1h)
-- `dead` - 24h of continuous failures, daily retry only
+- `1` = **Healthy** - Connected and stable
+- `2` = **Disconnected** - Not connected, but no issues detected
+- `3` = **Degraded** - Connection problems or unstable after recovery
+- `4` = **Dead** - 24h+ of continuous failures
+- `5` = **RateLimited** - Rate limit cooldown active (65s)
 
 ### Example Grafana Queries
 
 ```promql
-# Relay health overview - count by status
-sum by (status) (ngit_sync_relay_status == 1)
+# Relay connection status overview - count by status
+sum by (relay) (ngit_sync_relay_connected == 0)  # Disconnected
+sum by (relay) (ngit_sync_relay_connected == 1)  # Connecting
+sum by (relay) (ngit_sync_relay_connected == 2)  # Syncing
+sum by (relay) (ngit_sync_relay_connected == 3)  # Connected
+
+# Relays still syncing (not yet fully caught up)
+count(ngit_sync_relay_connected == 2)
 
 # Connection success rate over last hour
 sum(rate(ngit_sync_connection_attempts_total{result="success"}[1h]))
 / sum(rate(ngit_sync_connection_attempts_total[1h]))
 
-# Sync gap detection - events that should have been live synced
-sum(rate(ngit_sync_gap_events_total[1h])) by (relay)
-
-# Live sync effectiveness (lower is better - fewer gaps)
-sum(rate(ngit_sync_events_total{source=~"catchup|daily_catchup"}[1h]))
-/ sum(rate(ngit_sync_events_total[1h]))
+# Event sync rate (newly saved events)
+rate(ngit_sync_events_synced_total[5m])
 
 # Relays with high failure counts (potential issues)
 topk(10, ngit_sync_relay_failures)
+
+# Relay health overview - count by health state
+sum(ngit_sync_relay_status == 1)  # Healthy
+sum(ngit_sync_relay_status == 2)  # Disconnected
+sum(ngit_sync_relay_status == 3)  # Degraded
+sum(ngit_sync_relay_status == 4)  # Dead
+sum(ngit_sync_relay_status == 5)  # RateLimited
 ```
 
 ### Example Alerts
@@ -153,23 +163,30 @@ topk(10, ngit_sync_relay_failures)
 ```yaml
 # Alert if relay stuck in dead state for > 1 day
 - alert: SyncRelayDead
-  expr: ngit_sync_relay_status{status="dead"} == 1
+  expr: ngit_sync_relay_status == 4  # Dead state
   for: 1d
   labels:
     severity: warning
   annotations:
-    summary: "Sync relay {{ $labels.relay }} is dead"
+    summary: "Sync relay {{ $labels.relay }} is dead (24h+ failures)"
 
-# Alert if sync gap rate is high (>10% of events from catchup)
-- alert: SyncGapHigh
-  expr: >
-    sum(rate(ngit_sync_events_total{source=~"catchup|daily_catchup"}[1h]))
-    / sum(rate(ngit_sync_events_total[1h])) > 0.1
-  for: 30m
+# Alert if relay stuck in syncing state for > 1 hour
+- alert: SyncRelaySlow
+  expr: ngit_sync_relay_connected == 2  # Syncing state
+  for: 1h
+  labels:
+    severity: info
+  annotations:
+    summary: "Sync relay {{ $labels.relay }} taking >1h to complete historic sync"
+
+# Alert if too many relays are degraded
+- alert: SyncManyDegraded
+  expr: sum(ngit_sync_relay_status == 3) > 5  # Degraded state
+  for: 15m
   labels:
     severity: warning
   annotations:
-    summary: "High sync gap rate - {{ $value | humanizePercentage }} of events from catchup"
+    summary: "{{ $value }} relays in degraded state"
 ```
 
 ### Design Rationale
