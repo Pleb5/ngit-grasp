@@ -94,6 +94,18 @@ pub enum ConnectionStatus {
     Syncing,
     /// Successfully connected, historic sync completed
     Connected,
+    /// Successfully connected, historic sync failed but live sync active
+    ConnectedDegraded,
+}
+
+impl ConnectionStatus {
+    /// Returns true if live sync is active (can accept new filters)
+    pub fn is_live_sync_active(&self) -> bool {
+        matches!(
+            self,
+            ConnectionStatus::Syncing | ConnectionStatus::Connected | ConnectionStatus::ConnectedDegraded
+        )
+    }
 }
 
 /// Complete state for a single relay - combines sync needs with connection lifecycle
@@ -119,6 +131,10 @@ pub struct RelayState {
     pub historic_sync_completed: bool,
     /// When historic sync completed (None if never completed or cleared on fresh_start)
     pub historic_sync_completed_at: Option<Timestamp>,
+    /// Whether any batch failed during historic sync
+    /// Set to true when retry protection triggers or other failures occur
+    /// Used to transition to ConnectedDegraded instead of Connected
+    pub historic_sync_had_failures: bool,
 }
 
 impl Default for RelayState {
@@ -133,6 +149,7 @@ impl Default for RelayState {
             announcements_synced: false,
             historic_sync_completed: false,
             historic_sync_completed_at: None,
+            historic_sync_had_failures: false,
         }
     }
 }
@@ -156,6 +173,7 @@ impl RelayState {
         self.announcements_synced = false;
         self.historic_sync_completed = false;
         self.historic_sync_completed_at = None;
+        self.historic_sync_had_failures = false;
     }
 }
 
@@ -216,6 +234,9 @@ pub struct PendingBatch {
     /// Number of retry attempts for missing events (Negentropy only)
     /// Used to prevent infinite retry loops when relay consistently fails
     pub retry_count: usize,
+    /// Whether this batch failed (completed with missing data)
+    /// Set to true when retry protection triggers or other failures occur
+    pub failed: bool,
 }
 
 /// Items included in a pending batch
@@ -682,9 +703,10 @@ impl SyncManager {
                             // TODO: Track this failure in Prometheus metrics (sync_failed_batches_total)
                         );
 
-                        // Extract and complete batch with partial results
+                        // Extract and complete batch with partial results, marking as failed
                         let batch_idx_for_completion = batch_idx;
-                        let completed_batch = batches.remove(batch_idx_for_completion);
+                        let mut completed_batch = batches.remove(batch_idx_for_completion);
+                        completed_batch.failed = true; // Mark as failed for ConnectedDegraded transition
                         if batches.is_empty() {
                             pending.remove(relay_url);
                         }
@@ -849,6 +871,16 @@ impl SyncManager {
                 );
             }
 
+            // Track if this batch failed (for ConnectedDegraded transition)
+            if batch.failed {
+                state.historic_sync_had_failures = true;
+                tracing::warn!(
+                    relay = %relay_url,
+                    batch_id = batch_id,
+                    "Batch failed - will transition to ConnectedDegraded instead of Connected"
+                );
+            }
+
             // DEBUG TRACING: Log the root events being confirmed
             tracing::info!(
                 relay = %relay_url,
@@ -862,6 +894,7 @@ impl SyncManager {
                 all_root_events = ?state.root_events.iter().map(|id| id.to_hex()).collect::<Vec<_>>(),
                 is_generic_filter = is_generic_filter,
                 announcements_synced = state.announcements_synced,
+                had_failures = state.historic_sync_had_failures,
                 "Batch confirmed - items moved from pending to confirmed"
             );
         } else {
@@ -881,13 +914,24 @@ impl SyncManager {
 
     /// Check if historic sync is complete and transition to Connected status
     ///
-    /// This method checks if there are any pending batches for the relay.
-    /// If no pending batches exist and the relay is in Syncing status,
-    /// it transitions to Connected and updates metrics.
+    /// This method uses a double-check pattern to avoid race conditions with
+    /// the self-subscriber's batching window. The sequence is:
+    ///
+    /// 1. First check: Are there pending batches?
+    /// 2. Wait for batch window + buffer (6 seconds)
+    /// 3. Second check: Are there still no pending batches?
+    /// 4. If still no pending batches, transition to Connected
+    ///
+    /// This ensures that events received just before the first check have time
+    /// to be batched and create Layer 2/3 filters before we mark sync complete.
+    ///
+    /// The 6-second delay is based on:
+    /// - Self-subscriber batch window: 5 seconds (configurable via NGIT_SYNC_BATCH_WINDOW_MS)
+    /// - Buffer for processing: 1 second
     ///
     /// Called after each batch is confirmed to detect completion.
     async fn check_and_complete_historic_sync(&self, relay_url: &str) {
-        // Check if there are any pending batches
+        // First check: Are there any pending batches?
         let has_pending = {
             let pending = self.pending_sync_index.read().await;
             pending.get(relay_url).map_or(false, |batches| !batches.is_empty())
@@ -898,12 +942,33 @@ impl SyncManager {
             return;
         }
         
-        // No pending batches - check if we should transition to Connected
+        // Wait for self-subscriber batch window + buffer to catch any in-flight events
+        // that might create new Layer 2/3 filters
+        tokio::time::sleep(Duration::from_millis(6000)).await;
+        
+        // Second check: Are there still no pending batches?
+        let has_pending = {
+            let pending = self.pending_sync_index.read().await;
+            pending.get(relay_url).map_or(false, |batches| !batches.is_empty())
+        };
+        
+        if has_pending {
+            // New batches appeared during the wait - still syncing
+            return;
+        }
+        
+        // No pending batches after waiting - safe to transition to Connected or ConnectedDegraded
         let mut relay_index = self.relay_sync_index.write().await;
         if let Some(state) = relay_index.get_mut(relay_url) {
             if state.connection_status == ConnectionStatus::Syncing {
-                // Transition to Connected
-                state.connection_status = ConnectionStatus::Connected;
+                // Check if any batches failed during historic sync
+                let new_status = if state.historic_sync_had_failures {
+                    ConnectionStatus::ConnectedDegraded
+                } else {
+                    ConnectionStatus::Connected
+                };
+                
+                state.connection_status = new_status;
                 state.historic_sync_completed = true;
                 state.historic_sync_completed_at = Some(Timestamp::now());
                 
@@ -911,12 +976,15 @@ impl SyncManager {
                     relay = %relay_url,
                     repos_synced = state.repos.len(),
                     root_events_synced = state.root_events.len(),
-                    "Historic sync complete - transitioned to Connected status"
+                    had_failures = state.historic_sync_had_failures,
+                    status = ?new_status,
+                    "Historic sync complete - transitioned to {} status",
+                    if state.historic_sync_had_failures { "ConnectedDegraded" } else { "Connected" }
                 );
                 
                 // Update metrics
                 if let Some(ref metrics) = self.metrics {
-                    metrics.record_connection_status(relay_url, ConnectionStatus::Connected);
+                    metrics.record_connection_status(relay_url, new_status);
                 }
             }
         }
@@ -1147,8 +1215,8 @@ impl SyncManager {
                 );
                 return;
             }
-            Some(ConnectionStatus::Syncing) | Some(ConnectionStatus::Connected) => {
-                // Continue to subscribe - both Syncing and Connected can accept new filters
+            Some(status) if status.is_live_sync_active() => {
+                // Continue to subscribe - live sync is active, can accept new filters
             }
         }
 
@@ -1514,8 +1582,8 @@ impl SyncManager {
                         "Cleared sync state in fresh_start"
                     );
                 }
-                // Only sync if we're connected (either Syncing or fully Connected)
-                if matches!(state.connection_status, ConnectionStatus::Syncing | ConnectionStatus::Connected) {
+                // Only sync if we're connected (live sync active)
+                if state.connection_status.is_live_sync_active() {
                     drop(index);
                     self.sync_generic_filters(relay_url, None).await;
                     // Step 5: compute_actions for L2+L3 (will be triggered by EOSE)
@@ -2474,6 +2542,7 @@ impl SyncManager {
                 requested_event_ids: None,        // Will be set after negentropy diff
                 received_event_ids: None,         // Will be set after negentropy diff
                 retry_count: 0,
+                failed: false,
             };
 
             // Add to pending_sync_index
@@ -2712,6 +2781,7 @@ impl SyncManager {
                 requested_event_ids: None, // Not used for REQ+EOSE
                 received_event_ids: None,  // Not used for REQ+EOSE
                 retry_count: 0,            // Not used for REQ+EOSE
+                failed: false,
             };
 
             // Add to pending_sync_index
@@ -2925,12 +2995,14 @@ mod tests {
             requested_event_ids: Some(HashSet::new()),
             received_event_ids: Some(HashSet::new()),
             retry_count: 0,
+            failed: false,
         };
 
         assert!(batch.requested_event_ids.is_some());
         assert!(batch.received_event_ids.is_some());
         assert_eq!(batch.sync_method, SyncMethod::Negentropy);
         assert_eq!(batch.retry_count, 0);
+        assert!(!batch.failed);
     }
 
     #[test]
@@ -2945,10 +3017,12 @@ mod tests {
             requested_event_ids: None,
             received_event_ids: None,
             retry_count: 0,
+            failed: false,
         };
 
         assert!(batch.requested_event_ids.is_none());
         assert!(batch.received_event_ids.is_none());
         assert_eq!(batch.sync_method, SyncMethod::ReqEose);
+        assert!(!batch.failed);
     }
 }

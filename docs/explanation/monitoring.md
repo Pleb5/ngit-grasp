@@ -98,7 +98,7 @@ When GRASP-02 proactive sync is implemented, the following metrics will be added
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `ngit_sync_relay_connected` | Gauge | relay | Connection status (0=disconnected, 1=connecting, 2=syncing, 3=connected) |
+| `ngit_sync_relay_connected` | Gauge | relay | Connection status (0=disconnected, 1=connecting, 2=syncing, 3=connected, 4=connected_degraded) |
 | `ngit_sync_connection_attempts_total` | Counter | relay, result | Connection attempt outcomes |
 | `ngit_sync_relay_status` | Gauge | relay | Health status (1=healthy, 2=disconnected, 3=degraded, 4=dead, 5=rate_limited) |
 | `ngit_sync_relay_failures` | Gauge | relay | Current consecutive failure count |
@@ -115,8 +115,9 @@ The `ngit_sync_relay_connected` metric tracks the connection lifecycle:
 - `1` = **Connecting** - Connection attempt in progress
 - `2` = **Syncing** - Connected, historic sync in progress
 - `3` = **Connected** - Connected, historic sync complete, live sync active
+- `4` = **ConnectedDegraded** - Connected, historic sync failed, live sync active, partial data
 
-This allows operators to distinguish between "connected but still catching up" (Syncing) vs "fully synced and live" (Connected).
+This allows operators to distinguish between "connected but still catching up" (Syncing) vs "fully synced and live" (Connected) vs "degraded - missing historic data" (ConnectedDegraded).
 
 ### Relay Health States
 
@@ -136,9 +137,13 @@ sum by (relay) (ngit_sync_relay_connected == 0)  # Disconnected
 sum by (relay) (ngit_sync_relay_connected == 1)  # Connecting
 sum by (relay) (ngit_sync_relay_connected == 2)  # Syncing
 sum by (relay) (ngit_sync_relay_connected == 3)  # Connected
+sum by (relay) (ngit_sync_relay_connected == 4)  # ConnectedDegraded
 
 # Relays still syncing (not yet fully caught up)
 count(ngit_sync_relay_connected == 2)
+
+# Relays with degraded sync (missing historic data)
+count(ngit_sync_relay_connected == 4)
 
 # Connection success rate over last hour
 sum(rate(ngit_sync_connection_attempts_total{result="success"}[1h]))

@@ -405,6 +405,7 @@ mod tests {
                 requested_event_ids: None,
                 received_event_ids: None,
                 retry_count: 0,
+                failed: false,
             }],
         );
 
@@ -520,6 +521,7 @@ mod tests {
                 requested_event_ids: None,
                 received_event_ids: None,
                 retry_count: 0,
+                failed: false,
             }],
         );
 

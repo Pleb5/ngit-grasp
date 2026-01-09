@@ -79,6 +79,8 @@ pub enum ConnectionStatus {
     Syncing,
     /// Successfully connected, historic sync completed
     Connected,
+    /// Successfully connected, historic sync failed but live sync active
+    ConnectedDegraded,
 }
 
 /// Complete state for a single relay - combines sync needs with connection lifecycle
@@ -207,15 +209,19 @@ stateDiagram-v2
     Disconnected --> Connecting: retry_disconnected_relays → try_connect_relay
     Connecting --> Syncing: success → handle_connect_or_reconnect
     Connecting --> Disconnected: failure + record in health tracker
-    Syncing --> Connected: all historic batches complete → check_and_complete_historic_sync
+    Syncing --> Connected: all batches succeed → check_and_complete_historic_sync
+    Syncing --> ConnectedDegraded: any batch failed → check_and_complete_historic_sync
     Syncing --> Disconnected: connection lost → handle_disconnect
     Connected --> Disconnected: connection lost → handle_disconnect
+    ConnectedDegraded --> Disconnected: connection lost → handle_disconnect
     Connected --> [*]: intentional disconnect via check_disconnects
+    ConnectedDegraded --> [*]: intentional disconnect via check_disconnects
 
     note right of Disconnected: disconnected_at set for 15min rule<br/>RelayConnection kept in HashMap
     note right of Connecting: connection attempt with timeout
     note right of Syncing: historic sync in progress<br/>event loop spawned here
     note right of Connected: historic sync complete<br/>last_connected tracked for since filter
+    note right of ConnectedDegraded: historic sync failed (missing events)<br/>live sync active, partial data
 ```
 
 ### Connection Flow Methods
@@ -240,17 +246,28 @@ When a relay first connects, it enters the **Syncing** state and begins historic
 Each layer creates one or more `PendingBatch` entries tracked in `PendingSyncIndex`. As EOSE messages arrive:
 
 - `handle_eose()` confirms each batch via `confirm_batch()`
-- `confirm_batch()` moves items to confirmed state and calls `check_and_complete_historic_sync()`
-- `check_and_complete_historic_sync()` checks if `PendingSyncIndex` is empty for this relay
-- When empty: transitions `Syncing` → `Connected`, sets `historic_sync_completed = true`
+- `confirm_batch()` moves items to confirmed state, tracks if batch failed, and calls `check_and_complete_historic_sync()`
+- `check_and_complete_historic_sync()` uses a **double-check pattern** to avoid race conditions:
+  1. First check: Are there pending batches? If yes, return early
+  2. Wait 6 seconds (batch window + buffer) for self-subscriber to process in-flight events
+  3. Second check: Are there still no pending batches? If yes, return early
+  4. If no pending batches after wait:
+     - If any batch failed: transition `Syncing` → `ConnectedDegraded`
+     - If all batches succeeded: transition `Syncing` → `Connected`
+     - Set `historic_sync_completed = true`
+
+**Why the double-check?** There's an async gap between receiving EOSE and the self-subscriber processing events to create Layer 2/3 filters. The 6-second wait (5s batch window + 1s buffer) ensures we don't prematurely mark sync complete while Layer 2/3 batches are being created.
+
+**Batch Failure Tracking**: When negentropy retry protection triggers (relay returns zero requested events on retry), the batch is marked as `failed = true`. This causes the relay to transition to `ConnectedDegraded` instead of `Connected`, signaling that live sync is active but historic sync is incomplete.
 
 **Metrics tracking**: The `ngit_sync_relay_connected` metric shows:
 - `0` = Disconnected
-- `1` = Connecting  
+- `1` = Connecting
 - `2` = Syncing (historic sync in progress)
 - `3` = Connected (historic sync complete, live sync active)
+- `4` = ConnectedDegraded (historic sync failed, live sync active, partial data)
 
-This allows operators to monitor sync progress and distinguish between "connected but still catching up" vs "fully synced and live".
+This allows operators to monitor sync progress and distinguish between "connected but still catching up" vs "fully synced and live" vs "degraded (missing historic data)".
 
 ### Event Loop Lifecycle
 
