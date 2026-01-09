@@ -973,6 +973,25 @@ impl SyncManager {
                     sync_method = ?sync_method,
                     "Generic filter (announcements) historic sync complete - announcements_synced set to true"
                 );
+
+                // Provide helpful feedback for bootstrap relay
+                if state.is_bootstrap {
+                    let announcement_count = events_count;
+                    if announcement_count == 0 {
+                        tracing::info!(
+                            relay = %relay_url,
+                            domain = %self.config.domain,
+                            "Bootstrap sync found no announcements for domain - verify domain is correct or try different bootstrap relay"
+                        );
+                    } else {
+                        tracing::info!(
+                            relay = %relay_url,
+                            domain = %self.config.domain,
+                            announcement_count,
+                            "Bootstrap sync discovered announcements for domain"
+                        );
+                    }
+                }
             }
 
             // Track if this batch failed (for ConnectedDegraded transition)
