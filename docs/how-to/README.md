@@ -36,6 +36,18 @@ How-to guides are **recipes** that show you how to solve specific problems or ac
 
 ---
 
+### [Test Sync Against Production Data](production-sync-testing.md)
+**Problem:** Debug and improve sync using real-world data  
+**Difficulty:** Intermediate
+
+**You'll learn:**
+- Run sync against production relays
+- Sanitize logs for LLM analysis
+- Identify common issues and patterns
+- Iteratively improve sync behavior
+
+---
+
 ## Planned How-To Guides
 
 ### Deploy ngit-grasp
