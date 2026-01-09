@@ -640,7 +640,18 @@ impl SyncManager {
         let mut pending = self.pending_sync_index.write().await;
 
         let Some(batches) = pending.get_mut(relay_url) else {
-            // This can happen during disconnect if EOSE arrives after cleanup
+            // This can happen when EOSE arrives after batch has already been confirmed/removed.
+            // Common causes:
+            // 1. During intentional disconnect (cleanup in progress)
+            // 2. Duplicate/late EOSE from relay (e.g., live_sync REQ subscriptions may send
+            //    multiple EOSE messages - some relays do this)
+            // 3. Race condition between batch confirmation and EOSE arrival
+            //
+            // NOTE: If we wanted to investigate whether these are truly duplicate EOSEs,
+            // we could track recently-completed subscription IDs (with timestamps) and
+            // check if this sub_id was recently confirmed. This would distinguish between:
+            // - Duplicate EOSE (sub_id was recently in outstanding_subs)
+            // - Truly unknown subscription (sub_id never tracked)
             if is_disconnecting {
                 // Expected during intentional disconnect - suppress noisy log
                 tracing::trace!(
@@ -649,11 +660,11 @@ impl SyncManager {
                     "EOSE received during disconnect cleanup - ignoring"
                 );
             } else {
-                // Unexpected - log at debug level
-                tracing::debug!(
+                // Expected when batch completes before late/duplicate EOSE arrives
+                tracing::trace!(
                     relay = %relay_url,
                     sub_id = %sub_id,
-                    "EOSE received for unknown relay"
+                    "EOSE received after batch already completed (late or duplicate EOSE)"
                 );
             }
             return;
