@@ -647,12 +647,12 @@ pub mod mock {
                         vec!["test-repo".to_string()],
                     )];
 
-                    for url in &self.clone_urls {
-                        tags.push(nostr_sdk::Tag::custom(
-                            nostr_sdk::TagKind::Custom("clone".into()),
-                            vec![url.clone()],
-                        ));
-                    }
+                    // Create a single clone tag with multiple values (NIP-34 format)
+                    let clone_values: Vec<String> = self.clone_urls.iter().cloned().collect();
+                    tags.push(nostr_sdk::Tag::custom(
+                        nostr_sdk::TagKind::Custom("clone".into()),
+                        clone_values,
+                    ));
 
                     let event = EventBuilder::new(Kind::from(30617), "")
                         .tags(tags)
