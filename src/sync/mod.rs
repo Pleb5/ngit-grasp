@@ -106,6 +106,9 @@ pub enum ConnectionStatus {
     Connected,
     /// Successfully connected, historic sync had failures but live sync active
     ConnectedHistoricSyncFailures,
+    /// Disconnection initiated, waiting for event loop to terminate
+    /// State is retained to process remaining queued events
+    Disconnecting,
 }
 
 impl ConnectionStatus {
@@ -624,16 +627,35 @@ impl SyncManager {
     /// - When all subscriptions complete (outstanding_subs empty):
     ///   - Calls confirm_batch to move items to confirmed state
     async fn handle_eose(&mut self, relay_url: &str, sub_id: SubscriptionId) {
+        // Check if relay is in Disconnecting state
+        let is_disconnecting = {
+            let index = self.relay_sync_index.read().await;
+            index
+                .get(relay_url)
+                .map(|s| s.connection_status == ConnectionStatus::Disconnecting)
+                .unwrap_or(false)
+        };
+
         // 1. Find and update the pending batch
         let mut pending = self.pending_sync_index.write().await;
 
         let Some(batches) = pending.get_mut(relay_url) else {
-            // This can happen during disconnect if EOSE arrives after relay cleanup
-            tracing::debug!(
-                relay = %relay_url,
-                sub_id = %sub_id,
-                "EOSE received for unknown relay (likely during disconnect)"
-            );
+            // This can happen during disconnect if EOSE arrives after cleanup
+            if is_disconnecting {
+                // Expected during intentional disconnect - suppress noisy log
+                tracing::trace!(
+                    relay = %relay_url,
+                    sub_id = %sub_id,
+                    "EOSE received during disconnect cleanup - ignoring"
+                );
+            } else {
+                // Unexpected - log at debug level
+                tracing::debug!(
+                    relay = %relay_url,
+                    sub_id = %sub_id,
+                    "EOSE received for unknown relay"
+                );
+            }
             return;
         };
 
@@ -1361,8 +1383,10 @@ impl SyncManager {
                 // Connection will trigger handle_connect_or_reconnect which will process items
                 return;
             }
-            Some(ConnectionStatus::Disconnected) | Some(ConnectionStatus::Connecting) => {
-                // Will be handled when connection succeeds
+            Some(ConnectionStatus::Disconnected)
+            | Some(ConnectionStatus::Connecting)
+            | Some(ConnectionStatus::Disconnecting) => {
+                // Will be handled when connection succeeds (or ignored if disconnecting)
                 tracing::debug!(
                     relay = %action.relay_url,
                     status = ?connection_status,
@@ -2060,68 +2084,122 @@ impl SyncManager {
 
     /// Handle a relay disconnection
     ///
-    /// This method:
-    /// - Updates the RelayState in relay_sync_index to Disconnected status
-    /// - Sets disconnected_at timestamp
-    /// - Clears pending sync batches for this relay
-    /// - Removes the relay from active connections
-    /// - Records the failure in health tracker
+    /// This method is called when the event loop terminates and sends a disconnect notification.
+    /// It handles two cases:
+    /// - Unexpected disconnects: Updates state to Disconnected, keeps RelayConnection for reconnect
+    /// - Intentional disconnects: Completes cleanup of Disconnecting relays (removes from indices)
     async fn handle_disconnect(&mut self, relay_url: &str) {
-        tracing::warn!(relay = %relay_url, "Handling relay disconnect");
+        // Check if this was an intentional disconnect (Disconnecting status)
+        let was_intentional = {
+            let index = self.relay_sync_index.read().await;
+            index
+                .get(relay_url)
+                .map(|s| s.connection_status == ConnectionStatus::Disconnecting)
+                .unwrap_or(false)
+        };
 
-        // 1. Update RelayState in relay_sync_index
-        {
-            let mut index = self.relay_sync_index.write().await;
-            if let Some(state) = index.get_mut(relay_url) {
-                state.connection_status = ConnectionStatus::Disconnected;
-                state.disconnected_at = Some(Timestamp::now());
-                tracing::info!(
-                    relay = %relay_url,
-                    repos_tracked = state.repos.len(),
-                    "Relay state updated to disconnected"
-                );
-            } else {
+        if was_intentional {
+            // Intentional disconnect - complete cleanup by removing state
+            tracing::info!(relay = %relay_url, "Event loop terminated for intentional disconnect, completing cleanup");
+
+            // Update metrics to Disconnected before cleanup
+            if let Some(ref metrics) = self.metrics {
+                metrics.record_connection_status(relay_url, ConnectionStatus::Disconnected);
+            }
+
+            // Remove from relay_sync_index
+            {
+                let mut index = self.relay_sync_index.write().await;
+                if index.remove(relay_url).is_some() {
+                    tracing::debug!(
+                        relay = %relay_url,
+                        "Removed relay from relay_sync_index"
+                    );
+                }
+            }
+
+            // Remove from pending_sync_index
+            {
+                let mut pending = self.pending_sync_index.write().await;
+                if pending.remove(relay_url).is_some() {
+                    tracing::debug!(
+                        relay = %relay_url,
+                        "Removed relay from pending_sync_index"
+                    );
+                }
+            }
+
+            // Remove the connection object (won't reconnect)
+            if self.connections.remove(relay_url).is_some() {
                 tracing::debug!(
                     relay = %relay_url,
-                    "No RelayState found for disconnected relay"
+                    "Removed connection from connections map"
                 );
             }
-        }
 
-        // 2. Clear pending sync batches for this relay
-        {
-            let mut pending = self.pending_sync_index.write().await;
-            if pending.remove(relay_url).is_some() {
-                tracing::debug!(
-                    relay = %relay_url,
-                    "Cleared pending sync batches for disconnected relay"
-                );
+            // Update metrics - decrement connected count
+            if let Some(ref metrics) = self.metrics {
+                metrics.dec_connected_count();
             }
+
+            tracing::info!(relay = %relay_url, "Intentional disconnect cleanup complete");
+        } else {
+            // Unexpected disconnect - update state but keep for reconnection
+            tracing::warn!(relay = %relay_url, "Unexpected relay disconnect detected");
+
+            // Update RelayState in relay_sync_index
+            {
+                let mut index = self.relay_sync_index.write().await;
+                if let Some(state) = index.get_mut(relay_url) {
+                    state.connection_status = ConnectionStatus::Disconnected;
+                    state.disconnected_at = Some(Timestamp::now());
+                    tracing::info!(
+                        relay = %relay_url,
+                        repos_tracked = state.repos.len(),
+                        "Relay state updated to disconnected"
+                    );
+                } else {
+                    tracing::debug!(
+                        relay = %relay_url,
+                        "No RelayState found for disconnected relay"
+                    );
+                    return;
+                }
+            }
+
+            // Clear pending sync batches for this relay
+            {
+                let mut pending = self.pending_sync_index.write().await;
+                if pending.remove(relay_url).is_some() {
+                    tracing::debug!(
+                        relay = %relay_url,
+                        "Cleared pending sync batches for disconnected relay"
+                    );
+                }
+            }
+
+            // Keep RelayConnection in HashMap for reuse on reconnect
+            tracing::debug!(
+                relay = %relay_url,
+                "Keeping RelayConnection in HashMap for reconnection"
+            );
+
+            // Record failure in health tracker
+            self.health_tracker.record_failure(relay_url);
+
+            // Update metrics
+            if let Some(ref metrics) = self.metrics {
+                metrics.record_connection_status(relay_url, ConnectionStatus::Disconnected);
+                metrics.dec_connected_count();
+                metrics.record_health_state(relay_url, self.health_tracker.get_state(relay_url));
+            }
+
+            tracing::info!(
+                relay = %relay_url,
+                health_state = %self.health_tracker.get_state(relay_url),
+                "Unexpected disconnect handling complete"
+            );
         }
-
-        // 3. Keep RelayConnection in HashMap for reuse on reconnect
-        // The connection object persists and will be reused when retry_disconnected_relays
-        // calls try_connect_relay -> connection.connect()
-        tracing::debug!(
-            relay = %relay_url,
-            "Keeping RelayConnection in HashMap for reconnection"
-        );
-
-        // 4. Record failure in health tracker
-        self.health_tracker.record_failure(relay_url);
-
-        // Update metrics
-        if let Some(ref metrics) = self.metrics {
-            metrics.record_connection_status(relay_url, ConnectionStatus::Disconnected);
-            metrics.dec_connected_count();
-            metrics.record_health_state(relay_url, self.health_tracker.get_state(relay_url));
-        }
-
-        tracing::info!(
-            relay = %relay_url,
-            health_state = %self.health_tracker.get_state(relay_url),
-            "Relay disconnect handling complete"
-        );
     }
 
     /// Re-process events from hot cache after their dependencies become available
@@ -2683,6 +2761,11 @@ impl SyncManager {
                         return None;
                     }
 
+                    // Skip relays already disconnecting
+                    if state.connection_status == ConnectionStatus::Disconnecting {
+                        return None;
+                    }
+
                     // Disconnect if no repos and no root events
                     if state.repos.is_empty() && state.root_events.is_empty() {
                         Some(relay_url.clone())
@@ -2710,49 +2793,45 @@ impl SyncManager {
         }
     }
 
-    /// Disconnect a relay and clean up all associated state
+    /// Disconnect a relay and mark it for cleanup
     ///
     /// This method:
-    /// - Removes the relay from relay_sync_index
-    /// - Removes the relay from pending_sync_index
-    /// - Disconnects the connection if it exists
+    /// - Marks the relay as Disconnecting in relay_sync_index
+    /// - Initiates the connection disconnect
+    /// - Final cleanup happens in handle_disconnect when event loop terminates
     ///
     /// Used by check_disconnects for cleanup of empty relays.
     async fn disconnect_relay(&mut self, relay_url: &str) {
-        tracing::info!(relay = %relay_url, "Disconnecting empty relay");
+        tracing::info!(relay = %relay_url, "Initiating disconnect for empty relay");
 
-        // Remove from relay_sync_index
+        // Mark relay as Disconnecting (keep state for event loop to drain)
         {
             let mut index = self.relay_sync_index.write().await;
-            if index.remove(relay_url).is_some() {
+            if let Some(state) = index.get_mut(relay_url) {
+                state.connection_status = ConnectionStatus::Disconnecting;
+                state.disconnected_at = Some(Timestamp::now());
                 tracing::debug!(
                     relay = %relay_url,
-                    "Removed relay from relay_sync_index"
+                    "Marked relay as Disconnecting"
                 );
             }
         }
 
-        // Remove from pending_sync_index
-        {
-            let mut pending = self.pending_sync_index.write().await;
-            if pending.remove(relay_url).is_some() {
-                tracing::debug!(
-                    relay = %relay_url,
-                    "Removed relay from pending_sync_index"
-                );
-            }
-        }
-
-        // Disconnect the connection if it exists
-        if let Some(connection) = self.connections.remove(relay_url) {
+        // Initiate disconnect - event loop will drain and send disconnect notification
+        if let Some(connection) = self.connections.get(relay_url) {
             connection.disconnect().await;
             tracing::debug!(
                 relay = %relay_url,
-                "Disconnected connection"
+                "Initiated connection disconnect"
             );
         }
 
-        tracing::info!(relay = %relay_url, "Relay disconnected and cleaned up");
+        // Update metrics
+        if let Some(ref metrics) = self.metrics {
+            metrics.record_connection_status(relay_url, ConnectionStatus::Disconnecting);
+        }
+
+        tracing::info!(relay = %relay_url, "Disconnect initiated, waiting for event loop termination");
     }
 
     /// Retry disconnected relays that are ready for reconnection

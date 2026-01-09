@@ -311,6 +311,7 @@ impl SyncMetrics {
             ConnectionStatus::Syncing => 2,
             ConnectionStatus::Connected => 3,
             ConnectionStatus::ConnectedHistoricSyncFailures => 4,
+            ConnectionStatus::Disconnecting => 5,
         };
         self.relay_connected
             .with_label_values(&[relay])
