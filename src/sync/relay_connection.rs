@@ -486,11 +486,12 @@ impl RelayConnection {
                 );
 
                 // Check for any failures
+                // Note: Timeouts are common for relays without NIP-77 support
                 if !output.failed.is_empty() {
-                    tracing::warn!(
+                    tracing::debug!(
                         relay = %self.url,
                         failures = ?output.failed,
-                        "Some relays failed during negentropy diff"
+                        "Negentropy diff had failures (timeout usually means relay doesn't support NIP-77)"
                     );
                 }
 
