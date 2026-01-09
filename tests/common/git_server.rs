@@ -128,18 +128,26 @@ impl SimpleGitServer {
             );
         }
 
-        // 4. Find a free port
-        let port = find_free_port();
-        let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+        // 4. Create and bind listener (eliminates port race condition)
+        let std_listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("Failed to bind to random port");
+        let port = std_listener
+            .local_addr()
+            .expect("Failed to get local addr")
+            .port();
+
+        // Convert to tokio listener (keeps port bound)
+        std_listener
+            .set_nonblocking(true)
+            .expect("Failed to set non-blocking");
+        let listener =
+            TcpListener::from_std(std_listener).expect("Failed to convert to tokio listener");
 
         // 5. Create shutdown channel
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
 
         // 6. Start the HTTP server
         let repo_path = Arc::new(bare_repo_path);
-        let listener = TcpListener::bind(addr)
-            .await
-            .expect("Failed to bind to address");
 
         let handle = tokio::spawn(async move {
             println!("[SmartGitServer] Server loop started on port {}", port);
@@ -294,19 +302,6 @@ fn guess_content_type(path: &Path) -> &'static str {
     } else {
         "application/octet-stream"
     }
-}
-
-/// Find a free port to use for the server.
-fn find_free_port() -> u16 {
-    use std::net::TcpListener;
-
-    let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind to random port");
-    let port = listener
-        .local_addr()
-        .expect("Failed to get local addr")
-        .port();
-    drop(listener);
-    port
 }
 
 /// Wait for the server to be ready to accept connections.
