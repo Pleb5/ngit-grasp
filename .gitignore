@@ -12,3 +12,6 @@ work/*
 # Environment and data
 .env
 data/
+
+# direnv directory - used by nix
+.direnv
