@@ -1,10 +1,37 @@
 # How-To: Test Sync Against Production Data
 
-> **Quick Start Prompt:** Run a 30-second production sync test following docs/how-to/production-sync-testing.md. Use the minimal test command with sanitized output. Analyze the log for errors, warnings, and unexpected patterns. Document findings as individual markdown files in work/active-issues/ and suggest code fixes or logging improvements.
+> **Quick Start Prompt:** Check work/active-issues/ for existing issues. If issues exist, pick the most important, fix it, test with cargo test, run clippy and fmt, commit, and report back with a brief 1-2 sentence summary of each issue you identified. If no issues exist, run a 30-second production sync test, analyze logs, create individual issue files in work/active-issues/ (one per issue with minimal description), then report summary listing each issue in 1-2 sentences.
 
 **Problem:** Debug and improve sync behavior using real-world data from production relays  
 **Difficulty:** Intermediate  
 **Time:** 30 minutes per iteration
+
+## Two-Mode Workflow
+
+This guide operates in two modes:
+
+### Mode 1: Fix Existing Issues
+**When:** There are files in `work/active-issues/` (excluding README.md)
+
+1. Check for active issues: `ls work/active-issues/`
+2. Pick the most important issue to fix
+3. Implement the fix
+4. Run `cargo test` to verify tests pass
+5. Run `cargo clippy` to check for warnings
+6. Run `cargo fmt` to format code
+7. Commit changes with descriptive message
+8. Report back - **DO NOT** do another issue or run more tests
+
+### Mode 2: Discover New Issues
+**When:** No active issues in `work/active-issues/`
+
+1. Run 30-second production sync test (logs saved to `tmp/run-{timestamp}/`)
+2. Analyze logs for errors, warnings, unexpected patterns
+3. Document each issue as a separate markdown file in `work/active-issues/`
+4. Keep issue files minimal - just enough to identify the issue
+5. Report brief summary listing each issue in 1-2 sentences
+6. **DO NOT** create separate detailed analysis files
+7. **DO NOT** do thorough investigation or root cause analysis
 
 ## Overview
 
@@ -45,22 +72,32 @@ The bootstrap relay provides the initial set of announcements to discover repos:
 
 ### 3. Run with Time Limit
 
-Start with short runs (30 seconds) to capture manageable log volumes:
+Start with short runs (30 seconds) to capture manageable log volumes. Each run creates its own subdirectory in `tmp/` to keep data and logs isolated:
 
 ```bash
-# Clear any existing data for clean state
-rm -rf /tmp/ngit-test-*
+# Create run directory with timestamp
+RUN_DIR="tmp/run-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$RUN_DIR"
 
 # Run for 30 seconds with sanitized output
 timeout 30s cargo run -- \
     --sync-bootstrap-relay-url wss://git.shakespeare.diy \
     --domain ngit.danconwaydev.com \
-    --git-data-path /tmp/ngit-test-git \
-    --relay-data-path /tmp/ngit-test-relay \
-    2>&1 | ./scripts/sanitize-logs.sh | tee sync-test.log
+    --git-data-path "$RUN_DIR/git-data" \
+    --relay-data-path "$RUN_DIR/relay-data" \
+    2>&1 | ./scripts/sanitize-logs.sh | tee "$RUN_DIR/sync.log"
 ```
 
 **Note:** The `timeout` command returns exit code 124, which is expected.
+
+**Directory structure after run:**
+```
+tmp/
+└── run-20260109-143022/
+    ├── git-data/       # Git repository data
+    ├── relay-data/     # Relay database
+    └── sync.log        # Sanitized log output
+```
 
 ## Log Sanitization
 
@@ -152,73 +189,132 @@ When analyzing logs, look for these patterns:
 | `sync_live` | Live subscriptions active |
 | `PendingBatch` | Items awaiting EOSE confirmation |
 
-## Iterative Improvement Process
+## Mode 1: Fix Existing Issues (Detailed)
 
-### Step 1: Run and Capture
+When `work/active-issues/` contains issue files:
+
+### Step 1: Check for Active Issues
 
 ```bash
-timeout 30s cargo run -- [args] 2>&1 | ./scripts/sanitize-logs.sh > iteration-1.log
+ls work/active-issues/
 ```
 
-### Step 2: Identify Issues
+If any `.md` files exist (excluding README.md), you're in Mode 1.
 
-Scan logs for errors and unexpected patterns:
+### Step 2: Pick Most Important Issue
+
+Review issue files and select based on:
+- Severity (errors > warnings > log quality)
+- Impact (functionality > performance > UX)
+- Complexity (quick fixes first to clear backlog)
+
+### Step 3: Implement the Fix
+
+Make the necessary code changes based on the issue description.
+
+### Step 4: Test, Lint, Format
+
 ```bash
-grep -i error iteration-1.log
-grep -i warn iteration-1.log
-grep -i panic iteration-1.log
+# Run tests
+cargo test
+
+# Check for warnings
+cargo clippy
+
+# Format code
+cargo fmt
 ```
 
-### Step 3: Document Findings
-
-Create individual markdown files in `work/active-issues/` for each issue discovered:
+### Step 5: Commit
 
 ```bash
-# Example: Document a connection timeout issue
-cat > work/active-issues/connection-timeout-bootstrap.md <<'EOF'
-# Issue: Connection Timeout on Bootstrap Relay
+git add .
+git commit -m "fix: [brief description of what was fixed]"
+```
 
-**Discovered:** 2026-01-09
-**Status:** Open
+### Step 6: Report Back
 
-## Symptoms
+**STOP HERE.** Report what was fixed. Do NOT:
+- Fix another issue
+- Run production sync test
+- Do additional investigation
 
-- Connection to wss://git.shakespeare.diy fails after 10s timeout
-- Log shows: `error: connection failed: timeout`
-- Occurs 100% of time with this relay
+The workflow will cycle back through Mode 1 if more issues remain.
 
-## Root Cause
+## Mode 2: Discover New Issues (Detailed)
 
-[To be determined]
+When `work/active-issues/` is empty (or only contains README.md):
 
-## Proposed Fix
+### Step 1: Run Production Sync Test
 
-- Increase connection timeout from 10s to 30s for initial bootstrap
-- Add retry logic with exponential backoff
-- Consider fallback bootstrap relays
+```bash
+# Create run directory with timestamp
+RUN_DIR="tmp/run-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$RUN_DIR"
 
-## Code Location
+# Run 30-second test
+timeout 30s cargo run -- \
+    --sync-bootstrap-relay-url wss://git.shakespeare.diy \
+    --domain ngit.danconwaydev.com \
+    --git-data-path "$RUN_DIR/git-data" \
+    --relay-data-path "$RUN_DIR/relay-data" \
+    2>&1 | ./scripts/sanitize-logs.sh | tee "$RUN_DIR/sync.log"
+```
 
-- `src/sync/relay_connection.rs:45` - connection timeout constant
+Each run is isolated in its own timestamped directory under `tmp/`, keeping data and logs organized.
+
+### Step 2: Analyze Logs
+
+Scan for errors and unexpected patterns:
+```bash
+# Find the most recent run
+LATEST_RUN=$(ls -1t tmp/run-*/sync.log | head -n1)
+
+# Analyze for issues
+grep -i error "$LATEST_RUN"
+grep -i warn "$LATEST_RUN"
+grep -i panic "$LATEST_RUN"
+```
+
+### Step 3: Document Issues
+
+Create **one markdown file per issue** in `work/active-issues/`:
+
+```bash
+# Example: Minimal issue documentation
+cat > work/active-issues/bootstrap-disconnect.md <<'EOF'
+# Bootstrap relay disconnects when empty
+
+Bootstrap relay wss://git.shakespeare.diy disconnects after sync finds 0 events. Should persist since user-specified.
+
+Log: "Disconnecting empty relay relay=wss://git.shakespeare.diy"
+File: src/sync/mod.rs (check_disconnects function)
 EOF
 ```
 
-**Why individual files?**
-- Keeps the how-to guide clean and focused
-- Prevents accidental commits of transient issues to tracked files
-- Easy to delete resolved issues or archive important ones
-- Each file can be worked on independently
+**Keep each file brief:**
+- Descriptive title (one line)
+- What happens (1-2 sentences max)
+- Relevant log excerpt (one line)
+- File/function location if obvious (one line)
+- **NO** separate detailed analysis files
+- **NO** root cause analysis
+- **NO** proposed solutions (unless immediately obvious)
 
-### Step 4: Fix and Re-test
+### Step 4: Report Summary
 
-After code changes, run again to verify the fix.
+Provide a brief closing message with 1-2 sentence summary of **each issue** identified:
+- State what the issue is
+- Where it occurs (file/component)
+- Keep it concise
 
-### Step 5: Extend Duration
+**STOP HERE.** Do NOT:
+- Fix the issues immediately
+- Create separate detailed analysis markdown files
+- Do thorough investigations
+- Write lengthy explanations
 
-Once 30-second runs are clean, extend to 2 minutes, then 5 minutes:
-```bash
-timeout 120s cargo run -- [args] 2>&1 | ./scripts/sanitize-logs.sh > iteration-2.log
-```
+The workflow will cycle back through Mode 1 to fix issues one at a time.
 
 ## Logging Improvements
 
@@ -253,51 +349,65 @@ If a log line appears too frequently:
 tracing::trace!("Per-event detail that's too noisy");
 ```
 
-## Active Issues
+## Managing Active Issues
 
-Issues discovered during production sync testing are tracked in `work/active-issues/` as individual markdown files.
+Issues are tracked in `work/active-issues/` as individual markdown files.
 
-**View current issues:**
+**Check for active issues:**
 ```bash
 ls work/active-issues/
 ```
 
-**Create a new issue:**
+**After fixing an issue:**
 ```bash
-# Use kebab-case filename describing the issue
-cat > work/active-issues/[issue-name].md <<'EOF'
-# Issue: [Short Description]
+# Delete the resolved issue file
+rm work/active-issues/issue-name.md
 
-**Discovered:** [Date]
-**Status:** Open
-
-## Symptoms
-
-- Log patterns observed
-- Reproduction steps if known
-
-## Root Cause
-
-[To be determined / Known cause]
-
-## Proposed Fix
-
-- Suggested code changes
-- Alternative approaches
-
-## Code Location
-
-- File paths and line numbers where changes are needed
-EOF
+# Or archive if important for future reference
+mv work/active-issues/issue-name.md docs/archive/2026-01-09-issue-name.md
 ```
 
-**Resolve an issue:**
-```bash
-# After fixing, either delete or move to archive
-rm work/active-issues/resolved-issue.md
-# OR
-mv work/active-issues/important-issue.md docs/archive/2026-01-09-important-issue.md
+**Issue file format (minimal):**
+```markdown
+# Brief title
+
+What happens (1-2 sentences).
+
+Log evidence: "relevant log line"
+File: src/path/to/file.rs (function_name if known)
 ```
+
+Keep documentation minimal - just enough to identify and locate the issue.
+
+---
+
+## Workflow Summary
+
+```
+Check work/active-issues/
+    │
+    ├─ Has issues? ──► Mode 1: Pick one issue
+    │                          │
+    │                          ├─ Fix code
+    │                          ├─ cargo test
+    │                          ├─ cargo clippy
+    │                          ├─ cargo fmt
+    │                          ├─ git commit
+    │                          └─ Report & STOP
+    │
+    └─ No issues? ──► Mode 2: Run production sync
+                               │
+                               ├─ timeout 30s cargo run ...
+                               ├─ Analyze logs
+                               ├─ Document issues (minimal)
+                               └─ Report summary & STOP
+```
+
+**Key Rules:**
+- Only do ONE thing per cycle (fix one issue OR discover issues)
+- Always stop after reporting
+- Keep issue documentation minimal
+- No root cause analysis during discovery
 
 ---
 
@@ -306,27 +416,47 @@ mv work/active-issues/important-issue.md docs/archive/2026-01-09-important-issue
 ### Minimal Test Command
 
 ```bash
+# Create run directory
+RUN_DIR="tmp/run-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$RUN_DIR"
+
+# Run test
 timeout 30s cargo run -- \
     --sync-bootstrap-relay-url wss://git.shakespeare.diy \
     --domain ngit.danconwaydev.com \
-    --git-data-path /tmp/ngit-test-git \
-    --relay-data-path /tmp/ngit-test-relay \
-    2>&1 | ./scripts/sanitize-logs.sh
+    --git-data-path "$RUN_DIR/git-data" \
+    --relay-data-path "$RUN_DIR/relay-data" \
+    2>&1 | ./scripts/sanitize-logs.sh | tee "$RUN_DIR/sync.log"
 ```
 
 ### With Metrics Endpoint
 
 ```bash
+# Create run directory
+RUN_DIR="tmp/run-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$RUN_DIR"
+
+# Run with metrics
 timeout 30s cargo run -- \
     --sync-bootstrap-relay-url wss://git.shakespeare.diy \
     --domain ngit.danconwaydev.com \
-    --git-data-path /tmp/ngit-test-git \
-    --relay-data-path /tmp/ngit-test-relay \
+    --git-data-path "$RUN_DIR/git-data" \
+    --relay-data-path "$RUN_DIR/relay-data" \
     --metrics-address 127.0.0.1:9090 \
-    2>&1 | ./scripts/sanitize-logs.sh
+    2>&1 | ./scripts/sanitize-logs.sh | tee "$RUN_DIR/sync.log"
 ```
 
 Then in another terminal: `curl http://127.0.0.1:9090/metrics`
+
+### Cleanup Old Runs
+
+```bash
+# Remove runs older than 7 days
+find tmp/run-* -type d -mtime +7 -exec rm -rf {} +
+
+# Remove all test runs
+rm -rf tmp/run-*
+```
 
 ### Different Log Level
 

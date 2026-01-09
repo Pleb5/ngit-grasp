@@ -9,6 +9,9 @@ grasp-audit/target
 work/*
 !work/README.md
 
+# Test runs (production sync testing data and logs)
+tmp/
+
 # Environment and data
 .env
 data/
