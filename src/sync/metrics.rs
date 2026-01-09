@@ -41,37 +41,21 @@ pub struct SyncMetrics {
     /// Relays marked as dead
     relays_dead_total: IntGauge,
 
-    // === Rejected Announcements Index Metrics ===
-    /// Current number of entries in hot cache
-    rejected_announcements_hot_cache_current: IntGauge,
-    /// Total hot cache hits (events re-processed from cache)
-    rejected_announcements_hot_cache_hits_total: IntCounter,
-    /// Total hot cache misses (events not in cache)
-    rejected_announcements_hot_cache_misses_total: IntCounter,
-    /// Total expired entries removed from hot cache
-    rejected_announcements_hot_cache_expired_total: IntCounter,
-    /// Current number of entries in cold index
-    rejected_announcements_cold_index_current: IntGauge,
-    /// Total cold index entries expired and removed
-    rejected_announcements_cold_index_expired_total: IntCounter,
-    /// Total invalidations (maintainer announcements invalidated)
-    rejected_announcements_invalidated_total: IntCounter,
-
-    // === Rejected States Index Metrics ===
-    /// Current number of state events in hot cache
-    rejected_states_hot_cache_current: IntGauge,
-    /// Total hot cache hits (state events re-processed from cache)
-    rejected_states_hot_cache_hits_total: IntCounter,
-    /// Total hot cache misses (state events not in cache)
-    rejected_states_hot_cache_misses_total: IntCounter,
-    /// Total expired state events removed from hot cache
-    rejected_states_hot_cache_expired_total: IntCounter,
-    /// Current number of state event entries in cold index
-    rejected_states_cold_index_current: IntGauge,
-    /// Total state event cold index entries expired and removed
-    rejected_states_cold_index_expired_total: IntCounter,
-    /// Total state event invalidations
-    rejected_states_invalidated_total: IntCounter,
+    // === Rejected Events Index Metrics (unified with event_type label) ===
+    /// Current number of entries in hot cache (by event_type: announcement, state)
+    rejected_hot_cache_current: IntGaugeVec,
+    /// Total hot cache hits (by event_type: announcement, state)
+    rejected_hot_cache_hits_total: IntCounterVec,
+    /// Total hot cache misses (by event_type: announcement, state)
+    rejected_hot_cache_misses_total: IntCounterVec,
+    /// Total expired entries removed from hot cache (by event_type: announcement, state)
+    rejected_hot_cache_expired_total: IntCounterVec,
+    /// Current number of entries in cold index (by event_type: announcement, state)
+    rejected_cold_index_current: IntGaugeVec,
+    /// Total cold index entries expired and removed (by event_type: announcement, state)
+    rejected_cold_index_expired_total: IntCounterVec,
+    /// Total invalidations (by event_type: announcement, state)
+    rejected_invalidated_total: IntCounterVec,
 }
 
 impl SyncMetrics {
@@ -145,99 +129,69 @@ impl SyncMetrics {
         ))?;
         registry.register(Box::new(relays_dead_total.clone()))?;
 
-        // Rejected announcements metrics
-        let rejected_announcements_hot_cache_current = IntGauge::with_opts(Opts::new(
-            "ngit_sync_rejected_announcements_hot_cache_current",
-            "Current number of entries in hot cache (full events, 2 min expiry)",
-        ))?;
-        registry.register(Box::new(rejected_announcements_hot_cache_current.clone()))?;
+        // Rejected events metrics (unified with event_type label)
+        let rejected_hot_cache_current = IntGaugeVec::new(
+            Opts::new(
+                "ngit_sync_rejected_hot_cache_current",
+                "Current number of entries in hot cache (full events, 2 min expiry)",
+            ),
+            &["event_type"],
+        )?;
+        registry.register(Box::new(rejected_hot_cache_current.clone()))?;
 
-        let rejected_announcements_hot_cache_hits_total = IntCounter::with_opts(Opts::new(
-            "ngit_sync_rejected_announcements_hot_cache_hits_total",
-            "Total hot cache hits (events re-processed from cache)",
-        ))?;
-        registry.register(Box::new(
-            rejected_announcements_hot_cache_hits_total.clone(),
-        ))?;
+        let rejected_hot_cache_hits_total = IntCounterVec::new(
+            Opts::new(
+                "ngit_sync_rejected_hot_cache_hits_total",
+                "Total hot cache hits (events re-processed from cache)",
+            ),
+            &["event_type"],
+        )?;
+        registry.register(Box::new(rejected_hot_cache_hits_total.clone()))?;
 
-        let rejected_announcements_hot_cache_misses_total = IntCounter::with_opts(Opts::new(
-            "ngit_sync_rejected_announcements_hot_cache_misses_total",
-            "Total hot cache misses (events not in cache when invalidated)",
-        ))?;
-        registry.register(Box::new(
-            rejected_announcements_hot_cache_misses_total.clone(),
-        ))?;
+        let rejected_hot_cache_misses_total = IntCounterVec::new(
+            Opts::new(
+                "ngit_sync_rejected_hot_cache_misses_total",
+                "Total hot cache misses (events not in cache when invalidated)",
+            ),
+            &["event_type"],
+        )?;
+        registry.register(Box::new(rejected_hot_cache_misses_total.clone()))?;
 
-        let rejected_announcements_hot_cache_expired_total = IntCounter::with_opts(Opts::new(
-            "ngit_sync_rejected_announcements_hot_cache_expired_total",
-            "Total expired entries removed from hot cache",
-        ))?;
-        registry.register(Box::new(
-            rejected_announcements_hot_cache_expired_total.clone(),
-        ))?;
+        let rejected_hot_cache_expired_total = IntCounterVec::new(
+            Opts::new(
+                "ngit_sync_rejected_hot_cache_expired_total",
+                "Total expired entries removed from hot cache",
+            ),
+            &["event_type"],
+        )?;
+        registry.register(Box::new(rejected_hot_cache_expired_total.clone()))?;
 
-        let rejected_announcements_cold_index_current = IntGauge::with_opts(Opts::new(
-            "ngit_sync_rejected_announcements_cold_index_current",
-            "Current number of entries in cold index (metadata only, 7 day expiry)",
-        ))?;
-        registry.register(Box::new(rejected_announcements_cold_index_current.clone()))?;
+        let rejected_cold_index_current = IntGaugeVec::new(
+            Opts::new(
+                "ngit_sync_rejected_cold_index_current",
+                "Current number of entries in cold index (metadata only, 7 day expiry)",
+            ),
+            &["event_type"],
+        )?;
+        registry.register(Box::new(rejected_cold_index_current.clone()))?;
 
-        let rejected_announcements_cold_index_expired_total = IntCounter::with_opts(Opts::new(
-            "ngit_sync_rejected_announcements_cold_index_expired_total",
-            "Total expired entries removed from cold index",
-        ))?;
-        registry.register(Box::new(
-            rejected_announcements_cold_index_expired_total.clone(),
-        ))?;
+        let rejected_cold_index_expired_total = IntCounterVec::new(
+            Opts::new(
+                "ngit_sync_rejected_cold_index_expired_total",
+                "Total expired entries removed from cold index",
+            ),
+            &["event_type"],
+        )?;
+        registry.register(Box::new(rejected_cold_index_expired_total.clone()))?;
 
-        let rejected_announcements_invalidated_total = IntCounter::with_opts(Opts::new(
-            "ngit_sync_rejected_announcements_invalidated_total",
-            "Total invalidations (maintainer announcements invalidated when owner accepted)",
-        ))?;
-        registry.register(Box::new(rejected_announcements_invalidated_total.clone()))?;
-
-        // Rejected states metrics
-        let rejected_states_hot_cache_current = IntGauge::with_opts(Opts::new(
-            "ngit_sync_rejected_states_hot_cache_current",
-            "Current number of state events in hot cache (full events, 2 min expiry)",
-        ))?;
-        registry.register(Box::new(rejected_states_hot_cache_current.clone()))?;
-
-        let rejected_states_hot_cache_hits_total = IntCounter::with_opts(Opts::new(
-            "ngit_sync_rejected_states_hot_cache_hits_total",
-            "Total hot cache hits (state events re-processed from cache)",
-        ))?;
-        registry.register(Box::new(rejected_states_hot_cache_hits_total.clone()))?;
-
-        let rejected_states_hot_cache_misses_total = IntCounter::with_opts(Opts::new(
-            "ngit_sync_rejected_states_hot_cache_misses_total",
-            "Total hot cache misses (state events not in cache when invalidated)",
-        ))?;
-        registry.register(Box::new(rejected_states_hot_cache_misses_total.clone()))?;
-
-        let rejected_states_hot_cache_expired_total = IntCounter::with_opts(Opts::new(
-            "ngit_sync_rejected_states_hot_cache_expired_total",
-            "Total expired state events removed from hot cache",
-        ))?;
-        registry.register(Box::new(rejected_states_hot_cache_expired_total.clone()))?;
-
-        let rejected_states_cold_index_current = IntGauge::with_opts(Opts::new(
-            "ngit_sync_rejected_states_cold_index_current",
-            "Current number of state event entries in cold index (metadata only, 7 day expiry)",
-        ))?;
-        registry.register(Box::new(rejected_states_cold_index_current.clone()))?;
-
-        let rejected_states_cold_index_expired_total = IntCounter::with_opts(Opts::new(
-            "ngit_sync_rejected_states_cold_index_expired_total",
-            "Total state event cold index entries expired and removed",
-        ))?;
-        registry.register(Box::new(rejected_states_cold_index_expired_total.clone()))?;
-
-        let rejected_states_invalidated_total = IntCounter::with_opts(Opts::new(
-            "ngit_sync_rejected_states_invalidated_total",
-            "Total state event invalidations (when announcements accepted)",
-        ))?;
-        registry.register(Box::new(rejected_states_invalidated_total.clone()))?;
+        let rejected_invalidated_total = IntCounterVec::new(
+            Opts::new(
+                "ngit_sync_rejected_invalidated_total",
+                "Total invalidations (events invalidated when dependencies resolved)",
+            ),
+            &["event_type"],
+        )?;
+        registry.register(Box::new(rejected_invalidated_total.clone()))?;
 
         Ok(Self {
             relay_connected,
@@ -248,20 +202,13 @@ impl SyncMetrics {
             relays_tracked_total,
             relays_connected_total,
             relays_dead_total,
-            rejected_announcements_hot_cache_current,
-            rejected_announcements_hot_cache_hits_total,
-            rejected_announcements_hot_cache_misses_total,
-            rejected_announcements_hot_cache_expired_total,
-            rejected_announcements_cold_index_current,
-            rejected_announcements_cold_index_expired_total,
-            rejected_announcements_invalidated_total,
-            rejected_states_hot_cache_current,
-            rejected_states_hot_cache_hits_total,
-            rejected_states_hot_cache_misses_total,
-            rejected_states_hot_cache_expired_total,
-            rejected_states_cold_index_current,
-            rejected_states_cold_index_expired_total,
-            rejected_states_invalidated_total,
+            rejected_hot_cache_current,
+            rejected_hot_cache_hits_total,
+            rejected_hot_cache_misses_total,
+            rejected_hot_cache_expired_total,
+            rejected_cold_index_current,
+            rejected_cold_index_expired_total,
+            rejected_invalidated_total,
         })
     }
 
@@ -434,85 +381,88 @@ impl SyncMetrics {
         self.relays_dead_total.get()
     }
 
-    // === Rejected Announcements Recording Methods ===
+    // === Rejected Events Recording Methods (unified with event_type parameter) ===
 
-    /// Update hot cache current size gauge.
-    pub fn update_hot_cache_size(&self, size: usize) {
-        self.rejected_announcements_hot_cache_current
+    /// Update hot cache current size gauge for a specific event type.
+    ///
+    /// # Arguments
+    ///
+    /// * `event_type` - Either "announcement" or "state"
+    /// * `size` - Current number of entries
+    pub fn update_rejected_hot_cache_size(&self, event_type: &str, size: usize) {
+        self.rejected_hot_cache_current
+            .with_label_values(&[event_type])
             .set(size as i64);
     }
 
-    /// Record hot cache hit (event re-processed from cache).
-    pub fn record_hot_cache_hit(&self) {
-        self.rejected_announcements_hot_cache_hits_total.inc();
+    /// Record hot cache hit for a specific event type.
+    ///
+    /// # Arguments
+    ///
+    /// * `event_type` - Either "announcement" or "state"
+    pub fn record_rejected_hot_cache_hit(&self, event_type: &str) {
+        self.rejected_hot_cache_hits_total
+            .with_label_values(&[event_type])
+            .inc();
     }
 
-    /// Record hot cache miss (event not in cache when invalidated).
-    pub fn record_hot_cache_miss(&self) {
-        self.rejected_announcements_hot_cache_misses_total.inc();
+    /// Record hot cache miss for a specific event type.
+    ///
+    /// # Arguments
+    ///
+    /// * `event_type` - Either "announcement" or "state"
+    pub fn record_rejected_hot_cache_miss(&self, event_type: &str) {
+        self.rejected_hot_cache_misses_total
+            .with_label_values(&[event_type])
+            .inc();
     }
 
-    /// Record hot cache expired entries.
-    pub fn record_hot_cache_expired(&self, count: usize) {
-        self.rejected_announcements_hot_cache_expired_total
+    /// Record hot cache expired entries for a specific event type.
+    ///
+    /// # Arguments
+    ///
+    /// * `event_type` - Either "announcement" or "state"
+    /// * `count` - Number of expired entries
+    pub fn record_rejected_hot_cache_expired(&self, event_type: &str, count: usize) {
+        self.rejected_hot_cache_expired_total
+            .with_label_values(&[event_type])
             .inc_by(count as u64);
     }
 
-    /// Update cold index current size gauge.
-    pub fn update_cold_index_size(&self, size: usize) {
-        self.rejected_announcements_cold_index_current
+    /// Update cold index current size gauge for a specific event type.
+    ///
+    /// # Arguments
+    ///
+    /// * `event_type` - Either "announcement" or "state"
+    /// * `size` - Current number of entries
+    pub fn update_rejected_cold_index_size(&self, event_type: &str, size: usize) {
+        self.rejected_cold_index_current
+            .with_label_values(&[event_type])
             .set(size as i64);
     }
 
-    /// Record cold index expired entries.
-    pub fn record_cold_index_expired(&self, count: usize) {
-        self.rejected_announcements_cold_index_expired_total
+    /// Record cold index expired entries for a specific event type.
+    ///
+    /// # Arguments
+    ///
+    /// * `event_type` - Either "announcement" or "state"
+    /// * `count` - Number of expired entries
+    pub fn record_rejected_cold_index_expired(&self, event_type: &str, count: usize) {
+        self.rejected_cold_index_expired_total
+            .with_label_values(&[event_type])
             .inc_by(count as u64);
     }
 
-    /// Record invalidation (maintainer announcement invalidated).
-    pub fn record_invalidation(&self, count: usize) {
-        self.rejected_announcements_invalidated_total
+    /// Record invalidation for a specific event type.
+    ///
+    /// # Arguments
+    ///
+    /// * `event_type` - Either "announcement" or "state"
+    /// * `count` - Number of invalidated entries
+    pub fn record_rejected_invalidation(&self, event_type: &str, count: usize) {
+        self.rejected_invalidated_total
+            .with_label_values(&[event_type])
             .inc_by(count as u64);
-    }
-
-    // === Rejected States Recording Methods ===
-
-    /// Update state events hot cache current size gauge.
-    pub fn update_states_hot_cache_size(&self, size: usize) {
-        self.rejected_states_hot_cache_current.set(size as i64);
-    }
-
-    /// Record state event hot cache hit (event re-processed from cache).
-    pub fn record_states_hot_cache_hit(&self) {
-        self.rejected_states_hot_cache_hits_total.inc();
-    }
-
-    /// Record state event hot cache miss (event not in cache when invalidated).
-    pub fn record_states_hot_cache_miss(&self) {
-        self.rejected_states_hot_cache_misses_total.inc();
-    }
-
-    /// Record state event hot cache expired entries.
-    pub fn record_states_hot_cache_expired(&self, count: usize) {
-        self.rejected_states_hot_cache_expired_total
-            .inc_by(count as u64);
-    }
-
-    /// Update state events cold index current size gauge.
-    pub fn update_states_cold_index_size(&self, size: usize) {
-        self.rejected_states_cold_index_current.set(size as i64);
-    }
-
-    /// Record state event cold index expired entries.
-    pub fn record_states_cold_index_expired(&self, count: usize) {
-        self.rejected_states_cold_index_expired_total
-            .inc_by(count as u64);
-    }
-
-    /// Record state event invalidation.
-    pub fn record_states_invalidation(&self, count: usize) {
-        self.rejected_states_invalidated_total.inc_by(count as u64);
     }
 }
 
@@ -618,23 +568,36 @@ mod tests {
     }
 
     #[test]
-    fn test_rejected_announcements_metrics() {
+    fn test_rejected_events_metrics() {
         let registry = create_test_registry();
         let metrics = SyncMetrics::register(&registry).unwrap();
 
-        // Test hot cache metrics
-        metrics.update_hot_cache_size(10);
-        metrics.record_hot_cache_hit();
-        metrics.record_hot_cache_hit();
-        metrics.record_hot_cache_miss();
-        metrics.record_hot_cache_expired(5);
+        // Test announcement hot cache metrics
+        metrics.update_rejected_hot_cache_size("announcement", 10);
+        metrics.record_rejected_hot_cache_hit("announcement");
+        metrics.record_rejected_hot_cache_hit("announcement");
+        metrics.record_rejected_hot_cache_miss("announcement");
+        metrics.record_rejected_hot_cache_expired("announcement", 5);
 
-        // Test cold index metrics
-        metrics.update_cold_index_size(100);
-        metrics.record_cold_index_expired(10);
+        // Test announcement cold index metrics
+        metrics.update_rejected_cold_index_size("announcement", 100);
+        metrics.record_rejected_cold_index_expired("announcement", 10);
 
-        // Test invalidation metrics
-        metrics.record_invalidation(3);
-        metrics.record_invalidation(2);
+        // Test announcement invalidation metrics
+        metrics.record_rejected_invalidation("announcement", 3);
+        metrics.record_rejected_invalidation("announcement", 2);
+
+        // Test state hot cache metrics
+        metrics.update_rejected_hot_cache_size("state", 20);
+        metrics.record_rejected_hot_cache_hit("state");
+        metrics.record_rejected_hot_cache_miss("state");
+        metrics.record_rejected_hot_cache_expired("state", 3);
+
+        // Test state cold index metrics
+        metrics.update_rejected_cold_index_size("state", 50);
+        metrics.record_rejected_cold_index_expired("state", 5);
+
+        // Test state invalidation metrics
+        metrics.record_rejected_invalidation("state", 1);
     }
 }
