@@ -13,6 +13,7 @@
 - Migration documentation (during migration)
 - Planning documents
 - Temporary analysis files
+- **active-issues/**: Issues discovered during production sync testing (see [docs/how-to/production-sync-testing.md](../docs/how-to/production-sync-testing.md))
 
 **Rule:** Nothing in this directory should be permanent. Archive or delete at session end.
 

@@ -1,5 +1,7 @@
 # How-To: Test Sync Against Production Data
 
+> **Quick Start Prompt:** Run a 30-second production sync test following docs/how-to/production-sync-testing.md. Use the minimal test command with sanitized output. Analyze the log for errors, warnings, and unexpected patterns. Document findings as individual markdown files in work/active-issues/ and suggest code fixes or logging improvements.
+
 **Problem:** Debug and improve sync behavior using real-world data from production relays  
 **Difficulty:** Intermediate  
 **Time:** 30 minutes per iteration
@@ -169,7 +171,43 @@ grep -i panic iteration-1.log
 
 ### Step 3: Document Findings
 
-Add findings to this file's [Known Issues](#known-issues) section or create GitHub issues.
+Create individual markdown files in `work/active-issues/` for each issue discovered:
+
+```bash
+# Example: Document a connection timeout issue
+cat > work/active-issues/connection-timeout-bootstrap.md <<'EOF'
+# Issue: Connection Timeout on Bootstrap Relay
+
+**Discovered:** 2026-01-09
+**Status:** Open
+
+## Symptoms
+
+- Connection to wss://git.shakespeare.diy fails after 10s timeout
+- Log shows: `error: connection failed: timeout`
+- Occurs 100% of time with this relay
+
+## Root Cause
+
+[To be determined]
+
+## Proposed Fix
+
+- Increase connection timeout from 10s to 30s for initial bootstrap
+- Add retry logic with exponential backoff
+- Consider fallback bootstrap relays
+
+## Code Location
+
+- `src/sync/relay_connection.rs:45` - connection timeout constant
+EOF
+```
+
+**Why individual files?**
+- Keeps the how-to guide clean and focused
+- Prevents accidental commits of transient issues to tracked files
+- Easy to delete resolved issues or archive important ones
+- Each file can be worked on independently
 
 ### Step 4: Fix and Re-test
 
@@ -215,26 +253,50 @@ If a log line appears too frequently:
 tracing::trace!("Per-event detail that's too noisy");
 ```
 
-## Known Issues
+## Active Issues
 
-*Document issues discovered during testing here. Delete this section when empty.*
+Issues discovered during production sync testing are tracked in `work/active-issues/` as individual markdown files.
 
-### Template for New Issues
+**View current issues:**
+```bash
+ls work/active-issues/
+```
 
-```markdown
-### Issue: [Short description]
+**Create a new issue:**
+```bash
+# Use kebab-case filename describing the issue
+cat > work/active-issues/[issue-name].md <<'EOF'
+# Issue: [Short Description]
 
 **Discovered:** [Date]
-**Status:** [Open/Fixed in PR#xxx]
+**Status:** Open
 
-**Symptoms:**
-- Log pattern observed
+## Symptoms
 
-**Root cause:**
-- [If known]
+- Log patterns observed
+- Reproduction steps if known
 
-**Fix:**
-- [If known]
+## Root Cause
+
+[To be determined / Known cause]
+
+## Proposed Fix
+
+- Suggested code changes
+- Alternative approaches
+
+## Code Location
+
+- File paths and line numbers where changes are needed
+EOF
+```
+
+**Resolve an issue:**
+```bash
+# After fixing, either delete or move to archive
+rm work/active-issues/resolved-issue.md
+# OR
+mv work/active-issues/important-issue.md docs/archive/2026-01-09-important-issue.md
 ```
 
 ---
