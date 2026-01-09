@@ -299,10 +299,22 @@ impl ColdIndex {
 ///
 /// Combines hot cache (full events, short duration) with cold index
 /// (metadata only, long duration) for efficient re-processing and deduplication.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RejectedEventsIndex {
     hot_cache: HotCache,
     cold_index: ColdIndex,
+    metrics: Option<super::metrics::SyncMetrics>,
+}
+
+// Manual Debug impl to avoid requiring Debug on SyncMetrics
+impl std::fmt::Debug for RejectedEventsIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RejectedEventsIndex")
+            .field("hot_cache", &self.hot_cache)
+            .field("cold_index", &self.cold_index)
+            .field("metrics", &self.metrics.is_some())
+            .finish()
+    }
 }
 
 impl RejectedEventsIndex {
@@ -316,6 +328,38 @@ impl RejectedEventsIndex {
         Self {
             hot_cache: HotCache::new(hot_cache_duration),
             cold_index: ColdIndex::new(cold_index_duration),
+            metrics: None,
+        }
+    }
+
+    /// Create new rejected events index with metrics
+    ///
+    /// # Arguments
+    ///
+    /// * `hot_cache_duration` - How long to keep full events in hot cache (default: 2 minutes)
+    /// * `cold_index_duration` - How long to keep metadata in cold index (default: 7 days)
+    /// * `metrics` - Prometheus metrics for tracking index operations
+    pub fn with_metrics(
+        hot_cache_duration: Duration,
+        cold_index_duration: Duration,
+        metrics: super::metrics::SyncMetrics,
+    ) -> Self {
+        let index = Self {
+            hot_cache: HotCache::new(hot_cache_duration),
+            cold_index: ColdIndex::new(cold_index_duration),
+            metrics: Some(metrics),
+        };
+
+        // Initialize metrics with current sizes
+        index.update_metrics();
+        index
+    }
+
+    /// Update metrics with current sizes
+    fn update_metrics(&self) {
+        if let Some(ref metrics) = self.metrics {
+            metrics.update_hot_cache_size(self.hot_cache.len());
+            metrics.update_cold_index_size(self.cold_index.len());
         }
     }
 
@@ -344,6 +388,9 @@ impl RejectedEventsIndex {
 
         // Add to cold index (metadata only)
         self.cold_index.add(event.id, pubkey, identifier, reason);
+
+        // Update metrics
+        self.update_metrics();
     }
 
     /// Check if event is already rejected (in either tier)
@@ -375,6 +422,23 @@ impl RejectedEventsIndex {
             .hot_cache
             .get_maintainer_events(maintainer_pubkey, identifier);
 
+        // Track metrics
+        if let Some(ref metrics) = self.metrics {
+            if removed > 0 {
+                metrics.record_invalidation(removed);
+            }
+            if events.is_empty() {
+                metrics.record_hot_cache_miss();
+            } else {
+                for _ in &events {
+                    metrics.record_hot_cache_hit();
+                }
+            }
+        }
+
+        // Update size metrics
+        self.update_metrics();
+
         (removed, events)
     }
 
@@ -384,6 +448,20 @@ impl RejectedEventsIndex {
     pub fn cleanup_expired(&self) -> (usize, usize) {
         let hot_expired = self.hot_cache.cleanup_expired();
         let cold_expired = self.cold_index.cleanup_expired();
+
+        // Track metrics
+        if let Some(ref metrics) = self.metrics {
+            if hot_expired > 0 {
+                metrics.record_hot_cache_expired(hot_expired);
+            }
+            if cold_expired > 0 {
+                metrics.record_cold_index_expired(cold_expired);
+            }
+        }
+
+        // Update size metrics
+        self.update_metrics();
+
         (hot_expired, cold_expired)
     }
 
