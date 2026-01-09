@@ -1246,7 +1246,7 @@ impl SyncManager {
 
         // 6. Connect to bootstrap relay if configured
         if let Some(ref bootstrap_url) = self.bootstrap_relay_url.clone() {
-            self.register_relay(bootstrap_url.clone()).await;
+            self.register_relay(bootstrap_url.clone(), true).await;
             self.try_connect_relay(bootstrap_url).await;
         }
 
@@ -1356,7 +1356,7 @@ impl SyncManager {
                 );
 
                 // Register relay (creates RelayConnection, initializes RelayState, updates metrics)
-                self.register_relay(action.relay_url.clone()).await;
+                self.register_relay(action.relay_url.clone(), false).await;
                 self.try_connect_relay(&action.relay_url).await;
                 // Connection will trigger handle_connect_or_reconnect which will process items
                 return;
@@ -1868,7 +1868,7 @@ impl SyncManager {
     /// Also initializes RelayState if it doesn't exist.
     /// Does NOT connect - connection happens via try_connect_relay or retry_disconnected_relays.
     /// The RelayConnection persists forever and is reused on reconnects.
-    async fn register_relay(&mut self, relay_url: String) {
+    async fn register_relay(&mut self, relay_url: String, is_bootstrap: bool) {
         // Create RelayConnection if not exists
         if !self.connections.contains_key(&relay_url) {
             // Get relay owner keys for NIP-42 authentication
@@ -1892,7 +1892,7 @@ impl SyncManager {
             if !index.contains_key(&relay_url) {
                 let new_state = RelayState {
                     connection_status: ConnectionStatus::Disconnected,
-                    is_bootstrap: false,
+                    is_bootstrap,
                     last_connected: None,
                     disconnected_at: None,
                     repos: HashSet::new(),
@@ -1905,6 +1905,12 @@ impl SyncManager {
                 index.insert(relay_url.clone(), new_state);
                 true
             } else {
+                // If relay already exists and is_bootstrap is true, update the flag
+                if is_bootstrap {
+                    if let Some(state) = index.get_mut(&relay_url) {
+                        state.is_bootstrap = true;
+                    }
+                }
                 false
             }
         };
