@@ -951,6 +951,38 @@ async fn process_purgatory_state_events(
             }
         };
 
+        // CRITICAL: Check authorization before processing
+        // State events MUST be rejected if author is not in maintainer set
+        let authorized_owners = crate::git::authorization::pubkey_authorised_for_repo_owners(
+            &entry.event.pubkey,
+            &db_repo_data,
+        );
+
+        if authorized_owners.is_empty() {
+            warn!(
+                identifier = %identifier,
+                event_id = %entry.event.id,
+                author = %entry.event.pubkey.to_hex(),
+                "Rejecting state event from purgatory: author not in maintainer set"
+            );
+            // Remove from purgatory - this event will never be authorized
+            purgatory.remove_state_event(identifier, &entry.event.id);
+            result.errors.push(format!(
+                "State event {} rejected: author {} not in maintainer set",
+                entry.event.id,
+                entry.event.pubkey.to_hex()
+            ));
+            continue;
+        }
+
+        debug!(
+            identifier = %identifier,
+            event_id = %entry.event.id,
+            author = %entry.event.pubkey.to_hex(),
+            authorized_for_owners = ?authorized_owners,
+            "State event author authorized via maintainer set"
+        );
+
         // Use unified processing function
         let process_result = crate::git::process::process_state_with_git_data(
             &state,

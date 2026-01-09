@@ -56,6 +56,22 @@ pub struct SyncMetrics {
     rejected_announcements_cold_index_expired_total: IntCounter,
     /// Total invalidations (maintainer announcements invalidated)
     rejected_announcements_invalidated_total: IntCounter,
+
+    // === Rejected States Index Metrics ===
+    /// Current number of state events in hot cache
+    rejected_states_hot_cache_current: IntGauge,
+    /// Total hot cache hits (state events re-processed from cache)
+    rejected_states_hot_cache_hits_total: IntCounter,
+    /// Total hot cache misses (state events not in cache)
+    rejected_states_hot_cache_misses_total: IntCounter,
+    /// Total expired state events removed from hot cache
+    rejected_states_hot_cache_expired_total: IntCounter,
+    /// Current number of state event entries in cold index
+    rejected_states_cold_index_current: IntGauge,
+    /// Total state event cold index entries expired and removed
+    rejected_states_cold_index_expired_total: IntCounter,
+    /// Total state event invalidations
+    rejected_states_invalidated_total: IntCounter,
 }
 
 impl SyncMetrics {
@@ -172,6 +188,49 @@ impl SyncMetrics {
         ))?;
         registry.register(Box::new(rejected_announcements_invalidated_total.clone()))?;
 
+        // Rejected states metrics
+        let rejected_states_hot_cache_current = IntGauge::with_opts(Opts::new(
+            "ngit_sync_rejected_states_hot_cache_current",
+            "Current number of state events in hot cache (full events, 2 min expiry)",
+        ))?;
+        registry.register(Box::new(rejected_states_hot_cache_current.clone()))?;
+
+        let rejected_states_hot_cache_hits_total = IntCounter::with_opts(Opts::new(
+            "ngit_sync_rejected_states_hot_cache_hits_total",
+            "Total hot cache hits (state events re-processed from cache)",
+        ))?;
+        registry.register(Box::new(rejected_states_hot_cache_hits_total.clone()))?;
+
+        let rejected_states_hot_cache_misses_total = IntCounter::with_opts(Opts::new(
+            "ngit_sync_rejected_states_hot_cache_misses_total",
+            "Total hot cache misses (state events not in cache when invalidated)",
+        ))?;
+        registry.register(Box::new(rejected_states_hot_cache_misses_total.clone()))?;
+
+        let rejected_states_hot_cache_expired_total = IntCounter::with_opts(Opts::new(
+            "ngit_sync_rejected_states_hot_cache_expired_total",
+            "Total expired state events removed from hot cache",
+        ))?;
+        registry.register(Box::new(rejected_states_hot_cache_expired_total.clone()))?;
+
+        let rejected_states_cold_index_current = IntGauge::with_opts(Opts::new(
+            "ngit_sync_rejected_states_cold_index_current",
+            "Current number of state event entries in cold index (metadata only, 7 day expiry)",
+        ))?;
+        registry.register(Box::new(rejected_states_cold_index_current.clone()))?;
+
+        let rejected_states_cold_index_expired_total = IntCounter::with_opts(Opts::new(
+            "ngit_sync_rejected_states_cold_index_expired_total",
+            "Total state event cold index entries expired and removed",
+        ))?;
+        registry.register(Box::new(rejected_states_cold_index_expired_total.clone()))?;
+
+        let rejected_states_invalidated_total = IntCounter::with_opts(Opts::new(
+            "ngit_sync_rejected_states_invalidated_total",
+            "Total state event invalidations (when announcements accepted)",
+        ))?;
+        registry.register(Box::new(rejected_states_invalidated_total.clone()))?;
+
         Ok(Self {
             relay_connected,
             connection_attempts_total,
@@ -188,6 +247,13 @@ impl SyncMetrics {
             rejected_announcements_cold_index_current,
             rejected_announcements_cold_index_expired_total,
             rejected_announcements_invalidated_total,
+            rejected_states_hot_cache_current,
+            rejected_states_hot_cache_hits_total,
+            rejected_states_hot_cache_misses_total,
+            rejected_states_hot_cache_expired_total,
+            rejected_states_cold_index_current,
+            rejected_states_cold_index_expired_total,
+            rejected_states_invalidated_total,
         })
     }
 
@@ -395,6 +461,43 @@ impl SyncMetrics {
     /// Record invalidation (maintainer announcement invalidated).
     pub fn record_invalidation(&self, count: usize) {
         self.rejected_announcements_invalidated_total.inc_by(count as u64);
+    }
+
+    // === Rejected States Recording Methods ===
+
+    /// Update state events hot cache current size gauge.
+    pub fn update_states_hot_cache_size(&self, size: usize) {
+        self.rejected_states_hot_cache_current.set(size as i64);
+    }
+
+    /// Record state event hot cache hit (event re-processed from cache).
+    pub fn record_states_hot_cache_hit(&self) {
+        self.rejected_states_hot_cache_hits_total.inc();
+    }
+
+    /// Record state event hot cache miss (event not in cache when invalidated).
+    pub fn record_states_hot_cache_miss(&self) {
+        self.rejected_states_hot_cache_misses_total.inc();
+    }
+
+    /// Record state event hot cache expired entries.
+    pub fn record_states_hot_cache_expired(&self, count: usize) {
+        self.rejected_states_hot_cache_expired_total.inc_by(count as u64);
+    }
+
+    /// Update state events cold index current size gauge.
+    pub fn update_states_cold_index_size(&self, size: usize) {
+        self.rejected_states_cold_index_current.set(size as i64);
+    }
+
+    /// Record state event cold index expired entries.
+    pub fn record_states_cold_index_expired(&self, count: usize) {
+        self.rejected_states_cold_index_expired_total.inc_by(count as u64);
+    }
+
+    /// Record state event invalidation.
+    pub fn record_states_invalidation(&self, count: usize) {
+        self.rejected_states_invalidated_total.inc_by(count as u64);
     }
 }
 

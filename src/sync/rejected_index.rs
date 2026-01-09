@@ -355,11 +355,19 @@ impl RejectedEventsIndex {
         index
     }
 
-    /// Update metrics with current sizes
+    /// Update metrics with current sizes (for announcements)
     fn update_metrics(&self) {
         if let Some(ref metrics) = self.metrics {
             metrics.update_hot_cache_size(self.hot_cache.len());
             metrics.update_cold_index_size(self.cold_index.len());
+        }
+    }
+
+    /// Update metrics with current sizes (for states)
+    fn update_states_metrics(&self) {
+        if let Some(ref metrics) = self.metrics {
+            metrics.update_states_hot_cache_size(self.hot_cache.len());
+            metrics.update_states_cold_index_size(self.cold_index.len());
         }
     }
 
@@ -391,6 +399,36 @@ impl RejectedEventsIndex {
 
         // Update metrics
         self.update_metrics();
+    }
+
+    /// Add rejected state event to both tiers
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - Full event object (stored in hot cache)
+    /// * `pubkey` - Author's public key
+    /// * `identifier` - Repository identifier (d tag)
+    /// * `reason` - Why the state event was rejected
+    pub fn add_state(
+        &self,
+        event: Event,
+        pubkey: PublicKey,
+        identifier: String,
+        reason: RejectionReason,
+    ) {
+        // Add to hot cache (full event)
+        self.hot_cache.add(
+            event.clone(),
+            pubkey,
+            identifier.clone(),
+            reason,
+        );
+
+        // Add to cold index (metadata only)
+        self.cold_index.add(event.id, pubkey, identifier, reason);
+
+        // Update metrics (using states metrics)
+        self.update_states_metrics();
     }
 
     /// Check if event is already rejected (in either tier)
@@ -442,7 +480,51 @@ impl RejectedEventsIndex {
         (removed, events)
     }
 
-    /// Clean up expired entries from both tiers
+    /// Invalidate state events and get events for immediate re-processing
+    ///
+    /// This is called when an announcement is accepted that authorizes state events.
+    /// It removes the cold index entries (so they can be re-fetched on next sync) and
+    /// returns any events still in the hot cache for immediate re-processing.
+    ///
+    /// # Returns
+    ///
+    /// Tuple of (number of cold index entries removed, events from hot cache)
+    pub fn invalidate_and_get_state_events(
+        &self,
+        maintainer_pubkey: &PublicKey,
+        identifier: &str,
+    ) -> (usize, Vec<Event>) {
+        // Remove from cold index (prevents re-fetch)
+        let removed = self
+            .cold_index
+            .invalidate_maintainer_announcements(maintainer_pubkey, identifier);
+
+        // Get from hot cache (for immediate re-processing)
+        let events = self
+            .hot_cache
+            .get_maintainer_events(maintainer_pubkey, identifier);
+
+        // Track metrics (using states metrics)
+        if let Some(ref metrics) = self.metrics {
+            if removed > 0 {
+                metrics.record_states_invalidation(removed);
+            }
+            if events.is_empty() {
+                metrics.record_states_hot_cache_miss();
+            } else {
+                for _ in &events {
+                    metrics.record_states_hot_cache_hit();
+                }
+            }
+        }
+
+        // Update size metrics (using states metrics)
+        self.update_states_metrics();
+
+        (removed, events)
+    }
+
+    /// Clean up expired entries from both tiers (for announcements)
     ///
     /// Returns tuple of (hot cache expired, cold index expired)
     pub fn cleanup_expired(&self) -> (usize, usize) {
@@ -461,6 +543,29 @@ impl RejectedEventsIndex {
 
         // Update size metrics
         self.update_metrics();
+
+        (hot_expired, cold_expired)
+    }
+
+    /// Clean up expired entries from both tiers (for states)
+    ///
+    /// Returns tuple of (hot cache expired, cold index expired)
+    pub fn cleanup_states_expired(&self) -> (usize, usize) {
+        let hot_expired = self.hot_cache.cleanup_expired();
+        let cold_expired = self.cold_index.cleanup_expired();
+
+        // Track metrics (using states metrics)
+        if let Some(ref metrics) = self.metrics {
+            if hot_expired > 0 {
+                metrics.record_states_hot_cache_expired(hot_expired);
+            }
+            if cold_expired > 0 {
+                metrics.record_states_cold_index_expired(cold_expired);
+            }
+        }
+
+        // Update size metrics (using states metrics)
+        self.update_states_metrics();
 
         (hot_expired, cold_expired)
     }

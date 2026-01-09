@@ -78,6 +78,46 @@ impl StatePolicy {
         // Get all repositories and state events from db with identifier
         let db_repo_data = fetch_repository_data(&self.ctx.database, &state.identifier).await?;
 
+        // CRITICAL: Check if author is authorized via maintainer set
+        // State events MUST be rejected if author is not in maintainer set of any accepted announcement
+        if db_repo_data.announcements.is_empty() {
+            tracing::warn!(
+                event_id = %event.id,
+                identifier = %state.identifier,
+                author = %event.pubkey.to_hex(),
+                "Rejecting state event: no announcement exists for this repository"
+            );
+            return Ok(WritePolicyResult::Reject {
+                status: false,
+                message: "invalid: no announcement exists for this repository".into(),
+            });
+        }
+
+        let authorized_owners =
+            crate::git::authorization::pubkey_authorised_for_repo_owners(&event.pubkey, &db_repo_data);
+        
+        if authorized_owners.is_empty() {
+            tracing::warn!(
+                event_id = %event.id,
+                identifier = %state.identifier,
+                author = %event.pubkey.to_hex(),
+                announcements_count = db_repo_data.announcements.len(),
+                "Rejecting state event: author not in maintainer set of any announcement"
+            );
+            return Ok(WritePolicyResult::Reject {
+                status: false,
+                message: "invalid: author not authorized for this repository".into(),
+            });
+        }
+
+        tracing::debug!(
+            event_id = %event.id,
+            identifier = %state.identifier,
+            author = %event.pubkey.to_hex(),
+            authorized_for_owners = ?authorized_owners,
+            "State event author authorized via maintainer set"
+        );
+
         // Duplicate check in db
         if db_repo_data.states.iter().any(|e| e.event.id.eq(&event.id)) {
             tracing::debug!("processed state event duplicate (in db): {}", event.id);

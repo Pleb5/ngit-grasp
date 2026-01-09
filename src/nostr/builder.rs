@@ -102,6 +102,11 @@ impl Nip34WritePolicy {
                         }
 
                         tracing::debug!("Accepted repository announcement: {}", event_id_str);
+                        
+                        // Check purgatory for state events that might now be authorized
+                        self.check_purgatory_state_events_for_identifier(&announcement.identifier)
+                            .await;
+                        
                         WritePolicyResult::Accept
                     }
                     Err(e) => {
@@ -125,6 +130,11 @@ impl Nip34WritePolicy {
                             announcement.identifier
                         );
                         // Don't create bare repository for external announcements
+                        
+                        // Check purgatory for state events that might now be authorized
+                        self.check_purgatory_state_events_for_identifier(&announcement.identifier)
+                            .await;
+                        
                         WritePolicyResult::Accept
                     }
                     Err(e) => {
@@ -300,6 +310,68 @@ impl Nip34WritePolicy {
                     e
                 );
                 WritePolicyResult::reject(format!("Failed to check git data: {}", e))
+            }
+        }
+    }
+
+    /// Check purgatory for state events that might now be authorized by a new announcement
+    ///
+    /// When an announcement is accepted, state events in purgatory that were previously
+    /// rejected due to missing announcements might now be authorized. This method:
+    /// 1. Finds all state events in purgatory for the identifier
+    /// 2. Re-evaluates authorization for each event
+    /// 3. Processes authorized events (releases from purgatory)
+    /// 4. Keeps unauthorized events in purgatory (will expire naturally)
+    async fn check_purgatory_state_events_for_identifier(&self, identifier: &str) {
+        let state_events = self.ctx.purgatory.find_state(identifier);
+        
+        if state_events.is_empty() {
+            return;
+        }
+        
+        tracing::debug!(
+            identifier = %identifier,
+            count = state_events.len(),
+            "Checking purgatory state events after announcement acceptance"
+        );
+        
+        for entry in state_events {
+            // Re-evaluate authorization with the new announcement
+            match self.state_policy.process_state_event(&entry.event, false).await {
+                Ok(WritePolicyResult::Accept) => {
+                    tracing::info!(
+                        event_id = %entry.event.id,
+                        identifier = %identifier,
+                        "State event in purgatory now authorized, will be processed"
+                    );
+                    // Event will be automatically removed from purgatory by process_state_event
+                    // and broadcast to subscribers
+                }
+                Ok(WritePolicyResult::Reject { message, .. }) => {
+                    if message.contains("not authorized") {
+                        tracing::debug!(
+                            event_id = %entry.event.id,
+                            identifier = %identifier,
+                            "State event in purgatory still not authorized, keeping in purgatory"
+                        );
+                        // Keep in purgatory - will expire naturally after 30 minutes
+                    } else {
+                        tracing::debug!(
+                            event_id = %entry.event.id,
+                            identifier = %identifier,
+                            reason = %message,
+                            "State event in purgatory rejected for other reason"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        event_id = %entry.event.id,
+                        identifier = %identifier,
+                        error = %e,
+                        "Error re-evaluating state event in purgatory"
+                    );
+                }
             }
         }
     }
