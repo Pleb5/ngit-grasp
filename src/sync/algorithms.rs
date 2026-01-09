@@ -404,6 +404,7 @@ mod tests {
                 pagination_state: HashMap::new(),
                 requested_event_ids: None,
                 received_event_ids: None,
+                retry_count: 0,
             }],
         );
 
@@ -518,6 +519,7 @@ mod tests {
                 pagination_state: HashMap::new(),
                 requested_event_ids: None,
                 received_event_ids: None,
+                retry_count: 0,
             }],
         );
 

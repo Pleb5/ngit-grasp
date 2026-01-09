@@ -202,6 +202,9 @@ pub struct PendingBatch {
     /// Event IDs actually received for this batch (None for REQ+EOSE)
     /// Compared against requested_event_ids to detect missing events
     pub received_event_ids: Option<HashSet<EventId>>,
+    /// Number of retry attempts for missing events (Negentropy only)
+    /// Used to prevent infinite retry loops when relay consistently fails
+    pub retry_count: usize,
 }
 
 /// Items included in a pending batch
@@ -651,10 +654,38 @@ impl SyncManager {
                 if !missing.is_empty() {
                     let requested_count = requested.len();
                     let received_count = received.len();
+                    let retry_count = batch.retry_count;
+
+                    // Check if we made any progress (received ANY events we requested)
+                    // If received_count is 0, relay returned nothing useful - abort retry
+                    if retry_count > 0 && received_count == 0 {
+                        tracing::error!(
+                            relay = %relay_url,
+                            batch_id = batch.batch_id,
+                            retry_count = retry_count,
+                            requested_count = requested_count,
+                            missing_count = missing.len(),
+                            missing_ids = ?missing.iter().map(|id| id.to_hex()).collect::<Vec<_>>(),
+                            "Negentropy retry made no progress - relay returned zero requested events. \
+                             Aborting retry to prevent infinite loop. Completing batch with partial results."
+                            // TODO: Track this failure in Prometheus metrics (sync_failed_batches_total)
+                        );
+
+                        // Extract and complete batch with partial results
+                        let batch_idx_for_completion = batch_idx;
+                        let completed_batch = batches.remove(batch_idx_for_completion);
+                        if batches.is_empty() {
+                            pending.remove(relay_url);
+                        }
+                        drop(pending);
+                        self.confirm_batch(relay_url, completed_batch).await;
+                        return;
+                    }
 
                     tracing::warn!(
                         relay = %relay_url,
                         batch_id = batch.batch_id,
+                        retry_count = retry_count,
                         requested_count = requested_count,
                         received_count = received_count,
                         missing_count = missing.len(),
@@ -710,12 +741,15 @@ impl SyncManager {
                                     Some(missing.iter().cloned().collect());
                                 // Clear received_event_ids for fresh tracking
                                 batch.received_event_ids = Some(HashSet::new());
+                                // Increment retry counter
+                                batch.retry_count += 1;
 
                                 tracing::info!(
                                     relay = %relay_url_for_retry,
                                     batch_id = batch_id,
                                     retry_subs = new_sub_ids.len(),
                                     missing_events = missing.len(),
+                                    retry_attempt = batch.retry_count,
                                     "Created retry subscriptions for missing negentropy events"
                                 );
                             }
@@ -2373,6 +2407,7 @@ impl SyncManager {
                 pagination_state: HashMap::new(), // Negentropy doesn't use pagination
                 requested_event_ids: None,        // Will be set after negentropy diff
                 received_event_ids: None,         // Will be set after negentropy diff
+                retry_count: 0,
             };
 
             // Add to pending_sync_index
@@ -2610,6 +2645,7 @@ impl SyncManager {
                 pagination_state,
                 requested_event_ids: None, // Not used for REQ+EOSE
                 received_event_ids: None,  // Not used for REQ+EOSE
+                retry_count: 0,            // Not used for REQ+EOSE
             };
 
             // Add to pending_sync_index
@@ -2822,11 +2858,13 @@ mod tests {
             pagination_state: HashMap::new(),
             requested_event_ids: Some(HashSet::new()),
             received_event_ids: Some(HashSet::new()),
+            retry_count: 0,
         };
 
         assert!(batch.requested_event_ids.is_some());
         assert!(batch.received_event_ids.is_some());
         assert_eq!(batch.sync_method, SyncMethod::Negentropy);
+        assert_eq!(batch.retry_count, 0);
     }
 
     #[test]
@@ -2840,6 +2878,7 @@ mod tests {
             pagination_state: HashMap::new(),
             requested_event_ids: None,
             received_event_ids: None,
+            retry_count: 0,
         };
 
         assert!(batch.requested_event_ids.is_none());
