@@ -2050,6 +2050,119 @@ impl SyncManager {
                     broadcast = broadcast_success,
                     "Synced event saved and broadcast"
                 );
+
+                // GRASP-02 PR3: Invalidate and re-process maintainer announcements
+                // If this is a repository announcement that lists maintainers, check if any
+                // of those maintainer announcements were previously rejected and are still
+                // in the hot cache. If so, re-process them immediately (they should now pass
+                // validation since the owner announcement has been accepted).
+                if event.kind == Kind::GitRepoAnnouncement {
+                    use crate::nostr::events::RepositoryAnnouncement;
+                    
+                    match RepositoryAnnouncement::from_event(event.clone()) {
+                        Ok(announcement) => {
+                            if !announcement.maintainers.is_empty() {
+                                tracing::debug!(
+                                    event_id = %event.id,
+                                    identifier = %announcement.identifier,
+                                    maintainer_count = announcement.maintainers.len(),
+                                    "Owner announcement accepted, checking for rejected maintainer announcements"
+                                );
+
+                                // For each maintainer, invalidate and get their events
+                                for maintainer_hex in &announcement.maintainers {
+                                    // Parse maintainer public key
+                                    match PublicKey::from_hex(maintainer_hex) {
+                                        Ok(maintainer_pubkey) => {
+                                            let (removed, hot_events) = rejected_events_index
+                                                .invalidate_and_get_events(
+                                                    &maintainer_pubkey,
+                                                    &announcement.identifier,
+                                                );
+
+                                            if removed > 0 {
+                                                tracing::info!(
+                                                    maintainer = %maintainer_hex,
+                                                    identifier = %announcement.identifier,
+                                                    removed_from_cold_index = removed,
+                                                    hot_cache_events = hot_events.len(),
+                                                    "Invalidated rejected maintainer announcements"
+                                                );
+                                            }
+
+                                            // Re-process events from hot cache immediately
+                                            for maintainer_event in hot_events {
+                                                tracing::info!(
+                                                    event_id = %maintainer_event.id,
+                                                    maintainer = %maintainer_hex,
+                                                    identifier = %announcement.identifier,
+                                                    "Re-processing maintainer announcement from hot cache"
+                                                );
+
+                                                // Recursive call to process_event_static
+                                                // This is safe because:
+                                                // 1. Event was removed from hot cache before this call
+                                                // 2. Second attempt uses maintainer exception (different code path)
+                                                // 3. If second attempt fails, stays in cold index only (no third attempt)
+                                                // Use Box::pin to avoid infinitely sized future
+                                                let reprocess_result = Box::pin(Self::process_event_static(
+                                                    &maintainer_event,
+                                                    relay_url,
+                                                    database,
+                                                    write_policy,
+                                                    local_relay,
+                                                    rejected_events_index,
+                                                ))
+                                                .await;
+
+                                                match reprocess_result {
+                                                    ProcessResult::Saved => {
+                                                        tracing::info!(
+                                                            event_id = %maintainer_event.id,
+                                                            maintainer = %maintainer_hex,
+                                                            identifier = %announcement.identifier,
+                                                            "Maintainer announcement accepted on re-processing"
+                                                        );
+                                                    }
+                                                    ProcessResult::Duplicate => {
+                                                        tracing::debug!(
+                                                            event_id = %maintainer_event.id,
+                                                            "Maintainer announcement already exists (duplicate)"
+                                                        );
+                                                    }
+                                                    other => {
+                                                        tracing::warn!(
+                                                            event_id = %maintainer_event.id,
+                                                            maintainer = %maintainer_hex,
+                                                            identifier = %announcement.identifier,
+                                                            result = ?other,
+                                                            "Maintainer announcement still rejected on re-processing"
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                maintainer_hex = %maintainer_hex,
+                                                error = %e,
+                                                "Invalid maintainer public key in announcement"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                event_id = %event.id,
+                                error = %e,
+                                "Failed to parse repository announcement for maintainer invalidation"
+                            );
+                        }
+                    }
+                }
+
                 ProcessResult::Saved
             }
             WritePolicyResult::Reject { message, status } => {
@@ -2082,7 +2195,8 @@ impl SyncManager {
                             .and_then(|t| t.content())
                         {
                             // Determine rejection reason based on message
-                            let reason = if message.contains("doesn't list this service") {
+                            let reason = if message.contains("doesn't list this service") 
+                                || message.contains("Announcement must list service") {
                                 rejected_index::RejectionReason::DoesNotListService
                             } else if message.contains("maintainer") {
                                 rejected_index::RejectionReason::MaintainerNotYetValid

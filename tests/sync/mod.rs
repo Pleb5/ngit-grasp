@@ -134,5 +134,6 @@ pub mod historic_sync;
 pub mod catchup;
 pub mod discovery;
 pub mod live_sync;
+pub mod maintainer_reprocessing;
 pub mod metrics;
 pub mod tag_variations;
