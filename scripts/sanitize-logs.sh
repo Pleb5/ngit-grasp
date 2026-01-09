@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # sanitize-logs.sh - Truncates verbose log lines for LLM analysis
 #
 # Usage:
@@ -9,8 +9,8 @@
 set -euo pipefail
 
 # Default settings
-HEAD_CHARS=100
-TAIL_CHARS=20
+HEAD_CHARS=200
+TAIL_CHARS=100
 MAX_LINE_LENGTH=$((HEAD_CHARS + TAIL_CHARS + 20))  # buffer for the ellipsis marker
 
 # Parse arguments
@@ -35,8 +35,8 @@ while [[ $# -gt 0 ]]; do
             echo "Reads from stdin, writes to stdout."
             echo ""
             echo "Options:"
-            echo "  --head-chars N    Show first N chars of long lines (default: 100)"
-            echo "  --tail-chars N    Show last N chars of long lines (default: 20)"
+            echo "  --head-chars N    Show first N chars of long lines (default: 200)"
+            echo "  --tail-chars N    Show last N chars of long lines (default: 100)"
             echo "  --max-line N      Lines shorter than this are unchanged (default: head+tail+20)"
             echo "  -h, --help        Show this help"
             echo ""

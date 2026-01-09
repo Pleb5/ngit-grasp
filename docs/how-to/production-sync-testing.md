@@ -38,7 +38,7 @@ This domain has few repo announcements listing it, so sync stays manageable.
 The bootstrap relay provides the initial set of announcements to discover repos:
 
 ```bash
---sync-bootstrap-relay wss://git.shakespeare.diy
+--sync-bootstrap-relay-url wss://git.shakespeare.diy
 ```
 
 ### 3. Run with Time Limit
@@ -51,9 +51,9 @@ rm -rf /tmp/ngit-test-*
 
 # Run for 30 seconds with sanitized output
 timeout 30s cargo run -- \
-    --sync-bootstrap-relay wss://git.shakespeare.diy \
+    --sync-bootstrap-relay-url wss://git.shakespeare.diy \
     --domain ngit.danconwaydev.com \
-    --git-path /tmp/ngit-test-git \
+    --git-data-path /tmp/ngit-test-git \
     --relay-data-path /tmp/ngit-test-relay \
     2>&1 | ./scripts/sanitize-logs.sh | tee sync-test.log
 ```
@@ -72,8 +72,8 @@ cargo run -- [args] 2>&1 | ./scripts/sanitize-logs.sh
 ```
 
 **Options:**
-- `--head-chars N` - First N characters to show (default: 100)
-- `--tail-chars N` - Last N characters to show (default: 20)
+- `--head-chars N` - First N characters to show (default: 200)
+- `--tail-chars N` - Last N characters to show (default: 100)
 
 Example output:
 ```
@@ -245,9 +245,9 @@ tracing::trace!("Per-event detail that's too noisy");
 
 ```bash
 timeout 30s cargo run -- \
-    --sync-bootstrap-relay wss://git.shakespeare.diy \
+    --sync-bootstrap-relay-url wss://git.shakespeare.diy \
     --domain ngit.danconwaydev.com \
-    --git-path /tmp/ngit-test-git \
+    --git-data-path /tmp/ngit-test-git \
     --relay-data-path /tmp/ngit-test-relay \
     2>&1 | ./scripts/sanitize-logs.sh
 ```
@@ -256,9 +256,9 @@ timeout 30s cargo run -- \
 
 ```bash
 timeout 30s cargo run -- \
-    --sync-bootstrap-relay wss://git.shakespeare.diy \
+    --sync-bootstrap-relay-url wss://git.shakespeare.diy \
     --domain ngit.danconwaydev.com \
-    --git-path /tmp/ngit-test-git \
+    --git-data-path /tmp/ngit-test-git \
     --relay-data-path /tmp/ngit-test-relay \
     --metrics-address 127.0.0.1:9090 \
     2>&1 | ./scripts/sanitize-logs.sh
