@@ -136,6 +136,18 @@ pub struct Config {
     /// Primarily useful for testing that sync works without negentropy support.
     #[arg(long, env = "NGIT_SYNC_DISABLE_NEGENTROPY", default_value_t = false)]
     pub sync_disable_negentropy: bool,
+
+    /// Hot cache duration in seconds for rejected announcements (default: 120 = 2 minutes)
+    /// Stores full event objects for immediate re-processing when dependencies resolve.
+    /// Too short (<30s): Miss events from slow relays
+    /// Too long (>5min): Waste memory
+    #[arg(long, env = "NGIT_REJECTED_HOT_CACHE_DURATION_SECS", default_value_t = 120)]
+    pub rejected_hot_cache_duration_secs: u64,
+
+    /// Cold index expiry in seconds for rejected announcements (default: 604800 = 7 days)
+    /// Stores metadata only to prevent repeated downloads of rejected events.
+    #[arg(long, env = "NGIT_REJECTED_COLD_INDEX_EXPIRY_SECS", default_value_t = 604800)]
+    pub rejected_cold_index_expiry_secs: u64,
 }
 
 impl Config {
@@ -258,6 +270,8 @@ impl Config {
             sync_disconnect_check_interval_secs: 60,
             sync_base_backoff_secs: 5,
             sync_disable_negentropy: false,
+            rejected_hot_cache_duration_secs: 120,
+            rejected_cold_index_expiry_secs: 604800,
         }
     }
 }

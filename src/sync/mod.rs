@@ -74,9 +74,10 @@ pub type PendingSyncIndex = Arc<RwLock<HashMap<String, Vec<PendingBatch>>>>;
 /// These events are excluded from negentropy sync and skipped during REQ+EOSE processing
 /// to avoid repeatedly fetching and rejecting the same events.
 /// 
-/// NOTE: This is a temporary simple implementation. PR2 will replace this with the
-/// two-tier RejectedEventsIndex from rejected_index.rs (hot cache + cold index).
-type RejectedEventsIndexSimple = Arc<RwLock<HashSet<EventId>>>;
+/// Uses the two-tier RejectedEventsIndex from rejected_index.rs:
+/// - Hot cache: Full events for 2 minutes (enables immediate re-processing)
+/// - Cold index: Metadata for 7 days (prevents repeated downloads)
+use rejected_index::RejectedEventsIndex;
 
 // =============================================================================
 // Supporting Data Structures
@@ -444,8 +445,8 @@ pub struct SyncManager {
     relay_sync_index: RelaySyncIndex,
     /// In-flight subscription batches
     pending_sync_index: PendingSyncIndex,
-    /// Rejected announcement event IDs (30617/30618) - excluded from sync
-    rejected_events_index: RejectedEventsIndexSimple,
+    /// Rejected announcement events (30617/30618) - two-tier storage for re-processing
+    rejected_events_index: Arc<RejectedEventsIndex>,
     /// Active relay connections - keyed by relay URL
     connections: HashMap<String, RelayConnection>,
     /// Health tracker for relay connection state
@@ -498,7 +499,10 @@ impl SyncManager {
             repo_sync_index: Arc::new(RwLock::new(HashMap::new())),
             relay_sync_index: Arc::new(RwLock::new(HashMap::new())),
             pending_sync_index: Arc::new(RwLock::new(HashMap::new())),
-            rejected_events_index: Arc::new(RwLock::new(HashSet::new())),
+            rejected_events_index: Arc::new(RejectedEventsIndex::new(
+                Duration::from_secs(config.rejected_hot_cache_duration_secs),
+                Duration::from_secs(config.rejected_cold_index_expiry_secs),
+            )),
             connections: HashMap::new(),
             health_tracker: Arc::new(RelayHealthTracker::new(config)),
             next_batch_id: 0,
@@ -1351,8 +1355,7 @@ impl SyncManager {
                     RelayEvent::Event(event, subscription_id) => {
                         // Skip events we've already rejected (announcements only)
                         if event.kind == Kind::GitRepoAnnouncement || event.kind == Kind::RepoState {
-                            let rejected = rejected_events_index.read().await;
-                            if rejected.contains(&event.id) {
+                            if rejected_events_index.contains(&event.id) {
                                 tracing::trace!(
                                     event_id = %event.id,
                                     kind = %event.kind.as_u16(),
@@ -2001,7 +2004,7 @@ impl SyncManager {
         database: &SharedDatabase,
         write_policy: &Nip34WritePolicy,
         local_relay: &LocalRelay,
-        rejected_events_index: &RejectedEventsIndexSimple,
+        rejected_events_index: &Arc<RejectedEventsIndex>,
     ) -> ProcessResult {
         use nostr_relay_builder::prelude::{WritePolicy, WritePolicyResult};
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -2071,13 +2074,42 @@ impl SyncManager {
                     
                     // Track rejected announcement events to avoid re-fetching them
                     if event.kind == Kind::GitRepoAnnouncement || event.kind == Kind::RepoState {
-                        let mut rejected = rejected_events_index.write().await;
-                        rejected.insert(event.id);
-                        tracing::debug!(
-                            event_id = %event.id,
-                            kind = %event.kind.as_u16(),
-                            "Added rejected announcement to exclusion list"
-                        );
+                        // Extract identifier from 'd' tag
+                        if let Some(identifier) = event
+                            .tags
+                            .iter()
+                            .find(|t| t.kind() == nostr_sdk::TagKind::d())
+                            .and_then(|t| t.content())
+                        {
+                            // Determine rejection reason based on message
+                            let reason = if message.contains("doesn't list this service") {
+                                rejected_index::RejectionReason::DoesNotListService
+                            } else if message.contains("maintainer") {
+                                rejected_index::RejectionReason::MaintainerNotYetValid
+                            } else {
+                                rejected_index::RejectionReason::Other
+                            };
+
+                            rejected_events_index.add_announcement(
+                                event.clone(),
+                                event.pubkey,
+                                identifier.to_string(),
+                                reason,
+                            );
+
+                            tracing::debug!(
+                                event_id = %event.id,
+                                kind = %event.kind.as_u16(),
+                                identifier = %identifier,
+                                "Added rejected announcement to two-tier index"
+                            );
+                        } else {
+                            tracing::warn!(
+                                event_id = %event.id,
+                                kind = %event.kind.as_u16(),
+                                "Announcement missing 'd' tag, cannot track in rejected index"
+                            );
+                        }
                     }
                     
                     ProcessResult::Rejected
@@ -2608,7 +2640,7 @@ impl SyncManager {
 
             // Get event IDs to exclude: purgatory + rejected announcements
             let purgatory_ids = self.purgatory.event_ids();
-            let rejected_ids = self.rejected_events_index.read().await.clone();
+            let rejected_ids = self.rejected_events_index.get_all_event_ids();
             let excluded_ids: HashSet<EventId> = purgatory_ids.union(&rejected_ids).cloned().collect();
 
             for (idx, result) in diff_results {
@@ -2888,40 +2920,48 @@ mod tests {
 
     #[tokio::test]
     async fn test_rejected_events_index_tracks_announcements() {
-        // Create a rejected events index
-        let rejected_index: RejectedEventsIndexSimple = Arc::new(RwLock::new(HashSet::new()));
+        // Create a rejected events index with 2 minute hot cache, 7 day cold index
+        let rejected_index = Arc::new(RejectedEventsIndex::new(
+            Duration::from_secs(120),
+            Duration::from_secs(604800),
+        ));
 
-        // Create test announcement event (kind 30617)
+        // Create test announcement event (kind 30617) with 'd' tag
         let keys = Keys::generate();
         let announcement = EventBuilder::new(Kind::GitRepoAnnouncement, "test content")
+            .tag(nostr_sdk::Tag::custom(
+                nostr_sdk::TagKind::d(),
+                vec!["test-repo"],
+            ))
             .sign_with_keys(&keys)
             .unwrap();
 
         // Verify index is empty
-        {
-            let rejected = rejected_index.read().await;
-            assert_eq!(rejected.len(), 0);
-        }
+        assert_eq!(rejected_index.hot_cache_len(), 0);
+        assert_eq!(rejected_index.cold_index_len(), 0);
 
         // Simulate rejection by adding to index
-        {
-            let mut rejected = rejected_index.write().await;
-            rejected.insert(announcement.id);
-        }
+        rejected_index.add_announcement(
+            announcement.clone(),
+            announcement.pubkey,
+            "test-repo".to_string(),
+            rejected_index::RejectionReason::DoesNotListService,
+        );
 
-        // Verify event is tracked
-        {
-            let rejected = rejected_index.read().await;
-            assert!(rejected.contains(&announcement.id));
-            assert_eq!(rejected.len(), 1);
-        }
+        // Verify event is tracked in both tiers
+        assert!(rejected_index.contains(&announcement.id));
+        assert_eq!(rejected_index.hot_cache_len(), 1);
+        assert_eq!(rejected_index.cold_index_len(), 1);
     }
 
     #[tokio::test]
     async fn test_rejected_events_excluded_from_negentropy() {
         // Create indices
         let purgatory_ids: HashSet<EventId> = HashSet::new();
-        let mut rejected_ids = HashSet::new();
+        let rejected_index = RejectedEventsIndex::new(
+            Duration::from_secs(120),
+            Duration::from_secs(604800),
+        );
 
         // Create test event IDs
         let rejected_id = EventId::from_hex(
@@ -2933,7 +2973,28 @@ mod tests {
         )
         .unwrap();
 
-        rejected_ids.insert(rejected_id);
+        // Add rejected event to index
+        let keys = Keys::generate();
+        let rejected_event = EventBuilder::new(Kind::GitRepoAnnouncement, "rejected")
+            .tag(nostr_sdk::Tag::custom(
+                nostr_sdk::TagKind::d(),
+                vec!["rejected-repo"],
+            ))
+            .sign_with_keys(&keys)
+            .unwrap();
+        
+        // Override the event ID for testing (we need a specific ID)
+        // Since we can't override the ID, let's use the actual event ID
+        let rejected_id = rejected_event.id;
+        rejected_index.add_announcement(
+            rejected_event,
+            keys.public_key(),
+            "rejected-repo".to_string(),
+            rejected_index::RejectionReason::DoesNotListService,
+        );
+
+        // Get rejected IDs from index
+        let rejected_ids = rejected_index.get_all_event_ids();
 
         // Simulate negentropy reconciliation result
         let mut remote_ids = HashSet::new();

@@ -85,7 +85,7 @@
 //! ```
 
 use nostr_sdk::{Event, EventId, PublicKey};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -395,6 +395,24 @@ impl RejectedEventsIndex {
     /// Get current number of entries in cold index
     pub fn cold_index_len(&self) -> usize {
         self.cold_index.len()
+    }
+
+    /// Get all rejected event IDs (from both hot cache and cold index)
+    ///
+    /// Used for excluding rejected events from negentropy sync.
+    /// Note: This creates a snapshot - events may be added/removed concurrently.
+    pub fn get_all_event_ids(&self) -> HashSet<EventId> {
+        let mut ids = HashSet::new();
+
+        // Add from hot cache
+        let hot_entries = self.hot_cache.entries.read().unwrap();
+        ids.extend(hot_entries.keys().cloned());
+
+        // Add from cold index
+        let cold_entries = self.cold_index.entries.read().unwrap();
+        ids.extend(cold_entries.keys().cloned());
+
+        ids
     }
 }
 
