@@ -239,6 +239,22 @@ pub struct RepositoryAnnouncement { ... }
 pub struct RepositoryState { ... }
 ```
 
+#### [`policy/state.rs`](src/nostr/policy/state.rs) - State Event Authorization
+
+State events undergo authorization checks at multiple points:
+
+```rust
+/// State event authorization checks:
+/// 1. Announcement must exist for the repository identifier
+/// 2. Author must be in maintainer set of accepted announcement
+/// 3. Validated on arrival, announcement acceptance, and git data arrival
+```
+
+**Defense-in-depth authorization:**
+- **On arrival** (StatePolicy): Initial authorization check
+- **On announcement acceptance**: Purgatory re-evaluation of waiting state events
+- **On git data arrival**: Final authorization before database save
+
 ### 5. Purgatory System ([`src/purgatory/`](../../src/purgatory/))
 
 The purgatory system solves the "which arrives first?" problem where either nostr events or git pushes can arrive in any order. It provides an in-memory holding area for events and git data awaiting their counterparts.
@@ -457,6 +473,7 @@ The ngit-grasp relay implements **Proactive Sync of Nostr Eevents**, which synch
 - **Health tracking** with exponential backoff for failing relays
 - **Daily sync** with random 23-25h timer to detect state drift
 - **Filter consolidation** when count exceeds 70 to prevent subscription explosion
+- **Rejected events index** - prevents wasteful re-fetching during negentropy sync
 
 **Architecture:**
 
@@ -479,12 +496,59 @@ The ngit-grasp relay implements **Proactive Sync of Nostr Eevents**, which synch
 │  │  Health Tracker  │  Exponential backoff, dead detection │
 │  │  (DashMap)       │                                      │
 │  └──────────────────┘                                      │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │  Rejected Events Index (Two-Tier)                   │  │
+│  │  ┌────────────────┐    ┌──────────────────────┐    │  │
+│  │  │  Hot Cache     │───▶│  Cold Index          │    │  │
+│  │  │  (2 min)       │    │  (7 days)            │    │  │
+│  │  │  Full events   │    │  Metadata only       │    │  │
+│  │  └────────────────┘    └──────────────────────┘    │  │
+│  └──────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 **Source Code:** [`src/sync/`](src/sync/)
 
 For full design details, see [grasp-02-proactive-sync-v4.md](grasp-02-proactive-sync-v4.md).
+
+### Rejected Events Index
+
+The rejected events index solves two critical problems during sync:
+
+1. **Negentropy sync efficiency**: Prevents repeatedly downloading events that will be rejected again
+2. **Race condition resolution**: Enables immediate re-processing when event dependencies are satisfied
+
+**Two-Tier Architecture:**
+
+| Tier | Duration | Storage | Purpose |
+|------|----------|---------|---------|
+| Hot Cache | 2 minutes | Full events | Immediate re-processing when dependencies arrive |
+| Cold Index | 7 days | Metadata only | Prevent re-fetch during negentropy sync |
+
+**Event Flow:**
+
+```
+Event Rejected (e.g., maintainer before owner announcement)
+    │
+    ├──▶ Store full event in Hot Cache (2 min expiry)
+    └──▶ Store metadata in Cold Index (7 day expiry)
+    
+Dependency Arrives (e.g., owner announcement accepted)
+    │
+    ├──▶ Invalidate from Cold Index
+    ├──▶ Retrieve from Hot Cache (if still available)
+    └──▶ Re-process immediately (<1 second vs 24 hours)
+
+Negentropy Sync
+    │
+    └──▶ Exclude Cold Index IDs from "missing events" calculation
+```
+
+**Tracked Events:**
+- Repository announcements (kind 30617) rejected for not listing this service or maintainer validation failure
+- State events (kind 30618) rejected for missing announcements or unauthorized authors
+
+**Source Code:** [`src/sync/rejected_index.rs`](../../src/sync/rejected_index.rs)
 
 ## Future Extensions
 

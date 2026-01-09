@@ -434,6 +434,70 @@ NGIT_SYNC_RECONNECT_LOOKBACK_DAYS=7
 
 ---
 
+### Rejected Events Index Configuration
+
+These options configure the two-tier rejected events index that prevents wasteful re-fetching during sync and enables race condition resolution.
+
+#### `NGIT_REJECTED_HOT_CACHE_DURATION_SECS`
+
+**Description:** Duration in seconds to retain full events in hot cache for immediate re-processing
+**Type:** Integer (seconds)
+**Default:** `120` (2 minutes)
+**Required:** No
+
+**Examples:**
+
+```bash
+# Default: 2 minute hot cache
+NGIT_REJECTED_HOT_CACHE_DURATION_SECS=120
+
+# Shorter window (1 minute)
+NGIT_REJECTED_HOT_CACHE_DURATION_SECS=60
+
+# Longer window (5 minutes)
+NGIT_REJECTED_HOT_CACHE_DURATION_SECS=300
+```
+
+**Notes:**
+
+- Hot cache stores full event objects for immediate re-processing when dependencies arrive
+- Events expire from hot cache after this duration and move to cold index
+- Shorter durations reduce memory usage but may miss dependency arrivals
+- Longer durations increase memory but improve race condition resolution
+- Memory impact: ~200 KB typical, ~20 MB worst case
+
+---
+
+#### `NGIT_REJECTED_COLD_INDEX_EXPIRY_SECS`
+
+**Description:** Duration in seconds to retain event metadata in cold index for negentropy sync exclusion
+**Type:** Integer (seconds)
+**Default:** `604800` (7 days)
+**Required:** No
+
+**Examples:**
+
+```bash
+# Default: 7 day cold index
+NGIT_REJECTED_COLD_INDEX_EXPIRY_SECS=604800
+
+# Shorter retention (3 days)
+NGIT_REJECTED_COLD_INDEX_EXPIRY_SECS=259200
+
+# Longer retention (14 days)
+NGIT_REJECTED_COLD_INDEX_EXPIRY_SECS=1209600
+```
+
+**Notes:**
+
+- Cold index stores only metadata (event ID, pubkey, identifier, rejection reason)
+- Prevents re-downloading rejected events during negentropy sync
+- Entries automatically cleaned up daily
+- Longer durations prevent more wasteful re-fetching but use slightly more memory
+- Memory impact: ~1 MB typical
+
+---
+
 ### Logging Configuration
 
 #### `RUST_LOG`

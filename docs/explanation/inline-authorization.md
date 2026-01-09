@@ -352,6 +352,99 @@ pub async fn authorize_push(
    - If no event found, create placeholder (git-data-first scenario)
    - Collect PR events from purgatory for post-push processing
 
+## State Event Authorization
+
+State events (kind 30618) undergo authorization checks at three points (defense-in-depth):
+
+### 1. On Arrival (StatePolicy)
+
+When a state event arrives via WebSocket or sync:
+
+```rust
+// src/nostr/policy/state.rs
+impl StatePolicy {
+    async fn admit_event(&self, event: &Event) -> Result<Decision, Error> {
+        // Check 1: Does announcement exist for this repository?
+        let announcements = query_announcements(pubkey, identifier);
+        if announcements.is_empty() {
+            return Reject("No announcement exists for repository");
+        }
+        
+        // Check 2: Is author in maintainer set?
+        let maintainers = build_maintainer_set(announcements);
+        if !maintainers.contains(&event.author) {
+            return Reject("Author not in maintainer set");
+        }
+        
+        // If git data doesn't exist yet, goes to purgatory
+        // Otherwise, accepted to database
+    }
+}
+```
+
+### 2. On Announcement Acceptance (Purgatory Re-evaluation)
+
+When a repository announcement is accepted, waiting state events are re-evaluated:
+
+```rust
+// After announcement is saved to database
+for state_event in purgatory.get_state_events(identifier) {
+    // Re-check authorization now that announcement exists
+    if author_in_maintainer_set(state_event.author, identifier) {
+        // If git data now exists, save to database
+        // Otherwise, keep in purgatory
+    } else {
+        // Remove from purgatory - not authorized
+    }
+}
+```
+
+### 3. On Git Data Arrival (Purgatory Sync)
+
+When git data is pushed, purgatory state events are validated before saving:
+
+```rust
+// src/git/handlers.rs - after successful git push
+for state_event in purgatory.get_matching_state_events(identifier) {
+    // Final authorization check before database save
+    if author_in_maintainer_set(state_event.author, identifier) {
+        database.save(state_event);
+        purgatory.remove(state_event);
+    } else {
+        purgatory.remove(state_event); // Not authorized
+    }
+}
+```
+
+### Why Three Checkpoints?
+
+**Defense-in-depth** ensures authorization is always validated:
+
+1. **On arrival**: Prevents unauthorized events from entering the system
+2. **On announcement acceptance**: Handles race condition where state arrives before announcement
+3. **On git data arrival**: Final check before committing to database
+
+This prevents scenarios where:
+- Unauthorized state events are saved after maintainer changes
+- Race conditions bypass authorization
+- Purgatory holds events that will never be authorized
+
+### Rejection Tracking
+
+State events rejected during authorization are tracked in the rejected events index:
+
+- **Reason: MaintainerNotYetValid** - Author not in maintainer set (may become valid later)
+- **Reason: Other** - Other validation failures
+
+When a repository announcement is accepted, rejected state events for that repository are:
+1. **Invalidated** from cold index (removed from negentropy exclusion)
+2. **Retrieved** from hot cache (if still available within 2 minutes)
+3. **Re-processed** immediately with new maintainer set
+
+This enables rapid recovery from race conditions where state events arrive before maintainer announcements.
+
+See [work/rejected-events-index-summary.md](../../work/rejected-events-index-summary.md) for complete details on rejection tracking and re-processing.
+
 ---
 
 ## Comparison with Reference Implementation

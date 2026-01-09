@@ -729,6 +729,41 @@ If negentropy fails (relay doesn't support NIP-77, network error, etc.):
 2. The sync falls back to traditional REQ+EOSE
 3. No error is raised - fallback is automatic
 
+### Integration with Rejected Events Index
+
+The rejected events index prevents wasteful re-fetching during negentropy sync by excluding rejected event IDs from the reconciliation process:
+
+**During Negentropy Reconciliation:**
+
+1. **Build "already have" set**: Combine event IDs from:
+   - Events in database
+   - Events in purgatory
+   - **Events in rejected index (hot cache + cold index)**
+
+2. **Send to negentropy**: This combined set represents "events we already have or don't want"
+
+3. **Receive differences**: Relay only sends events we don't have and haven't rejected
+
+4. **Process received events**: New events go through normal validation:
+   - If accepted → saved to database
+   - If rejected → added to rejected index
+   - If waiting for dependencies → added to purgatory
+
+**Why This Matters:**
+
+Without the rejected events index, negentropy would repeatedly download events that don't list this service or are from unauthorized maintainers, wasting bandwidth on every sync cycle.
+
+**Re-Processing on Dependency Arrival:**
+
+When a dependency is satisfied (e.g., owner announcement accepted):
+1. Related entries are **invalidated** (removed) from cold index
+2. If event still in hot cache → immediate re-processing
+3. If event expired from hot cache → will be re-fetched on next sync (now that dependency exists)
+
+This prevents permanently excluding events that could become valid after dependencies arrive.
+
+See [work/rejected-events-index-summary.md](../../work/rejected-events-index-summary.md) for complete implementation details.
+
 ---
 
 ## REQ+EOSE Pagination

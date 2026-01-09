@@ -205,3 +205,97 @@ sum(ngit_sync_relay_status == 5)  # RateLimited
 5. **Historical data**: Prometheus retains health history; in-memory state only needs current status
 
 See [GRASP-02 Proactive Sync](grasp-02-proactive-sync.md) for full architecture details.
+
+## Rejected Events Index Metrics
+
+The rejected events index tracks rejected repository announcements and state events to prevent wasteful re-fetching during negentropy sync and enable race condition resolution.
+
+### Rejected Events Metrics
+
+All metrics are parameterized by `event_type` label with values "announcement" or "state":
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `ngit_rejected_hot_cache_current` | Gauge | event_type | Current number of entries in hot cache |
+| `ngit_rejected_cold_index_current` | Gauge | event_type | Current number of entries in cold index |
+| `ngit_rejected_hot_cache_hits` | Counter | event_type | Events successfully retrieved from hot cache for re-processing |
+| `ngit_rejected_hot_cache_misses` | Counter | event_type | Events expired from hot cache before dependency arrived |
+| `ngit_rejected_hot_cache_expired` | Counter | event_type | Entries cleaned up from hot cache (2 min expiry) |
+| `ngit_rejected_cold_index_expired` | Counter | event_type | Entries cleaned up from cold index (7 day expiry) |
+| `ngit_rejected_invalidated` | Counter | event_type | Entries invalidated when dependency was satisfied |
+
+### Example Grafana Queries
+
+```promql
+# Hot cache efficiency - how often we successfully re-process from cache
+rate(ngit_rejected_hot_cache_hits_total[5m])
+/ (rate(ngit_rejected_hot_cache_hits_total[5m]) + rate(ngit_rejected_hot_cache_misses_total[5m]))
+
+# Current rejected events by type
+ngit_rejected_hot_cache_current{event_type="announcement"}
+ngit_rejected_hot_cache_current{event_type="state"}
+ngit_rejected_cold_index_current{event_type="announcement"}
+ngit_rejected_cold_index_current{event_type="state"}
+
+# Race condition resolution rate - invalidations indicate successful dependency arrival
+rate(ngit_rejected_invalidated_total[5m])
+
+# Cache hit ratio over time (higher is better, means dependencies arriving quickly)
+sum(rate(ngit_rejected_hot_cache_hits_total[5m]))
+/ sum(rate(ngit_rejected_hot_cache_hits_total[5m]) + rate(ngit_rejected_hot_cache_misses_total[5m]))
+```
+
+### Example Alerts
+
+```yaml
+# Alert if hot cache hit rate is too low (suggests timing issues)
+- alert: RejectedEventsCacheMissRate
+  expr: |
+    sum(rate(ngit_rejected_hot_cache_misses_total[5m]))
+    / sum(rate(ngit_rejected_hot_cache_hits_total[5m]) + rate(ngit_rejected_hot_cache_misses_total[5m]))
+    > 0.8
+  for: 15m
+  labels:
+    severity: warning
+  annotations:
+    summary: "High rejected events cache miss rate ({{ $value | humanizePercentage }})"
+    description: "Most rejected events are expiring before dependencies arrive"
+
+# Alert if cold index growing too large
+- alert: RejectedEventsColdIndexSize
+  expr: ngit_rejected_cold_index_current > 10000
+  for: 1h
+  labels:
+    severity: info
+  annotations:
+    summary: "Rejected events cold index has {{ $value }} entries"
+    description: "Consider investigating why many events are being rejected"
+```
+
+### Two-Tier Architecture
+
+**Hot Cache (2 minutes):**
+- Stores full event objects
+- Enables immediate re-processing when dependencies arrive
+- Cleaned up every 60 seconds
+- Memory: ~200 KB typical, ~20 MB worst case
+
+**Cold Index (7 days):**
+- Stores metadata only (event ID, pubkey, identifier, reason)
+- Prevents re-downloading during negentropy sync
+- Cleaned up daily
+- Memory: ~1 MB typical
+
+### Use Cases
+
+**Race Condition Resolution:**
+When a maintainer announcement arrives before the owner announcement:
+1. Maintainer event rejected → hot cache + cold index
+2. Owner announcement accepted → invalidate from cold index
+3. If still in hot cache → immediate re-processing (<1 second)
+4. If expired from hot cache → will be re-fetched on next sync
+
+**Negentropy Sync Efficiency:**
+During sync, cold index IDs are excluded from "missing events" calculation, preventing wasteful re-download of events that will be rejected again.
+
+See [work/rejected-events-index-summary.md](../../work/rejected-events-index-summary.md) for complete implementation details.
