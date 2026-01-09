@@ -54,9 +54,9 @@
 //!
 //! # Usage
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use ngit_grasp::sync::rejected_index::{RejectedEventsIndex, RejectionReason};
-//! use nostr_sdk::Event;
+//! use nostr_sdk::{Event, PublicKey};
 //! use std::time::Duration;
 //!
 //! let index = RejectedEventsIndex::new(
@@ -64,7 +64,7 @@
 //!     Duration::from_secs(604800), // cold index: 7 days
 //! );
 //!
-//! // Add rejected announcement
+//! // Add rejected announcement (event is a nostr_sdk::Event)
 //! index.add_announcement(
 //!     event.clone(),
 //!     event.pubkey,
@@ -116,16 +116,19 @@ struct HotCacheEntry {
     event: Event,
     pubkey: PublicKey,
     identifier: String,
+    #[allow(dead_code)] // Used for metrics/debugging in future
     reason: RejectionReason,
     cached_at: Instant,
 }
 
 /// Entry in the cold index (metadata only)
+///
+/// Note: event_id is stored as the HashMap key, not in this struct
 #[derive(Debug, Clone)]
 struct ColdIndexEntry {
-    event_id: EventId,
     pubkey: PublicKey,
     identifier: String,
+    #[allow(dead_code)] // Used for metrics/debugging in future
     reason: RejectionReason,
     rejected_at: Instant,
 }
@@ -235,7 +238,6 @@ impl ColdIndex {
         reason: RejectionReason,
     ) {
         let entry = ColdIndexEntry {
-            event_id,
             pubkey,
             identifier,
             reason,

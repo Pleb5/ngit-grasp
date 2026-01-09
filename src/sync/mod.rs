@@ -1468,16 +1468,16 @@ impl SyncManager {
                 match relay_event {
                     RelayEvent::Event(event, subscription_id) => {
                         // Skip events we've already rejected (announcements only)
-                        if event.kind == Kind::GitRepoAnnouncement || event.kind == Kind::RepoState {
-                            if rejected_events_index.contains(&event.id) {
-                                tracing::trace!(
-                                    event_id = %event.id,
-                                    kind = %event.kind.as_u16(),
-                                    relay = %relay_url_clone,
-                                    "Skipping previously rejected announcement event"
-                                );
-                                continue;
-                            }
+                        if (event.kind == Kind::GitRepoAnnouncement || event.kind == Kind::RepoState)
+                            && rejected_events_index.contains(&event.id)
+                        {
+                            tracing::trace!(
+                                event_id = %event.id,
+                                kind = %event.kind.as_u16(),
+                                relay = %relay_url_clone,
+                                "Skipping previously rejected announcement event"
+                            );
+                            continue;
                         }
                         
                         let result = Self::process_event_static(
@@ -2275,6 +2275,161 @@ impl SyncManager {
                             );
                         }
                     }
+                    
+                    // GRASP-02 PR4.1: Re-process state events that were rejected because no announcement existed
+                    // When an announcement is accepted, check for state events that were rejected
+                    // because "no announcement exists for this repository". These should now pass.
+                    match RepositoryAnnouncement::from_event(event.clone()) {
+                        Ok(announcement) => {
+                            // Get the announcement author's state events that were rejected
+                            let (removed, hot_events) = rejected_events_index
+                                .invalidate_and_get_state_events(&event.pubkey, &announcement.identifier);
+
+                            if removed > 0 {
+                                tracing::info!(
+                                    pubkey = %event.pubkey,
+                                    identifier = %announcement.identifier,
+                                    removed_from_cold_index = removed,
+                                    hot_cache_events = hot_events.len(),
+                                    "Invalidated rejected state events (announcement now exists)"
+                                );
+                            }
+
+                            // Re-process state events from hot cache immediately
+                            for state_event in hot_events {
+                                tracing::info!(
+                                    event_id = %state_event.id,
+                                    pubkey = %event.pubkey,
+                                    identifier = %announcement.identifier,
+                                    "Re-processing state event from hot cache (announcement now exists)"
+                                );
+
+                                let reprocess_result = Box::pin(Self::process_event_static(
+                                    &state_event,
+                                    relay_url,
+                                    database,
+                                    write_policy,
+                                    local_relay,
+                                    rejected_events_index,
+                                ))
+                                .await;
+
+                                match reprocess_result {
+                                    ProcessResult::Saved => {
+                                        tracing::info!(
+                                            event_id = %state_event.id,
+                                            pubkey = %event.pubkey,
+                                            identifier = %announcement.identifier,
+                                            "State event accepted on re-processing (announcement now exists)"
+                                        );
+                                    }
+                                    ProcessResult::Purgatory => {
+                                        tracing::debug!(
+                                            event_id = %state_event.id,
+                                            "State event added to purgatory (waiting for git data)"
+                                        );
+                                    }
+                                    ProcessResult::Duplicate => {
+                                        tracing::debug!(
+                                            event_id = %state_event.id,
+                                            "State event already exists (duplicate)"
+                                        );
+                                    }
+                                    other => {
+                                        tracing::warn!(
+                                            event_id = %state_event.id,
+                                            pubkey = %event.pubkey,
+                                            identifier = %announcement.identifier,
+                                            result = ?other,
+                                            "State event still rejected on re-processing"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                event_id = %event.id,
+                                error = %e,
+                                "Failed to parse repository announcement for state event invalidation"
+                            );
+                        }
+                    }
+                }
+                
+                // GRASP-02 PR4.2: Invalidate and re-process state events
+                // When a state event is accepted (git data arrived), check if there are any
+                // other rejected state events for the same repository in the hot cache.
+                // Re-process them immediately since git data is now available.
+                if event.kind == Kind::RepoState {
+                    // Extract identifier from 'd' tag
+                    if let Some(identifier) = event
+                        .tags
+                        .iter()
+                        .find(|t| t.kind() == nostr_sdk::TagKind::d())
+                        .and_then(|t| t.content())
+                    {
+                        // Get rejected state events for this pubkey + identifier
+                        let (removed, hot_events) = rejected_events_index
+                            .invalidate_and_get_state_events(&event.pubkey, identifier);
+
+                        if removed > 0 {
+                            tracing::info!(
+                                pubkey = %event.pubkey,
+                                identifier = %identifier,
+                                removed_from_cold_index = removed,
+                                hot_cache_events = hot_events.len(),
+                                "Invalidated rejected state events (git data now available)"
+                            );
+                        }
+
+                        // Re-process events from hot cache immediately
+                        for state_event in hot_events {
+                            tracing::info!(
+                                event_id = %state_event.id,
+                                pubkey = %event.pubkey,
+                                identifier = %identifier,
+                                "Re-processing state event from hot cache"
+                            );
+
+                            // Recursive call to process_event_static
+                            let reprocess_result = Box::pin(Self::process_event_static(
+                                &state_event,
+                                relay_url,
+                                database,
+                                write_policy,
+                                local_relay,
+                                rejected_events_index,
+                            ))
+                            .await;
+
+                            match reprocess_result {
+                                ProcessResult::Saved => {
+                                    tracing::info!(
+                                        event_id = %state_event.id,
+                                        pubkey = %event.pubkey,
+                                        identifier = %identifier,
+                                        "State event accepted on re-processing"
+                                    );
+                                }
+                                ProcessResult::Duplicate => {
+                                    tracing::debug!(
+                                        event_id = %state_event.id,
+                                        "State event already exists (duplicate)"
+                                    );
+                                }
+                                other => {
+                                    tracing::warn!(
+                                        event_id = %state_event.id,
+                                        pubkey = %event.pubkey,
+                                        identifier = %identifier,
+                                        result = ?other,
+                                        "State event still rejected on re-processing"
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
 
                 ProcessResult::Saved
@@ -2299,7 +2454,7 @@ impl SyncManager {
                         "Event rejected by write policy"
                     );
                     
-                    // Track rejected announcement events to avoid re-fetching them
+                    // Track rejected announcement and state events to avoid re-fetching them
                     if event.kind == Kind::GitRepoAnnouncement || event.kind == Kind::RepoState {
                         // Extract identifier from 'd' tag
                         if let Some(identifier) = event
@@ -2312,30 +2467,47 @@ impl SyncManager {
                             let reason = if message.contains("doesn't list this service") 
                                 || message.contains("Announcement must list service") {
                                 rejected_index::RejectionReason::DoesNotListService
-                            } else if message.contains("maintainer") {
+                            } else if message.contains("maintainer") 
+                                || message.contains("no announcement exists")
+                                || message.contains("not authorized") {
                                 rejected_index::RejectionReason::MaintainerNotYetValid
                             } else {
                                 rejected_index::RejectionReason::Other
                             };
 
-                            rejected_events_index.add_announcement(
-                                event.clone(),
-                                event.pubkey,
-                                identifier.to_string(),
-                                reason,
-                            );
-
-                            tracing::debug!(
-                                event_id = %event.id,
-                                kind = %event.kind.as_u16(),
-                                identifier = %identifier,
-                                "Added rejected announcement to two-tier index"
-                            );
+                            // Use appropriate method based on event kind
+                            if event.kind == Kind::RepoState {
+                                rejected_events_index.add_state(
+                                    event.clone(),
+                                    event.pubkey,
+                                    identifier.to_string(),
+                                    reason,
+                                );
+                                tracing::debug!(
+                                    event_id = %event.id,
+                                    kind = %event.kind.as_u16(),
+                                    identifier = %identifier,
+                                    "Added rejected state event to two-tier index"
+                                );
+                            } else {
+                                rejected_events_index.add_announcement(
+                                    event.clone(),
+                                    event.pubkey,
+                                    identifier.to_string(),
+                                    reason,
+                                );
+                                tracing::debug!(
+                                    event_id = %event.id,
+                                    kind = %event.kind.as_u16(),
+                                    identifier = %identifier,
+                                    "Added rejected announcement to two-tier index"
+                                );
+                            }
                         } else {
                             tracing::warn!(
                                 event_id = %event.id,
                                 kind = %event.kind.as_u16(),
-                                "Announcement missing 'd' tag, cannot track in rejected index"
+                                "Event missing 'd' tag, cannot track in rejected index"
                             );
                         }
                     }
@@ -3192,7 +3364,7 @@ mod tests {
         );
 
         // Create test event IDs
-        let rejected_id = EventId::from_hex(
+        let _rejected_id = EventId::from_hex(
             "0000000000000000000000000000000000000000000000000000000000000001",
         )
         .unwrap();
