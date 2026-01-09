@@ -2165,11 +2165,11 @@ impl SyncManager {
                     "Synced event saved and broadcast"
                 );
 
-                // GRASP-02 PR3: Invalidate and re-process maintainer announcements
-                // If this is a repository announcement that lists maintainers, check if any
-                // of those maintainer announcements were previously rejected and are still
-                // in the hot cache. If so, re-process them immediately (they should now pass
-                // validation since the owner announcement has been accepted).
+                // When an owner announcement is accepted, re-process any maintainer announcements
+                // that were previously rejected because the owner announcement didn't exist yet.
+                // This handles the race condition where maintainer events arrive before owner events
+                // during relay synchronization. Maintainer events in the hot cache are re-processed
+                // immediately and should now pass validation.
                 if event.kind == Kind::GitRepoAnnouncement {
                     use crate::nostr::events::RepositoryAnnouncement;
                     
@@ -2276,9 +2276,10 @@ impl SyncManager {
                         }
                     }
                     
-                    // GRASP-02 PR4.1: Re-process state events that were rejected because no announcement existed
-                    // When an announcement is accepted, check for state events that were rejected
-                    // because "no announcement exists for this repository". These should now pass.
+                    // When a repository announcement is accepted, re-process any state events
+                    // that were previously rejected because no announcement existed.
+                    // This handles the race condition where state events arrive before their
+                    // announcements during relay synchronization.
                     match RepositoryAnnouncement::from_event(event.clone()) {
                         Ok(announcement) => {
                             // Get the announcement author's state events that were rejected
@@ -2357,10 +2358,10 @@ impl SyncManager {
                     }
                 }
                 
-                // GRASP-02 PR4.2: Invalidate and re-process state events
-                // When a state event is accepted (git data arrived), check if there are any
-                // other rejected state events for the same repository in the hot cache.
-                // Re-process them immediately since git data is now available.
+                // When a state event is accepted (git data arrived), re-process any other
+                // rejected state events for the same repository. This handles the case where
+                // multiple state events arrive but only one has git data initially.
+                // Events in the hot cache are re-processed immediately now that git data is available.
                 if event.kind == Kind::RepoState {
                     // Extract identifier from 'd' tag
                     if let Some(identifier) = event
