@@ -141,12 +141,20 @@ pub struct Config {
     /// Stores full event objects for immediate re-processing when dependencies resolve.
     /// Too short (<30s): Miss events from slow relays
     /// Too long (>5min): Waste memory
-    #[arg(long, env = "NGIT_REJECTED_HOT_CACHE_DURATION_SECS", default_value_t = 120)]
+    #[arg(
+        long,
+        env = "NGIT_REJECTED_HOT_CACHE_DURATION_SECS",
+        default_value_t = 120
+    )]
     pub rejected_hot_cache_duration_secs: u64,
 
     /// Cold index expiry in seconds for rejected announcements (default: 604800 = 7 days)
     /// Stores metadata only to prevent repeated downloads of rejected events.
-    #[arg(long, env = "NGIT_REJECTED_COLD_INDEX_EXPIRY_SECS", default_value_t = 604800)]
+    #[arg(
+        long,
+        env = "NGIT_REJECTED_COLD_INDEX_EXPIRY_SECS",
+        default_value_t = 604800
+    )]
     pub rejected_cold_index_expiry_secs: u64,
 }
 
@@ -190,10 +198,7 @@ impl Config {
             // Validate it's a valid nsec
             Keys::parse(&nsec).context("Invalid nsec in relay owner key file")?;
 
-            tracing::info!(
-                "Loaded relay owner key from {}",
-                key_path.display()
-            );
+            tracing::info!("Loaded relay owner key from {}", key_path.display());
             return Ok(nsec);
         }
 
@@ -202,8 +207,7 @@ impl Config {
         let nsec = keys.secret_key().to_bech32()?;
 
         // Save to file
-        fs::write(&key_path, &nsec)
-            .context("Failed to write relay owner key file")?;
+        fs::write(&key_path, &nsec).context("Failed to write relay owner key file")?;
 
         tracing::info!(
             "Generated new relay owner key and saved to {}",
@@ -215,7 +219,9 @@ impl Config {
 
     /// Get the relay owner's Keys object
     pub fn relay_owner_keys(&self) -> Result<Keys> {
-        let nsec = self.relay_owner_nsec.as_ref()
+        let nsec = self
+            .relay_owner_nsec
+            .as_ref()
             .context("relay_owner_nsec not set (should be set by Config::load())")?;
         Keys::parse(nsec).context("Invalid relay_owner_nsec")
     }
@@ -251,8 +257,11 @@ impl Config {
     pub fn for_testing() -> Self {
         // Generate a test key deterministically for consistent tests
         let keys = Keys::generate();
-        let nsec = keys.secret_key().to_bech32().expect("Failed to generate test nsec");
-        
+        let nsec = keys
+            .secret_key()
+            .to_bech32()
+            .expect("Failed to generate test nsec");
+
         Self {
             domain: "localhost:8080".to_string(),
             relay_owner_nsec: Some(nsec),
@@ -348,7 +357,7 @@ mod tests {
         let config = Config::for_testing();
         let keys = config.relay_owner_keys().expect("Should have valid keys");
         let npub = config.relay_owner_npub().expect("Should derive npub");
-        
+
         // Verify the npub matches the keys
         assert_eq!(npub, keys.public_key().to_bech32().unwrap());
         assert!(npub.starts_with("npub1"));

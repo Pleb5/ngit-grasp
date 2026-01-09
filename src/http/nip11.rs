@@ -102,12 +102,12 @@ mod tests {
 
         assert_eq!(doc.name, "Test Relay");
         assert_eq!(doc.description, "A test relay");
-        
+
         // Verify pubkey is present and is a valid npub
         assert!(doc.pubkey.is_some());
         let pubkey = doc.pubkey.unwrap();
         assert!(pubkey.starts_with("npub1"));
-        
+
         assert!(doc.supported_nips.contains(&1));
         assert!(doc.supported_nips.contains(&11));
         assert!(doc.supported_nips.contains(&34));

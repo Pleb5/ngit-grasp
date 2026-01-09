@@ -93,9 +93,11 @@ impl StatePolicy {
             });
         }
 
-        let authorized_owners =
-            crate::git::authorization::pubkey_authorised_for_repo_owners(&event.pubkey, &db_repo_data);
-        
+        let authorized_owners = crate::git::authorization::pubkey_authorised_for_repo_owners(
+            &event.pubkey,
+            &db_repo_data,
+        );
+
         if authorized_owners.is_empty() {
             tracing::warn!(
                 event_id = %event.id,

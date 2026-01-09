@@ -102,11 +102,11 @@ impl Nip34WritePolicy {
                         }
 
                         tracing::debug!("Accepted repository announcement: {}", event_id_str);
-                        
+
                         // Check purgatory for state events that might now be authorized
                         self.check_purgatory_state_events_for_identifier(&announcement.identifier)
                             .await;
-                        
+
                         WritePolicyResult::Accept
                     }
                     Err(e) => {
@@ -130,11 +130,11 @@ impl Nip34WritePolicy {
                             announcement.identifier
                         );
                         // Don't create bare repository for external announcements
-                        
+
                         // Check purgatory for state events that might now be authorized
                         self.check_purgatory_state_events_for_identifier(&announcement.identifier)
                             .await;
-                        
+
                         WritePolicyResult::Accept
                     }
                     Err(e) => {
@@ -324,20 +324,24 @@ impl Nip34WritePolicy {
     /// 4. Keeps unauthorized events in purgatory (will expire naturally)
     async fn check_purgatory_state_events_for_identifier(&self, identifier: &str) {
         let state_events = self.ctx.purgatory.find_state(identifier);
-        
+
         if state_events.is_empty() {
             return;
         }
-        
+
         tracing::debug!(
             identifier = %identifier,
             count = state_events.len(),
             "Checking purgatory state events after announcement acceptance"
         );
-        
+
         for entry in state_events {
             // Re-evaluate authorization with the new announcement
-            match self.state_policy.process_state_event(&entry.event, false).await {
+            match self
+                .state_policy
+                .process_state_event(&entry.event, false)
+                .await
+            {
                 Ok(WritePolicyResult::Accept) => {
                     tracing::info!(
                         event_id = %entry.event.id,

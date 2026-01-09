@@ -708,7 +708,7 @@ impl ParsedMetrics {
     /// Check if a specific relay is connected
     pub fn relay_connected(&self, relay: &str) -> Option<bool> {
         self.gauge("ngit_sync_relay_connected", &[("relay", relay)])
-            .map(|v| v >= 2)  // Syncing (2), Connected (3), or ConnectedHistoricSyncFailures (4)
+            .map(|v| v >= 2) // Syncing (2), Connected (3), or ConnectedHistoricSyncFailures (4)
     }
 
     /// Get total number of connected relays

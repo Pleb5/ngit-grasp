@@ -190,9 +190,7 @@ impl HotCache {
         let now = Instant::now();
         let initial_count = entries.len();
 
-        entries.retain(|_, entry| {
-            now.duration_since(entry.cached_at) < self.expiry_duration
-        });
+        entries.retain(|_, entry| now.duration_since(entry.cached_at) < self.expiry_duration);
 
         initial_count - entries.len()
     }
@@ -284,9 +282,7 @@ impl ColdIndex {
         let now = Instant::now();
         let initial_count = entries.len();
 
-        entries.retain(|_, entry| {
-            now.duration_since(entry.rejected_at) < self.expiry_duration
-        });
+        entries.retain(|_, entry| now.duration_since(entry.rejected_at) < self.expiry_duration);
 
         initial_count - entries.len()
     }
@@ -389,12 +385,8 @@ impl RejectedEventsIndex {
         reason: RejectionReason,
     ) {
         // Add to hot cache (full event)
-        self.hot_cache.add(
-            event.clone(),
-            pubkey,
-            identifier.clone(),
-            reason,
-        );
+        self.hot_cache
+            .add(event.clone(), pubkey, identifier.clone(), reason);
 
         // Add to cold index (metadata only)
         self.cold_index.add(event.id, pubkey, identifier, reason);
@@ -419,12 +411,8 @@ impl RejectedEventsIndex {
         reason: RejectionReason,
     ) {
         // Add to hot cache (full event)
-        self.hot_cache.add(
-            event.clone(),
-            pubkey,
-            identifier.clone(),
-            reason,
-        );
+        self.hot_cache
+            .add(event.clone(), pubkey, identifier.clone(), reason);
 
         // Add to cold index (metadata only)
         self.cold_index.add(event.id, pubkey, identifier, reason);
@@ -608,8 +596,7 @@ mod tests {
 
     async fn create_test_event() -> Event {
         let keys = Keys::generate();
-        let unsigned = nostr_sdk::EventBuilder::text_note("test")
-            .build(keys.public_key());
+        let unsigned = nostr_sdk::EventBuilder::text_note("test").build(keys.public_key());
         keys.sign_event(unsigned).await.unwrap()
     }
 
@@ -695,10 +682,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_two_tier_index_add_and_contains() {
-        let index = RejectedEventsIndex::new(
-            Duration::from_secs(120),
-            Duration::from_secs(604800),
-        );
+        let index = RejectedEventsIndex::new(Duration::from_secs(120), Duration::from_secs(604800));
         let event = create_test_event().await;
 
         index.add_announcement(
@@ -715,10 +699,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalidate_and_get_events() {
-        let index = RejectedEventsIndex::new(
-            Duration::from_secs(120),
-            Duration::from_secs(604800),
-        );
+        let index = RejectedEventsIndex::new(Duration::from_secs(120), Duration::from_secs(604800));
         let event = create_test_event().await;
         let pubkey = event.pubkey;
         let identifier = "test-repo".to_string();
@@ -773,10 +754,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_hot_cache_miss_after_expiry() {
-        let index = RejectedEventsIndex::new(
-            Duration::from_millis(50),
-            Duration::from_secs(604800),
-        );
+        let index =
+            RejectedEventsIndex::new(Duration::from_millis(50), Duration::from_secs(604800));
         let event = create_test_event().await;
         let pubkey = event.pubkey;
         let identifier = "test-repo".to_string();
@@ -801,20 +780,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_maintainer_repos() {
-        let index = RejectedEventsIndex::new(
-            Duration::from_secs(120),
-            Duration::from_secs(604800),
-        );
+        let index = RejectedEventsIndex::new(Duration::from_secs(120), Duration::from_secs(604800));
 
         let keys1 = Keys::generate();
         let keys2 = Keys::generate();
 
-        let unsigned1 = nostr_sdk::EventBuilder::text_note("test1")
-            .build(keys1.public_key());
+        let unsigned1 = nostr_sdk::EventBuilder::text_note("test1").build(keys1.public_key());
         let event1 = keys1.sign_event(unsigned1).await.unwrap();
 
-        let unsigned2 = nostr_sdk::EventBuilder::text_note("test2")
-            .build(keys2.public_key());
+        let unsigned2 = nostr_sdk::EventBuilder::text_note("test2").build(keys2.public_key());
         let event2 = keys2.sign_event(unsigned2).await.unwrap();
 
         // Add two different maintainer repos
@@ -836,8 +810,7 @@ mod tests {
         assert_eq!(index.cold_index_len(), 2);
 
         // Invalidate only first maintainer
-        let (removed, hot_events) =
-            index.invalidate_and_get_events(&event1.pubkey, "repo1");
+        let (removed, hot_events) = index.invalidate_and_get_events(&event1.pubkey, "repo1");
 
         assert_eq!(removed, 1);
         assert_eq!(hot_events.len(), 1);

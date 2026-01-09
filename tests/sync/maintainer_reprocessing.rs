@@ -42,23 +42,18 @@ async fn test_maintainer_announcement_reprocessed_immediately() {
         .await
         .expect("Failed to connect to relay_a");
 
-    let maintainer_announcement = EventBuilder::new(
-        Kind::GitRepoAnnouncement,
-        "Maintainer's repository",
-    )
-    .tags(vec![
-        Tag::identifier(identifier),
-        Tag::custom(
-            TagKind::custom("clone"),
-            vec![format!("https://{}/{}.git", relay_a.domain(), identifier)],
-        ),
-        Tag::custom(
-            TagKind::custom("relays"),
-            vec![relay_a.url().to_string()],
-        ),
-    ])
-    .sign_with_keys(&maintainer_keys)
-    .unwrap();
+    let maintainer_announcement =
+        EventBuilder::new(Kind::GitRepoAnnouncement, "Maintainer's repository")
+            .tags(vec![
+                Tag::identifier(identifier),
+                Tag::custom(
+                    TagKind::custom("clone"),
+                    vec![format!("https://{}/{}.git", relay_a.domain(), identifier)],
+                ),
+                Tag::custom(TagKind::custom("relays"), vec![relay_a.url().to_string()]),
+            ])
+            .sign_with_keys(&maintainer_keys)
+            .unwrap();
 
     client_a.send_event(&maintainer_announcement).await.unwrap();
     println!("✓ Maintainer announcement sent to relay_a");
@@ -68,27 +63,24 @@ async fn test_maintainer_announcement_reprocessed_immediately() {
         .await
         .expect("Failed to connect to relay_b");
 
-    let owner_announcement = EventBuilder::new(
-        Kind::GitRepoAnnouncement,
-        "Owner's repository",
-    )
-    .tags(vec![
-        Tag::identifier(identifier),
-        Tag::custom(
-            TagKind::custom("clone"),
-            vec![format!("https://{}/{}.git", relay_b.domain(), identifier)],
-        ),
-        Tag::custom(
-            TagKind::custom("relays"),
-            vec![relay_a.url().to_string(), relay_b.url().to_string()],
-        ),
-        Tag::custom(
-            TagKind::custom("maintainers"),
-            vec![maintainer_keys.public_key().to_hex()],
-        ),
-    ])
-    .sign_with_keys(&owner_keys)
-    .unwrap();
+    let owner_announcement = EventBuilder::new(Kind::GitRepoAnnouncement, "Owner's repository")
+        .tags(vec![
+            Tag::identifier(identifier),
+            Tag::custom(
+                TagKind::custom("clone"),
+                vec![format!("https://{}/{}.git", relay_b.domain(), identifier)],
+            ),
+            Tag::custom(
+                TagKind::custom("relays"),
+                vec![relay_a.url().to_string(), relay_b.url().to_string()],
+            ),
+            Tag::custom(
+                TagKind::custom("maintainers"),
+                vec![maintainer_keys.public_key().to_hex()],
+            ),
+        ])
+        .sign_with_keys(&owner_keys)
+        .unwrap();
 
     client_b.send_event(&owner_announcement).await.unwrap();
     println!("✓ Owner announcement sent to relay_b");
@@ -104,7 +96,8 @@ async fn test_maintainer_announcement_reprocessed_immediately() {
         .author(owner_keys.public_key())
         .identifier(identifier);
 
-    let owner_found = wait_for_event_on_relay(relay_b.url(), owner_filter, Duration::from_secs(2)).await;
+    let owner_found =
+        wait_for_event_on_relay(relay_b.url(), owner_filter, Duration::from_secs(2)).await;
     assert!(owner_found, "Owner announcement should be in relay_b");
 
     let maintainer_filter = Filter::new()
@@ -112,8 +105,12 @@ async fn test_maintainer_announcement_reprocessed_immediately() {
         .author(maintainer_keys.public_key())
         .identifier(identifier);
 
-    let maintainer_found = wait_for_event_on_relay(relay_b.url(), maintainer_filter, Duration::from_secs(2)).await;
-    assert!(maintainer_found, "Maintainer announcement should be re-processed and accepted in relay_b");
+    let maintainer_found =
+        wait_for_event_on_relay(relay_b.url(), maintainer_filter, Duration::from_secs(2)).await;
+    assert!(
+        maintainer_found,
+        "Maintainer announcement should be re-processed and accepted in relay_b"
+    );
 
     // Step 5: Verify it happened quickly (not 24 hours!)
     assert!(
@@ -145,36 +142,34 @@ async fn test_maintainer_announcement_reprocessed_immediately() {
 #[ignore] // Skip by default due to 2+ minute duration
 async fn test_maintainer_announcement_cold_index_prevents_refetch() {
     let relay = TestRelay::start().await;
-    
+
     // Create keys
     let owner_keys = Keys::generate();
     let maintainer_keys = Keys::generate();
 
     let identifier = "test-repo-cold";
-    
+
     // Create client using TestClient helper
     let client = TestClient::new(relay.url(), maintainer_keys.clone())
         .await
         .expect("Failed to connect to relay");
 
     // Step 1: Send maintainer announcement (will be rejected - doesn't list our relay)
-    let maintainer_announcement = EventBuilder::new(
-        Kind::GitRepoAnnouncement,
-        "Maintainer's repository",
-    )
-    .tags(vec![
-        Tag::identifier(identifier),
-        Tag::custom(
-            TagKind::custom("clone"),
-            vec![format!("https://example.com/{}.git", identifier)],
-        ),
-        Tag::custom(
-            TagKind::custom("relays"),
-            vec!["wss://example.com".to_string()],
-        ),
-    ])
-    .sign_with_keys(&maintainer_keys)
-    .unwrap();
+    let maintainer_announcement =
+        EventBuilder::new(Kind::GitRepoAnnouncement, "Maintainer's repository")
+            .tags(vec![
+                Tag::identifier(identifier),
+                Tag::custom(
+                    TagKind::custom("clone"),
+                    vec![format!("https://example.com/{}.git", identifier)],
+                ),
+                Tag::custom(
+                    TagKind::custom("relays"),
+                    vec!["wss://example.com".to_string()],
+                ),
+            ])
+            .sign_with_keys(&maintainer_keys)
+            .unwrap();
 
     // Send maintainer announcement - expect it to be rejected
     let _ = client.send_event(&maintainer_announcement).await;
@@ -185,27 +180,21 @@ async fn test_maintainer_announcement_cold_index_prevents_refetch() {
     tokio::time::sleep(Duration::from_secs(125)).await;
 
     // Step 3: Send owner announcement (lists maintainer)
-    let owner_announcement = EventBuilder::new(
-        Kind::GitRepoAnnouncement,
-        "Owner's repository",
-    )
-    .tags(vec![
-        Tag::identifier(identifier),
-        Tag::custom(
-            TagKind::custom("clone"),
-            vec![format!("https://{}/{}.git", relay.domain(), identifier)],
-        ),
-        Tag::custom(
-            TagKind::custom("relays"),
-            vec![relay.url().to_string()],
-        ),
-        Tag::custom(
-            TagKind::custom("maintainers"),
-            vec![maintainer_keys.public_key().to_hex()],
-        ),
-    ])
-    .sign_with_keys(&owner_keys)
-    .unwrap();
+    let owner_announcement = EventBuilder::new(Kind::GitRepoAnnouncement, "Owner's repository")
+        .tags(vec![
+            Tag::identifier(identifier),
+            Tag::custom(
+                TagKind::custom("clone"),
+                vec![format!("https://{}/{}.git", relay.domain(), identifier)],
+            ),
+            Tag::custom(TagKind::custom("relays"), vec![relay.url().to_string()]),
+            Tag::custom(
+                TagKind::custom("maintainers"),
+                vec![maintainer_keys.public_key().to_hex()],
+            ),
+        ])
+        .sign_with_keys(&owner_keys)
+        .unwrap();
 
     client.send_event(&owner_announcement).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -215,16 +204,18 @@ async fn test_maintainer_announcement_cold_index_prevents_refetch() {
         .kind(Kind::GitRepoAnnouncement)
         .author(owner_keys.public_key())
         .identifier(identifier);
-    
-    let owner_found = wait_for_event_on_relay(relay.url(), owner_filter, Duration::from_secs(2)).await;
+
+    let owner_found =
+        wait_for_event_on_relay(relay.url(), owner_filter, Duration::from_secs(2)).await;
     assert!(owner_found, "Owner announcement should be accepted");
 
     let maintainer_filter = Filter::new()
         .kind(Kind::GitRepoAnnouncement)
         .author(maintainer_keys.public_key())
         .identifier(identifier);
-    
-    let maintainer_found = wait_for_event_on_relay(relay.url(), maintainer_filter, Duration::from_millis(500)).await;
+
+    let maintainer_found =
+        wait_for_event_on_relay(relay.url(), maintainer_filter, Duration::from_millis(500)).await;
     assert!(
         !maintainer_found,
         "Maintainer announcement should NOT be re-processed (hot cache expired)"
@@ -267,7 +258,10 @@ async fn test_multiple_maintainers_all_reprocessed() {
         .await
         .expect("Failed to connect to relay_a");
 
-    for (idx, maintainer_keys) in [&maintainer1_keys, &maintainer2_keys, &maintainer3_keys].iter().enumerate() {
+    for (idx, maintainer_keys) in [&maintainer1_keys, &maintainer2_keys, &maintainer3_keys]
+        .iter()
+        .enumerate()
+    {
         let announcement = EventBuilder::new(
             Kind::GitRepoAnnouncement,
             format!("Maintainer {} repository", idx + 1),
@@ -278,10 +272,7 @@ async fn test_multiple_maintainers_all_reprocessed() {
                 TagKind::custom("clone"),
                 vec![format!("https://{}/{}.git", relay_a.domain(), identifier)],
             ),
-            Tag::custom(
-                TagKind::custom("relays"),
-                vec![relay_a.url().to_string()],
-            ),
+            Tag::custom(TagKind::custom("relays"), vec![relay_a.url().to_string()]),
         ])
         .sign_with_keys(maintainer_keys)
         .unwrap();
@@ -295,31 +286,28 @@ async fn test_multiple_maintainers_all_reprocessed() {
         .await
         .expect("Failed to connect to relay_b");
 
-    let owner_announcement = EventBuilder::new(
-        Kind::GitRepoAnnouncement,
-        "Owner's repository",
-    )
-    .tags(vec![
-        Tag::identifier(identifier),
-        Tag::custom(
-            TagKind::custom("clone"),
-            vec![format!("https://{}/{}.git", relay_b.domain(), identifier)],
-        ),
-        Tag::custom(
-            TagKind::custom("relays"),
-            vec![relay_a.url().to_string(), relay_b.url().to_string()],
-        ),
-        Tag::custom(
-            TagKind::custom("maintainers"),
-            vec![
-                maintainer1_keys.public_key().to_hex(),
-                maintainer2_keys.public_key().to_hex(),
-                maintainer3_keys.public_key().to_hex(),
-            ],
-        ),
-    ])
-    .sign_with_keys(&owner_keys)
-    .unwrap();
+    let owner_announcement = EventBuilder::new(Kind::GitRepoAnnouncement, "Owner's repository")
+        .tags(vec![
+            Tag::identifier(identifier),
+            Tag::custom(
+                TagKind::custom("clone"),
+                vec![format!("https://{}/{}.git", relay_b.domain(), identifier)],
+            ),
+            Tag::custom(
+                TagKind::custom("relays"),
+                vec![relay_a.url().to_string(), relay_b.url().to_string()],
+            ),
+            Tag::custom(
+                TagKind::custom("maintainers"),
+                vec![
+                    maintainer1_keys.public_key().to_hex(),
+                    maintainer2_keys.public_key().to_hex(),
+                    maintainer3_keys.public_key().to_hex(),
+                ],
+            ),
+        ])
+        .sign_with_keys(&owner_keys)
+        .unwrap();
 
     client_b.send_event(&owner_announcement).await.unwrap();
     println!("✓ Owner announcement sent to relay_b");
@@ -340,11 +328,7 @@ async fn test_multiple_maintainers_all_reprocessed() {
             .identifier(identifier);
 
         let found = wait_for_event_on_relay(relay_b.url(), filter, Duration::from_secs(2)).await;
-        assert!(
-            found,
-            "{} announcement should be in relay_b",
-            name
-        );
+        assert!(found, "{} announcement should be in relay_b", name);
     }
 
     println!("✅ All three maintainer announcements re-processed successfully");
@@ -365,63 +349,55 @@ async fn test_multiple_maintainers_all_reprocessed() {
 #[tokio::test]
 async fn test_invalid_maintainer_pubkey_handled_gracefully() {
     let relay = TestRelay::start().await;
-    
+
     // Create keys
     let owner_keys = Keys::generate();
     let maintainer_keys = Keys::generate();
 
     let identifier = "invalid-maintainer-repo";
-    
+
     // Create client using TestClient helper
     let client = TestClient::new(relay.url(), owner_keys.clone())
         .await
         .expect("Failed to connect to relay");
 
     // Step 1: Send maintainer announcement (will be rejected - doesn't list our relay)
-    let maintainer_announcement = EventBuilder::new(
-        Kind::GitRepoAnnouncement,
-        "Maintainer's repository",
-    )
-    .tags(vec![
-        Tag::identifier(identifier),
-        Tag::custom(
-            TagKind::custom("clone"),
-            vec![format!("https://example.com/{}.git", identifier)],
-        ),
-        Tag::custom(
-            TagKind::custom("relays"),
-            vec!["wss://example.com".to_string()],
-        ),
-    ])
-    .sign_with_keys(&maintainer_keys)
-    .unwrap();
+    let maintainer_announcement =
+        EventBuilder::new(Kind::GitRepoAnnouncement, "Maintainer's repository")
+            .tags(vec![
+                Tag::identifier(identifier),
+                Tag::custom(
+                    TagKind::custom("clone"),
+                    vec![format!("https://example.com/{}.git", identifier)],
+                ),
+                Tag::custom(
+                    TagKind::custom("relays"),
+                    vec!["wss://example.com".to_string()],
+                ),
+            ])
+            .sign_with_keys(&maintainer_keys)
+            .unwrap();
 
     // Send maintainer announcement - expect it to be rejected
     let _ = client.send_event(&maintainer_announcement).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Step 2: Send owner announcement with INVALID maintainer hex
-    let owner_announcement = EventBuilder::new(
-        Kind::GitRepoAnnouncement,
-        "Owner's repository",
-    )
-    .tags(vec![
-        Tag::identifier(identifier),
-        Tag::custom(
-            TagKind::custom("clone"),
-            vec![format!("https://{}/{}.git", relay.domain(), identifier)],
-        ),
-        Tag::custom(
-            TagKind::custom("relays"),
-            vec![relay.url().to_string()],
-        ),
-        Tag::custom(
-            TagKind::custom("maintainers"),
-            vec!["invalid-hex-not-a-pubkey".to_string()],
-        ),
-    ])
-    .sign_with_keys(&owner_keys)
-    .unwrap();
+    let owner_announcement = EventBuilder::new(Kind::GitRepoAnnouncement, "Owner's repository")
+        .tags(vec![
+            Tag::identifier(identifier),
+            Tag::custom(
+                TagKind::custom("clone"),
+                vec![format!("https://{}/{}.git", relay.domain(), identifier)],
+            ),
+            Tag::custom(TagKind::custom("relays"), vec![relay.url().to_string()]),
+            Tag::custom(
+                TagKind::custom("maintainers"),
+                vec!["invalid-hex-not-a-pubkey".to_string()],
+            ),
+        ])
+        .sign_with_keys(&owner_keys)
+        .unwrap();
 
     client.send_event(&owner_announcement).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -431,16 +407,21 @@ async fn test_invalid_maintainer_pubkey_handled_gracefully() {
         .kind(Kind::GitRepoAnnouncement)
         .author(owner_keys.public_key())
         .identifier(identifier);
-    
-    let owner_found = wait_for_event_on_relay(relay.url(), owner_filter, Duration::from_secs(2)).await;
-    assert!(owner_found, "Owner announcement should be accepted despite invalid maintainer");
+
+    let owner_found =
+        wait_for_event_on_relay(relay.url(), owner_filter, Duration::from_secs(2)).await;
+    assert!(
+        owner_found,
+        "Owner announcement should be accepted despite invalid maintainer"
+    );
 
     let maintainer_filter = Filter::new()
         .kind(Kind::GitRepoAnnouncement)
         .author(maintainer_keys.public_key())
         .identifier(identifier);
-    
-    let maintainer_found = wait_for_event_on_relay(relay.url(), maintainer_filter, Duration::from_millis(500)).await;
+
+    let maintainer_found =
+        wait_for_event_on_relay(relay.url(), maintainer_filter, Duration::from_millis(500)).await;
     assert!(
         !maintainer_found,
         "Maintainer announcement should NOT be re-processed (invalid pubkey)"

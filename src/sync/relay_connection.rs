@@ -526,31 +526,46 @@ mod tests {
     #[test]
     fn test_normalize_url_with_wss_scheme() {
         let url = "wss://relay.example.com";
-        assert_eq!(RelayConnection::normalize_url(url), "wss://relay.example.com");
+        assert_eq!(
+            RelayConnection::normalize_url(url),
+            "wss://relay.example.com"
+        );
     }
 
     #[test]
     fn test_normalize_url_with_ws_scheme() {
         let url = "ws://relay.example.com";
-        assert_eq!(RelayConnection::normalize_url(url), "ws://relay.example.com");
+        assert_eq!(
+            RelayConnection::normalize_url(url),
+            "ws://relay.example.com"
+        );
     }
 
     #[test]
     fn test_normalize_url_without_scheme() {
         let url = "relay.example.com";
-        assert_eq!(RelayConnection::normalize_url(url), "wss://relay.example.com");
+        assert_eq!(
+            RelayConnection::normalize_url(url),
+            "wss://relay.example.com"
+        );
     }
 
     #[test]
     fn test_normalize_url_without_scheme_with_port() {
         let url = "relay.example.com:8080";
-        assert_eq!(RelayConnection::normalize_url(url), "wss://relay.example.com:8080");
+        assert_eq!(
+            RelayConnection::normalize_url(url),
+            "wss://relay.example.com:8080"
+        );
     }
 
     #[test]
     fn test_normalize_url_with_path() {
         let url = "relay.example.com/nostr";
-        assert_eq!(RelayConnection::normalize_url(url), "wss://relay.example.com/nostr");
+        assert_eq!(
+            RelayConnection::normalize_url(url),
+            "wss://relay.example.com/nostr"
+        );
     }
 
     #[test]
@@ -587,6 +602,9 @@ mod tests {
     fn test_normalize_url_real_world_example() {
         // Test the exact case from the bug report
         let url = "git.shakespeare.diy";
-        assert_eq!(RelayConnection::normalize_url(url), "wss://git.shakespeare.diy");
+        assert_eq!(
+            RelayConnection::normalize_url(url),
+            "wss://git.shakespeare.diy"
+        );
     }
 }
