@@ -53,7 +53,7 @@ impl SyncMetrics {
         let relay_connected = IntGaugeVec::new(
             Opts::new(
                 "ngit_sync_relay_connected",
-                "Relay connection status (0=disconnected, 1=connecting, 2=syncing, 3=connected, 4=connected_degraded)",
+                "Relay connection status (0=disconnected, 1=connecting, 2=syncing, 3=connected, 4=connected_historic_sync_failures)",
             ),
             &["relay"],
         )?;
@@ -208,7 +208,7 @@ impl SyncMetrics {
     /// - Connecting = 1 (connection attempt in progress)
     /// - Syncing = 2 (connected, historic sync in progress)
     /// - Connected = 3 (connected, historic sync complete)
-    /// - ConnectedDegraded = 4 (connected, historic sync failed but live sync active)
+    /// - ConnectedHistoricSyncFailures = 4 (connected, historic sync had failures but live sync active)
     ///
     /// This is separate from health state and provides more granular connection lifecycle tracking.
     ///
@@ -223,7 +223,7 @@ impl SyncMetrics {
             ConnectionStatus::Connecting => 1,
             ConnectionStatus::Syncing => 2,
             ConnectionStatus::Connected => 3,
-            ConnectionStatus::ConnectedDegraded => 4,
+            ConnectionStatus::ConnectedHistoricSyncFailures => 4,
         };
         self.relay_connected
             .with_label_values(&[relay])

@@ -94,8 +94,8 @@ pub enum ConnectionStatus {
     Syncing,
     /// Successfully connected, historic sync completed
     Connected,
-    /// Successfully connected, historic sync failed but live sync active
-    ConnectedDegraded,
+    /// Successfully connected, historic sync had failures but live sync active
+    ConnectedHistoricSyncFailures,
 }
 
 impl ConnectionStatus {
@@ -103,7 +103,7 @@ impl ConnectionStatus {
     pub fn is_live_sync_active(&self) -> bool {
         matches!(
             self,
-            ConnectionStatus::Syncing | ConnectionStatus::Connected | ConnectionStatus::ConnectedDegraded
+            ConnectionStatus::Syncing | ConnectionStatus::Connected | ConnectionStatus::ConnectedHistoricSyncFailures
         )
     }
 }
@@ -877,7 +877,7 @@ impl SyncManager {
                 tracing::warn!(
                     relay = %relay_url,
                     batch_id = batch_id,
-                    "Batch failed - will transition to ConnectedDegraded instead of Connected"
+                    "Batch failed - will transition to ConnectedHistoricSyncFailures instead of Connected"
                 );
             }
 
@@ -963,7 +963,7 @@ impl SyncManager {
             if state.connection_status == ConnectionStatus::Syncing {
                 // Check if any batches failed during historic sync
                 let new_status = if state.historic_sync_had_failures {
-                    ConnectionStatus::ConnectedDegraded
+                    ConnectionStatus::ConnectedHistoricSyncFailures
                 } else {
                     ConnectionStatus::Connected
                 };
@@ -979,7 +979,7 @@ impl SyncManager {
                     had_failures = state.historic_sync_had_failures,
                     status = ?new_status,
                     "Historic sync complete - transitioned to {} status",
-                    if state.historic_sync_had_failures { "ConnectedDegraded" } else { "Connected" }
+                    if state.historic_sync_had_failures { "ConnectedHistoricSyncFailures" } else { "Connected" }
                 );
                 
                 // Update metrics
