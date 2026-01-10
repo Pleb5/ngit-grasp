@@ -80,13 +80,13 @@ Start with short runs (30 seconds) to capture manageable log volumes. Each run c
 RUN_DIR="tmp/run-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$RUN_DIR"
 
-# Run for 30 seconds with sanitized output
+# Run for 30 seconds, saving both raw and sanitized logs
 timeout 30s cargo run -- \
     --sync-bootstrap-relay-url wss://git.shakespeare.diy \
     --domain ngit.danconwaydev.com \
     --git-data-path "$RUN_DIR/git-data" \
     --relay-data-path "$RUN_DIR/relay-data" \
-    2>&1 | ./scripts/sanitize-logs.sh | tee "$RUN_DIR/sync.log"
+    2>&1 | tee "$RUN_DIR/sync-raw.log" | ./scripts/sanitize-logs.sh | tee "$RUN_DIR/sync.log"
 ```
 
 **Note:** The `timeout` command returns exit code 124, which is expected.
@@ -97,8 +97,13 @@ tmp/
 └── run-20260109-143022/
     ├── git-data/       # Git repository data
     ├── relay-data/     # Relay database
-    └── sync.log        # Sanitized log output
+    ├── sync.log        # Sanitized log (for quick analysis)
+    └── sync-raw.log    # Raw log (for full details when needed)
 ```
+
+**When to use which log:**
+- **sync.log** - Use for quick scanning and pattern recognition (long lines truncated)
+- **sync-raw.log** - Use when you need full details (e.g., complete rejection reasons, full event data)
 
 ## Log Sanitization
 
@@ -119,6 +124,23 @@ Example output:
 ```
 2024-01-09T10:00:00Z DEBUG sync: Processing events ids=[abc123, def456, ghi789, jkl012...<1847 chars>...xyz999, end123]
 ```
+
+### Retrieving Full Details from Raw Logs
+
+When sanitized logs show truncated messages (e.g., rejection reasons), use the raw log to see the complete content:
+
+```bash
+# Find specific error in raw log
+grep "Rejected repository announcement" "$RUN_DIR/sync-raw.log"
+
+# Extract full line for specific event ID
+grep "note1z5ys7wf3ms5yxhnp3kfw7hpu5asfkx4jngzt5zgs4tm4tnvggnsqjfqeyt" "$RUN_DIR/sync-raw.log"
+
+# View context around a truncated warning
+grep -A 2 -B 2 "pattern from sanitized log" "$RUN_DIR/sync-raw.log"
+```
+
+The raw log contains complete, untruncated messages including full rejection reasons, event data, and debug details.
 
 ## What to Look For
 
@@ -265,16 +287,16 @@ When `work/active-issues/` is empty (or only contains README.md):
 RUN_DIR="tmp/run-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$RUN_DIR"
 
-# Run 30-second test
+# Run 30-second test, saving both raw and sanitized logs
 timeout 30s cargo run -- \
     --sync-bootstrap-relay-url wss://git.shakespeare.diy \
     --domain ngit.danconwaydev.com \
     --git-data-path "$RUN_DIR/git-data" \
     --relay-data-path "$RUN_DIR/relay-data" \
-    2>&1 | ./scripts/sanitize-logs.sh | tee "$RUN_DIR/sync.log"
+    2>&1 | tee "$RUN_DIR/sync-raw.log" | ./scripts/sanitize-logs.sh | tee "$RUN_DIR/sync.log"
 ```
 
-Each run is isolated in its own timestamped directory under `tmp/`, keeping data and logs organized.
+Each run is isolated in its own timestamped directory under `tmp/`, keeping data and logs organized. Both raw and sanitized logs are saved for flexible analysis.
 
 ### Step 2: Analyze Logs
 
@@ -282,11 +304,15 @@ Scan for errors and unexpected patterns:
 ```bash
 # Find the most recent run
 LATEST_RUN=$(ls -1t tmp/run-*/sync.log | head -n1)
+LATEST_RAW=$(ls -1t tmp/run-*/sync-raw.log | head -n1)
 
-# Analyze for issues
+# Analyze sanitized log for quick scanning
 grep -i error "$LATEST_RUN"
 grep -i warn "$LATEST_RUN"
 grep -i panic "$LATEST_RUN"
+
+# If you find truncated messages, check the raw log for full details
+grep "pattern from truncated message" "$LATEST_RAW"
 ```
 
 ### Step 3: Document Issues
@@ -435,13 +461,13 @@ Check work/active-issues/
 RUN_DIR="tmp/run-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$RUN_DIR"
 
-# Run test
+# Run test with both raw and sanitized logs
 timeout 30s cargo run -- \
     --sync-bootstrap-relay-url wss://git.shakespeare.diy \
     --domain ngit.danconwaydev.com \
     --git-data-path "$RUN_DIR/git-data" \
     --relay-data-path "$RUN_DIR/relay-data" \
-    2>&1 | ./scripts/sanitize-logs.sh | tee "$RUN_DIR/sync.log"
+    2>&1 | tee "$RUN_DIR/sync-raw.log" | ./scripts/sanitize-logs.sh | tee "$RUN_DIR/sync.log"
 ```
 
 ### With Metrics Endpoint
@@ -451,14 +477,14 @@ timeout 30s cargo run -- \
 RUN_DIR="tmp/run-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$RUN_DIR"
 
-# Run with metrics
+# Run with metrics and both log formats
 timeout 30s cargo run -- \
     --sync-bootstrap-relay-url wss://git.shakespeare.diy \
     --domain ngit.danconwaydev.com \
     --git-data-path "$RUN_DIR/git-data" \
     --relay-data-path "$RUN_DIR/relay-data" \
     --metrics-address 127.0.0.1:9090 \
-    2>&1 | ./scripts/sanitize-logs.sh | tee "$RUN_DIR/sync.log"
+    2>&1 | tee "$RUN_DIR/sync-raw.log" | ./scripts/sanitize-logs.sh | tee "$RUN_DIR/sync.log"
 ```
 
 Then in another terminal: `curl http://127.0.0.1:9090/metrics`
