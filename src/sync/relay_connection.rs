@@ -527,11 +527,19 @@ impl RelayConnection {
                     self.nip77_supported
                         .store(2, std::sync::atomic::Ordering::Relaxed);
 
-                    tracing::debug!(
-                        relay = %self.url,
-                        failures = ?output.failed,
-                        "Negentropy diff had failures (timeout usually means relay doesn't support NIP-77)"
-                    );
+                    // Log warning only once per relay to avoid spam
+                    if !self
+                        .nip77_warning_logged
+                        .swap(true, std::sync::atomic::Ordering::Relaxed)
+                    {
+                        tracing::warn!(
+                            relay = %self.url,
+                            failures = ?output.failed,
+                            "Negentropy diff had failures (timeout usually means relay doesn't support NIP-77), will fall back to REQ+EOSE"
+                        );
+                    }
+
+                    return Err(format!("Negentropy diff had failures: {:?}", output.failed));
                 }
 
                 Ok(reconciliation)
