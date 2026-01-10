@@ -676,10 +676,14 @@ impl SyncManager {
             .position(|b| b.outstanding_subs.contains(&sub_id));
 
         let Some(batch_idx) = batch_index else {
-            tracing::warn!(
+            // Live subscriptions (limit:0, no auto-close) are not tracked in PendingBatch.
+            // They complete immediately with EOSE (no historic events) and stay open for new events.
+            // Observed in production: sync_live() subscriptions trigger this path (expected).
+            // Also possible: duplicate/late EOSE from relay after batch already completed.
+            tracing::trace!(
                 relay = %relay_url,
                 sub_id = %sub_id,
-                "EOSE received for unknown subscription"
+                "EOSE received for subscription not tracked in batch (live subscription or late EOSE)"
             );
             return;
         };
