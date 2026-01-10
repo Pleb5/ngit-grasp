@@ -15,6 +15,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info};
 
 use crate::purgatory::Purgatory;
+use crate::sync::naughty_list::NaughtyListTracker;
 
 use super::context::SyncContext;
 use super::functions::sync_identifier;
@@ -37,6 +38,7 @@ impl Purgatory {
     /// # Arguments
     /// * `ctx` - The sync context providing repository data and fetch capabilities
     /// * `throttle_manager` - Used for rate limiting and domain queue management
+    /// * `git_naughty_list` - Tracker for git remote domains with persistent errors
     ///
     /// # Returns
     /// A `JoinHandle` for the background task (can be used to cancel the loop)
@@ -47,12 +49,13 @@ impl Purgatory {
     /// let purgatory = Arc::new(Purgatory::new("/data/git"));
     /// let ctx = Arc::new(RealSyncContext::new(...));
     /// let throttle_manager = Arc::new(ThrottleManager::new(5, 30));
+    /// let git_naughty_list = Arc::new(NaughtyListTracker::with_defaults());
     ///
     /// // Set context on throttle manager for queue processing
     /// throttle_manager.set_context(ctx.clone());
     ///
     /// // Start the sync loop
-    /// let handle = purgatory.start_sync_loop(ctx, throttle_manager);
+    /// let handle = purgatory.start_sync_loop(ctx, throttle_manager, git_naughty_list);
     ///
     /// // Later, to stop the loop:
     /// handle.abort();
@@ -61,6 +64,7 @@ impl Purgatory {
         self: Arc<Self>,
         ctx: Arc<dyn SyncContext>,
         throttle_manager: Arc<ThrottleManager>,
+        git_naughty_list: Arc<NaughtyListTracker>,
     ) -> JoinHandle<()> {
         info!(
             "Starting purgatory sync loop (interval: {:?})",
@@ -121,6 +125,7 @@ impl Purgatory {
                     let purgatory = self.clone();
                     let ctx = ctx.clone();
                     let throttle_manager = throttle_manager.clone();
+                    let git_naughty_list = git_naughty_list.clone();
                     let id = identifier.clone();
 
                     tokio::spawn(async move {
@@ -129,7 +134,13 @@ impl Purgatory {
                             "Starting sync task for identifier"
                         );
 
-                        let complete = sync_identifier(ctx.as_ref(), &id, &throttle_manager).await;
+                        let complete = sync_identifier(
+                            ctx.as_ref(),
+                            &id,
+                            &throttle_manager,
+                            git_naughty_list.as_ref(),
+                        )
+                        .await;
 
                         // Check final state and update queue
                         if complete || !purgatory.has_pending_events(&id) {

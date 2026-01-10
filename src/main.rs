@@ -12,7 +12,7 @@ use ngit_grasp::{
     metrics::Metrics,
     nostr,
     purgatory::{sync::RealSyncContext, sync::ThrottleManager, Purgatory},
-    sync::SyncManager,
+    sync::{naughty_list::NaughtyListTracker, SyncManager},
 };
 
 #[tokio::main]
@@ -132,23 +132,29 @@ async fn main() -> Result<()> {
         info!("Expired event cleanup task started (24h interval, keeps 7 days)");
 
         // Start purgatory sync loop for background git data fetching
+        // Create naughty list tracker for git remote domains with persistent errors (12h expiration)
+        let git_naughty_list = Arc::new(NaughtyListTracker::with_defaults());
+
         let sync_ctx = Arc::new(RealSyncContext::new(
             purgatory.clone(),
             relay_with_db.database.clone(),
             PathBuf::from(config.effective_git_data_path()),
             Some(config.domain.clone()),
             Some(relay_with_db.relay.clone()),
+            git_naughty_list.clone(),
         ));
 
         // Create throttle manager for rate limiting remote git servers
         // Default: 5 concurrent requests per domain, 30 requests per minute per domain
         let throttle_manager = Arc::new(ThrottleManager::new(5, 30));
         throttle_manager.set_context(sync_ctx.clone());
+        throttle_manager.set_git_naughty_list(git_naughty_list.clone());
 
         // Start the sync loop
-        let _sync_loop_handle = purgatory
-            .clone()
-            .start_sync_loop(sync_ctx, throttle_manager);
+        let _sync_loop_handle =
+            purgatory
+                .clone()
+                .start_sync_loop(sync_ctx, throttle_manager, git_naughty_list.clone());
         info!("Purgatory sync loop started (1s interval)");
 
         // Setup shutdown handler for purgatory cleanup

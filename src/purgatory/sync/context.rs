@@ -187,6 +187,9 @@ use tracing::debug;
 use crate::nostr::builder::SharedDatabase;
 use crate::nostr::events::RepositoryState;
 use crate::purgatory::Purgatory;
+use crate::sync::naughty_list::NaughtyListTracker;
+
+use super::functions::extract_domain;
 
 /// Real implementation of `SyncContext` that connects to actual systems.
 ///
@@ -210,6 +213,9 @@ pub struct RealSyncContext {
 
     /// Local relay for notifying WebSocket subscribers
     local_relay: Option<LocalRelay>,
+
+    /// Naughty list tracker for git remote domains with persistent errors
+    git_naughty_list: Arc<NaughtyListTracker>,
 }
 
 impl RealSyncContext {
@@ -221,12 +227,14 @@ impl RealSyncContext {
     /// * `git_data_path` - Base path for git repositories
     /// * `our_domain` - Our domain to exclude from clone URLs
     /// * `local_relay` - Local relay for WebSocket notifications
+    /// * `git_naughty_list` - Naughty list tracker for git remote domains
     pub fn new(
         purgatory: Arc<Purgatory>,
         database: SharedDatabase,
         git_data_path: PathBuf,
         our_domain: Option<String>,
         local_relay: Option<LocalRelay>,
+        git_naughty_list: Arc<NaughtyListTracker>,
     ) -> Self {
         Self {
             purgatory,
@@ -234,7 +242,13 @@ impl RealSyncContext {
             git_data_path,
             our_domain_value: our_domain,
             local_relay,
+            git_naughty_list,
         }
+    }
+
+    /// Get reference to the git naughty list tracker
+    pub fn git_naughty_list(&self) -> &Arc<NaughtyListTracker> {
+        &self.git_naughty_list
     }
 }
 
@@ -344,6 +358,7 @@ impl SyncContext for RealSyncContext {
         let repo_path = repo_path.to_path_buf();
         let url = url.to_string();
         let missing_oids: Vec<String> = missing.into_iter().cloned().collect();
+        let naughty_list = self.git_naughty_list.clone();
 
         tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
             // git fetch <remote> <sha1> <sha2> ... - fetch all OIDs in one command
@@ -370,6 +385,29 @@ impl SyncContext for RealSyncContext {
                 }
                 Ok(result) => {
                     let stderr = String::from_utf8_lossy(&result.stderr);
+
+                    // Extract domain and classify error for naughty list
+                    if let Some(domain) = extract_domain(&url) {
+                        if let Some(category) = NaughtyListTracker::classify_error(&stderr) {
+                            let is_new = naughty_list.record(&domain, category, stderr.to_string());
+
+                            if is_new {
+                                tracing::warn!(
+                                    domain = %domain,
+                                    category = %category,
+                                    error = %stderr,
+                                    "Git remote domain added to naughty list"
+                                );
+                            } else {
+                                debug!(
+                                    domain = %domain,
+                                    category = %category,
+                                    "Git remote domain still on naughty list"
+                                );
+                            }
+                        }
+                    }
+
                     Err(anyhow::anyhow!("git fetch failed: {}", stderr))
                 }
                 Err(e) => Err(anyhow::anyhow!("git fetch command error: {}", e)),

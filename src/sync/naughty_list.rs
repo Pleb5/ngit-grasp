@@ -1,8 +1,9 @@
-//! Naughty List Tracker for Relays with Persistent Infrastructure Issues
+//! Naughty List Tracker for Remote Servers with Persistent Infrastructure Issues
 //!
-//! This module tracks relays with persistent configuration/infrastructure problems
-//! (DNS failures, TLS certificate errors, protocol violations) separately from
-//! transient network issues (timeouts, connection refused).
+//! This module tracks remote servers (Nostr relays and git remote domains) with
+//! persistent configuration/infrastructure problems (DNS failures, TLS certificate
+//! errors, protocol violations) separately from transient network issues (timeouts,
+//! connection refused).
 //!
 //! ## Failure Classification
 //!
@@ -23,14 +24,14 @@
 use dashmap::DashMap;
 use std::time::Instant;
 
-/// Category of persistent relay failure that qualifies for the naughty list
+/// Category of persistent remote server failure that qualifies for the naughty list
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NaughtyCategory {
     /// DNS lookup failures (domain doesn't resolve)
     DnsLookupFailed,
     /// TLS certificate errors (expired, invalid, mismatch)
     TlsCertificateInvalid,
-    /// WebSocket or Nostr protocol violations
+    /// WebSocket or Nostr protocol violations (relay-specific, won't trigger for git)
     ProtocolError,
 }
 
@@ -51,7 +52,7 @@ impl std::fmt::Display for NaughtyCategory {
     }
 }
 
-/// Naughty list entry for a relay with persistent issues
+/// Naughty list entry for a remote server (relay URL or git domain) with persistent issues
 #[derive(Debug, Clone)]
 pub struct NaughtyEntry {
     /// Category of the persistent failure
@@ -66,15 +67,19 @@ pub struct NaughtyEntry {
     pub occurrence_count: u32,
 }
 
-/// Tracks relays with persistent infrastructure/configuration issues
+/// Tracks remote servers with persistent infrastructure/configuration issues
+///
+/// Used for both:
+/// - Nostr relay URLs (e.g., "wss://relay.example.com")
+/// - Git remote domains (e.g., "git.example.com")
 ///
 /// Separate from HealthTracker's backoff logic - this is specifically for
-/// relays with configuration problems that are unlikely to be fixed quickly.
+/// servers with configuration problems that are unlikely to be fixed quickly.
 #[derive(Debug)]
 pub struct NaughtyListTracker {
-    /// Map of relay URL to naughty entry
+    /// Map of relay URL or git domain to naughty entry
     entries: DashMap<String, NaughtyEntry>,
-    /// How many hours before removing a relay from the naughty list
+    /// How many hours before removing a server from the naughty list
     expiration_hours: u64,
 }
 
@@ -147,21 +152,26 @@ impl NaughtyListTracker {
         None
     }
 
-    /// Record a naughty relay (adds new entry or updates existing)
+    /// Record a naughty server (adds new entry or updates existing)
     ///
     /// # Arguments
     ///
-    /// * `relay_url` - The relay URL
+    /// * `server_url_or_domain` - The relay URL or git domain
     /// * `category` - The naughty category
     /// * `reason` - The full error message
     ///
     /// # Returns
     ///
     /// `true` if this is a new naughty entry (first occurrence), `false` if updating existing
-    pub fn record(&self, relay_url: &str, category: NaughtyCategory, reason: String) -> bool {
+    pub fn record(
+        &self,
+        server_url_or_domain: &str,
+        category: NaughtyCategory,
+        reason: String,
+    ) -> bool {
         let now = Instant::now();
 
-        if let Some(mut entry) = self.entries.get_mut(relay_url) {
+        if let Some(mut entry) = self.entries.get_mut(server_url_or_domain) {
             // Update existing entry
             entry.last_seen = now;
             entry.occurrence_count = entry.occurrence_count.saturating_add(1);
@@ -170,7 +180,7 @@ impl NaughtyListTracker {
         } else {
             // Create new entry
             self.entries.insert(
-                relay_url.to_string(),
+                server_url_or_domain.to_string(),
                 NaughtyEntry {
                     category,
                     reason,
@@ -183,17 +193,17 @@ impl NaughtyListTracker {
         }
     }
 
-    /// Check if a relay is on the naughty list (not expired)
+    /// Check if a server is on the naughty list (not expired)
     ///
     /// # Arguments
     ///
-    /// * `relay_url` - The relay URL to check
+    /// * `server_url_or_domain` - The relay URL or git domain to check
     ///
     /// # Returns
     ///
-    /// `true` if the relay is currently on the naughty list
-    pub fn is_naughty(&self, relay_url: &str) -> bool {
-        if let Some(entry) = self.entries.get(relay_url) {
+    /// `true` if the server is currently on the naughty list
+    pub fn is_naughty(&self, server_url_or_domain: &str) -> bool {
+        if let Some(entry) = self.entries.get(server_url_or_domain) {
             let age = Instant::now().duration_since(entry.first_seen);
             let expiration = std::time::Duration::from_secs(self.expiration_hours * 3600);
             age < expiration
@@ -206,23 +216,23 @@ impl NaughtyListTracker {
     ///
     /// # Arguments
     ///
-    /// * `relay_url` - The relay URL to look up
+    /// * `server_url_or_domain` - The relay URL or git domain to look up
     ///
     /// # Returns
     ///
-    /// A cloned `NaughtyEntry` if the relay is on the naughty list and not expired
-    pub fn get_entry(&self, relay_url: &str) -> Option<NaughtyEntry> {
-        self.entries.get(relay_url).map(|e| e.clone())
+    /// A cloned `NaughtyEntry` if the server is on the naughty list and not expired
+    pub fn get_entry(&self, server_url_or_domain: &str) -> Option<NaughtyEntry> {
+        self.entries.get(server_url_or_domain).map(|e| e.clone())
     }
 
     /// Remove expired entries from the naughty list
     ///
-    /// Entries older than `expiration_hours` are removed to allow relays
+    /// Entries older than `expiration_hours` are removed to allow servers
     /// to be retried after infrastructure issues are potentially fixed.
     ///
     /// # Returns
     ///
-    /// Vector of relay URLs that were removed from the naughty list
+    /// Vector of server URLs/domains that were removed from the naughty list
     pub fn expire_old_entries(&self) -> Vec<String> {
         let now = Instant::now();
         let expiration = std::time::Duration::from_secs(self.expiration_hours * 3600);
@@ -242,11 +252,11 @@ impl NaughtyListTracker {
         expired
     }
 
-    /// Get all naughty relays (for metrics and monitoring)
+    /// Get all naughty servers (for metrics and monitoring)
     ///
     /// # Returns
     ///
-    /// Vector of (relay_url, entry) tuples for all relays currently on the naughty list
+    /// Vector of (server_url_or_domain, entry) tuples for all servers currently on the naughty list
     pub fn get_all(&self) -> Vec<(String, NaughtyEntry)> {
         self.entries
             .iter()
@@ -254,7 +264,7 @@ impl NaughtyListTracker {
             .collect()
     }
 
-    /// Get the count of relays in a specific category
+    /// Get the count of servers in a specific category
     ///
     /// # Arguments
     ///
@@ -262,7 +272,7 @@ impl NaughtyListTracker {
     ///
     /// # Returns
     ///
-    /// Number of relays in the specified category
+    /// Number of servers in the specified category
     pub fn count_by_category(&self, category: NaughtyCategory) -> usize {
         self.entries
             .iter()
@@ -270,7 +280,7 @@ impl NaughtyListTracker {
             .count()
     }
 
-    /// Get total number of relays on the naughty list
+    /// Get total number of servers on the naughty list
     pub fn total_count(&self) -> usize {
         self.entries.len()
     }

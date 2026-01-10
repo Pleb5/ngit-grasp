@@ -24,6 +24,7 @@ use tracing::debug;
 
 use super::context::SyncContext;
 use super::functions::{sync_identifier_from_url, sync_identifier_next_url};
+use crate::sync::naughty_list::NaughtyListTracker;
 
 /// State for an identifier waiting in a domain's queue.
 ///
@@ -265,6 +266,10 @@ pub struct ThrottleManager {
     /// Sync context for processing queued identifiers.
     /// Set once at startup via `set_context()`.
     ctx: OnceLock<Arc<dyn SyncContext>>,
+
+    /// Naughty list tracker for git remote domains with persistent errors.
+    /// Set once at startup via `set_git_naughty_list()`.
+    git_naughty_list: OnceLock<Arc<NaughtyListTracker>>,
 }
 
 impl ThrottleManager {
@@ -279,6 +284,7 @@ impl ThrottleManager {
             max_concurrent_per_domain: max_concurrent,
             max_per_minute_per_domain: max_per_minute,
             ctx: OnceLock::new(),
+            git_naughty_list: OnceLock::new(),
         }
     }
 
@@ -292,6 +298,17 @@ impl ThrottleManager {
     /// * `ctx` - The sync context implementation
     pub fn set_context(&self, ctx: Arc<dyn SyncContext>) {
         let _ = self.ctx.set(ctx);
+    }
+
+    /// Set the git naughty list tracker (called once at startup).
+    ///
+    /// The naughty list is used to filter out domains with persistent errors
+    /// during URL selection.
+    ///
+    /// # Arguments
+    /// * `git_naughty_list` - The naughty list tracker
+    pub fn set_git_naughty_list(&self, git_naughty_list: Arc<NaughtyListTracker>) {
+        let _ = self.git_naughty_list.set(git_naughty_list);
     }
 
     /// Check if a domain is currently throttled (at capacity).
@@ -479,10 +496,22 @@ impl ThrottleManager {
                 .unwrap_or_default()
         };
 
+        // Get naughty list (should be set at startup)
+        let naughty_list = self
+            .git_naughty_list
+            .get()
+            .expect("git_naughty_list not set");
+
         // Get next URL for this identifier on this specific domain
-        let url =
-            sync_identifier_next_url(ctx.as_ref(), identifier, Some(domain), &tried_urls, self)
-                .await;
+        let url = sync_identifier_next_url(
+            ctx.as_ref(),
+            identifier,
+            Some(domain),
+            &tried_urls,
+            self,
+            naughty_list.as_ref(),
+        )
+        .await;
 
         match url {
             Some(url) => {

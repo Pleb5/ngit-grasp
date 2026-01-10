@@ -17,6 +17,7 @@ use tracing::debug;
 
 use super::context::SyncContext;
 use super::throttle::ThrottleManager;
+use crate::sync::naughty_list::NaughtyListTracker;
 
 /// Extract domain from a URL.
 ///
@@ -29,7 +30,7 @@ use super::throttle::ThrottleManager;
 /// assert_eq!(extract_domain("http://example.com:8080/repo.git"), Some("example.com".to_string()));
 /// assert_eq!(extract_domain("git@github.com:foo/bar.git"), None); // SSH URLs not supported
 /// ```
-fn extract_domain(url: &str) -> Option<String> {
+pub(crate) fn extract_domain(url: &str) -> Option<String> {
     // Simple URL parsing for HTTP(S) URLs
     // Format: scheme://[user@]host[:port]/path
     let url = url
@@ -57,7 +58,8 @@ fn extract_domain(url: &str) -> Option<String> {
 /// 2. Checks if there are OIDs still needed
 /// 3. Gets repository data and extracts clone URLs
 /// 4. Filters out our own domain and already-tried URLs
-/// 5. Returns the first non-throttled URL (when `domain` is None)
+/// 5. Filters out naughty domains (with persistent SSL/DNS errors)
+/// 6. Returns the first non-throttled URL (when `domain` is None)
 ///    or a URL from the specified domain (when `domain` is Some)
 ///
 /// # Arguments
@@ -68,6 +70,7 @@ fn extract_domain(url: &str) -> Option<String> {
 ///   If None, return any non-throttled URL.
 /// * `tried_urls` - URLs that have already been tried (will be skipped)
 /// * `throttle_manager` - Used to check if domains are throttled (when domain is None)
+/// * `git_naughty_list` - Used to filter out domains with persistent errors
 ///
 /// # Returns
 ///
@@ -79,6 +82,7 @@ pub async fn sync_identifier_next_url<C: SyncContext + ?Sized>(
     domain: Option<&str>,
     tried_urls: &HashSet<String>,
     throttle_manager: &ThrottleManager,
+    git_naughty_list: &NaughtyListTracker,
 ) -> Option<String> {
     // 1. Check if we still have pending events
     if !ctx.has_pending_events(identifier) {
@@ -158,7 +162,7 @@ pub async fn sync_identifier_next_url<C: SyncContext + ?Sized>(
                 .and_then(|urls| urls.iter().find(|url| !tried_urls.contains(*url)).cloned())
         }
         None => {
-            // Try any non-throttled domain
+            // Try any non-throttled, non-naughty domain
             for (d, domain_urls) in &urls_by_domain {
                 if throttle_manager.is_throttled(d) {
                     debug!(
@@ -168,6 +172,17 @@ pub async fn sync_identifier_next_url<C: SyncContext + ?Sized>(
                     );
                     continue;
                 }
+
+                // NEW: Skip naughty domains
+                if git_naughty_list.is_naughty(d) {
+                    debug!(
+                        identifier = %identifier,
+                        domain = %d,
+                        "Domain is on git naughty list - skipping"
+                    );
+                    continue;
+                }
+
                 if let Some(url) = domain_urls.iter().find(|url| !tried_urls.contains(*url)) {
                     return Some(url.clone());
                 }
@@ -200,6 +215,7 @@ pub struct ThrottledDomainInfo {
 /// * `identifier` - The repository identifier
 /// * `tried_urls` - All URLs that have been tried (across all domains)
 /// * `throttle_manager` - Used to check which domains are throttled
+/// * `git_naughty_list` - Used to filter out domains with persistent errors
 ///
 /// # Returns
 ///
@@ -210,6 +226,7 @@ pub async fn get_throttled_domains_with_untried_urls<C: SyncContext + ?Sized>(
     identifier: &str,
     tried_urls: &HashSet<String>,
     throttle_manager: &ThrottleManager,
+    git_naughty_list: &NaughtyListTracker,
 ) -> Vec<ThrottledDomainInfo> {
     let repo_data = match ctx.fetch_repository_data(identifier).await {
         Ok(data) => data,
@@ -248,6 +265,11 @@ pub async fn get_throttled_domains_with_untried_urls<C: SyncContext + ?Sized>(
         .filter_map(|(domain, domain_urls)| {
             if !throttle_manager.is_throttled(&domain) {
                 return None; // Not throttled, skip
+            }
+
+            // Skip naughty domains
+            if git_naughty_list.is_naughty(&domain) {
+                return None; // On naughty list, skip
             }
 
             let untried: Vec<_> = domain_urls
@@ -388,7 +410,7 @@ pub async fn sync_identifier_from_url<C: SyncContext + ?Sized>(
 /// Sync git data for an identifier.
 ///
 /// This is the main orchestration function called by the sync loop. It:
-/// 1. Tries all non-throttled URLs in sequence
+/// 1. Tries all non-throttled, non-naughty URLs in sequence
 /// 2. After each fetch, checks if sync is complete (no pending events or no needed OIDs)
 /// 3. When no non-throttled URLs remain, enqueues with throttled domains for later processing
 /// 4. Returns without waiting for throttled domains to complete
@@ -398,6 +420,7 @@ pub async fn sync_identifier_from_url<C: SyncContext + ?Sized>(
 /// * `ctx` - The sync context providing repository data and OID information
 /// * `identifier` - The repository identifier (d-tag value)
 /// * `throttle_manager` - Used for rate limiting and domain queue management
+/// * `git_naughty_list` - Used to filter out domains with persistent errors
 ///
 /// # Returns
 ///
@@ -408,6 +431,7 @@ pub async fn sync_identifier<C: SyncContext + ?Sized>(
     ctx: &C,
     identifier: &str,
     throttle_manager: &Arc<ThrottleManager>,
+    git_naughty_list: &NaughtyListTracker,
 ) -> bool {
     let mut tried_urls: HashSet<String> = HashSet::new();
 
@@ -416,9 +440,18 @@ pub async fn sync_identifier<C: SyncContext + ?Sized>(
         "Starting sync for identifier"
     );
 
-    // Try all non-throttled URLs
+    // Try all non-throttled, non-naughty URLs
     loop {
-        match sync_identifier_next_url(ctx, identifier, None, &tried_urls, throttle_manager).await {
+        match sync_identifier_next_url(
+            ctx,
+            identifier,
+            None,
+            &tried_urls,
+            throttle_manager,
+            git_naughty_list,
+        )
+        .await
+        {
             Some(url) => {
                 debug!(
                     identifier = %identifier,
@@ -481,9 +514,14 @@ pub async fn sync_identifier<C: SyncContext + ?Sized>(
     }
 
     // Enqueue with any throttled domains that have untried URLs
-    let throttled_domains =
-        get_throttled_domains_with_untried_urls(ctx, identifier, &tried_urls, throttle_manager)
-            .await;
+    let throttled_domains = get_throttled_domains_with_untried_urls(
+        ctx,
+        identifier,
+        &tried_urls,
+        throttle_manager,
+        git_naughty_list,
+    )
+    .await;
 
     for info in throttled_domains {
         debug!(
@@ -525,15 +563,22 @@ mod tests {
 
         // Create throttle manager and throttle github.com
         let throttle_manager = ThrottleManager::new(1, 100);
+        let naughty_list = NaughtyListTracker::with_defaults();
 
         // Saturate github.com by starting a request
         throttle_manager.start_request("github.com");
 
         // Should return gitlab.com URL since github.com is throttled
         let tried_urls = HashSet::new();
-        let result =
-            sync_identifier_next_url(&mock, "test-repo", None, &tried_urls, &throttle_manager)
-                .await;
+        let result = sync_identifier_next_url(
+            &mock,
+            "test-repo",
+            None,
+            &tried_urls,
+            &throttle_manager,
+            &naughty_list,
+        )
+        .await;
 
         assert!(result.is_some());
         let url = result.unwrap();
@@ -556,15 +601,22 @@ mod tests {
             .with_pending_events(true);
 
         let throttle_manager = ThrottleManager::new(5, 100);
+        let naughty_list = NaughtyListTracker::with_defaults();
 
         // Mark first URL as tried
         let mut tried_urls = HashSet::new();
         tried_urls.insert("https://github.com/foo/bar.git".to_string());
 
         // Should return the second URL
-        let result =
-            sync_identifier_next_url(&mock, "test-repo", None, &tried_urls, &throttle_manager)
-                .await;
+        let result = sync_identifier_next_url(
+            &mock,
+            "test-repo",
+            None,
+            &tried_urls,
+            &throttle_manager,
+            &naughty_list,
+        )
+        .await;
 
         assert!(result.is_some());
         let url = result.unwrap();
@@ -579,11 +631,18 @@ mod tests {
             .with_pending_events(false); // No pending events
 
         let throttle_manager = ThrottleManager::new(5, 100);
+        let naughty_list = NaughtyListTracker::with_defaults();
         let tried_urls = HashSet::new();
 
-        let result =
-            sync_identifier_next_url(&mock, "test-repo", None, &tried_urls, &throttle_manager)
-                .await;
+        let result = sync_identifier_next_url(
+            &mock,
+            "test-repo",
+            None,
+            &tried_urls,
+            &throttle_manager,
+            &naughty_list,
+        )
+        .await;
 
         assert!(result.is_none());
     }
@@ -596,11 +655,18 @@ mod tests {
             .with_pending_events(true);
 
         let throttle_manager = ThrottleManager::new(5, 100);
+        let naughty_list = NaughtyListTracker::with_defaults();
         let tried_urls = HashSet::new();
 
-        let result =
-            sync_identifier_next_url(&mock, "test-repo", None, &tried_urls, &throttle_manager)
-                .await;
+        let result = sync_identifier_next_url(
+            &mock,
+            "test-repo",
+            None,
+            &tried_urls,
+            &throttle_manager,
+            &naughty_list,
+        )
+        .await;
 
         assert!(result.is_none());
     }
@@ -617,11 +683,18 @@ mod tests {
             .with_our_domain("our-relay.com");
 
         let throttle_manager = ThrottleManager::new(5, 100);
+        let naughty_list = NaughtyListTracker::with_defaults();
         let tried_urls = HashSet::new();
 
-        let result =
-            sync_identifier_next_url(&mock, "test-repo", None, &tried_urls, &throttle_manager)
-                .await;
+        let result = sync_identifier_next_url(
+            &mock,
+            "test-repo",
+            None,
+            &tried_urls,
+            &throttle_manager,
+            &naughty_list,
+        )
+        .await;
 
         assert!(result.is_some());
         let url = result.unwrap();
@@ -643,6 +716,7 @@ mod tests {
             .with_pending_events(true);
 
         let throttle_manager = ThrottleManager::new(5, 100);
+        let naughty_list = NaughtyListTracker::with_defaults();
         let tried_urls = HashSet::new();
 
         // Request specific domain
@@ -652,6 +726,7 @@ mod tests {
             Some("gitlab.com"),
             &tried_urls,
             &throttle_manager,
+            &naughty_list,
         )
         .await;
 
@@ -757,6 +832,7 @@ mod tests {
             .with_pending_events(true);
 
         let throttle_manager = ThrottleManager::new(1, 100);
+        let naughty_list = NaughtyListTracker::with_defaults();
 
         // Throttle github.com and gitlab.com
         throttle_manager.start_request("github.com");
@@ -771,6 +847,7 @@ mod tests {
             "test-repo",
             &tried_urls,
             &throttle_manager,
+            &naughty_list,
         )
         .await;
 
@@ -803,9 +880,10 @@ mod tests {
             .url_provides("https://server3.com/repo.git", &["ghi789"]);
 
         let throttle_manager = Arc::new(ThrottleManager::new(5, 100));
+        let naughty_list = NaughtyListTracker::with_defaults();
 
         // Run sync_identifier
-        let complete = sync_identifier(&mock, "test-repo", &throttle_manager).await;
+        let complete = sync_identifier(&mock, "test-repo", &throttle_manager, &naughty_list).await;
 
         // Should return true (sync complete)
         assert!(complete, "Expected sync to complete after trying all URLs");
@@ -841,12 +919,13 @@ mod tests {
         // Note: gitlab.com doesn't provide any OIDs
 
         let throttle_manager = Arc::new(ThrottleManager::new(1, 100));
+        let naughty_list = NaughtyListTracker::with_defaults();
 
         // Throttle github.com by starting a request
         throttle_manager.start_request("github.com");
 
         // Run sync_identifier
-        let complete = sync_identifier(&mock, "test-repo", &throttle_manager).await;
+        let complete = sync_identifier(&mock, "test-repo", &throttle_manager, &naughty_list).await;
 
         // Should return false (sync incomplete - github.com is throttled)
         assert!(
@@ -911,23 +990,36 @@ mod tests {
             .with_pending_events(true);
 
         let throttle_manager = ThrottleManager::new(5, 100);
+        let naughty_list = NaughtyListTracker::with_defaults();
         let tried_urls = HashSet::new();
 
         // Get first URL
-        let first_url =
-            sync_identifier_next_url(&mock, "test-repo", None, &tried_urls, &throttle_manager)
-                .await
-                .expect("Should return a URL");
+        let first_url = sync_identifier_next_url(
+            &mock,
+            "test-repo",
+            None,
+            &tried_urls,
+            &throttle_manager,
+            &naughty_list,
+        )
+        .await
+        .expect("Should return a URL");
 
         // Try the first URL
         let mut tried = HashSet::new();
         tried.insert(first_url.clone());
 
         // Get second URL
-        let second_url =
-            sync_identifier_next_url(&mock, "test-repo", None, &tried, &throttle_manager)
-                .await
-                .expect("Should return a second URL");
+        let second_url = sync_identifier_next_url(
+            &mock,
+            "test-repo",
+            None,
+            &tried,
+            &throttle_manager,
+            &naughty_list,
+        )
+        .await
+        .expect("Should return a second URL");
 
         // Both URLs should be available (one from announcement, one from PR)
         let both_urls = [first_url, second_url];
@@ -955,12 +1047,20 @@ mod tests {
             .with_pending_events(true);
 
         let throttle_manager = ThrottleManager::new(5, 100);
+        let naughty_list = NaughtyListTracker::with_defaults();
         let mut tried_urls = HashSet::new();
 
         // Collect all available URLs
         let mut available_urls = Vec::new();
-        while let Some(url) =
-            sync_identifier_next_url(&mock, "test-repo", None, &tried_urls, &throttle_manager).await
+        while let Some(url) = sync_identifier_next_url(
+            &mock,
+            "test-repo",
+            None,
+            &tried_urls,
+            &throttle_manager,
+            &naughty_list,
+        )
+        .await
         {
             available_urls.push(url.clone());
             tried_urls.insert(url);
@@ -1001,6 +1101,7 @@ mod tests {
             .with_pending_events(true);
 
         let throttle_manager = ThrottleManager::new(1, 100);
+        let naughty_list = NaughtyListTracker::with_defaults();
 
         // Throttle both domains
         throttle_manager.start_request("github.com");
@@ -1013,6 +1114,7 @@ mod tests {
             "test-repo",
             &tried_urls,
             &throttle_manager,
+            &naughty_list,
         )
         .await;
 
@@ -1037,9 +1139,10 @@ mod tests {
         // Note: github.com doesn't provide any OIDs
 
         let throttle_manager = Arc::new(ThrottleManager::new(5, 100));
+        let naughty_list = NaughtyListTracker::with_defaults();
 
         // Run sync_identifier
-        let complete = sync_identifier(&mock, "test-repo", &throttle_manager).await;
+        let complete = sync_identifier(&mock, "test-repo", &throttle_manager, &naughty_list).await;
 
         // Should complete successfully using PR clone URL
         assert!(complete, "Sync should complete using PR clone URL");
