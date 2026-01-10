@@ -81,12 +81,21 @@ impl StatePolicy {
         // CRITICAL: Check if author is authorized via maintainer set
         // State events MUST be rejected if author is not in maintainer set of any accepted announcement
         if db_repo_data.announcements.is_empty() {
-            tracing::warn!(
-                event_id = %event.id,
-                identifier = %state.identifier,
-                author = %event.pubkey.to_hex(),
-                "Rejecting state event: no announcement exists for this repository"
-            );
+            if is_synced {
+                tracing::debug!(
+                    event_id = %event.id,
+                    identifier = %state.identifier,
+                    author = %event.pubkey.to_hex(),
+                    "Rejecting state event: no announcement exists for this repository"
+                );
+            } else {
+                tracing::warn!(
+                    event_id = %event.id,
+                    identifier = %state.identifier,
+                    author = %event.pubkey.to_hex(),
+                    "Rejecting state event: no announcement exists for this repository"
+                );
+            }
             return Ok(WritePolicyResult::Reject {
                 status: false,
                 message: "invalid: no announcement exists for this repository".into(),
@@ -99,13 +108,23 @@ impl StatePolicy {
         );
 
         if authorized_owners.is_empty() {
-            tracing::warn!(
-                event_id = %event.id,
-                identifier = %state.identifier,
-                author = %event.pubkey.to_hex(),
-                announcements_count = db_repo_data.announcements.len(),
-                "Rejecting state event: author not in maintainer set of any announcement"
-            );
+            if is_synced {
+                tracing::debug!(
+                    event_id = %event.id,
+                    identifier = %state.identifier,
+                    author = %event.pubkey.to_hex(),
+                    announcements_count = db_repo_data.announcements.len(),
+                    "Rejecting state event: author not in maintainer set of any announcement"
+                );
+            } else {
+                tracing::warn!(
+                    event_id = %event.id,
+                    identifier = %state.identifier,
+                    author = %event.pubkey.to_hex(),
+                    announcements_count = db_repo_data.announcements.len(),
+                    "Rejecting state event: author not in maintainer set of any announcement"
+                );
+            }
             return Ok(WritePolicyResult::Reject {
                 status: false,
                 message: "invalid: author not authorized for this repository".into(),
