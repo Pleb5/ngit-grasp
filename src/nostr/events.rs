@@ -143,14 +143,29 @@ impl RepositoryAnnouncement {
         })
     }
 
+    /// Normalize a URL by removing trailing slashes for consistent comparison
+    ///
+    /// See test_validate_announcement_with_trailing_slash_in_relay for why we need this
+    fn normalize_url_for_comparison(url: &str) -> &str {
+        url.trim_end_matches('/')
+    }
+
     /// Check if this announcement lists the given domain in clone URLs
     pub fn has_clone_url(&self, domain: &str) -> bool {
-        self.clone_urls.iter().any(|url| url.contains(domain))
+        let normalized_domain = Self::normalize_url_for_comparison(domain);
+        self.clone_urls.iter().any(|url| {
+            let normalized_url = Self::normalize_url_for_comparison(url);
+            normalized_url.contains(normalized_domain)
+        })
     }
 
     /// Check if this announcement lists the given relay
     pub fn has_relay(&self, relay: &str) -> bool {
-        self.relays.iter().any(|r| r.contains(relay))
+        let normalized_relay = Self::normalize_url_for_comparison(relay);
+        self.relays.iter().any(|r| {
+            let normalized_r = Self::normalize_url_for_comparison(r);
+            normalized_r.contains(normalized_relay)
+        })
     }
 
     /// Check if this announcement lists the service (both clone and relay)
@@ -786,5 +801,99 @@ mod tests {
         assert_eq!(state.get_head_branch(), Some("develop"));
         // HEAD points to develop but only main branch exists in state
         assert!(!state.head_commit_available());
+    }
+
+    #[test]
+    fn test_validate_announcement_with_trailing_slash_in_relay() {
+        let keys = create_test_keys();
+        let event = create_announcement_event(
+            &keys,
+            "test-repo",
+            vec!["https://git.shakespeare.diy/alice/test-repo.git"],
+            vec!["wss://git.shakespeare.diy/"], // Trailing slash in relay
+        );
+
+        // Should accept despite trailing slash mismatch
+        let result = validate_announcement(&event, "git.shakespeare.diy");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_announcement_with_trailing_slash_in_clone_url() {
+        let keys = create_test_keys();
+        let event = create_announcement_event(
+            &keys,
+            "test-repo",
+            vec!["https://git.shakespeare.diy/"], // Trailing slash in clone URL
+            vec!["wss://git.shakespeare.diy"],
+        );
+
+        // Should accept despite trailing slash mismatch
+        let result = validate_announcement(&event, "git.shakespeare.diy");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_announcement_with_trailing_slash_in_both() {
+        let keys = create_test_keys();
+        let event = create_announcement_event(
+            &keys,
+            "test-repo",
+            vec!["https://git.shakespeare.diy/alice/test-repo.git/"], // Trailing slash
+            vec!["wss://git.shakespeare.diy/"],                       // Trailing slash
+        );
+
+        // Should accept with trailing slashes in both
+        let result = validate_announcement(&event, "git.shakespeare.diy");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_announcement_domain_with_trailing_slash() {
+        let keys = create_test_keys();
+        let event = create_announcement_event(
+            &keys,
+            "test-repo",
+            vec!["https://gitnostr.com/alice/test-repo.git"],
+            vec!["wss://gitnostr.com"],
+        );
+
+        // Should accept even when domain parameter has trailing slash
+        let result = validate_announcement(&event, "gitnostr.com/");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_has_clone_url_with_trailing_slashes() {
+        let keys = create_test_keys();
+        let event = create_announcement_event(
+            &keys,
+            "test-repo",
+            vec!["https://example.com/repo.git/"],
+            vec!["wss://example.com"],
+        );
+
+        let announcement = RepositoryAnnouncement::from_event(event).unwrap();
+
+        // Should match with or without trailing slash
+        assert!(announcement.has_clone_url("example.com"));
+        assert!(announcement.has_clone_url("example.com/"));
+    }
+
+    #[test]
+    fn test_has_relay_with_trailing_slashes() {
+        let keys = create_test_keys();
+        let event = create_announcement_event(
+            &keys,
+            "test-repo",
+            vec!["https://example.com/repo.git"],
+            vec!["wss://example.com/"],
+        );
+
+        let announcement = RepositoryAnnouncement::from_event(event).unwrap();
+
+        // Should match with or without trailing slash
+        assert!(announcement.has_relay("example.com"));
+        assert!(announcement.has_relay("example.com/"));
     }
 }
