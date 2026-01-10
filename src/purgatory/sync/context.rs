@@ -345,7 +345,7 @@ impl SyncContext for RealSyncContext {
         let url = url.to_string();
         let missing_oids: Vec<String> = missing.into_iter().cloned().collect();
 
-        let fetched = tokio::task::spawn_blocking(move || -> Vec<String> {
+        tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
             // git fetch <remote> <sha1> <sha2> ... - fetch all OIDs in one command
             let mut args = vec!["fetch", "--depth=1", &url];
             args.extend(missing_oids.iter().map(|s| s.as_str()));
@@ -366,29 +366,17 @@ impl SyncContext for RealSyncContext {
 
                     debug!(fetched_count = fetched.len(), "Successfully fetched OIDs");
 
-                    fetched
+                    Ok(fetched)
                 }
                 Ok(result) => {
                     let stderr = String::from_utf8_lossy(&result.stderr);
-                    debug!(
-                        stderr = %stderr,
-                        "git fetch failed"
-                    );
-                    vec![]
+                    Err(anyhow::anyhow!("git fetch failed: {}", stderr))
                 }
-                Err(e) => {
-                    debug!(
-                        error = %e,
-                        "git fetch command error"
-                    );
-                    vec![]
-                }
+                Err(e) => Err(anyhow::anyhow!("git fetch command error: {}", e)),
             }
         })
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to spawn blocking task: {}", e))?;
-
-        Ok(fetched)
+        .map_err(|e| anyhow::anyhow!("Failed to spawn blocking task: {}", e))?
     }
 
     async fn process_newly_available_git_data(
