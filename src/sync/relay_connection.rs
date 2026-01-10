@@ -509,42 +509,65 @@ impl RelayConnection {
         // Use dry_run to only identify differences without downloading events
         let sync_opts = SyncOptions::default().dry_run();
 
-        match self.client.sync(filter.clone(), &sync_opts).await {
-            Ok(output) => {
-                let reconciliation = output.val;
+        // Clone the atomic for the polling task
+        let nip77_status = self.nip77_supported.clone();
+        let url = self.url.clone();
 
+        // Create a polling task that checks if NIP-77 support was detected as unavailable
+        let poll_task = async move {
+            loop {
+                let status = nip77_status.load(std::sync::atomic::Ordering::Relaxed);
+                if status == 2 {
+                    // Relay confirmed not to support NIP-77 (via NOTICE or other means)
+                    return Err(format!(
+                        "Relay {} does not support NIP-77 (detected via NOTICE)",
+                        url
+                    ));
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            }
+        };
+
+        // Race the sync operation against the polling task
+        let sync_task = self.client.sync(filter.clone(), &sync_opts);
+
+        let result = tokio::select! {
+            poll_result = poll_task => {
+                // Polling detected NIP-77 not supported
+                poll_result
+            }
+            sync_result = sync_task => {
+                // Sync completed (or failed) first
+                match sync_result {
+                    Ok(output) => {
+                        // Check for any failures
+                        // Note: Timeouts are common for relays without NIP-77 support
+                        if !output.failed.is_empty() {
+                            Err(format!("Negentropy diff had failures: {:?}", output.failed))
+                        } else {
+                            Ok(output.val)
+                        }
+                    }
+                    Err(e) => Err(format!("Negentropy diff failed: {}", e))
+                }
+            }
+        };
+
+        match result {
+            Ok(reconciliation) => {
                 tracing::debug!(
                     relay = %self.url,
                     local_count = reconciliation.local.len(),
                     remote_count = reconciliation.remote.len(),
                     "Negentropy diff completed (dry run)"
                 );
-
-                // Check for any failures
-                // Note: Timeouts are common for relays without NIP-77 support
-                if !output.failed.is_empty() {
-                    // Mark relay as not supporting NIP-77 (timeout typically means no support)
-                    self.nip77_supported
-                        .store(2, std::sync::atomic::Ordering::Relaxed);
-
-                    // Log warning only once per relay to avoid spam
-                    if !self
-                        .nip77_warning_logged
-                        .swap(true, std::sync::atomic::Ordering::Relaxed)
-                    {
-                        tracing::warn!(
-                            relay = %self.url,
-                            failures = ?output.failed,
-                            "Negentropy diff had failures (timeout usually means relay doesn't support NIP-77), will fall back to REQ+EOSE"
-                        );
-                    }
-
-                    return Err(format!("Negentropy diff had failures: {:?}", output.failed));
-                }
-
                 Ok(reconciliation)
             }
             Err(e) => {
+                // Mark relay as not supporting NIP-77
+                self.nip77_supported
+                    .store(2, std::sync::atomic::Ordering::Relaxed);
+
                 // Log warning only once per relay to avoid spam
                 if !self
                     .nip77_warning_logged
@@ -556,7 +579,7 @@ impl RelayConnection {
                         "Negentropy diff failed, will fall back to REQ+EOSE"
                     );
                 }
-                Err(format!("Negentropy diff failed: {}", e))
+                Err(e)
             }
         }
     }
