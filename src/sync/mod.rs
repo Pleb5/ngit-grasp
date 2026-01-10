@@ -16,6 +16,7 @@ pub mod algorithms;
 pub mod filters;
 pub mod health;
 pub mod metrics;
+pub mod naughty_list;
 pub mod rejected_index;
 pub mod relay_connection;
 pub mod self_subscriber;
@@ -483,7 +484,18 @@ async fn run_health_and_metrics_checker(
                 // 2. Check for rate limit recovery
                 manager.check_rate_limit_recovery().await;
 
-                // 3. Update metrics with current health states
+                // 3. Check for naughty list expiration
+                if let Some(naughty_list) = manager.health_tracker.naughty_list() {
+                    let recovered = naughty_list.expire_old_entries();
+                    for url in recovered {
+                        tracing::info!(
+                            relay = %url,
+                            "Relay removed from naughty list after expiration, will retry"
+                        );
+                    }
+                }
+
+                // 4. Update metrics with current health states and naughty list
                 if let Some(ref metrics) = manager.metrics {
                     // Get all tracked relay URLs
                     let relay_urls: Vec<String> = {
@@ -495,6 +507,12 @@ async fn run_health_and_metrics_checker(
                     for relay_url in relay_urls {
                         let state = manager.health_tracker.get_state(&relay_url);
                         metrics.record_health_state(&relay_url, state);
+                    }
+
+                    // Update naughty list metrics
+                    if let Some(naughty_list) = manager.health_tracker.naughty_list() {
+                        let entries = naughty_list.get_all();
+                        metrics.update_naughty_list(entries);
                     }
                 }
             }
@@ -2018,7 +2036,38 @@ impl SyncManager {
                 }
             }
             Err(e) => {
-                tracing::error!(relay = %relay_url, error = %e, "Connection failed");
+                // Classify error to determine if it's a naughty relay or transient issue
+                let error_str = e.to_string();
+
+                if let Some(category) = naughty_list::NaughtyListTracker::classify_error(&error_str)
+                {
+                    // Persistent infrastructure issue - use naughty list
+                    if let Some(ref naughty_list) = self.health_tracker.naughty_list() {
+                        let is_new = naughty_list.record(relay_url, category, error_str.clone());
+
+                        if is_new {
+                            tracing::warn!(
+                                relay = %relay_url,
+                                category = ?category,
+                                error = %e,
+                                "Relay has persistent configuration issue, added to naughty list"
+                            );
+                        } else {
+                            tracing::debug!(
+                                relay = %relay_url,
+                                category = ?category,
+                                "Naughty relay failure (already tracked)"
+                            );
+                        }
+                    }
+                } else {
+                    // Transient network issue - use existing backoff flow
+                    tracing::debug!(
+                        relay = %relay_url,
+                        error = %e,
+                        "Connection failed (transient issue, backoff active)"
+                    );
+                }
 
                 // 4. Update state back to Disconnected on failure
                 {

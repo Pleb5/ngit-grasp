@@ -5,6 +5,7 @@
 //! - Exponential backoff with configurable max delay
 //! - Dead relay detection after 24h of continuous failures
 //! - Rate limit detection and fixed cooldown period
+//! - Naughty list for persistent infrastructure issues (DNS, TLS, protocol errors)
 //!
 //! ## Health States
 //!
@@ -18,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 
+use super::naughty_list::NaughtyListTracker;
 use crate::config::Config;
 
 /// Duration threshold before a relay is considered dead (24 hours)
@@ -213,15 +215,21 @@ pub struct RelayHealthTracker {
     health: DashMap<String, RelayHealth>,
     max_backoff_secs: u64,
     base_backoff_secs: u64,
+    naughty_list: Option<Arc<NaughtyListTracker>>,
 }
 
 impl RelayHealthTracker {
     /// Create a new RelayHealthTracker
     pub fn new(config: &Config) -> Self {
+        let naughty_list = Some(Arc::new(NaughtyListTracker::new(
+            config.naughty_list_expiration_hours,
+        )));
+
         Self {
             health: DashMap::new(),
             max_backoff_secs: config.sync_max_backoff_secs,
             base_backoff_secs: config.sync_base_backoff_secs,
+            naughty_list,
         }
     }
 
@@ -231,6 +239,7 @@ impl RelayHealthTracker {
             health: DashMap::new(),
             max_backoff_secs: DEFAULT_MAX_BACKOFF_SECS,
             base_backoff_secs: DEFAULT_BASE_BACKOFF_SECS,
+            naughty_list: Some(Arc::new(NaughtyListTracker::with_defaults())),
         }
     }
 
@@ -240,6 +249,7 @@ impl RelayHealthTracker {
             health: DashMap::new(),
             max_backoff_secs,
             base_backoff_secs: DEFAULT_BASE_BACKOFF_SECS,
+            naughty_list: Some(Arc::new(NaughtyListTracker::with_defaults())),
         }
     }
 
@@ -548,6 +558,11 @@ impl RelayHealthTracker {
         self.health
             .get(relay_url)
             .map(|entry| entry.value().clone())
+    }
+
+    /// Get a reference to the naughty list tracker
+    pub fn naughty_list(&self) -> Option<Arc<NaughtyListTracker>> {
+        self.naughty_list.clone()
     }
 }
 

@@ -156,6 +156,12 @@ pub struct Config {
         default_value_t = 604800
     )]
     pub rejected_cold_index_expiry_secs: u64,
+
+    /// Hours before removing relay from naughty list (default: 12)
+    /// Relays with persistent infrastructure issues (DNS, TLS, protocol errors) are
+    /// tracked separately and retried after this expiration period.
+    #[arg(long, env = "NGIT_NAUGHTY_LIST_EXPIRATION_HOURS", default_value_t = 12)]
+    pub naughty_list_expiration_hours: u64,
 }
 
 impl Config {
@@ -281,6 +287,7 @@ impl Config {
             sync_disable_negentropy: false,
             rejected_hot_cache_duration_secs: 120,
             rejected_cold_index_expiry_secs: 604800,
+            naughty_list_expiration_hours: 12,
         }
     }
 }

@@ -56,6 +56,12 @@ pub struct SyncMetrics {
     rejected_cold_index_expired_total: IntCounterVec,
     /// Total invalidations (by event_type: announcement, state)
     rejected_invalidated_total: IntCounterVec,
+
+    // === Naughty List Metrics ===
+    /// Number of relays on naughty list by category
+    naughty_relays_total: IntGaugeVec,
+    /// Detailed info about naughty relays (relay, category, reason)
+    naughty_relay_info: IntGaugeVec,
 }
 
 impl SyncMetrics {
@@ -193,6 +199,25 @@ impl SyncMetrics {
         )?;
         registry.register(Box::new(rejected_invalidated_total.clone()))?;
 
+        // Naughty list metrics
+        let naughty_relays_total = IntGaugeVec::new(
+            Opts::new(
+                "ngit_sync_naughty_relays_total",
+                "Number of relays on naughty list by category",
+            ),
+            &["category"],
+        )?;
+        registry.register(Box::new(naughty_relays_total.clone()))?;
+
+        let naughty_relay_info = IntGaugeVec::new(
+            Opts::new(
+                "ngit_sync_naughty_relay_info",
+                "Detailed info about naughty relays (occurrence count)",
+            ),
+            &["relay", "category", "reason"],
+        )?;
+        registry.register(Box::new(naughty_relay_info.clone()))?;
+
         Ok(Self {
             relay_connected,
             connection_attempts_total,
@@ -209,6 +234,8 @@ impl SyncMetrics {
             rejected_cold_index_current,
             rejected_cold_index_expired_total,
             rejected_invalidated_total,
+            naughty_relays_total,
+            naughty_relay_info,
         })
     }
 
@@ -464,6 +491,56 @@ impl SyncMetrics {
         self.rejected_invalidated_total
             .with_label_values(&[event_type])
             .inc_by(count as u64);
+    }
+
+    // === Naughty List Recording Methods ===
+
+    /// Update naughty list metrics from current naughty list state
+    ///
+    /// This method resets and rebuilds all naughty list metrics based on
+    /// the provided entries. Should be called periodically to keep metrics
+    /// in sync with the naughty list state.
+    ///
+    /// # Arguments
+    ///
+    /// * `entries` - Vector of (relay_url, naughty_entry) tuples from NaughtyListTracker::get_all()
+    pub fn update_naughty_list(&self, entries: Vec<(String, super::naughty_list::NaughtyEntry)>) {
+        use super::naughty_list::NaughtyCategory;
+
+        // Reset all naughty list metrics
+        self.naughty_relays_total.reset();
+        self.naughty_relay_info.reset();
+
+        // Count by category
+        let mut dns_count = 0;
+        let mut tls_count = 0;
+        let mut protocol_count = 0;
+
+        // Update metrics for each naughty relay
+        for (url, entry) in entries {
+            // Update category counts
+            match entry.category {
+                NaughtyCategory::DnsLookupFailed => dns_count += 1,
+                NaughtyCategory::TlsCertificateInvalid => tls_count += 1,
+                NaughtyCategory::ProtocolError => protocol_count += 1,
+            }
+
+            // Update detailed info (occurrence count)
+            self.naughty_relay_info
+                .with_label_values(&[&url, entry.category.as_str(), &entry.reason])
+                .set(entry.occurrence_count as i64);
+        }
+
+        // Set category totals
+        self.naughty_relays_total
+            .with_label_values(&["dns_lookup_failed"])
+            .set(dns_count);
+        self.naughty_relays_total
+            .with_label_values(&["tls_certificate_invalid"])
+            .set(tls_count);
+        self.naughty_relays_total
+            .with_label_values(&["protocol_error"])
+            .set(protocol_count);
     }
 }
 
