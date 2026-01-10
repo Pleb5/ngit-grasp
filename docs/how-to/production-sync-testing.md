@@ -1,6 +1,6 @@
 # How-To: Test Sync Against Production Data
 
-> **Quick Start Prompt:** Check work/active-issues/ for existing issues. If issues exist, pick the most important, fix it, test with cargo test, run clippy and fmt, commit, and report back with a brief 1-2 sentence summary of each issue you identified. If no issues exist, run a 30-second production sync test, analyze logs, create individual issue files in work/active-issues/ (one per issue with minimal description), then report summary listing each issue in 1-2 sentences.
+> **Quick Start Prompt:** Check work/active-issues/ for existing issues. If issues exist, pick the most important, fix it, test with cargo test, run clippy and fmt, commit, and report back with a brief 1-2 sentence summary of each issue you identified. If no issues exist, run a 60-second production sync test, analyze logs, create individual issue files in work/active-issues/ (one per issue with minimal description), then report summary listing each issue in 1-2 sentences.
 
 **Problem:** Debug and improve sync behavior using real-world data from production relays  
 **Difficulty:** Intermediate  
@@ -26,7 +26,7 @@ This guide operates in two modes:
 ### Mode 2: Discover New Issues
 **When:** No active issues in `work/active-issues/`
 
-1. Run 30-second production sync test (logs saved to `tmp/run-{timestamp}/`)
+1. Run 60-second production sync test (logs saved to `tmp/run-{timestamp}/`)
 2. Analyze logs for errors, warnings, unexpected patterns
 3. Document each issue as a separate markdown file in `work/active-issues/`
 4. Keep issue files minimal - just enough to identify the issue
@@ -73,21 +73,36 @@ The bootstrap relay provides the initial set of announcements to discover repos:
 
 ### 3. Run with Time Limit
 
-Start with short runs (30 seconds) to capture manageable log volumes. Each run creates its own subdirectory in `tmp/` to keep data and logs isolated:
+Run for **60 seconds** to allow the full sync cascade to complete. This duration allows:
+- Layer 1: Discovery of repo announcements (0-5s)
+- Layer 2: Sending `#a`, `#A`, `#q` filters for repos (5-30s)
+- Layer 3: Receiving issues, patches, PRs (30-60s)
+- Layer 4: Receiving comments on root events (40-60s)
+
+Each run creates its own subdirectory in `tmp/` to keep data and logs isolated:
 
 ```bash
 # Create run directory with timestamp
 RUN_DIR="tmp/run-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$RUN_DIR"
 
-# Run for 30 seconds, saving both raw and sanitized logs
-timeout 30s cargo run -- \
+# Run for 60 seconds, saving both raw and sanitized logs
+timeout 60s cargo run -- \
     --sync-bootstrap-relay-url wss://git.shakespeare.diy \
     --domain ngit.danconwaydev.com \
     --git-data-path "$RUN_DIR/git-data" \
     --relay-data-path "$RUN_DIR/relay-data" \
     2>&1 | tee "$RUN_DIR/sync-raw.log" | ./scripts/sanitize-logs.sh | tee "$RUN_DIR/sync.log"
 ```
+
+**Why 60 seconds?** The sync system uses a 5-second batch window for aggregating discovered repos. Repos discovered late in the sync need time for:
+1. Batch window to expire (5s)
+2. Layer 2 filters to be sent and processed
+3. Layer 3 events (issues/patches/PRs) to be returned
+4. Layer 4 filters for root events to be sent
+5. Comments and threaded replies to be returned
+
+Testing shows 30 seconds is too short for late-discovered repos to complete the Layer 2→3→4 cascade.
 
 **Note:** The `timeout` command returns exit code 124, which is expected.
 
@@ -287,8 +302,8 @@ When `work/active-issues/` is empty (or only contains README.md):
 RUN_DIR="tmp/run-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$RUN_DIR"
 
-# Run 30-second test, saving both raw and sanitized logs
-timeout 30s cargo run -- \
+# Run 60-second test, saving both raw and sanitized logs
+timeout 60s cargo run -- \
     --sync-bootstrap-relay-url wss://git.shakespeare.diy \
     --domain ngit.danconwaydev.com \
     --git-data-path "$RUN_DIR/git-data" \
@@ -297,6 +312,8 @@ timeout 30s cargo run -- \
 ```
 
 Each run is isolated in its own timestamped directory under `tmp/`, keeping data and logs organized. Both raw and sanitized logs are saved for flexible analysis.
+
+**Note:** 60 seconds allows the full sync cascade (Layer 1→2→3→4) to complete for late-discovered repos.
 
 ### Step 2: Analyze Logs
 
@@ -438,7 +455,7 @@ Check work/active-issues/
     │
     └─ No issues? ──► Mode 2: Run production sync
                                │
-                               ├─ timeout 30s cargo run ...
+                               ├─ timeout 60s cargo run ...
                                ├─ Analyze logs
                                ├─ Document issues (minimal)
                                └─ Report summary & STOP
@@ -461,8 +478,8 @@ Check work/active-issues/
 RUN_DIR="tmp/run-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$RUN_DIR"
 
-# Run test with both raw and sanitized logs
-timeout 30s cargo run -- \
+# Run test with both raw and sanitized logs (60s for full cascade)
+timeout 60s cargo run -- \
     --sync-bootstrap-relay-url wss://git.shakespeare.diy \
     --domain ngit.danconwaydev.com \
     --git-data-path "$RUN_DIR/git-data" \
@@ -477,8 +494,8 @@ timeout 30s cargo run -- \
 RUN_DIR="tmp/run-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$RUN_DIR"
 
-# Run with metrics and both log formats
-timeout 30s cargo run -- \
+# Run with metrics and both log formats (60s for full cascade)
+timeout 60s cargo run -- \
     --sync-bootstrap-relay-url wss://git.shakespeare.diy \
     --domain ngit.danconwaydev.com \
     --git-data-path "$RUN_DIR/git-data" \
