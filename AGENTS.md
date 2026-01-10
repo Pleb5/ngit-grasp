@@ -170,6 +170,72 @@ fn test_audit_tags_automatically_added() {
 - Tags enable production relay cleanup scripts
 - No special handling needed in test code - tags are automatic
 
+## Configuration Management
+
+**⚠️ CRITICAL: Keep Configuration in Sync Across All Four Sources**
+
+Configuration options must be consistent across four locations:
+
+1. **Source code** (`src/config.rs`) - Defines actual config structs, env vars, and defaults
+2. **Documentation** (`docs/reference/configuration.md`) - User-facing reference for all options
+3. **NixOS module** (`nix/module.nix`) - NixOS deployment configuration
+4. **Example env file** (`.env.example`) - Template for development and Docker deployments
+
+**When adding/modifying ANY configuration option:**
+
+1. **Update `src/config.rs`** - Add/modify the field with proper env var name
+2. **Update `docs/reference/configuration.md`** - Document the option with examples and defaults
+3. **Update `nix/module.nix`** - Add/modify the NixOS option in `instanceOptions`
+4. **Update `.env.example`** - Add the option with comments explaining usage and defaults
+5. **Verify consistency** - Check env var names, defaults, and descriptions match exactly
+
+**Critical consistency checks:**
+
+- Environment variable names must match: `NGIT_*` in code, docs, module, and .env.example
+- Default values must match across all four sources
+- Option names should be consistent (snake_case in code, camelCase in NixOS)
+- Descriptions should be similar (can be more detailed in docs)
+
+**Example: Adding a new config option**
+
+```rust
+// 1. src/config.rs
+#[arg(long, env = "NGIT_NEW_OPTION", default_value_t = 42)]
+pub new_option: u32,
+```
+
+```markdown
+<!-- 2. docs/reference/configuration.md -->
+#### `NGIT_NEW_OPTION`
+**Description:** What this option does
+**Type:** Integer
+**Default:** `42`
+**Required:** No
+```
+
+```nix
+# 3. nix/module.nix (in instanceOptions)
+newOption = mkOption {
+  type = types.int;
+  default = 42;
+  description = "What this option does";
+};
+
+# Also add to environment mapping in mkService:
+environment = {
+  # ...
+  NGIT_NEW_OPTION = toString cfg.newOption;
+};
+```
+
+```bash
+# 4. .env.example
+# What this option does
+# CLI: --new-option <value>
+# Default: 42
+# NGIT_NEW_OPTION=42
+```
+
 ## Documentation
 
 **⚠️ CRITICAL: Keep Architecture Docs Updated**
@@ -205,6 +271,7 @@ This was a key learning from GRASP-01: docs described plans, not implementation,
 5. **Work directory:** All session docs go in `work/`, NOT root
 6. **Archive naming:** Use `YYYY-MM-DD-description.md` format
 7. **test-ngit-relay.sh tests ngit-relay**: This script tests the reference implementation, NOT ngit-grasp
+8. **Configuration sync:** Config changes MUST be updated in all four places: `src/config.rs`, `docs/reference/configuration.md`, `nix/module.nix`, AND `.env.example`
 
 ## File Restrictions by Mode
 
