@@ -851,6 +851,14 @@ impl SyncManager {
 
                     // Check if we made any progress (received ANY events we requested)
                     // If received_count is 0, relay returned nothing useful - abort retry
+                    //
+                    // NOTE: Some relays (e.g., azzamo.net, snort.social) have been observed
+                    // returning zero events during negentropy retry even though manual queries
+                    // (REQ by ID) show they DO have these events. This appears to be relay-
+                    // specific behavior where the relay refuses to serve events via negentropy
+                    // retry for unknown reasons (rate limiting, negentropy implementation bugs,
+                    // or other internal logic). We abort here to prevent infinite loops, but
+                    // future enhancement could fall back to REQ+EOSE when retry returns zero.
                     if retry_count > 0 && received_count == 0 {
                         tracing::error!(
                             relay = %relay_url,
