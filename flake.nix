@@ -8,28 +8,20 @@
   };
 
   outputs = { self, nixpkgs, rust-overlay, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system:
+    (flake-utils.lib.eachDefaultSystem (system:
       let
         overlays = [ (import rust-overlay) ];
-        pkgs = import nixpkgs {
-          inherit system overlays;
-        };
-        
+        pkgs = import nixpkgs { inherit system overlays; };
+
         rustToolchain = pkgs.rust-bin.stable.latest.default.override {
           extensions = [ "rust-src" "rust-analyzer" ];
         };
-      in
-      {
+      in {
         devShells.default = pkgs.mkShell {
-          buildInputs = with pkgs; [
-            rustToolchain
-            pkg-config
-            openssl
-            git
-          ];
+          buildInputs = with pkgs; [ rustToolchain pkg-config openssl git ];
 
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
-          
+
           shellHook = ''
             echo "🚀 ngit-grasp development environment"
             echo "Rust version: $(rustc --version)"
@@ -46,16 +38,21 @@
           pname = "ngit-grasp";
           version = "0.1.0";
           src = ./.;
-          cargoLock.lockFile = ./Cargo.lock;
-          
-          nativeBuildInputs = with pkgs; [
-            pkg-config
-          ];
-          
-          buildInputs = with pkgs; [
-            openssl
-          ];
+          cargoLock = {
+            lockFile = ./Cargo.lock;
+            outputHashes = {
+              "nostr-0.44.1" =
+                "sha256-02cawkx6bxfi3bn1sb5ws8cn9wzcwsk8cdv1vx8h8lad1jdic1qg";
+            };
+          };
+
+          nativeBuildInputs = with pkgs; [ pkg-config ];
+
+          buildInputs = with pkgs; [ openssl ];
         };
-      }
-    );
+      })) // {
+        # NixOS module for deployment
+        nixosModules.default = import ./nix/module.nix;
+        nixosModules.ngit-grasp = self.nixosModules.default;
+      };
 }
