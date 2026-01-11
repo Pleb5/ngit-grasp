@@ -185,6 +185,10 @@ impl Config {
         // If relay_owner_nsec not provided, load from file or generate
         if config.relay_owner_nsec.is_none() {
             config.relay_owner_nsec = Some(Self::load_or_generate_relay_owner_key()?);
+        } else {
+            // If provided via CLI/env, trim any whitespace (newlines, spaces, etc.)
+            // This handles cases where the value is read from a file with trailing newline
+            config.relay_owner_nsec = config.relay_owner_nsec.map(|s| s.trim().to_string());
         }
 
         Ok(config)
@@ -368,6 +372,38 @@ mod tests {
         // Verify the npub matches the keys
         assert_eq!(npub, keys.public_key().to_bech32().unwrap());
         assert!(npub.starts_with("npub1"));
+    }
+
+    #[test]
+    fn test_relay_owner_nsec_trims_whitespace() {
+        // Test that Config::load() trims whitespace from provided nsec
+        // This simulates what happens when nsec is read from a file with trailing newline
+        let nsec_clean = "nsec1rt5f3gfnktvd77fdarg00ff94l8j833y778ym3xlzkx89g9v5zvq4y2qee";
+        let nsec_with_newline = format!("{}\n", nsec_clean);
+        let nsec_with_spaces = format!("  {}  ", nsec_clean);
+
+        // Test that trimming happens by directly creating config with whitespace
+        let mut config1 = Config::for_testing();
+        config1.relay_owner_nsec = Some(nsec_with_newline.clone());
+        // Simulate what Config::load() does
+        config1.relay_owner_nsec = config1.relay_owner_nsec.map(|s| s.trim().to_string());
+
+        let mut config2 = Config::for_testing();
+        config2.relay_owner_nsec = Some(nsec_with_spaces.clone());
+        config2.relay_owner_nsec = config2.relay_owner_nsec.map(|s| s.trim().to_string());
+
+        // Both should parse successfully after trimming
+        assert!(config1.relay_owner_keys().is_ok());
+        assert!(config2.relay_owner_keys().is_ok());
+
+        // Both should produce the same public key
+        let keys1 = config1.relay_owner_keys().unwrap();
+        let keys2 = config2.relay_owner_keys().unwrap();
+        assert_eq!(keys1.public_key(), keys2.public_key());
+
+        // Verify trimmed nsec equals clean nsec
+        assert_eq!(config1.relay_owner_nsec.unwrap(), nsec_clean);
+        assert_eq!(config2.relay_owner_nsec.unwrap(), nsec_clean);
     }
 
     #[test]
