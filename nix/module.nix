@@ -239,6 +239,9 @@ let
       # Working directory where .relay-owner.nsec will be created if needed
       WorkingDirectory = cfg.dataDir;
 
+      # Add git to PATH for purgatory sync operations
+      Environment = "PATH=${pkgs.git}/bin:${pkgs.openssh}/bin";
+
       # Command to run
       ExecStart = if cfg.relayOwnerNsecFile != null then
       # Use nsec from file - need to use shell to read the file
