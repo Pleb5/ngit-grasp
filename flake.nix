@@ -51,10 +51,15 @@
           buildInputs = with pkgs; [ openssl ];
 
           # Skip tests that require git in PATH (sandboxing issue)
+          # These tests run fine in dev environment and CI
           checkFlags = [
+            # Unit tests that spawn git subprocesses
             "--skip=git::subprocess::tests::"
             "--skip=git::tests::"
             "--skip=purgatory::helpers::tests::"
+            # Integration tests that create git repos
+            "--skip=common::git_server::"
+            "--skip=common::purgatory_helpers::"
           ];
         };
       })) // {
