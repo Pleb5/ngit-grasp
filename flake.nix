@@ -50,17 +50,11 @@
 
           buildInputs = with pkgs; [ openssl ];
 
-          # Skip tests that require git in PATH (sandboxing issue)
-          # These tests run fine in dev environment and CI
-          checkFlags = [
-            # Unit tests that spawn git subprocesses
-            "--skip=git::subprocess::tests::"
-            "--skip=git::tests::"
-            "--skip=purgatory::helpers::tests::"
-            # Integration tests that create git repos
-            "--skip=common::git_server::"
-            "--skip=common::purgatory_helpers::"
-          ];
+          # Skip all integration tests during Nix build (require git in PATH)
+          # Integration tests run in dev environment and CI where git is available
+          doCheck = true;
+          cargoTestFlags =
+            [ "--lib" ]; # Only run unit tests, skip integration tests
         };
       })) // {
         # NixOS module for deployment
