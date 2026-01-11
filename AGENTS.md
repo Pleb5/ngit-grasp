@@ -272,6 +272,7 @@ This was a key learning from GRASP-01: docs described plans, not implementation,
 6. **Archive naming:** Use `YYYY-MM-DD-description.md` format
 7. **test-ngit-relay.sh tests ngit-relay**: This script tests the reference implementation, NOT ngit-grasp
 8. **Configuration sync:** Config changes MUST be updated in all four places: `src/config.rs`, `docs/reference/configuration.md`, `nix/module.nix`, AND `.env.example`
+9. **Git dependencies:** When updating `Cargo.toml` or `Cargo.lock` with ANY git dependency (not crates.io), you MUST update hashes in BOTH `flake.nix` and `nix/module.nix`. See [docs/how-to/update-git-dependencies.md](docs/how-to/update-git-dependencies.md) - this is MANDATORY and builds will fail if skipped
 
 ## File Restrictions by Mode
 
