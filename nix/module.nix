@@ -245,7 +245,8 @@ let
       # Command to run
       ExecStart = if cfg.relayOwnerNsecFile != null then
       # Use nsec from file - need to use shell to read the file
-        "${pkgs.bash}/bin/bash -c '${ngit-grasp}/bin/ngit-grasp --relay-owner-nsec \"$(cat ${cfg.relayOwnerNsecFile})\"'"
+      # Use tr to remove trailing newline which would invalidate the nsec
+        "${pkgs.bash}/bin/bash -c '${ngit-grasp}/bin/ngit-grasp --relay-owner-nsec \"$(cat ${cfg.relayOwnerNsecFile} | tr -d \"\\n\")\"'"
       else
       # Let ngit-grasp auto-generate nsec in .relay-owner.nsec file in dataDir
         "${ngit-grasp}/bin/ngit-grasp";
