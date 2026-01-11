@@ -49,6 +49,13 @@
           nativeBuildInputs = with pkgs; [ pkg-config ];
 
           buildInputs = with pkgs; [ openssl ];
+
+          # Skip tests that require git in PATH (sandboxing issue)
+          checkFlags = [
+            "--skip=git::subprocess::tests::"
+            "--skip=git::tests::"
+            "--skip=purgatory::helpers::tests::"
+          ];
         };
       })) // {
         # NixOS module for deployment
