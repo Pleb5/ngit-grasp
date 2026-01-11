@@ -282,13 +282,7 @@ let
       SystemCallErrorNumber = "EPERM";
     };
 
-    # Ensure data directories exist before starting
-    preStart = ''
-      mkdir -p ${cfg.dataDir}/git
-      mkdir -p ${cfg.dataDir}/relay
-      chown -R ${cfg.user}:${cfg.group} ${cfg.dataDir}
-      chmod 750 ${cfg.dataDir}
-    '';
+    # Directory creation handled by systemd tmpfiles (see config section below)
   };
 
   enabledInstances =
@@ -340,5 +334,13 @@ in {
     systemd.services = mapAttrs'
       (name: cfg: nameValuePair "ngit-grasp-${name}" (mkService name cfg))
       enabledInstances;
+
+    # Create data directories with proper ownership using tmpfiles
+    # This runs as root before the service starts
+    systemd.tmpfiles.rules = flatten (mapAttrsToList (name: cfg: [
+      "d ${cfg.dataDir} 0750 ${cfg.user} ${cfg.group} -"
+      "d ${cfg.dataDir}/git 0750 ${cfg.user} ${cfg.group} -"
+      "d ${cfg.dataDir}/relay 0750 ${cfg.user} ${cfg.group} -"
+    ]) enabledInstances);
   };
 }
