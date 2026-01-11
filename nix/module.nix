@@ -239,13 +239,14 @@ let
       # Working directory where .relay-owner.nsec will be created if needed
       WorkingDirectory = cfg.dataDir;
 
-      # Add git to PATH for purgatory sync operations
-      Environment = "PATH=${pkgs.git}/bin:${pkgs.openssh}/bin";
+      # Add git, openssh, and coreutils to PATH for purgatory sync operations
+      Environment =
+        "PATH=${pkgs.git}/bin:${pkgs.openssh}/bin:${pkgs.coreutils}/bin";
 
       # Command to run
       ExecStart = if cfg.relayOwnerNsecFile != null then
       # Use nsec from file - need to use shell to read the file
-        "${pkgs.bash}/bin/bash -c '${ngit-grasp}/bin/ngit-grasp --relay-owner-nsec \"$(cat ${cfg.relayOwnerNsecFile})\"'"
+        "${pkgs.bash}/bin/bash -c '${ngit-grasp}/bin/ngit-grasp --relay-owner-nsec \"$(${pkgs.coreutils}/bin/cat ${cfg.relayOwnerNsecFile})\"'"
       else
       # Let ngit-grasp auto-generate nsec in .relay-owner.nsec file in dataDir
         "${ngit-grasp}/bin/ngit-grasp";
