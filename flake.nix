@@ -42,7 +42,7 @@
             lockFile = ./Cargo.lock;
             outputHashes = {
               "nostr-0.44.1" =
-                "sha256-02cawkx6bxfi3bn1sb5ws8cn9wzcwsk8cdv1vx8h8lad1jdic1qg";
+                "sha256-DwcWmwxNUQRR32E3hqbm7PNkGdK8LB3sGtH1Zfrkigk=";
             };
           };
 
