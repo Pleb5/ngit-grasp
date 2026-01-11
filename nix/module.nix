@@ -18,10 +18,9 @@ let
     nativeBuildInputs = with pkgs; [ pkg-config ];
     buildInputs = with pkgs; [ openssl ];
 
-    # Skip all integration tests during Nix build (require git in PATH)
-    # Integration tests run in dev environment and CI where git is available
-    doCheck = true;
-    cargoTestFlags = [ "--lib" ]; # Only run unit tests, skip integration tests
+    # Disable tests during Nix build (many require git in PATH for sandboxing)
+    # Tests run successfully in dev environment and CI where git is available
+    doCheck = false;
   };
 
   # Per-instance options
