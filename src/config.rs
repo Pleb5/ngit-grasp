@@ -244,6 +244,42 @@ impl Default for BlacklistConfig {
     }
 }
 
+/// Event blacklist configuration for blocking events by author npub
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventBlacklistConfig {
+    /// Blacklisted npubs - events from these authors are rejected
+    ///
+    /// If empty, no events are blacklisted by author.
+    /// Applies to ALL event types, preventing events from reaching both the relay and purgatory.
+    pub blacklisted_npubs: Vec<String>,
+}
+
+impl EventBlacklistConfig {
+    /// Check if event blacklist is enabled (non-empty blacklist)
+    pub fn enabled(&self) -> bool {
+        !self.blacklisted_npubs.is_empty()
+    }
+
+    /// Check if an event author is blacklisted
+    ///
+    /// Returns Some(reason) if blacklisted, None if not blacklisted.
+    pub fn check(&self, npub: &str) -> Option<String> {
+        if self.blacklisted_npubs.contains(&npub.to_string()) {
+            Some(format!("Event author {} is blacklisted", npub))
+        } else {
+            None
+        }
+    }
+}
+
+impl Default for EventBlacklistConfig {
+    fn default() -> Self {
+        Self {
+            blacklisted_npubs: Vec::new(),
+        }
+    }
+}
+
 /// Database backend type for the relay
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, ValueEnum)]
 #[serde(rename_all = "lowercase")]
@@ -428,6 +464,11 @@ pub struct Config {
     /// Blacklist takes precedence over all whitelists (archive and repository)
     #[arg(long, env = "NGIT_REPOSITORY_BLACKLIST", default_value = "")]
     pub repository_blacklist: String,
+
+    /// Event blacklist: comma-separated list of npubs whose events are rejected
+    /// All events from these authors are blocked from both relay storage and purgatory
+    #[arg(long, env = "NGIT_EVENT_BLACKLIST", default_value = "")]
+    pub event_blacklist: String,
 }
 
 impl Config {
@@ -612,6 +653,20 @@ impl Config {
         BlacklistConfig { blacklist }
     }
 
+    /// Get parsed event blacklist configuration
+    ///
+    /// This method assumes config has been validated - call Config::validate() first!
+    pub fn event_blacklist_config(&self) -> EventBlacklistConfig {
+        let blacklisted_npubs: Vec<String> = self
+            .event_blacklist
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        EventBlacklistConfig { blacklisted_npubs }
+    }
+
     /// Create config for testing
     #[cfg(test)]
     pub fn for_testing() -> Self {
@@ -647,6 +702,7 @@ impl Config {
             archive_read_only: None,
             repository_whitelist: String::new(),
             repository_blacklist: String::new(),
+            event_blacklist: String::new(),
         }
     }
 }
@@ -1246,6 +1302,60 @@ mod tests {
         };
 
         let result = config.check(&test_npub, "allowed-repo");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_event_blacklist_config_parsing() {
+        let keys1 = Keys::generate();
+        let keys2 = Keys::generate();
+        let npub1 = keys1.public_key().to_bech32().unwrap();
+        let npub2 = keys2.public_key().to_bech32().unwrap();
+        let config = Config {
+            event_blacklist: format!("{},{}", npub1, npub2),
+            ..Config::for_testing()
+        };
+        let event_blacklist_config = config.event_blacklist_config();
+        assert_eq!(event_blacklist_config.blacklisted_npubs.len(), 2);
+        assert!(event_blacklist_config.enabled());
+        assert!(event_blacklist_config.blacklisted_npubs.contains(&npub1));
+        assert!(event_blacklist_config.blacklisted_npubs.contains(&npub2));
+    }
+
+    #[test]
+    fn test_event_blacklist_config_empty() {
+        let config = Config::for_testing();
+        let event_blacklist_config = config.event_blacklist_config();
+        assert!(event_blacklist_config.blacklisted_npubs.is_empty());
+        assert!(!event_blacklist_config.enabled());
+    }
+
+    #[test]
+    fn test_event_blacklist_check_blacklisted() {
+        let keys = Keys::generate();
+        let test_npub = keys.public_key().to_bech32().unwrap();
+        let config = EventBlacklistConfig {
+            blacklisted_npubs: vec![test_npub.clone()],
+        };
+
+        let result = config.check(&test_npub);
+        assert!(result.is_some());
+        let reason = result.unwrap();
+        assert!(reason.contains("author"));
+        assert!(reason.contains(&test_npub));
+    }
+
+    #[test]
+    fn test_event_blacklist_check_not_blacklisted() {
+        let keys1 = Keys::generate();
+        let keys2 = Keys::generate();
+        let banned_npub = keys1.public_key().to_bech32().unwrap();
+        let allowed_npub = keys2.public_key().to_bech32().unwrap();
+        let config = EventBlacklistConfig {
+            blacklisted_npubs: vec![banned_npub],
+        };
+
+        let result = config.check(&allowed_npub);
         assert!(result.is_none());
     }
 }

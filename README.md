@@ -36,7 +36,7 @@ Unlike the reference implementation ([ngit-relay](https://gitworkshop.dev/npub15
 - **Pure Rust Implementation**: Single binary, no external dependencies beyond Git itself
 - **Integrated Authorization**: Push validation happens inline during the Git receive-pack operation
 - **GRASP-01 Compliant**: Core service requirements for Git hosting with Nostr authorization
-  - **Repository Whitelist/Blacklist**: Optional curation via pubkey/identifier whitelist (GRASP-01 mode) and blacklist (overrides all whitelists)
+  - **Flexible Curation & Moderation**: Repository whitelists (GRASP-01 mode), repository blacklists (moderation), and event blacklists (author blocking)
 - **GRASP-02 Proactive Sync**: Sophisticated relay-to-relay event and git data synchronization
   - **NIP-77 Negentropy**: Efficient set reconciliation with automatic fallback to REQ+EOSE
   - **Live & Historic Sync**: Real-time event streaming plus catch-up for past events
@@ -149,6 +149,93 @@ See [GRASP-02 Proactive Sync](docs/explanation/grasp-02-proactive-sync.md) for f
 **Archive mode enables backup/mirror operation** - accept repository announcements that don't list your relay, useful for creating archives of critical projects or running comprehensive mirrors. Archived repositories are read-only by default (`NGIT_ARCHIVE_READ_ONLY=true`) with full event and git data sync.
 
 **See**: [GRASP-05 Archive Mode](docs/explanation/grasp-05-archive.md)
+
+## Curation & Moderation
+
+ngit-grasp provides flexible tools for both curation (repository selection) and moderation (blocking spam/abuse):
+
+### Repository Whitelists (Curation)
+
+Control which repositories your relay accepts via two independent whitelist modes:
+
+**Repository Whitelist (GRASP-01 Mode):**
+- Only accept announcements that **both** list your service AND match the whitelist
+- Three formats: `<npub>`, `<npub>/<identifier>`, `<identifier>`
+- Environment: `NGIT_REPOSITORY_WHITELIST=npub1alice...,bitcoin-core`
+- Use case: Curated relay accepting specific projects/developers
+
+**Archive Whitelist (GRASP-05 Mode):**
+- Accept announcements matching the whitelist **even if they don't list your service**
+- Same three formats as repository whitelist
+- Environment: `NGIT_ARCHIVE_WHITELIST=npub1satoshi...,linux`
+- Use case: Backup/mirror relay for critical projects
+- Default: Read-only mode (`NGIT_ARCHIVE_READ_ONLY=true`)
+
+Both whitelists support flexible matching:
+```bash
+# Accept all repos from specific developer
+NGIT_REPOSITORY_WHITELIST=npub1alice...
+
+# Accept specific repository
+NGIT_REPOSITORY_WHITELIST=npub1alice.../my-project
+
+# Accept repos with specific identifier (any author)
+NGIT_REPOSITORY_WHITELIST=bitcoin-core
+```
+
+### Blacklists (Moderation)
+
+Block unwanted content without affecting your curation policy:
+
+**Repository Blacklist:**
+- Block specific repositories/developers/identifiers
+- **Takes precedence over ALL whitelists** (checked first)
+- Three formats: `<npub>`, `<npub>/<identifier>`, `<identifier>`
+- Environment: `NGIT_REPOSITORY_BLACKLIST=npub1spam...,malware-repo`
+- Use case: Block spam/malware repos while maintaining whitelist curation
+
+**Event Blacklist:**
+- Block **ALL events** from specific authors (npubs)
+- **Takes precedence over ALL other validation** (checked first)
+- Applies to all event types: announcements, state events, PRs, comments, etc.
+- Events never reach relay storage or purgatory
+- Environment: `NGIT_EVENT_BLACKLIST=npub1spammer...,npub1abuser...`
+- Use case: Block abusive users completely
+
+### Precedence & Interaction
+
+Validation order (from first to last):
+
+1. **Event Blacklist** → Reject if author is blacklisted (ALL event types)
+2. **Repository Blacklist** → Reject if repository/npub/identifier is blacklisted (announcements only)
+3. **Repository Whitelist** → Accept if announcement lists service AND matches whitelist
+4. **Archive Whitelist** → Accept if announcement matches whitelist (even without listing service)
+5. **Default GRASP-01** → Accept if announcement lists service (no whitelist configured)
+
+Examples:
+```bash
+# Curated relay blocking spam
+NGIT_REPOSITORY_WHITELIST=npub1alice...,npub1bob...
+NGIT_REPOSITORY_BLACKLIST=npub1alice.../spam-repo
+NGIT_EVENT_BLACKLIST=npub1spammer...
+# Result: Accept Alice & Bob's repos EXCEPT Alice's spam-repo, block all events from spammer
+
+# Archive relay with moderation
+NGIT_ARCHIVE_WHITELIST=bitcoin-core,linux
+NGIT_EVENT_BLACKLIST=npub1abuser...
+# Result: Mirror bitcoin-core and linux projects, block all events from abuser
+
+# Public relay with spam protection
+NGIT_EVENT_BLACKLIST=npub1spam1...,npub1spam2...
+# Result: Accept all GRASP-01 repos, block all events from spammers
+```
+
+**Privacy & Transparency:**
+- Blacklists are **not advertised** in NIP-11 metadata (operational, not curation policy)
+- Rejected events receive specific error messages for operator debugging
+- No client-visible indication that blacklists are in use
+
+**See**: [Configuration Reference](docs/reference/configuration.md) for complete details
 
 ## Roadmap
 
@@ -325,6 +412,17 @@ NGIT_RELAY_OWNER_NSEC=nsec1... ngit-grasp --domain relay.example.com
 | Disconnect check interval | `--sync-disconnect-check-interval-secs` | `NGIT_SYNC_DISCONNECT_CHECK_INTERVAL_SECS` | `60` seconds    |
 | Disable negentropy        | `--sync-disable-negentropy`             | `NGIT_SYNC_DISABLE_NEGENTROPY`             | `false`         |
 | Batch window              | N/A                                     | `NGIT_SYNC_BATCH_WINDOW_MS`                | `5000` ms       |
+
+#### Curation & Moderation Settings
+
+| Option               | CLI Flag                    | Environment Variable           | Default   |
+| -------------------- | --------------------------- | ------------------------------ | --------- |
+| Repository whitelist | `--repository-whitelist`    | `NGIT_REPOSITORY_WHITELIST`    | (empty)   |
+| Archive whitelist    | `--archive-whitelist`       | `NGIT_ARCHIVE_WHITELIST`       | (empty)   |
+| Archive all          | `--archive-all`             | `NGIT_ARCHIVE_ALL`             | `false`   |
+| Archive read-only    | `--archive-read-only`       | `NGIT_ARCHIVE_READ_ONLY`       | (auto)    |
+| Repository blacklist | `--repository-blacklist`    | `NGIT_REPOSITORY_BLACKLIST`    | (empty)   |
+| Event blacklist      | `--event-blacklist`         | `NGIT_EVENT_BLACKLIST`         | (empty)   |
 
 **Sync Notes:**
 

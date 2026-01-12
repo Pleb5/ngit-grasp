@@ -237,6 +237,19 @@ let
         '';
       };
 
+      eventBlacklist = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        example = [ "npub1spam..." "npub1abuser..." ];
+        description = ''
+          Event blacklist for blocking all events from specific authors (npubs).
+          Takes precedence over ALL other validation (checked first).
+          ALL events from these authors are rejected from relay storage and purgatory.
+          Applies to announcements, state events, PRs, and all other event types.
+          Does not affect NIP-11 metadata (operational, not curation policy).
+        '';
+      };
+
       user = mkOption {
         type = types.str;
         default = "ngit-grasp-${name}";
@@ -281,6 +294,7 @@ let
       NGIT_ARCHIVE_WHITELIST = concatStringsSep "," cfg.archiveWhitelist;
       NGIT_REPOSITORY_WHITELIST = concatStringsSep "," cfg.repositoryWhitelist;
       NGIT_REPOSITORY_BLACKLIST = concatStringsSep "," cfg.repositoryBlacklist;
+      NGIT_EVENT_BLACKLIST = concatStringsSep "," cfg.eventBlacklist;
       RUST_LOG = cfg.logLevel;
     } // optionalAttrs (cfg.relayName != null) {
       NGIT_RELAY_NAME = cfg.relayName;

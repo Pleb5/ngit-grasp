@@ -56,7 +56,13 @@ impl Nip34WritePolicy {
         purgatory: std::sync::Arc<crate::purgatory::Purgatory>,
         config: crate::config::Config,
     ) -> Self {
-        let ctx = PolicyContext::new(&config.domain, database, git_data_path, purgatory);
+        let ctx = PolicyContext::new(
+            &config.domain,
+            database,
+            git_data_path,
+            purgatory,
+            config.clone(),
+        );
         Self {
             announcement_policy: AnnouncementPolicy::new(ctx.clone(), config.clone()),
             state_policy: StatePolicy::new(ctx.clone()),
@@ -64,6 +70,19 @@ impl Nip34WritePolicy {
             related_event_policy: RelatedEventPolicy::new(ctx.clone()),
             ctx,
         }
+    }
+
+    /// Check if an event author is blacklisted
+    ///
+    /// Returns Some(reason) if blacklisted, None if not blacklisted.
+    fn check_event_blacklist(&self, event: &Event) -> Option<String> {
+        let event_blacklist = self.ctx.config.event_blacklist_config();
+        if !event_blacklist.enabled() {
+            return None;
+        }
+
+        let npub = event.pubkey.to_bech32().ok()?;
+        event_blacklist.check(&npub)
     }
 
     /// Get a reference to the purgatory for read-only access
@@ -474,6 +493,17 @@ impl WritePolicy for Nip34WritePolicy {
         addr: &'a SocketAddr,
     ) -> BoxedFuture<'a, WritePolicyResult> {
         Box::pin(async move {
+            // Check event blacklist FIRST - it overrides everything
+            if let Some(reason) = self.check_event_blacklist(event) {
+                tracing::debug!(
+                    event_id = %event.id.to_bech32().unwrap_or_else(|_| event.id.to_hex()),
+                    author = %event.pubkey.to_hex(),
+                    reason = %reason,
+                    "Rejected event from blacklisted author"
+                );
+                return WritePolicyResult::reject(reason);
+            }
+
             // Detect if this is a synced event (from proactive sync) vs user-submitted
             // Sync uses localhost:0 as a dummy address
             let is_synced = addr.ip().is_loopback() && addr.port() == 0;

@@ -32,6 +32,8 @@ pub struct PolicyContext {
     pub purgatory: Arc<Purgatory>,
     /// Local relay for notifying WebSocket subscribers (set after relay creation)
     pub local_relay: Arc<std::sync::RwLock<Option<LocalRelay>>>,
+    /// Configuration reference for policy settings (includes blacklists)
+    pub config: crate::config::Config,
 }
 
 impl PolicyContext {
@@ -40,6 +42,7 @@ impl PolicyContext {
         database: SharedDatabase,
         git_data_path: impl Into<std::path::PathBuf>,
         purgatory: Arc<Purgatory>,
+        config: crate::config::Config,
     ) -> Self {
         Self {
             domain: domain.into(),
@@ -47,6 +50,7 @@ impl PolicyContext {
             git_data_path: git_data_path.into(),
             purgatory,
             local_relay: Arc::new(std::sync::RwLock::new(None)),
+            config,
         }
     }
 

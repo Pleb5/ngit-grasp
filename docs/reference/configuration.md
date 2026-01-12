@@ -833,6 +833,98 @@ Blacklist does **not** affect NIP-11 metadata:
 
 ---
 
+### Event Blacklist
+
+#### `NGIT_EVENT_BLACKLIST`
+
+**Description:** Blacklist events from specific authors (npubs)  
+**Type:** Comma-separated list of npubs  
+**Default:** Empty (no events are blacklisted by author)  
+**Required:** No
+
+**Format:**
+- `npub1...` - Block all events from this author
+
+**Precedence:** Event blacklist takes precedence over **ALL** other validation:
+- Blacklisted events are rejected **before** any other policy checks
+- Applies to all event types (announcements, state events, PRs, etc.)
+- Events never reach purgatory (rejected immediately)
+- Overrides repository blacklist, whitelists, and all other policies
+
+**Examples:**
+
+```bash
+# Block all events from specific author
+NGIT_EVENT_BLACKLIST=npub1spam...
+
+# Block events from multiple authors
+NGIT_EVENT_BLACKLIST=npub1spam...,npub1abuser...,npub1troll...
+```
+
+**Rejection Reason:**
+
+The event blacklist provides a specific rejection reason:
+- **Format:** `"Event author <npub> is blacklisted"`
+
+This reason helps operators understand why an event was rejected without needing to flag it in metadata.
+
+**Behavior:**
+
+Event blacklist is checked **first** before all other validation:
+1. Check event blacklist → Reject if author is blacklisted
+2. Check repository blacklist (for announcements) → Reject if matched
+3. Check event-type specific policies → Accept/Reject based on policy
+4. Process event normally
+
+**Use Cases:**
+
+```bash
+# Block spam/abusive users
+NGIT_EVENT_BLACKLIST=npub1spammer...,npub1abuser...
+
+# Block malicious actors
+NGIT_EVENT_BLACKLIST=npub1malware...,npub1phisher...
+
+# Temporary block for investigation
+NGIT_EVENT_BLACKLIST=npub1suspicious...
+```
+
+**Comparison with Repository Blacklist:**
+
+| Configuration | Scope | Checked When | Applies To |
+|---------------|-------|--------------|------------|
+| Event Blacklist | Author-based | **First** (before all policies) | **All events** from author |
+| Repository Blacklist | Repo-based | Second (announcements only) | Specific repositories |
+
+**Event Blacklist vs Repository Blacklist:**
+
+```bash
+# Scenario: npub1alice is event-blacklisted
+NGIT_EVENT_BLACKLIST=npub1alice...
+
+# Result:
+# - ALL events from npub1alice are rejected (announcements, PRs, etc.)
+# - Events never reach relay or purgatory
+# - Rejection: "Event author npub1alice... is blacklisted"
+
+# Scenario: npub1alice/repo is repository-blacklisted
+NGIT_REPOSITORY_BLACKLIST=npub1alice.../malware
+
+# Result:
+# - Only announcements for npub1alice.../malware are rejected
+# - Other events from npub1alice are still processed normally
+# - PRs/state events for different repos from npub1alice are accepted
+```
+
+**NIP-11 Impact:**
+
+Event blacklist does **not** affect NIP-11 metadata:
+- No `curation` field changes (blacklist is operational, not policy)
+- Blacklist is transparent to clients (rejected with specific reason)
+- Operators can use blacklist without advertising moderation
+
+---
+
 ### Logging Configuration
 
 #### `RUST_LOG`
