@@ -361,8 +361,8 @@ impl SyncContext for RealSyncContext {
         let naughty_list = self.git_naughty_list.clone();
 
         tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
-            // git fetch <remote> <sha1> <sha2> ... - fetch all OIDs in one command
-            let mut args = vec!["fetch", "--depth=1", &url];
+            // git fetch <remote> <sha1> <sha2> ... - fetch all OIDs with full history
+            let mut args = vec!["fetch", &url];
             args.extend(missing_oids.iter().map(|s| s.as_str()));
 
             let output = Command::new("git")
