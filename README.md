@@ -141,11 +141,11 @@ See [GRASP-02 Proactive Sync](docs/explanation/grasp-02-proactive-sync.md) for f
 
 - ✅ Accept repositories not listing this instance via configurable whitelist
 - ✅ Three whitelist formats: `<npub>`, `<npub>/<identifier>`, `<identifier>`
-- ✅ Read-only mirroring with full GRASP-02 sync (git data + Nostr events)
+- ✅ Read-only mirroring with full GRASP-02 sync (git data + Nostr events) - **default behavior**
 - ✅ Archive-all mode for complete ecosystem mirrors
 - ✅ Fail-fast npub validation at startup
 
-**Archive mode enables backup/mirror operation** - accept repository announcements that don't list your relay, useful for creating archives of critical projects or running comprehensive mirrors. Archived repositories are read-only with full event and git data sync.
+**Archive mode enables backup/mirror operation** - accept repository announcements that don't list your relay, useful for creating archives of critical projects or running comprehensive mirrors. Archived repositories are read-only by default (`NGIT_ARCHIVE_READ_ONLY=true`) with full event and git data sync.
 
 **See**: [GRASP-05 Archive Mode](docs/explanation/grasp-05-archive.md)
 

@@ -362,9 +362,13 @@ impl RepositoryState {
 /// Validate a repository announcement according to GRASP-01 and GRASP-05
 ///
 /// Returns:
-/// - Accept: Announcement lists our service (GRASP-01)
+/// - Accept: Announcement lists our service (GRASP-01) - unless archive_read_only mode
 /// - AcceptArchive: Announcement matches archive config (GRASP-05)
 /// - Reject: Validation failed
+///
+/// When archive_read_only is true:
+/// - ONLY accept announcements matching archive whitelist/all
+/// - REJECT announcements listing our service but not in whitelist (read-only sync mode)
 ///
 /// Note: AcceptMaintainer is NOT returned here (requires database access)
 pub fn validate_announcement(
@@ -394,23 +398,32 @@ pub fn validate_announcement(
         Err(e) => return AnnouncementResult::Reject(format!("Invalid announcement: {}", e)),
     };
 
-    // GRASP-01: Check if announcement lists our service
-    if announcement.lists_service(domain) {
+    // GRASP-01: Normal mode - accept if announcement lists our service
+    if announcement.lists_service(domain) && !archive_config.read_only {
         return AnnouncementResult::Accept;
     }
 
-    // GRASP-05: Check if announcement matches archive configuration
     let npub = announcement.owner_npub();
+
+    // GRASP-05: Archive mode - accept if announcement matches whitelist
     if archive_config.matches(&npub, &announcement.identifier) {
         return AnnouncementResult::AcceptArchive;
     }
 
-    // Reject: Doesn't list us and not whitelisted
-    AnnouncementResult::Reject(format!(
-        "Announcement must list service in both 'clone' and 'relays' tags, or match archive whitelist. \
-         Found clone URLs: {:?}, relays: {:?}",
-        announcement.clone_urls, announcement.relays
-    ))
+    // Reject with appropriate error message
+    if archive_config.read_only {
+        AnnouncementResult::Reject(format!(
+            "Archive read-only mode: announcement must match archive whitelist. \
+             Repository {}/{} not in whitelist",
+            npub, announcement.identifier
+        ))
+    } else {
+        AnnouncementResult::Reject(format!(
+            "Announcement must list service in both 'clone' and 'relays' tags, or match archive whitelist. \
+             Found clone URLs: {:?}, relays: {:?}",
+            announcement.clone_urls, announcement.relays
+        ))
+    }
 }
 
 /// Validate a repository state announcement according to GRASP-01
@@ -969,6 +982,7 @@ mod tests {
         let archive_config = ArchiveConfig {
             archive_all: false,
             whitelist: vec![ArchiveWhitelistEntry::Pubkey(npub)],
+            read_only: false,
         };
 
         let result = validate_announcement(&event, "gitnostr.com", &archive_config);
@@ -994,6 +1008,7 @@ mod tests {
         let archive_config = ArchiveConfig {
             archive_all: false,
             whitelist: vec![ArchiveWhitelistEntry::Identifier("bitcoin-core".into())],
+            read_only: false,
         };
 
         let result = validate_announcement(&event, "gitnostr.com", &archive_config);
@@ -1023,6 +1038,7 @@ mod tests {
                 npub,
                 identifier: "linux".into(),
             }],
+            read_only: false,
         };
 
         let result = validate_announcement(&event, "gitnostr.com", &archive_config);
@@ -1048,6 +1064,7 @@ mod tests {
         let archive_config = ArchiveConfig {
             archive_all: true,
             whitelist: Vec::new(),
+            read_only: false,
         };
 
         let result = validate_announcement(&event, "gitnostr.com", &archive_config);
@@ -1073,6 +1090,7 @@ mod tests {
         let archive_config = ArchiveConfig {
             archive_all: false,
             whitelist: vec![ArchiveWhitelistEntry::Identifier("bitcoin-core".into())],
+            read_only: false,
         };
 
         let result = validate_announcement(&event, "gitnostr.com", &archive_config);
@@ -1094,13 +1112,96 @@ mod tests {
             vec!["wss://gitnostr.com"],
         );
 
-        // Even with archive config, GRASP-01 Accept takes precedence
+        // With archive_read_only=false, GRASP-01 Accept takes precedence
         let archive_config = ArchiveConfig {
             archive_all: true,
             whitelist: Vec::new(),
+            read_only: false,
         };
 
         let result = validate_announcement(&event, "gitnostr.com", &archive_config);
         assert!(matches!(result, AnnouncementResult::Accept));
+    }
+
+    #[test]
+    fn test_archive_read_only_rejects_non_whitelisted() {
+        use crate::config::{ArchiveConfig, ArchiveWhitelistEntry};
+        use crate::nostr::policy::AnnouncementResult;
+
+        let keys = create_test_keys();
+
+        // Create announcement that DOES list our service
+        let event = create_announcement_event(
+            &keys,
+            "test-repo",
+            vec!["https://gitnostr.com/alice/test-repo.git"],
+            vec!["wss://gitnostr.com"],
+        );
+
+        // With archive_read_only=true and whitelist that doesn't include this repo,
+        // should reject even though it lists our service
+        let archive_config = ArchiveConfig {
+            archive_all: false,
+            whitelist: vec![ArchiveWhitelistEntry::Identifier("bitcoin-core".into())],
+            read_only: true,
+        };
+
+        let result = validate_announcement(&event, "gitnostr.com", &archive_config);
+        assert!(matches!(result, AnnouncementResult::Reject(_)));
+    }
+
+    #[test]
+    fn test_archive_read_only_accepts_whitelisted() {
+        use crate::config::{ArchiveConfig, ArchiveWhitelistEntry};
+        use crate::nostr::policy::AnnouncementResult;
+
+        let keys = create_test_keys();
+        let npub = keys.public_key().to_bech32().unwrap();
+
+        // Create announcement that lists our service
+        let event = create_announcement_event(
+            &keys,
+            "test-repo",
+            vec!["https://gitnostr.com/alice/test-repo.git"],
+            vec!["wss://gitnostr.com"],
+        );
+
+        // With archive_read_only=true and whitelist that DOES include this repo,
+        // should accept as AcceptArchive
+        let archive_config = ArchiveConfig {
+            archive_all: false,
+            whitelist: vec![ArchiveWhitelistEntry::Pubkey(npub)],
+            read_only: true,
+        };
+
+        let result = validate_announcement(&event, "gitnostr.com", &archive_config);
+        assert!(matches!(result, AnnouncementResult::AcceptArchive));
+    }
+
+    #[test]
+    fn test_archive_read_only_with_archive_all() {
+        use crate::config::ArchiveConfig;
+        use crate::nostr::policy::AnnouncementResult;
+
+        let keys = create_test_keys();
+
+        // Create announcement that lists our service
+        let event = create_announcement_event(
+            &keys,
+            "any-repo",
+            vec!["https://gitnostr.com/alice/any-repo.git"],
+            vec!["wss://gitnostr.com"],
+        );
+
+        // With archive_read_only=true and archive_all=true,
+        // should accept as AcceptArchive
+        let archive_config = ArchiveConfig {
+            archive_all: true,
+            whitelist: Vec::new(),
+            read_only: true,
+        };
+
+        let result = validate_announcement(&event, "gitnostr.com", &archive_config);
+        assert!(matches!(result, AnnouncementResult::AcceptArchive));
     }
 }

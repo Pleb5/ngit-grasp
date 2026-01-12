@@ -98,6 +98,13 @@ pub struct ArchiveConfig {
     ///
     /// If empty and archive_all is false, GRASP-05 is disabled (GRASP-01 strict mode).
     pub whitelist: Vec<ArchiveWhitelistEntry>,
+
+    /// Read-only archive mode: relay is a read-only sync of archived repositories
+    ///
+    /// When true, the relay ONLY accepts announcements matching the archive whitelist/all.
+    /// Announcements listing the relay but not in the whitelist are rejected.
+    /// When false, the relay operates in GRASP-01 mode for unwhitelisted repos.
+    pub read_only: bool,
 }
 
 impl ArchiveConfig {
@@ -141,6 +148,7 @@ impl Default for ArchiveConfig {
         Self {
             archive_all: false,
             whitelist: Vec::new(),
+            read_only: false,
         }
     }
 }
@@ -311,6 +319,12 @@ pub struct Config {
     /// Formats: "npub1...", "npub1.../identifier", "identifier"
     #[arg(long, env = "NGIT_ARCHIVE_WHITELIST", default_value = "")]
     pub archive_whitelist: String,
+
+    /// Archive read-only mode: relay is a read-only sync of archived repositories
+    /// Defaults to true if archive_all or archive_whitelist is set, false otherwise
+    /// Throws error if set to true without archive_all or archive_whitelist
+    #[arg(long, env = "NGIT_ARCHIVE_READ_ONLY")]
+    pub archive_read_only: Option<bool>,
 }
 
 impl Config {
@@ -411,12 +425,34 @@ impl Config {
         }
     }
 
-    /// Get parsed archive configuration
+    /// Get parsed archive configuration with computed read-only mode
+    ///
+    /// Read-only mode defaults to true if archive mode is enabled, false otherwise.
+    /// Throws error if explicitly set to true without archive mode enabled.
     pub fn archive_config(&self) -> Result<ArchiveConfig> {
         let whitelist = ArchiveConfig::parse_whitelist(&self.archive_whitelist)?;
+        let archive_enabled = self.archive_all || !whitelist.is_empty();
+
+        let read_only = match self.archive_read_only {
+            Some(true) => {
+                if !archive_enabled {
+                    return Err(anyhow!(
+                        "NGIT_ARCHIVE_READ_ONLY=true requires either NGIT_ARCHIVE_ALL=true or NGIT_ARCHIVE_WHITELIST to be set"
+                    ));
+                }
+                true
+            }
+            Some(false) => false,
+            None => {
+                // Default: true if archive mode enabled, false otherwise
+                archive_enabled
+            }
+        };
+
         Ok(ArchiveConfig {
             archive_all: self.archive_all,
             whitelist,
+            read_only,
         })
     }
 
@@ -452,6 +488,7 @@ impl Config {
             naughty_list_expiration_hours: 12,
             archive_all: false,
             archive_whitelist: String::new(),
+            archive_read_only: None,
         }
     }
 }
@@ -664,12 +701,14 @@ mod tests {
         let config = ArchiveConfig {
             archive_all: true,
             whitelist: Vec::new(),
+            read_only: true,
         };
         assert!(config.enabled());
 
         let config = ArchiveConfig {
             archive_all: false,
             whitelist: vec![ArchiveWhitelistEntry::Identifier("test".into())],
+            read_only: true,
         };
         assert!(config.enabled());
     }
@@ -684,6 +723,7 @@ mod tests {
                 ArchiveWhitelistEntry::Pubkey(test_npub.clone()),
                 ArchiveWhitelistEntry::Identifier("bitcoin-core".into()),
             ],
+            read_only: false,
         };
 
         assert!(config.matches(&test_npub, "any-repo"));
@@ -696,6 +736,7 @@ mod tests {
         let config = ArchiveConfig {
             archive_all: true,
             whitelist: Vec::new(),
+            read_only: true,
         };
 
         assert!(config.matches("npub1alice", "any-repo"));
@@ -744,5 +785,69 @@ mod tests {
             ..Config::for_testing()
         };
         assert!(config.archive_config().is_err());
+    }
+
+    #[test]
+    fn test_archive_read_only_defaults() {
+        // Default: false when no archive mode
+        let config = Config::for_testing();
+        assert_eq!(config.archive_config().unwrap().read_only, false);
+
+        // Default: true when archive_all is set
+        let config = Config {
+            archive_all: true,
+            ..Config::for_testing()
+        };
+        assert_eq!(config.archive_config().unwrap().read_only, true);
+
+        // Default: true when archive_whitelist is set
+        let keys = Keys::generate();
+        let test_npub = keys.public_key().to_bech32().unwrap();
+        let config = Config {
+            archive_whitelist: test_npub,
+            ..Config::for_testing()
+        };
+        assert_eq!(config.archive_config().unwrap().read_only, true);
+    }
+
+    #[test]
+    fn test_archive_read_only_explicit() {
+        // Explicit true with archive_all
+        let config = Config {
+            archive_all: true,
+            archive_read_only: Some(true),
+            ..Config::for_testing()
+        };
+        assert_eq!(config.archive_config().unwrap().read_only, true);
+
+        // Explicit false with archive_all (unusual but allowed)
+        let config = Config {
+            archive_all: true,
+            archive_read_only: Some(false),
+            ..Config::for_testing()
+        };
+        assert_eq!(config.archive_config().unwrap().read_only, false);
+
+        // Explicit false without archive mode
+        let config = Config {
+            archive_read_only: Some(false),
+            ..Config::for_testing()
+        };
+        assert_eq!(config.archive_config().unwrap().read_only, false);
+    }
+
+    #[test]
+    fn test_archive_read_only_error() {
+        // Error: true without archive mode
+        let config = Config {
+            archive_read_only: Some(true),
+            ..Config::for_testing()
+        };
+        assert!(config.archive_config().is_err());
+        assert!(config
+            .archive_config()
+            .unwrap_err()
+            .to_string()
+            .contains("requires either"));
     }
 }

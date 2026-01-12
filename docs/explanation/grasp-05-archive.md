@@ -35,14 +35,17 @@ Archive mode relaxes the "must list service" requirement for whitelisted reposit
 
 **Configuration:**
 ```bash
-# Specific repos (safest)
+# Specific repos (safest) - read-only by default
 NGIT_ARCHIVE_WHITELIST=npub1torvalds.../linux,npub1satoshi.../bitcoin
+# NGIT_ARCHIVE_READ_ONLY defaults to true
 
 # All repos from trusted maintainers
 NGIT_ARCHIVE_WHITELIST=npub1alice...,npub1bob...
+# NGIT_ARCHIVE_READ_ONLY defaults to true
 
 # Archive everything (⚠️ storage risk)
 NGIT_ARCHIVE_ALL=true
+# NGIT_ARCHIVE_READ_ONLY defaults to true
 ```
 
 ### Validation Priority
@@ -63,10 +66,20 @@ Archived repos use the same directory structure as hosted repos:
 <git_data_path>/
   npub1alice.../
     hosted-repo.git/     # Lists your service (writable)
-    archived-repo.git/   # Whitelisted (read-only)
+    archived-repo.git/   # Whitelisted (read-only by default)
 ```
 
 **No flags or metadata** - archive status determined dynamically from config + announcement contents.
+
+### Read-Only Mode
+
+By default, archive mode operates in read-only mode (`NGIT_ARCHIVE_READ_ONLY=true`):
+- Repository announcements are accepted per whitelist/archive-all configuration
+- The service is **not listed** in accepted announcements (passive sync only)
+- NIP-11 document advertises `GRASP-05` support
+- NIP-11 `curation` field indicates read-only sync scope:
+  - `"Read-only sync of all repositories found on network"` (if `NGIT_ARCHIVE_ALL=true`)
+  - `"Read-only sync of whitelisted repositories and maintainers"` (if whitelist configured)
 
 ### Full Sync
 
@@ -129,12 +142,14 @@ Watch for:
 
 ## Comparison: Hosted vs Archived
 
-| Aspect | Hosted (GRASP-01) | Archived (GRASP-05) |
-|--------|-------------------|---------------------|
+| Aspect | Hosted (GRASP-01) | Archived (GRASP-05 Read-Only) |
+|--------|-------------------|-------------------------------|
 | Announcement must list you | ✅ Required | ❌ Whitelisted instead |
 | Git pushes | ✅ Accepted | ❌ Rejected (read-only) |
 | GRASP-02 sync | ✅ Full sync | ✅ Full sync |
-| Relay discovery | ✅ Listed | ❌ Not listed |
+| Relay discovery | ✅ Listed in announcements | ❌ Not listed (passive sync) |
+| NIP-11 supported_grasps | `["GRASP-01", "GRASP-02"]` | `["GRASP-01", "GRASP-05", "GRASP-02"]` |
+| NIP-11 curation field | `null` | Describes archive scope |
 | Use case | Hosting workspace | Backup/mirror |
 
 ## Related Documentation

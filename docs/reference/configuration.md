@@ -574,6 +574,77 @@ NGIT_ARCHIVE_WHITELIST=npub1alice23...,npub1bob23.../linux,bitcoin-core
 
 ---
 
+#### `NGIT_ARCHIVE_READ_ONLY`
+
+**Description:** Configure relay as read-only sync of archived repositories  
+**Type:** Boolean  
+**Default:** `true` if `NGIT_ARCHIVE_ALL` or `NGIT_ARCHIVE_WHITELIST` is set, `false` otherwise  
+**Required:** No
+
+**Examples:**
+
+```bash
+# Explicitly enable (requires archive mode)
+NGIT_ARCHIVE_READ_ONLY=true
+
+# Explicitly disable (writable archive repos)
+NGIT_ARCHIVE_READ_ONLY=false
+
+# Automatic (default behavior)
+# - If NGIT_ARCHIVE_ALL or NGIT_ARCHIVE_WHITELIST is set → true
+# - Otherwise → false
+# NGIT_ARCHIVE_READ_ONLY=
+```
+
+**Behavior:**
+
+- When `true`:
+  - NIP-11 document includes `GRASP-05` in `supported_grasps`
+  - NIP-11 `curation` field describes the archive scope
+  - Repository announcements not listing this service are accepted per whitelist/archive-all
+- When `false`:
+  - Archive mode disabled (standard GRASP-01 operation)
+- When unset (default):
+  - Automatically `true` if archive mode configured
+  - Automatically `false` otherwise
+
+**Error Conditions:**
+
+```bash
+# ERROR: Cannot set read-only without archive config
+NGIT_ARCHIVE_READ_ONLY=true
+NGIT_ARCHIVE_ALL=false
+NGIT_ARCHIVE_WHITELIST=
+# → Server fails to start: "NGIT_ARCHIVE_READ_ONLY=true requires either 
+#    NGIT_ARCHIVE_ALL=true or NGIT_ARCHIVE_WHITELIST to be set"
+```
+
+**NIP-11 Impact:**
+
+When `NGIT_ARCHIVE_READ_ONLY=true`:
+- `supported_grasps`: includes `"GRASP-05"`
+- `curation`: Set to one of:
+  - `"Read-only sync of all repositories found on network"` (if `NGIT_ARCHIVE_ALL=true`)
+  - `"Read-only sync of whitelisted repositories and maintainers"` (if `NGIT_ARCHIVE_WHITELIST` set)
+
+**Use Cases:**
+
+```bash
+# Public archive of entire ecosystem
+NGIT_ARCHIVE_ALL=true
+NGIT_ARCHIVE_READ_ONLY=true  # Default
+
+# Selective backup of critical projects
+NGIT_ARCHIVE_WHITELIST=npub1torvalds.../linux,npub1satoshi.../bitcoin
+NGIT_ARCHIVE_READ_ONLY=true  # Default
+
+# Writable mirror (advanced, not typical)
+NGIT_ARCHIVE_WHITELIST=npub1alice...
+NGIT_ARCHIVE_READ_ONLY=false
+```
+
+---
+
 ### Logging Configuration
 
 #### `RUST_LOG`

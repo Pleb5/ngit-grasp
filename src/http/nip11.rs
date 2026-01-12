@@ -56,6 +56,41 @@ pub struct RelayInformationDocument {
 impl RelayInformationDocument {
     /// Create NIP-11 relay information document from configuration
     pub fn from_config(config: &Config) -> Self {
+        // Determine if archive mode is enabled
+        let archive_config = config.archive_config().ok();
+        let archive_enabled = archive_config
+            .as_ref()
+            .map(|ac| ac.enabled())
+            .unwrap_or(false);
+        let archive_read_only = archive_config
+            .as_ref()
+            .map(|ac| ac.read_only)
+            .unwrap_or(false);
+
+        // Build supported_grasps list
+        let mut supported_grasps = vec!["GRASP-01".to_string()];
+        if archive_enabled {
+            supported_grasps.push("GRASP-05".to_string());
+        }
+        supported_grasps.push("GRASP-02".to_string());
+
+        // Build curation field for archive read-only mode
+        let curation = if archive_read_only {
+            if let Some(ref ac) = archive_config {
+                if ac.archive_all {
+                    Some("Read-only sync of all repositories found on network".to_string())
+                } else if !ac.whitelist.is_empty() {
+                    Some("Read-only sync of whitelisted repositories and maintainers".to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         Self {
             name: config.relay_name(),
             description: config.relay_description.clone(),
@@ -75,9 +110,9 @@ impl RelayInformationDocument {
             icon: Some(format!("https://{}/icon.png", config.domain)),
 
             // GRASP Extensions
-            supported_grasps: vec!["GRASP-01".to_string(), "GRASP-02".to_string()],
+            supported_grasps,
             repo_acceptance_criteria: "None".to_string(),
-            curation: None, // Not a curated relay - only SPAM prevention via GRASP-01 policy
+            curation,
         }
     }
 
@@ -90,6 +125,7 @@ impl RelayInformationDocument {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nostr_sdk::nips::nip19::ToBech32;
 
     #[test]
     fn test_relay_information_document_structure() {
@@ -112,6 +148,7 @@ mod tests {
         assert!(doc.supported_nips.contains(&11));
         assert!(doc.supported_nips.contains(&34));
         assert!(doc.supported_nips.contains(&77));
+        // Without archive mode, only GRASP-01 and GRASP-02
         assert_eq!(doc.supported_grasps, vec!["GRASP-01", "GRASP-02"]);
         assert!(doc.repo_acceptance_criteria.contains("None"));
         assert!(doc.curation.is_none());
@@ -146,5 +183,51 @@ mod tests {
         assert_eq!(parsed["supported_grasps"][0], "GRASP-01");
         assert_eq!(parsed["supported_grasps"][1], "GRASP-02");
         assert_eq!(parsed["icon"], "https://relay.example.com/icon.png");
+    }
+
+    #[test]
+    fn test_nip11_with_archive_mode() {
+        let mut config = Config::for_testing();
+        config.domain = "relay.example.com".to_string();
+        config.relay_name_override = Some("Archive Relay".to_string());
+        config.archive_all = true;
+        config.archive_read_only = Some(true);
+
+        let doc = RelayInformationDocument::from_config(&config);
+
+        // Archive mode enabled: should include GRASP-05
+        assert_eq!(
+            doc.supported_grasps,
+            vec!["GRASP-01", "GRASP-05", "GRASP-02"]
+        );
+        // Archive read-only: should have curation field
+        assert!(doc.curation.is_some());
+        assert!(doc
+            .curation
+            .unwrap()
+            .contains("Read-only sync of all repositories"));
+    }
+
+    #[test]
+    fn test_nip11_with_whitelist_archive() {
+        let keys = nostr_sdk::Keys::generate();
+        let test_npub = keys.public_key().to_bech32().unwrap();
+        let mut config = Config::for_testing();
+        config.domain = "relay.example.com".to_string();
+        config.archive_whitelist = format!("{},bitcoin-core", test_npub);
+
+        let doc = RelayInformationDocument::from_config(&config);
+
+        // Archive whitelist enabled: should include GRASP-05
+        assert_eq!(
+            doc.supported_grasps,
+            vec!["GRASP-01", "GRASP-05", "GRASP-02"]
+        );
+        // Archive read-only defaults to true: should have curation field
+        assert!(doc.curation.is_some());
+        assert!(doc
+            .curation
+            .unwrap()
+            .contains("Read-only sync of whitelisted"));
     }
 }

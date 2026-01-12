@@ -575,9 +575,10 @@ pub async fn create_relay(
 
     if archive_config.enabled() {
         tracing::info!(
-            "GRASP-05 archive mode enabled: archive_all={}, whitelist_entries={}",
+            "GRASP-05 archive mode enabled: archive_all={}, whitelist_entries={}, read_only={}",
             archive_config.archive_all,
-            archive_config.whitelist.len()
+            archive_config.whitelist.len(),
+            archive_config.read_only
         );
     }
 

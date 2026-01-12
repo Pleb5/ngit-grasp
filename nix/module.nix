@@ -196,6 +196,20 @@ let
         '';
       };
 
+      archiveReadOnly = mkOption {
+        type = types.nullOr types.bool;
+        default = null;
+        description = ''
+          Archive read-only mode (relay is read-only sync of archived repositories).
+          When true:
+            - NIP-11 includes GRASP-05 in supported_grasps
+            - NIP-11 curation field describes archive scope
+            - Repository announcements not listing this service are accepted per whitelist/archive-all
+          Default: true if archiveAll or archiveWhitelist is set, false otherwise
+          Note: Setting to true without archive config causes startup error
+        '';
+      };
+
       user = mkOption {
         type = types.str;
         default = "ngit-grasp-${name}";
@@ -241,6 +255,8 @@ let
       RUST_LOG = cfg.logLevel;
     } // optionalAttrs (cfg.relayName != null) {
       NGIT_RELAY_NAME = cfg.relayName;
+    } // optionalAttrs (cfg.archiveReadOnly != null) {
+      NGIT_ARCHIVE_READ_ONLY = toString cfg.archiveReadOnly;
     } // optionalAttrs cfg.metricsEnabled { NGIT_METRICS_ENABLED = "true"; }
       // optionalAttrs (cfg.syncBootstrapRelayUrl != null) {
         NGIT_SYNC_BOOTSTRAP_RELAY_URL = cfg.syncBootstrapRelayUrl;
