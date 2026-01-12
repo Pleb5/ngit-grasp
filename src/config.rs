@@ -195,6 +195,55 @@ impl Default for RepositoryConfig {
     }
 }
 
+/// Repository blacklist configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlacklistConfig {
+    /// Blacklist entries for blocking specific repositories
+    ///
+    /// If empty, no repositories are blacklisted.
+    /// Blacklist takes precedence over both archive and repository whitelists.
+    pub blacklist: Vec<WhitelistEntry>,
+}
+
+impl BlacklistConfig {
+    /// Check if repository blacklist is enabled (non-empty blacklist)
+    pub fn enabled(&self) -> bool {
+        !self.blacklist.is_empty()
+    }
+
+    /// Check if an announcement matches the repository blacklist
+    ///
+    /// Returns Some(reason) if blacklisted, None if not blacklisted.
+    /// The reason indicates what type of match occurred (npub, npub/identifier, or identifier).
+    pub fn check(&self, npub: &str, identifier: &str) -> Option<String> {
+        for entry in &self.blacklist {
+            if entry.matches(npub, identifier) {
+                let reason = match entry {
+                    WhitelistEntry::Pubkey(_) => {
+                        format!("Repository owner {} is blacklisted", npub)
+                    }
+                    WhitelistEntry::Repository { .. } => {
+                        format!("Repository {}/{} is blacklisted", npub, identifier)
+                    }
+                    WhitelistEntry::Identifier(_) => {
+                        format!("Repository identifier {} is blacklisted", identifier)
+                    }
+                };
+                return Some(reason);
+            }
+        }
+        None
+    }
+}
+
+impl Default for BlacklistConfig {
+    fn default() -> Self {
+        Self {
+            blacklist: Vec::new(),
+        }
+    }
+}
+
 /// Database backend type for the relay
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, ValueEnum)]
 #[serde(rename_all = "lowercase")]
@@ -373,6 +422,12 @@ pub struct Config {
     /// When set, only announcements matching the whitelist AND listing the service are accepted
     #[arg(long, env = "NGIT_REPOSITORY_WHITELIST", default_value = "")]
     pub repository_whitelist: String,
+
+    /// Repository blacklist: comma-separated list of npub/identifier/npub/identifier entries to reject
+    /// Formats: "npub1...", "npub1.../identifier", "identifier"
+    /// Blacklist takes precedence over all whitelists (archive and repository)
+    #[arg(long, env = "NGIT_REPOSITORY_BLACKLIST", default_value = "")]
+    pub repository_blacklist: String,
 }
 
 impl Config {
@@ -549,6 +604,14 @@ impl Config {
         RepositoryConfig { whitelist }
     }
 
+    /// Get parsed repository blacklist configuration
+    ///
+    /// This method assumes config has been validated - call Config::validate() first!
+    pub fn blacklist_config(&self) -> BlacklistConfig {
+        let blacklist = WhitelistEntry::parse_whitelist(&self.repository_blacklist);
+        BlacklistConfig { blacklist }
+    }
+
     /// Create config for testing
     #[cfg(test)]
     pub fn for_testing() -> Self {
@@ -583,6 +646,7 @@ impl Config {
             archive_whitelist: String::new(),
             archive_read_only: None,
             repository_whitelist: String::new(),
+            repository_blacklist: String::new(),
         }
     }
 }
@@ -1104,5 +1168,84 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("relay_owner_nsec not set"));
+    }
+
+    #[test]
+    fn test_blacklist_config_parsing() {
+        let keys = Keys::generate();
+        let test_npub = keys.public_key().to_bech32().unwrap();
+        let config = Config {
+            repository_blacklist: format!("{},bitcoin-core", test_npub),
+            ..Config::for_testing()
+        };
+        let blacklist_config = config.blacklist_config();
+        assert_eq!(blacklist_config.blacklist.len(), 2);
+        assert!(blacklist_config.enabled());
+    }
+
+    #[test]
+    fn test_blacklist_config_empty() {
+        let config = Config::for_testing();
+        let blacklist_config = config.blacklist_config();
+        assert!(blacklist_config.blacklist.is_empty());
+        assert!(!blacklist_config.enabled());
+    }
+
+    #[test]
+    fn test_blacklist_check_npub() {
+        let keys = Keys::generate();
+        let test_npub = keys.public_key().to_bech32().unwrap();
+        let config = BlacklistConfig {
+            blacklist: vec![WhitelistEntry::Pubkey(test_npub.clone())],
+        };
+
+        let result = config.check(&test_npub, "any-repo");
+        assert!(result.is_some());
+        let reason = result.unwrap();
+        assert!(reason.contains("owner"));
+        assert!(reason.contains(&test_npub));
+    }
+
+    #[test]
+    fn test_blacklist_check_identifier() {
+        let config = BlacklistConfig {
+            blacklist: vec![WhitelistEntry::Identifier("banned-repo".to_string())],
+        };
+
+        let result = config.check("npub1alice", "banned-repo");
+        assert!(result.is_some());
+        let reason = result.unwrap();
+        assert!(reason.contains("identifier"));
+        assert!(reason.contains("banned-repo"));
+    }
+
+    #[test]
+    fn test_blacklist_check_repository() {
+        let keys = Keys::generate();
+        let test_npub = keys.public_key().to_bech32().unwrap();
+        let config = BlacklistConfig {
+            blacklist: vec![WhitelistEntry::Repository {
+                npub: test_npub.clone(),
+                identifier: "specific-repo".to_string(),
+            }],
+        };
+
+        let result = config.check(&test_npub, "specific-repo");
+        assert!(result.is_some());
+        let reason = result.unwrap();
+        assert!(reason.contains(&test_npub));
+        assert!(reason.contains("specific-repo"));
+    }
+
+    #[test]
+    fn test_blacklist_check_not_blacklisted() {
+        let keys = Keys::generate();
+        let test_npub = keys.public_key().to_bech32().unwrap();
+        let config = BlacklistConfig {
+            blacklist: vec![WhitelistEntry::Identifier("banned-repo".to_string())],
+        };
+
+        let result = config.check(&test_npub, "allowed-repo");
+        assert!(result.is_none());
     }
 }

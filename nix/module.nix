@@ -224,6 +224,19 @@ let
         '';
       };
 
+      repositoryBlacklist = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        example = [ "npub1spam..." "npub1alice.../bad-repo" "malware" ];
+        description = ''
+          Repository blacklist for blocking specific repositories/pubkeys/identifiers.
+          Blacklist takes precedence over ALL whitelists (archive and repository).
+          Formats: <npub>, <npub>/<identifier>, <identifier>
+          Blacklisted repos are rejected with specific reasons (npub/identifier/both).
+          Does not affect NIP-11 curation field (operational, not curation policy).
+        '';
+      };
+
       user = mkOption {
         type = types.str;
         default = "ngit-grasp-${name}";
@@ -267,6 +280,7 @@ let
       NGIT_ARCHIVE_ALL = toString cfg.archiveAll;
       NGIT_ARCHIVE_WHITELIST = concatStringsSep "," cfg.archiveWhitelist;
       NGIT_REPOSITORY_WHITELIST = concatStringsSep "," cfg.repositoryWhitelist;
+      NGIT_REPOSITORY_BLACKLIST = concatStringsSep "," cfg.repositoryBlacklist;
       RUST_LOG = cfg.logLevel;
     } // optionalAttrs (cfg.relayName != null) {
       NGIT_RELAY_NAME = cfg.relayName;

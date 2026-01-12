@@ -36,7 +36,7 @@ Unlike the reference implementation ([ngit-relay](https://gitworkshop.dev/npub15
 - **Pure Rust Implementation**: Single binary, no external dependencies beyond Git itself
 - **Integrated Authorization**: Push validation happens inline during the Git receive-pack operation
 - **GRASP-01 Compliant**: Core service requirements for Git hosting with Nostr authorization
-  - **Repository Whitelist**: Optional curation via pubkey/identifier whitelist (GRASP-01 mode)
+  - **Repository Whitelist/Blacklist**: Optional curation via pubkey/identifier whitelist (GRASP-01 mode) and blacklist (overrides all whitelists)
 - **GRASP-02 Proactive Sync**: Sophisticated relay-to-relay event and git data synchronization
   - **NIP-77 Negentropy**: Efficient set reconciliation with automatic fallback to REQ+EOSE
   - **Live & Historic Sync**: Real-time event streaming plus catch-up for past events

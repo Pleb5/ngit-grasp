@@ -366,6 +366,9 @@ impl RepositoryState {
 /// - AcceptArchive: Announcement matches archive config (GRASP-05)
 /// - Reject: Validation failed
 ///
+/// Blacklist takes precedence over all whitelists:
+/// - If blacklisted, always reject with specific reason (npub/identifier/npub+identifier)
+///
 /// When archive_read_only is true:
 /// - ONLY accept announcements matching archive whitelist/all
 /// - REJECT announcements listing our service but not in whitelist (read-only sync mode)
@@ -403,9 +406,15 @@ pub fn validate_announcement(
     // Get validated configs (config.validate() must be called at startup)
     let archive_config = config.archive_config();
     let repository_config = config.repository_config();
+    let blacklist_config = config.blacklist_config();
 
     let npub = announcement.owner_npub();
     let lists_service = announcement.lists_service(&config.domain);
+
+    // Check blacklist FIRST - it overrides everything
+    if let Some(reason) = blacklist_config.check(&npub, &announcement.identifier) {
+        return AnnouncementResult::Reject(reason);
+    }
 
     // GRASP-01: Normal mode - accept if announcement lists our service AND matches repository whitelist (if enabled)
     if lists_service && !archive_config.read_only {
@@ -1308,5 +1317,183 @@ mod tests {
 
         let result = validate_announcement(&event, &config);
         assert!(matches!(result, AnnouncementResult::Reject(_)));
+    }
+
+    #[test]
+    fn test_blacklist_rejects_npub() {
+        use crate::config::Config;
+        use crate::nostr::policy::AnnouncementResult;
+
+        let keys = create_test_keys();
+        let npub = keys.public_key().to_bech32().unwrap();
+
+        // Create announcement that lists our service
+        let event = create_announcement_event(
+            &keys,
+            "test-repo",
+            vec!["https://gitnostr.com/alice/test-repo.git"],
+            vec!["wss://gitnostr.com"],
+        );
+
+        // Config with blacklist for this npub
+        let config = Config {
+            domain: "gitnostr.com".to_string(),
+            repository_blacklist: npub.clone(),
+            ..Config::for_testing()
+        };
+
+        let result = validate_announcement(&event, &config);
+        if let AnnouncementResult::Reject(reason) = result {
+            assert!(reason.contains("owner"));
+            assert!(reason.contains(&npub));
+        } else {
+            panic!("Expected Reject, got {:?}", result);
+        }
+    }
+
+    #[test]
+    fn test_blacklist_rejects_identifier() {
+        use crate::config::Config;
+        use crate::nostr::policy::AnnouncementResult;
+
+        let keys = create_test_keys();
+
+        // Create announcement that lists our service
+        let event = create_announcement_event(
+            &keys,
+            "banned-repo",
+            vec!["https://gitnostr.com/alice/banned-repo.git"],
+            vec!["wss://gitnostr.com"],
+        );
+
+        // Config with blacklist for this identifier
+        let config = Config {
+            domain: "gitnostr.com".to_string(),
+            repository_blacklist: "banned-repo".to_string(),
+            ..Config::for_testing()
+        };
+
+        let result = validate_announcement(&event, &config);
+        if let AnnouncementResult::Reject(reason) = result {
+            assert!(reason.contains("identifier"));
+            assert!(reason.contains("banned-repo"));
+        } else {
+            panic!("Expected Reject, got {:?}", result);
+        }
+    }
+
+    #[test]
+    fn test_blacklist_rejects_specific_repository() {
+        use crate::config::Config;
+        use crate::nostr::policy::AnnouncementResult;
+
+        let keys = create_test_keys();
+        let npub = keys.public_key().to_bech32().unwrap();
+
+        // Create announcement that lists our service
+        let event = create_announcement_event(
+            &keys,
+            "specific-repo",
+            vec!["https://gitnostr.com/alice/specific-repo.git"],
+            vec!["wss://gitnostr.com"],
+        );
+
+        // Config with blacklist for this specific repo
+        let config = Config {
+            domain: "gitnostr.com".to_string(),
+            repository_blacklist: format!("{}/specific-repo", npub),
+            ..Config::for_testing()
+        };
+
+        let result = validate_announcement(&event, &config);
+        if let AnnouncementResult::Reject(reason) = result {
+            assert!(reason.contains(&npub));
+            assert!(reason.contains("specific-repo"));
+        } else {
+            panic!("Expected Reject, got {:?}", result);
+        }
+    }
+
+    #[test]
+    fn test_blacklist_overrides_repository_whitelist() {
+        use crate::config::Config;
+        use crate::nostr::policy::AnnouncementResult;
+
+        let keys = create_test_keys();
+        let npub = keys.public_key().to_bech32().unwrap();
+
+        // Create announcement that lists our service
+        let event = create_announcement_event(
+            &keys,
+            "test-repo",
+            vec!["https://gitnostr.com/alice/test-repo.git"],
+            vec!["wss://gitnostr.com"],
+        );
+
+        // Config with both whitelist and blacklist - blacklist should win
+        let config = Config {
+            domain: "gitnostr.com".to_string(),
+            repository_whitelist: npub.clone(),
+            repository_blacklist: npub.clone(),
+            ..Config::for_testing()
+        };
+
+        let result = validate_announcement(&event, &config);
+        assert!(matches!(result, AnnouncementResult::Reject(_)));
+    }
+
+    #[test]
+    fn test_blacklist_overrides_archive_whitelist() {
+        use crate::config::Config;
+        use crate::nostr::policy::AnnouncementResult;
+
+        let keys = create_test_keys();
+        let npub = keys.public_key().to_bech32().unwrap();
+
+        // Create announcement that does NOT list our service
+        let event = create_announcement_event(
+            &keys,
+            "test-repo",
+            vec!["https://other-service.com/alice/test-repo.git"],
+            vec!["wss://other-service.com"],
+        );
+
+        // Config with archive whitelist and blacklist - blacklist should win
+        let config = Config {
+            domain: "gitnostr.com".to_string(),
+            archive_whitelist: npub.clone(),
+            archive_read_only: Some(false),
+            repository_blacklist: npub.clone(),
+            ..Config::for_testing()
+        };
+
+        let result = validate_announcement(&event, &config);
+        assert!(matches!(result, AnnouncementResult::Reject(_)));
+    }
+
+    #[test]
+    fn test_blacklist_allows_non_blacklisted() {
+        use crate::config::Config;
+        use crate::nostr::policy::AnnouncementResult;
+
+        let keys = create_test_keys();
+
+        // Create announcement that lists our service
+        let event = create_announcement_event(
+            &keys,
+            "allowed-repo",
+            vec!["https://gitnostr.com/alice/allowed-repo.git"],
+            vec!["wss://gitnostr.com"],
+        );
+
+        // Config with blacklist for different identifier
+        let config = Config {
+            domain: "gitnostr.com".to_string(),
+            repository_blacklist: "banned-repo".to_string(),
+            ..Config::for_testing()
+        };
+
+        let result = validate_announcement(&event, &config);
+        assert!(matches!(result, AnnouncementResult::Accept));
     }
 }

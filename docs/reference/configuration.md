@@ -744,6 +744,95 @@ NGIT_REPOSITORY_WHITELIST=bitcoin-core,npub1alice...
 
 ---
 
+### Repository Blacklist
+
+#### `NGIT_REPOSITORY_BLACKLIST`
+
+**Description:** Blacklist specific repositories/pubkeys/identifiers to reject  
+**Type:** Comma-separated list  
+**Default:** Empty (no repositories are blacklisted)  
+**Required:** No
+
+**Format:** Same as whitelist formats:
+- `npub1...` - Block all repos from this pubkey
+- `npub1.../identifier` - Block specific repo
+- `identifier` - Block repos with this identifier (any pubkey)
+
+**Precedence:** Blacklist takes precedence over **ALL** whitelists:
+- Blacklisted repos are rejected even if they match archive or repository whitelists
+- Blacklisted repos are rejected even if they list our service
+- Blacklist is checked **first** before any other validation
+
+**Examples:**
+
+```bash
+# Block all repos from specific pubkey
+NGIT_REPOSITORY_BLACKLIST=npub1spam...
+
+# Block specific repo
+NGIT_REPOSITORY_BLACKLIST=npub1alice.../malware-repo
+
+# Block repos with specific identifiers
+NGIT_REPOSITORY_BLACKLIST=malware,spam,phishing
+
+# Combined blacklist
+NGIT_REPOSITORY_BLACKLIST=npub1spam...,npub1alice.../bad-repo,malware
+```
+
+**Rejection Reasons:**
+
+The blacklist provides specific rejection reasons based on the match type:
+
+- **Npub format:** `"Repository owner <npub> is blacklisted"`
+- **Npub/identifier format:** `"Repository <npub>/<identifier> is blacklisted"`
+- **Identifier format:** `"Repository identifier <identifier> is blacklisted"`
+
+These reasons help operators understand why a repository was rejected without needing to flag it in curation metadata.
+
+**Behavior:**
+
+Blacklist is checked **before** all other validation:
+1. Check blacklist → Reject if matched
+2. Check if lists service → Accept if matches repository whitelist (if enabled)
+3. Check archive config → Accept if matches archive whitelist (if enabled)
+4. Reject otherwise
+
+**Use Cases:**
+
+```bash
+# Block spam/malware repos
+NGIT_REPOSITORY_BLACKLIST=malware,spam,phishing
+
+# Block abusive users
+NGIT_REPOSITORY_BLACKLIST=npub1spammer...,npub1abuser...
+
+# Block specific problematic repos
+NGIT_REPOSITORY_BLACKLIST=npub1alice.../copyright-violation,npub1bob.../illegal-content
+
+# Temporary block for investigation
+NGIT_REPOSITORY_BLACKLIST=npub1suspicious.../repo-under-review
+```
+
+**Comparison with Whitelists:**
+
+| Configuration | Blacklisted? | Matches Whitelist? | Lists Service? | Result |
+|---------------|--------------|-------------------|----------------|---------|
+| Blacklist only | Yes | N/A | N/A | ❌ Reject (blacklisted) |
+| Blacklist only | No | N/A | Yes | ✅ Accept (GRASP-01) |
+| Blacklist + Repository whitelist | Yes | Yes | Yes | ❌ Reject (blacklist wins) |
+| Blacklist + Archive whitelist | Yes | Yes | No | ❌ Reject (blacklist wins) |
+| Blacklist + Both whitelists | Yes | Yes | Yes | ❌ Reject (blacklist wins) |
+| Blacklist only | No | N/A | No | ❌ Reject (no whitelist match) |
+
+**NIP-11 Impact:**
+
+Blacklist does **not** affect NIP-11 metadata:
+- No `curation` field changes (blacklist is operational, not curation policy)
+- Blacklist is transparent to clients (rejected with specific reason)
+- Operators can use blacklist without advertising curation
+
+---
+
 ### Logging Configuration
 
 #### `RUST_LOG`
