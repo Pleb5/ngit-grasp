@@ -74,8 +74,8 @@ impl RelayInformationDocument {
             },
             icon: Some(format!("https://{}/icon.png", config.domain)),
 
-            // GRASP-01 Extensions
-            supported_grasps: vec!["GRASP-01".to_string()],
+            // GRASP Extensions
+            supported_grasps: vec!["GRASP-01".to_string(), "GRASP-02".to_string()],
             repo_acceptance_criteria: "None".to_string(),
             curation: None, // Not a curated relay - only SPAM prevention via GRASP-01 policy
         }
@@ -112,7 +112,7 @@ mod tests {
         assert!(doc.supported_nips.contains(&11));
         assert!(doc.supported_nips.contains(&34));
         assert!(doc.supported_nips.contains(&77));
-        assert_eq!(doc.supported_grasps, vec!["GRASP-01"]);
+        assert_eq!(doc.supported_grasps, vec!["GRASP-01", "GRASP-02"]);
         assert!(doc.repo_acceptance_criteria.contains("None"));
         assert!(doc.curation.is_none());
         assert_eq!(
@@ -138,11 +138,13 @@ mod tests {
         assert!(json.contains("\"supported_grasps\""));
         assert!(json.contains("\"repo_acceptance_criteria\""));
         assert!(json.contains("GRASP-01"));
+        assert!(json.contains("GRASP-02"));
 
         // Verify it's valid JSON by parsing
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("Invalid JSON");
         assert_eq!(parsed["name"], "Test Relay");
         assert_eq!(parsed["supported_grasps"][0], "GRASP-01");
+        assert_eq!(parsed["supported_grasps"][1], "GRASP-02");
         assert_eq!(parsed["icon"], "https://relay.example.com/icon.png");
     }
 }
