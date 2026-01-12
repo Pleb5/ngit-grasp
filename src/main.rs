@@ -40,9 +40,12 @@ async fn main() -> Result<()> {
     // Initialize metrics if enabled
     let metrics = if config.metrics_enabled {
         info!("Metrics enabled on /metrics endpoint");
-        Some(Arc::new(Metrics::new(
+        let m = Arc::new(Metrics::new(
             config.metrics_connection_per_ip_abuse_threshold,
-        )))
+            Some(config.effective_git_data_path()),
+        ));
+        info!("Repository count will be updated on each metrics request");
+        Some(m)
     } else {
         info!("Metrics disabled");
         None

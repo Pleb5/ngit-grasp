@@ -81,8 +81,10 @@ struct MetricsInner {
     pub events_rejected_total: CounterVec,
 
     // === Repository Metrics ===
-    /// Total repositories hosted
+    /// Total repositories hosted (counted from disk on each metrics request)
     pub repositories_total: Gauge,
+    /// Git data directory path for counting repositories on disk
+    pub git_data_path: Option<String>,
 
     // === System Health Metrics ===
     /// Server start time for uptime calculation
@@ -97,8 +99,9 @@ impl Metrics {
     ///
     /// # Arguments
     /// * `abuse_threshold` - Number of connections from a single IP before flagging as abuse
-    pub fn new(abuse_threshold: u32) -> Self {
-        let inner = MetricsInner::new(abuse_threshold);
+    /// * `git_data_path` - Optional path to git data directory for counting repositories
+    pub fn new(abuse_threshold: u32, git_data_path: Option<String>) -> Self {
+        let inner = MetricsInner::new(abuse_threshold, git_data_path);
         Self {
             inner: Arc::new(inner),
         }
@@ -214,9 +217,49 @@ impl Metrics {
         self.inner.repositories_total.set(count as f64);
     }
 
-    /// Increment the repository count
-    pub fn inc_repositories_total(&self) {
-        self.inner.repositories_total.inc();
+    /// Count all git repositories on disk.
+    ///
+    /// This scans the git data directory for all `*.git` directories.
+    ///
+    /// # Arguments
+    /// * `git_data_path` - Path to the git data directory (e.g., "./data/git")
+    ///
+    /// # Returns
+    /// The number of repositories found on disk
+    pub fn count_repositories_on_disk(git_data_path: &str) -> u64 {
+        use std::fs;
+        use std::path::Path;
+
+        let git_dir = Path::new(git_data_path);
+        if !git_dir.exists() {
+            return 0;
+        }
+
+        let mut count = 0u64;
+        if let Ok(entries) = fs::read_dir(git_dir) {
+            for npub_entry in entries.flatten() {
+                if let Ok(npub_meta) = npub_entry.metadata() {
+                    if npub_meta.is_dir() {
+                        // This is a npub directory, scan for *.git repos inside
+                        if let Ok(repo_entries) = fs::read_dir(npub_entry.path()) {
+                            for repo_entry in repo_entries.flatten() {
+                                if let Some(name) = repo_entry.file_name().to_str() {
+                                    if name.ends_with(".git") {
+                                        if let Ok(repo_meta) = repo_entry.metadata() {
+                                            if repo_meta.is_dir() {
+                                                count += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        count
     }
 
     // === Rendering ===
@@ -225,12 +268,19 @@ impl Metrics {
     ///
     /// This method:
     /// 1. Refreshes the top-N bandwidth metrics if needed
-    /// 2. Updates uptime
-    /// 3. Gathers all metrics from the registry
-    /// 4. Encodes them in Prometheus text format
+    /// 2. Counts repositories on disk (if git_data_path configured)
+    /// 3. Updates uptime
+    /// 4. Gathers all metrics from the registry
+    /// 5. Encodes them in Prometheus text format
     pub fn render(&self) -> String {
         // Refresh top-N bandwidth repos if needed
         self.inner.bandwidth_tracker.maybe_refresh_top_n();
+
+        // Count repositories on disk and update metric
+        if let Some(git_data_path) = &self.inner.git_data_path {
+            let count = Self::count_repositories_on_disk(git_data_path);
+            self.inner.repositories_total.set(count as f64);
+        }
 
         // Gather and encode metrics
         let encoder = TextEncoder::new();
@@ -256,7 +306,7 @@ impl Metrics {
 }
 
 impl MetricsInner {
-    fn new(abuse_threshold: u32) -> Self {
+    fn new(abuse_threshold: u32, git_data_path: Option<String>) -> Self {
         // Create connection tracker
         let connection_tracker = ConnectionTracker::new(abuse_threshold, &REGISTRY);
 
@@ -444,6 +494,7 @@ impl MetricsInner {
             events_stored_total,
             events_rejected_total,
             repositories_total,
+            git_data_path,
             start_time: Instant::now(),
             build_info,
         }
@@ -505,12 +556,67 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_metrics_creation() {
-        // Note: This test may fail if run with other tests due to global registry
-        // In production, consider using a test-specific registry
-        let metrics = Metrics::new(10);
+    fn test_count_repositories_on_disk() {
+        use std::fs;
+        use tempfile::TempDir;
 
-        // Test that we can record metrics without panicking
+        // Create temporary directory structure
+        let temp_dir = TempDir::new().unwrap();
+        let git_data_path = temp_dir.path();
+
+        // Initially should be 0
+        let count = Metrics::count_repositories_on_disk(git_data_path.to_str().unwrap());
+        assert_eq!(count, 0);
+
+        // Create some fake repositories
+        let npub1 = git_data_path.join("npub1test");
+        fs::create_dir_all(&npub1).unwrap();
+        fs::create_dir_all(npub1.join("repo1.git")).unwrap();
+        fs::create_dir_all(npub1.join("repo2.git")).unwrap();
+
+        let npub2 = git_data_path.join("npub2test");
+        fs::create_dir_all(&npub2).unwrap();
+        fs::create_dir_all(npub2.join("repo3.git")).unwrap();
+
+        // Should count 3 repositories
+        let count = Metrics::count_repositories_on_disk(git_data_path.to_str().unwrap());
+        assert_eq!(count, 3);
+
+        // Create a non-.git directory (should be ignored)
+        fs::create_dir_all(npub1.join("not-a-repo")).unwrap();
+        let count = Metrics::count_repositories_on_disk(git_data_path.to_str().unwrap());
+        assert_eq!(count, 3);
+
+        // Create a file with .git suffix (should be ignored, not a directory)
+        fs::write(npub1.join("file.git"), "content").unwrap();
+        let count = Metrics::count_repositories_on_disk(git_data_path.to_str().unwrap());
+        assert_eq!(count, 3);
+    }
+
+    /// Comprehensive test for Metrics functionality including repository counting.
+    ///
+    /// NOTE: This test creates a Metrics instance which registers with the global
+    /// Prometheus REGISTRY. Due to this global state, we cannot have multiple tests
+    /// that create Metrics instances - they would conflict. Therefore, this single
+    /// test covers:
+    /// 1. Metrics creation and basic operations
+    /// 2. Repository counting on disk via render()
+    ///
+    /// If additional Metrics tests are needed, they should either be added to this
+    /// test or use a separate test-specific Prometheus registry.
+    #[test]
+    fn test_metrics_with_repository_counting() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        // Create temporary directory structure for repository counting
+        let temp_dir = TempDir::new().unwrap();
+        let git_data_path = temp_dir.path();
+
+        // Create Metrics with git_data_path for repository counting
+        let metrics = Metrics::new(10, Some(git_data_path.to_str().unwrap().to_string()));
+
+        // Test basic metrics operations
         metrics.record_websocket_connection();
         metrics.record_message_received("REQ");
         metrics.record_message_sent("EVENT");
@@ -520,5 +626,28 @@ mod tests {
         metrics.record_event_stored(1);
         metrics.record_event_rejected(1, "invalid_signature");
         metrics.set_repositories_total(5);
+
+        // Test repository counting via render()
+        // Render should count 0 repos initially (even though we set it to 5 above,
+        // render() recounts from disk)
+        let output = metrics.render();
+        assert!(output.contains("ngit_repositories_total 0"));
+
+        // Create some repositories
+        let npub1 = git_data_path.join("npub1test");
+        fs::create_dir_all(&npub1).unwrap();
+        fs::create_dir_all(npub1.join("repo1.git")).unwrap();
+        fs::create_dir_all(npub1.join("repo2.git")).unwrap();
+
+        // Render should count 2 repos now
+        let output = metrics.render();
+        assert!(output.contains("ngit_repositories_total 2"));
+
+        // Add another repo
+        fs::create_dir_all(npub1.join("repo3.git")).unwrap();
+
+        // Render should count 3 repos
+        let output = metrics.render();
+        assert!(output.contains("ngit_repositories_total 3"));
     }
 }
