@@ -33,13 +33,16 @@ impl GitSubprocess {
 
         let mut cmd = Command::new("git");
 
-        // GRASP-01 requirement: MUST include `allow-reachable-sha1-in-want` and
-        // `allow-tip-sha1-in-want` in advertisement and serve available oids.
+        // GRASP-01 requirement: MUST include `allow-reachable-sha1-in-want`,
+        // `allow-tip-sha1-in-want`, and `uploadpack.allowFilter` in advertisement
+        // and serve available oids and filtered requests.
         // These config options must be passed before the command name.
         cmd.arg("-c");
         cmd.arg("uploadpack.allowReachableSHA1InWant=true");
         cmd.arg("-c");
         cmd.arg("uploadpack.allowTipSHA1InWant=true");
+        cmd.arg("-c");
+        cmd.arg("uploadpack.allowFilter=true");
 
         cmd.arg(service.command_name());
 

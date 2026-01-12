@@ -764,6 +764,8 @@ async fn handle_info_refs_upload_pack(
         .arg("uploadpack.allowReachableSHA1InWant=true")
         .arg("-c")
         .arg("uploadpack.allowTipSHA1InWant=true")
+        .arg("-c")
+        .arg("uploadpack.allowFilter=true")
         .arg("upload-pack")
         .arg("--advertise-refs")
         .arg("--stateless-rpc");
@@ -854,6 +856,8 @@ async fn handle_upload_pack(
         .arg("uploadpack.allowReachableSHA1InWant=true")
         .arg("-c")
         .arg("uploadpack.allowTipSHA1InWant=true")
+        .arg("-c")
+        .arg("uploadpack.allowFilter=true")
         .arg("upload-pack")
         .arg("--stateless-rpc");
 

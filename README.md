@@ -114,6 +114,7 @@ See [GRASP-02 Proactive Sync](docs/explanation/grasp-02-proactive-sync.md) for f
 - ✅ Push validation against Nostr state events
 - ✅ Multi-maintainer support via recursive maintainer sets
 - ✅ Support for `refs/nostr/<event-id>` for PRs
+- ✅ Git capabilities: `allow-tip-sha1-in-want`, `allow-reachable-sha1-in-want`, `uploadpack.allowFilter`
 - ✅ CORS support for web-based Git clients
 - ✅ NIP-11 relay information document
 - ✅ **Purgatory**: Events without git data held for 30 minutes, auto-released when data arrives

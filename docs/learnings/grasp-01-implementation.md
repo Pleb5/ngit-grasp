@@ -42,7 +42,8 @@
 - ✅ Recursive maintainer chain support
 - ✅ HEAD set from state events
 - ✅ `refs/nostr/<event-id>` support for PRs
-- ✅ `allow-tip-sha1-in-want` and `allow-reachable-sha1-in-want`
+- ✅ `allow-tip-sha1-in-want` and `allow-reachable-sha1-in-want` (GRASP-01 requirement)
+- ✅ `uploadpack.allowFilter` for partial clone support (required by git-natural-api)
 
 ---
 

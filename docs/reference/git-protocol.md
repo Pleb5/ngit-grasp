@@ -4,6 +4,44 @@
 
 This document explains the Git Smart HTTP protocol as it relates to our inline authorization implementation.
 
+## Required Git Capabilities
+
+### GRASP-01 Requirements (MUST)
+
+Per the [GRASP-01 specification](https://github.com/DanConwayDev/grasp/blob/main/01.md), implementations **MUST** advertise and support the following git capabilities:
+
+- **`allow-reachable-sha1-in-want`**: Allows clients to request commits reachable from any ref
+- **`allow-tip-sha1-in-want`**: Allows clients to request specific commit SHAs directly
+- **`uploadpack.allowFilter`**: Enables partial clone/fetch with `--filter` options
+
+These are essential for supporting `refs/nostr/<event-id>` (PR refs) and bandwidth-efficient partial clones.
+
+**Implementation:** `src/git/subprocess.rs:36-42`
+
+### How Capabilities are Advertised
+
+Git capabilities are advertised during the initial `GET /info/refs?service=git-upload-pack` request. The server spawns `git upload-pack --advertise-refs` with configuration flags:
+
+```bash
+git -c uploadpack.allowReachableSHA1InWant=true \
+    -c uploadpack.allowTipSHA1InWant=true \
+    -c uploadpack.allowFilter=true \
+    upload-pack --advertise-refs --stateless-rpc /path/to/repo.git
+```
+
+Clients parse the capability list from the response and only use features the server advertises.
+
+**Verification:** Test with `git ls-remote`:
+
+```bash
+GIT_TRACE_PACKET=1 git ls-remote https://ngit.danconwaydev.com/npub.../repo.git 2>&1 | grep -E "allow-|filter"
+```
+
+Expected output should include:
+```
+pkt-line: ... allow-tip-sha1-in-want allow-reachable-sha1-in-want filter ...
+```
+
 ## Protocol Flow
 
 ### Clone/Fetch (Upload Pack)
