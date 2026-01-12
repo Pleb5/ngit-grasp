@@ -290,7 +290,7 @@ let
         toString cfg.rejectedColdIndexExpirySecs;
       NGIT_NAUGHTY_LIST_EXPIRATION_HOURS =
         toString cfg.naughtyListExpirationHours;
-      NGIT_ARCHIVE_ALL = toString cfg.archiveAll;
+      NGIT_ARCHIVE_ALL = if cfg.archiveAll then "true" else "false";
       NGIT_ARCHIVE_WHITELIST = concatStringsSep "," cfg.archiveWhitelist;
       NGIT_REPOSITORY_WHITELIST = concatStringsSep "," cfg.repositoryWhitelist;
       NGIT_REPOSITORY_BLACKLIST = concatStringsSep "," cfg.repositoryBlacklist;
@@ -299,7 +299,7 @@ let
     } // optionalAttrs (cfg.relayName != null) {
       NGIT_RELAY_NAME = cfg.relayName;
     } // optionalAttrs (cfg.archiveReadOnly != null) {
-      NGIT_ARCHIVE_READ_ONLY = toString cfg.archiveReadOnly;
+      NGIT_ARCHIVE_READ_ONLY = if cfg.archiveReadOnly then "true" else "false";
     } // optionalAttrs cfg.metricsEnabled { NGIT_METRICS_ENABLED = "true"; }
       // optionalAttrs (cfg.syncBootstrapRelayUrl != null) {
         NGIT_SYNC_BOOTSTRAP_RELAY_URL = cfg.syncBootstrapRelayUrl;
