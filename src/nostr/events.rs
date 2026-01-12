@@ -359,13 +359,24 @@ impl RepositoryState {
     }
 }
 
-/// Validate a repository announcement according to GRASP-01
+/// Validate a repository announcement according to GRASP-01 and GRASP-05
 ///
-/// Returns Ok(()) if valid, Err with reason if invalid.
-pub fn validate_announcement(event: &Event, domain: &str) -> Result<()> {
+/// Returns:
+/// - Accept: Announcement lists our service (GRASP-01)
+/// - AcceptArchive: Announcement matches archive config (GRASP-05)
+/// - Reject: Validation failed
+///
+/// Note: AcceptMaintainer is NOT returned here (requires database access)
+pub fn validate_announcement(
+    event: &Event,
+    domain: &str,
+    archive_config: &crate::config::ArchiveConfig,
+) -> crate::nostr::policy::AnnouncementResult {
+    use crate::nostr::policy::AnnouncementResult;
+
     // Must be kind 30617
     if event.kind != Kind::GitRepoAnnouncement {
-        return Err(anyhow!(
+        return AnnouncementResult::Reject(format!(
             "Invalid kind: expected {}",
             Kind::GitRepoAnnouncement
         ));
@@ -374,24 +385,32 @@ pub fn validate_announcement(event: &Event, domain: &str) -> Result<()> {
     // Must have identifier
     let has_identifier = event.tags.iter().any(|t| t.kind() == TagKind::d());
     if !has_identifier {
-        return Err(anyhow!("Missing required 'd' tag (identifier)"));
+        return AnnouncementResult::Reject("Missing required 'd' tag (identifier)".to_string());
     }
 
     // Parse full announcement to validate structure
-    let announcement = RepositoryAnnouncement::from_event(event.clone())?;
+    let announcement = match RepositoryAnnouncement::from_event(event.clone()) {
+        Ok(a) => a,
+        Err(e) => return AnnouncementResult::Reject(format!("Invalid announcement: {}", e)),
+    };
 
-    // GRASP-01: MUST reject announcements that do not list the service
-    // in both `clone` and `relays` tags unless implementing GRASP-05
-    if !announcement.lists_service(domain) {
-        return Err(anyhow!(
-            "Announcement must list service in both 'clone' and 'relays' tags. \
-             Found clone URLs: {:?}, relays: {:?}",
-            announcement.clone_urls,
-            announcement.relays
-        ));
+    // GRASP-01: Check if announcement lists our service
+    if announcement.lists_service(domain) {
+        return AnnouncementResult::Accept;
     }
 
-    Ok(())
+    // GRASP-05: Check if announcement matches archive configuration
+    let npub = announcement.owner_npub();
+    if archive_config.matches(&npub, &announcement.identifier) {
+        return AnnouncementResult::AcceptArchive;
+    }
+
+    // Reject: Doesn't list us and not whitelisted
+    AnnouncementResult::Reject(format!(
+        "Announcement must list service in both 'clone' and 'relays' tags, or match archive whitelist. \
+         Found clone URLs: {:?}, relays: {:?}",
+        announcement.clone_urls, announcement.relays
+    ))
 }
 
 /// Validate a repository state announcement according to GRASP-01
@@ -529,6 +548,9 @@ mod tests {
 
     #[test]
     fn test_validate_announcement_success() {
+        use crate::config::ArchiveConfig;
+        use crate::nostr::policy::AnnouncementResult;
+
         let keys = create_test_keys();
         let event = create_announcement_event(
             &keys,
@@ -537,12 +559,15 @@ mod tests {
             vec!["wss://gitnostr.com"],
         );
 
-        let result = validate_announcement(&event, "gitnostr.com");
-        assert!(result.is_ok());
+        let result = validate_announcement(&event, "gitnostr.com", &ArchiveConfig::default());
+        assert!(matches!(result, AnnouncementResult::Accept));
     }
 
     #[test]
     fn test_validate_announcement_missing_clone() {
+        use crate::config::ArchiveConfig;
+        use crate::nostr::policy::AnnouncementResult;
+
         let keys = create_test_keys();
         let event = create_announcement_event(
             &keys,
@@ -551,13 +576,19 @@ mod tests {
             vec!["wss://gitnostr.com"],
         );
 
-        let result = validate_announcement(&event, "gitnostr.com");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("clone"));
+        let result = validate_announcement(&event, "gitnostr.com", &ArchiveConfig::default());
+        if let AnnouncementResult::Reject(reason) = result {
+            assert!(reason.contains("clone"));
+        } else {
+            panic!("Expected Reject, got {:?}", result);
+        }
     }
 
     #[test]
     fn test_validate_announcement_missing_relay() {
+        use crate::config::ArchiveConfig;
+        use crate::nostr::policy::AnnouncementResult;
+
         let keys = create_test_keys();
         let event = create_announcement_event(
             &keys,
@@ -566,13 +597,19 @@ mod tests {
             vec![], // No relays
         );
 
-        let result = validate_announcement(&event, "gitnostr.com");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("relays"));
+        let result = validate_announcement(&event, "gitnostr.com", &ArchiveConfig::default());
+        if let AnnouncementResult::Reject(reason) = result {
+            assert!(reason.contains("relays"));
+        } else {
+            panic!("Expected Reject, got {:?}", result);
+        }
     }
 
     #[test]
     fn test_validate_announcement_wrong_domain() {
+        use crate::config::ArchiveConfig;
+        use crate::nostr::policy::AnnouncementResult;
+
         let keys = create_test_keys();
         let event = create_announcement_event(
             &keys,
@@ -581,8 +618,8 @@ mod tests {
             vec!["wss://other-service.com"],
         );
 
-        let result = validate_announcement(&event, "gitnostr.com");
-        assert!(result.is_err());
+        let result = validate_announcement(&event, "gitnostr.com", &ArchiveConfig::default());
+        assert!(matches!(result, AnnouncementResult::Reject(_)));
     }
 
     #[test]
@@ -805,6 +842,9 @@ mod tests {
 
     #[test]
     fn test_validate_announcement_with_trailing_slash_in_relay() {
+        use crate::config::ArchiveConfig;
+        use crate::nostr::policy::AnnouncementResult;
+
         let keys = create_test_keys();
         let event = create_announcement_event(
             &keys,
@@ -814,12 +854,16 @@ mod tests {
         );
 
         // Should accept despite trailing slash mismatch
-        let result = validate_announcement(&event, "git.shakespeare.diy");
-        assert!(result.is_ok());
+        let result =
+            validate_announcement(&event, "git.shakespeare.diy", &ArchiveConfig::default());
+        assert!(matches!(result, AnnouncementResult::Accept));
     }
 
     #[test]
     fn test_validate_announcement_with_trailing_slash_in_clone_url() {
+        use crate::config::ArchiveConfig;
+        use crate::nostr::policy::AnnouncementResult;
+
         let keys = create_test_keys();
         let event = create_announcement_event(
             &keys,
@@ -829,12 +873,16 @@ mod tests {
         );
 
         // Should accept despite trailing slash mismatch
-        let result = validate_announcement(&event, "git.shakespeare.diy");
-        assert!(result.is_ok());
+        let result =
+            validate_announcement(&event, "git.shakespeare.diy", &ArchiveConfig::default());
+        assert!(matches!(result, AnnouncementResult::Accept));
     }
 
     #[test]
     fn test_validate_announcement_with_trailing_slash_in_both() {
+        use crate::config::ArchiveConfig;
+        use crate::nostr::policy::AnnouncementResult;
+
         let keys = create_test_keys();
         let event = create_announcement_event(
             &keys,
@@ -844,12 +892,16 @@ mod tests {
         );
 
         // Should accept with trailing slashes in both
-        let result = validate_announcement(&event, "git.shakespeare.diy");
-        assert!(result.is_ok());
+        let result =
+            validate_announcement(&event, "git.shakespeare.diy", &ArchiveConfig::default());
+        assert!(matches!(result, AnnouncementResult::Accept));
     }
 
     #[test]
     fn test_validate_announcement_domain_with_trailing_slash() {
+        use crate::config::ArchiveConfig;
+        use crate::nostr::policy::AnnouncementResult;
+
         let keys = create_test_keys();
         let event = create_announcement_event(
             &keys,
@@ -859,8 +911,8 @@ mod tests {
         );
 
         // Should accept even when domain parameter has trailing slash
-        let result = validate_announcement(&event, "gitnostr.com/");
-        assert!(result.is_ok());
+        let result = validate_announcement(&event, "gitnostr.com/", &ArchiveConfig::default());
+        assert!(matches!(result, AnnouncementResult::Accept));
     }
 
     #[test]
@@ -895,5 +947,160 @@ mod tests {
         // Should match with or without trailing slash
         assert!(announcement.has_relay("example.com"));
         assert!(announcement.has_relay("example.com/"));
+    }
+
+    #[test]
+    fn test_validate_announcement_archive_mode_npub() {
+        use crate::config::{ArchiveConfig, ArchiveWhitelistEntry};
+        use crate::nostr::policy::AnnouncementResult;
+
+        let keys = create_test_keys();
+        let npub = keys.public_key().to_bech32().unwrap();
+
+        // Create announcement that does NOT list our service
+        let event = create_announcement_event(
+            &keys,
+            "test-repo",
+            vec!["https://other-service.com/alice/test-repo.git"],
+            vec!["wss://other-service.com"],
+        );
+
+        // Create archive config that whitelists this npub
+        let archive_config = ArchiveConfig {
+            archive_all: false,
+            whitelist: vec![ArchiveWhitelistEntry::Pubkey(npub)],
+        };
+
+        let result = validate_announcement(&event, "gitnostr.com", &archive_config);
+        assert!(matches!(result, AnnouncementResult::AcceptArchive));
+    }
+
+    #[test]
+    fn test_validate_announcement_archive_mode_identifier() {
+        use crate::config::{ArchiveConfig, ArchiveWhitelistEntry};
+        use crate::nostr::policy::AnnouncementResult;
+
+        let keys = create_test_keys();
+
+        // Create announcement that does NOT list our service
+        let event = create_announcement_event(
+            &keys,
+            "bitcoin-core",
+            vec!["https://other-service.com/alice/bitcoin-core.git"],
+            vec!["wss://other-service.com"],
+        );
+
+        // Create archive config that whitelists this identifier
+        let archive_config = ArchiveConfig {
+            archive_all: false,
+            whitelist: vec![ArchiveWhitelistEntry::Identifier("bitcoin-core".into())],
+        };
+
+        let result = validate_announcement(&event, "gitnostr.com", &archive_config);
+        assert!(matches!(result, AnnouncementResult::AcceptArchive));
+    }
+
+    #[test]
+    fn test_validate_announcement_archive_mode_repository() {
+        use crate::config::{ArchiveConfig, ArchiveWhitelistEntry};
+        use crate::nostr::policy::AnnouncementResult;
+
+        let keys = create_test_keys();
+        let npub = keys.public_key().to_bech32().unwrap();
+
+        // Create announcement that does NOT list our service
+        let event = create_announcement_event(
+            &keys,
+            "linux",
+            vec!["https://other-service.com/alice/linux.git"],
+            vec!["wss://other-service.com"],
+        );
+
+        // Create archive config that whitelists this specific repo
+        let archive_config = ArchiveConfig {
+            archive_all: false,
+            whitelist: vec![ArchiveWhitelistEntry::Repository {
+                npub,
+                identifier: "linux".into(),
+            }],
+        };
+
+        let result = validate_announcement(&event, "gitnostr.com", &archive_config);
+        assert!(matches!(result, AnnouncementResult::AcceptArchive));
+    }
+
+    #[test]
+    fn test_validate_announcement_archive_all() {
+        use crate::config::ArchiveConfig;
+        use crate::nostr::policy::AnnouncementResult;
+
+        let keys = create_test_keys();
+
+        // Create announcement that does NOT list our service
+        let event = create_announcement_event(
+            &keys,
+            "any-repo",
+            vec!["https://other-service.com/alice/any-repo.git"],
+            vec!["wss://other-service.com"],
+        );
+
+        // Create archive config with archive_all enabled
+        let archive_config = ArchiveConfig {
+            archive_all: true,
+            whitelist: Vec::new(),
+        };
+
+        let result = validate_announcement(&event, "gitnostr.com", &archive_config);
+        assert!(matches!(result, AnnouncementResult::AcceptArchive));
+    }
+
+    #[test]
+    fn test_validate_announcement_reject_not_in_whitelist() {
+        use crate::config::{ArchiveConfig, ArchiveWhitelistEntry};
+        use crate::nostr::policy::AnnouncementResult;
+
+        let keys = create_test_keys();
+
+        // Create announcement that does NOT list our service
+        let event = create_announcement_event(
+            &keys,
+            "other-repo",
+            vec!["https://other-service.com/alice/other-repo.git"],
+            vec!["wss://other-service.com"],
+        );
+
+        // Create archive config that whitelists different identifier
+        let archive_config = ArchiveConfig {
+            archive_all: false,
+            whitelist: vec![ArchiveWhitelistEntry::Identifier("bitcoin-core".into())],
+        };
+
+        let result = validate_announcement(&event, "gitnostr.com", &archive_config);
+        assert!(matches!(result, AnnouncementResult::Reject(_)));
+    }
+
+    #[test]
+    fn test_validate_announcement_grasp01_takes_precedence() {
+        use crate::config::{ArchiveConfig, ArchiveWhitelistEntry};
+        use crate::nostr::policy::AnnouncementResult;
+
+        let keys = create_test_keys();
+
+        // Create announcement that DOES list our service
+        let event = create_announcement_event(
+            &keys,
+            "test-repo",
+            vec!["https://gitnostr.com/alice/test-repo.git"],
+            vec!["wss://gitnostr.com"],
+        );
+
+        // Even with archive config, GRASP-01 Accept takes precedence
+        let archive_config = ArchiveConfig {
+            archive_all: true,
+            whitelist: Vec::new(),
+        };
+
+        let result = validate_announcement(&event, "gitnostr.com", &archive_config);
+        assert!(matches!(result, AnnouncementResult::Accept));
     }
 }

@@ -55,10 +55,11 @@ impl Nip34WritePolicy {
         database: SharedDatabase,
         git_data_path: impl Into<std::path::PathBuf>,
         purgatory: std::sync::Arc<crate::purgatory::Purgatory>,
+        archive_config: crate::config::ArchiveConfig,
     ) -> Self {
         let ctx = PolicyContext::new(domain, database, git_data_path, purgatory);
         Self {
-            announcement_policy: AnnouncementPolicy::new(ctx.clone()),
+            announcement_policy: AnnouncementPolicy::new(ctx.clone(), archive_config),
             state_policy: StatePolicy::new(ctx.clone()),
             pr_event_policy: PrEventPolicy::new(ctx.clone()),
             related_event_policy: RelatedEventPolicy::new(ctx.clone()),
@@ -140,6 +141,34 @@ impl Nip34WritePolicy {
                     Err(e) => {
                         tracing::warn!(
                             "Failed to parse maintainer announcement {}: {}",
+                            event_id_str,
+                            e
+                        );
+                        WritePolicyResult::reject(format!("Failed to parse announcement: {}", e))
+                    }
+                }
+            }
+            AnnouncementResult::AcceptArchive => {
+                // GRASP-05: Archive mode - accept announcement but don't create bare repository
+                match RepositoryAnnouncement::from_event(event.clone()) {
+                    Ok(announcement) => {
+                        tracing::info!(
+                            "Accepted archive announcement {} for {}/{} (GRASP-05 read-only mirror)",
+                            event_id_str,
+                            announcement.owner_npub(),
+                            announcement.identifier
+                        );
+                        // Don't create bare repository for archived announcements
+
+                        // Check purgatory for state events that might now be authorized
+                        self.check_purgatory_state_events_for_identifier(&announcement.identifier)
+                            .await;
+
+                        WritePolicyResult::Accept
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to parse archive announcement {}: {}",
                             event_id_str,
                             e
                         );
@@ -539,9 +568,27 @@ pub async fn create_relay(
     // Clone Arc for the write policy so both relay and policy can access the database
     let git_data_path = config.effective_git_data_path();
 
+    // Parse archive configuration
+    let archive_config = config
+        .archive_config()
+        .map_err(|e| anyhow::anyhow!("Failed to parse archive configuration: {}", e))?;
+
+    if archive_config.enabled() {
+        tracing::info!(
+            "GRASP-05 archive mode enabled: archive_all={}, whitelist_entries={}",
+            archive_config.archive_all,
+            archive_config.whitelist.len()
+        );
+    }
+
     // Create write policy with purgatory integration
-    let write_policy =
-        Nip34WritePolicy::new(&config.domain, database.clone(), &git_data_path, purgatory);
+    let write_policy = Nip34WritePolicy::new(
+        &config.domain,
+        database.clone(),
+        &git_data_path,
+        purgatory,
+        archive_config,
+    );
 
     let relay = LocalRelayBuilder::default()
         .database(database.clone())

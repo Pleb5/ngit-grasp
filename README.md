@@ -137,10 +137,17 @@ See [GRASP-02 Proactive Sync](docs/explanation/grasp-02-proactive-sync.md) for f
 
 **See**: [GRASP-02 Proactive Sync](docs/explanation/grasp-02-proactive-sync.md) and [Purgatory Git Data Sync](docs/explanation/grasp-02-proactive-sync-purgatory-git-data.md)
 
-### GRASP-05 (Archive) - Planned
+### GRASP-05 (Archive) ✅
 
-- 🔄 Accept repositories not listing this instance
-- 🔄 Backup/mirror mode operation
+- ✅ Accept repositories not listing this instance via configurable whitelist
+- ✅ Three whitelist formats: `<npub>`, `<npub>/<identifier>`, `<identifier>`
+- ✅ Read-only mirroring with full GRASP-02 sync (git data + Nostr events)
+- ✅ Archive-all mode for complete ecosystem mirrors
+- ✅ Fail-fast npub validation at startup
+
+**Archive mode enables backup/mirror operation** - accept repository announcements that don't list your relay, useful for creating archives of critical projects or running comprehensive mirrors. Archived repositories are read-only with full event and git data sync.
+
+**See**: [GRASP-05 Archive Mode](docs/explanation/grasp-05-archive.md)
 
 ## Roadmap
 
@@ -222,10 +229,6 @@ This a useful feature of other git servers.
 **Future enhancement**: We aspire to also accept and weekly sync kind 10002 (user relay lists) and kind 0 (user metadata) events, but only for authors of accepted events. This would require an additional state-driven layer 2 filter (see Roadmap in GRASP-02 Proactive Sync documentation).
 
 **Future enhancement**: should we periodically scan relays in UserGraspLists to check for announcements that list our relay?
-
-### GRASP-5 Archive
-
-This not only is an important stand alone feature, it can be used to help to test sync features and have a local backup thats easy to deploy (set as bootstrap).
 
 ## Technology Stack
 

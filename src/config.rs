@@ -1,9 +1,149 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::{Parser, ValueEnum};
 use nostr_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+
+/// GRASP-05 Archive whitelist entry
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ArchiveWhitelistEntry {
+    /// Archive all repos from this pubkey: "npub1..."
+    Pubkey(String),
+
+    /// Archive specific repo: "npub1.../identifier"
+    Repository { npub: String, identifier: String },
+
+    /// Archive any repo with this identifier: "identifier"
+    Identifier(String),
+}
+
+impl ArchiveWhitelistEntry {
+    /// Parse a whitelist entry from string
+    ///
+    /// Formats:
+    /// - "npub1..." -> Pubkey
+    /// - "npub1.../identifier" -> Repository
+    /// - "identifier" -> Identifier
+    ///
+    /// Validates npub format at parse time (fail fast)
+    pub fn parse(s: &str) -> Result<Self> {
+        let trimmed = s.trim();
+
+        if trimmed.contains('/') {
+            // Format: npub1.../identifier
+            let parts: Vec<&str> = trimmed.split('/').collect();
+            if parts.len() != 2 {
+                return Err(anyhow!(
+                    "Invalid whitelist entry format '{}'. Expected 'npub/identifier'",
+                    s
+                ));
+            }
+
+            let npub = parts[0];
+            let identifier = parts[1];
+
+            // Validate npub format (fail fast)
+            if !npub.starts_with("npub1") {
+                return Err(anyhow!(
+                    "Invalid whitelist entry '{}'. First part must be npub",
+                    s
+                ));
+            }
+
+            PublicKey::from_bech32(npub)
+                .context(format!("Invalid npub in whitelist entry '{}'", s))?;
+
+            Ok(Self::Repository {
+                npub: npub.to_string(),
+                identifier: identifier.to_string(),
+            })
+        } else if trimmed.starts_with("npub1") {
+            // Format: npub1...
+            // Validate npub format (fail fast)
+            PublicKey::from_bech32(trimmed)
+                .context(format!("Invalid npub in whitelist entry '{}'", s))?;
+
+            Ok(Self::Pubkey(trimmed.to_string()))
+        } else {
+            // Format: identifier
+            Ok(Self::Identifier(trimmed.to_string()))
+        }
+    }
+
+    /// Check if this entry matches the given npub and identifier
+    pub fn matches(&self, npub: &str, identifier: &str) -> bool {
+        match self {
+            Self::Pubkey(p) => npub == p,
+            Self::Repository {
+                npub: p,
+                identifier: i,
+            } => npub == p && identifier == i,
+            Self::Identifier(i) => identifier == i,
+        }
+    }
+}
+
+/// GRASP-05 Archive mode configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchiveConfig {
+    /// Accept all repository announcements (no filtering)
+    ///
+    /// WARNING: Setting this to true allows anyone to mirror any repository
+    /// to this relay, potentially causing storage/bandwidth exhaustion.
+    pub archive_all: bool,
+
+    /// Whitelist entries for selective archiving
+    ///
+    /// If empty and archive_all is false, GRASP-05 is disabled (GRASP-01 strict mode).
+    pub whitelist: Vec<ArchiveWhitelistEntry>,
+}
+
+impl ArchiveConfig {
+    /// Check if GRASP-05 is enabled (either archive_all or non-empty whitelist)
+    pub fn enabled(&self) -> bool {
+        self.archive_all || !self.whitelist.is_empty()
+    }
+
+    /// Check if an announcement matches the archive configuration
+    ///
+    /// Returns true if:
+    /// - archive_all is true, OR
+    /// - announcement matches any whitelist entry
+    pub fn matches(&self, npub: &str, identifier: &str) -> bool {
+        if self.archive_all {
+            return true;
+        }
+
+        self.whitelist
+            .iter()
+            .any(|entry| entry.matches(npub, identifier))
+    }
+
+    /// Parse archive whitelist from comma-separated string
+    pub fn parse_whitelist(input: &str) -> Result<Vec<ArchiveWhitelistEntry>> {
+        if input.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        input
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(ArchiveWhitelistEntry::parse)
+            .collect()
+    }
+}
+
+impl Default for ArchiveConfig {
+    fn default() -> Self {
+        Self {
+            archive_all: false,
+            whitelist: Vec::new(),
+        }
+    }
+}
 
 /// Database backend type for the relay
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, ValueEnum)]
@@ -162,6 +302,15 @@ pub struct Config {
     /// tracked separately and retried after this expiration period.
     #[arg(long, env = "NGIT_NAUGHTY_LIST_EXPIRATION_HOURS", default_value_t = 12)]
     pub naughty_list_expiration_hours: u64,
+
+    /// Enable GRASP-05 archive mode: accept all announcements regardless of listing (WARNING: storage risk)
+    #[arg(long, env = "NGIT_ARCHIVE_ALL", default_value_t = false)]
+    pub archive_all: bool,
+
+    /// GRASP-05 archive whitelist: comma-separated list of npub/identifier/npub/identifier entries
+    /// Formats: "npub1...", "npub1.../identifier", "identifier"
+    #[arg(long, env = "NGIT_ARCHIVE_WHITELIST", default_value = "")]
+    pub archive_whitelist: String,
 }
 
 impl Config {
@@ -262,6 +411,15 @@ impl Config {
         }
     }
 
+    /// Get parsed archive configuration
+    pub fn archive_config(&self) -> Result<ArchiveConfig> {
+        let whitelist = ArchiveConfig::parse_whitelist(&self.archive_whitelist)?;
+        Ok(ArchiveConfig {
+            archive_all: self.archive_all,
+            whitelist,
+        })
+    }
+
     /// Create config for testing
     #[cfg(test)]
     pub fn for_testing() -> Self {
@@ -292,6 +450,8 @@ impl Config {
             rejected_hot_cache_duration_secs: 120,
             rejected_cold_index_expiry_secs: 604800,
             naughty_list_expiration_hours: 12,
+            archive_all: false,
+            archive_whitelist: String::new(),
         }
     }
 }
@@ -425,5 +585,164 @@ mod tests {
         assert!(!config.metrics_enabled);
         assert_eq!(config.metrics_connection_per_ip_abuse_threshold, 50);
         assert_eq!(config.metrics_top_n_repos, 25);
+    }
+
+    #[test]
+    fn test_parse_whitelist_entry_pubkey() {
+        // Generate a valid test npub
+        let keys = Keys::generate();
+        let test_npub = keys.public_key().to_bech32().unwrap();
+        let entry = ArchiveWhitelistEntry::parse(&test_npub).unwrap();
+        assert!(matches!(entry, ArchiveWhitelistEntry::Pubkey(_)));
+        if let ArchiveWhitelistEntry::Pubkey(npub) = entry {
+            assert_eq!(npub, test_npub);
+        }
+    }
+
+    #[test]
+    fn test_parse_whitelist_entry_repository() {
+        let keys = Keys::generate();
+        let test_npub = keys.public_key().to_bech32().unwrap();
+        let entry = ArchiveWhitelistEntry::parse(&format!("{}/linux", test_npub)).unwrap();
+        assert!(matches!(entry, ArchiveWhitelistEntry::Repository { .. }));
+        if let ArchiveWhitelistEntry::Repository { npub, identifier } = entry {
+            assert_eq!(npub, test_npub);
+            assert_eq!(identifier, "linux");
+        }
+    }
+
+    #[test]
+    fn test_parse_whitelist_entry_identifier() {
+        let entry = ArchiveWhitelistEntry::parse("bitcoin-core").unwrap();
+        assert!(matches!(entry, ArchiveWhitelistEntry::Identifier(_)));
+        if let ArchiveWhitelistEntry::Identifier(id) = entry {
+            assert_eq!(id, "bitcoin-core");
+        }
+    }
+
+    #[test]
+    fn test_parse_whitelist_entry_invalid_npub() {
+        let result = ArchiveWhitelistEntry::parse("npub1invalid");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_whitelist_entry_matches() {
+        let keys = Keys::generate();
+        let test_npub = keys.public_key().to_bech32().unwrap();
+        let entry = ArchiveWhitelistEntry::Pubkey(test_npub.clone());
+        assert!(entry.matches(&test_npub, "any-identifier"));
+        assert!(!entry.matches("npub1different", "any-identifier"));
+    }
+
+    #[test]
+    fn test_whitelist_entry_matches_repository() {
+        let keys = Keys::generate();
+        let test_npub = keys.public_key().to_bech32().unwrap();
+        let entry = ArchiveWhitelistEntry::Repository {
+            npub: test_npub.clone(),
+            identifier: "linux".to_string(),
+        };
+        assert!(entry.matches(&test_npub, "linux"));
+        assert!(!entry.matches(&test_npub, "bitcoin"));
+        assert!(!entry.matches("npub1different", "linux"));
+    }
+
+    #[test]
+    fn test_whitelist_entry_matches_identifier() {
+        let entry = ArchiveWhitelistEntry::Identifier("bitcoin-core".to_string());
+        assert!(entry.matches("npub1alice", "bitcoin-core"));
+        assert!(entry.matches("npub1bob", "bitcoin-core"));
+        assert!(!entry.matches("npub1alice", "other-repo"));
+    }
+
+    #[test]
+    fn test_archive_config_enabled() {
+        let config = ArchiveConfig::default();
+        assert!(!config.enabled());
+
+        let config = ArchiveConfig {
+            archive_all: true,
+            whitelist: Vec::new(),
+        };
+        assert!(config.enabled());
+
+        let config = ArchiveConfig {
+            archive_all: false,
+            whitelist: vec![ArchiveWhitelistEntry::Identifier("test".into())],
+        };
+        assert!(config.enabled());
+    }
+
+    #[test]
+    fn test_archive_config_matches() {
+        let keys = Keys::generate();
+        let test_npub = keys.public_key().to_bech32().unwrap();
+        let config = ArchiveConfig {
+            archive_all: false,
+            whitelist: vec![
+                ArchiveWhitelistEntry::Pubkey(test_npub.clone()),
+                ArchiveWhitelistEntry::Identifier("bitcoin-core".into()),
+            ],
+        };
+
+        assert!(config.matches(&test_npub, "any-repo"));
+        assert!(config.matches("npub1bob", "bitcoin-core"));
+        assert!(!config.matches("npub1bob", "other-repo"));
+    }
+
+    #[test]
+    fn test_archive_config_matches_archive_all() {
+        let config = ArchiveConfig {
+            archive_all: true,
+            whitelist: Vec::new(),
+        };
+
+        assert!(config.matches("npub1alice", "any-repo"));
+        assert!(config.matches("npub1bob", "other-repo"));
+    }
+
+    #[test]
+    fn test_parse_whitelist_empty() {
+        let whitelist = ArchiveConfig::parse_whitelist("").unwrap();
+        assert!(whitelist.is_empty());
+
+        let whitelist = ArchiveConfig::parse_whitelist("   ").unwrap();
+        assert!(whitelist.is_empty());
+    }
+
+    #[test]
+    fn test_parse_whitelist_multiple() {
+        let keys1 = Keys::generate();
+        let keys2 = Keys::generate();
+        let test_npub1 = keys1.public_key().to_bech32().unwrap();
+        let test_npub2 = keys2.public_key().to_bech32().unwrap();
+        let whitelist = ArchiveConfig::parse_whitelist(&format!(
+            "{},bitcoin-core,{}/linux",
+            test_npub1, test_npub2
+        ))
+        .unwrap();
+        assert_eq!(whitelist.len(), 3);
+    }
+
+    #[test]
+    fn test_archive_config_parsing() {
+        let keys = Keys::generate();
+        let test_npub = keys.public_key().to_bech32().unwrap();
+        let config = Config {
+            archive_whitelist: format!("{},bitcoin-core", test_npub),
+            ..Config::for_testing()
+        };
+        let archive_config = config.archive_config().unwrap();
+        assert_eq!(archive_config.whitelist.len(), 2);
+    }
+
+    #[test]
+    fn test_archive_config_invalid_npub() {
+        let config = Config {
+            archive_whitelist: "npub1invalid".to_string(),
+            ..Config::for_testing()
+        };
+        assert!(config.archive_config().is_err());
     }
 }

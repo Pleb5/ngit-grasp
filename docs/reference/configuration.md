@@ -498,6 +498,82 @@ NGIT_REJECTED_COLD_INDEX_EXPIRY_SECS=1209600
 
 ---
 
+### GRASP-05 Archive Configuration
+
+These options enable archive/mirror/backup mode per the GRASP-05 specification.
+
+#### `NGIT_ARCHIVE_ALL`
+
+**Description:** Accept all repository announcements regardless of whether they list this instance  
+**Type:** Boolean  
+**Default:** `false`  
+**Required:** No
+
+**Examples:**
+
+```bash
+# Enable archive-all mode (⚠️  WARNING: Storage risk)
+NGIT_ARCHIVE_ALL=true
+
+# Disable (default - GRASP-01 strict mode)
+NGIT_ARCHIVE_ALL=false
+```
+
+**Security Warning:** When enabled, any repository can be mirrored to this relay, potentially causing storage and bandwidth exhaustion. Only enable if you have unlimited resources and trust the relay network.
+
+**Notes:**
+
+- Archived repositories are read-only (pushes rejected)
+- Full sync enabled (both git data and Nostr events)
+- Takes precedence over whitelist (accepts everything)
+
+---
+
+#### `NGIT_ARCHIVE_WHITELIST`
+
+**Description:** Comma-separated list of repositories/pubkeys/identifiers to archive  
+**Type:** String (comma-separated)  
+**Default:** (empty)  
+**Required:** No
+
+**Formats:**
+
+- `<npub>` - Archive all repos from this pubkey
+- `<npub>/<identifier>` - Archive specific repo from specific pubkey
+- `<identifier>` - Archive repos with this identifier from any pubkey
+
+**Examples:**
+
+```bash
+# Archive all repos from Alice
+NGIT_ARCHIVE_WHITELIST=npub1alice23
+
+# Archive specific repos
+NGIT_ARCHIVE_WHITELIST=npub1alice23/linux,npub1bob23/bitcoin-core
+
+# Archive by identifier (any pubkey)
+NGIT_ARCHIVE_WHITELIST=bitcoin-core,linux,rust
+
+# Mixed formats
+NGIT_ARCHIVE_WHITELIST=npub1alice23...,npub1bob23.../linux,bitcoin-core
+```
+
+**Validation:**
+
+- Npub entries are validated at startup (invalid npub = server fails to start)
+- Identifier entries accept any string
+- Whitespace is trimmed
+- Empty entries are ignored
+
+**Security Notes:**
+
+- Identifier-only format (`bitcoin-core`) matches ANY pubkey
+- Use `npub/identifier` format for high-value archives
+- Whitelist is static (restart required to change)
+- Future: Dynamic management via API
+
+---
+
 ### Logging Configuration
 
 #### `RUST_LOG`

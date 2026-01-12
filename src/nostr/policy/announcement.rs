@@ -5,15 +5,18 @@
 use nostr_relay_builder::prelude::{Alphabet, Event, Filter, Kind, PublicKey, SingleLetterTag};
 
 use super::PolicyContext;
+use crate::config::ArchiveConfig;
 use crate::nostr::events::{validate_announcement, RepositoryAnnouncement};
 
 /// Result of announcement policy evaluation
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AnnouncementResult {
-    /// Accept: Event passes validation
+    /// Accept: Event lists our service (GRASP-01 compliant)
     Accept,
-    /// Accept as maintainer: Event accepted via maintainer exception
+    /// Accept as maintainer: Event accepted via maintainer exception (multi-maintainer)
     AcceptMaintainer,
+    /// Accept as archive: Event accepted via GRASP-05 archive whitelist (read-only)
+    AcceptArchive,
     /// Reject: Event fails validation with reason
     Reject(String),
 }
@@ -22,31 +25,34 @@ pub enum AnnouncementResult {
 #[derive(Clone)]
 pub struct AnnouncementPolicy {
     ctx: PolicyContext,
+    archive_config: ArchiveConfig,
 }
 
 impl AnnouncementPolicy {
-    pub fn new(ctx: PolicyContext) -> Self {
-        Self { ctx }
+    pub fn new(ctx: PolicyContext, archive_config: ArchiveConfig) -> Self {
+        Self {
+            ctx,
+            archive_config,
+        }
     }
 
     /// Validate a repository announcement event
     ///
     /// Returns `Accept` if the announcement lists the service properly,
     /// `AcceptMaintainer` if accepted via maintainer exception,
+    /// `AcceptArchive` if accepted via GRASP-05 archive config,
     /// or `Reject` with reason.
     pub async fn validate(&self, event: &Event) -> AnnouncementResult {
-        // First, try normal validation (announcement lists service)
-        match validate_announcement(event, &self.ctx.domain) {
-            Ok(_) => AnnouncementResult::Accept,
-            Err(validation_err) => {
-                // Validation failed - check if this is a recursive maintainer announcement
-                // GRASP-01 Exception: Accept announcements from recursive maintainers
-                // even without listing the service, for chain discovery and GRASP-02 sync
+        // First, try validation (GRASP-01 + GRASP-05)
+        let validation_result =
+            validate_announcement(event, &self.ctx.domain, &self.archive_config);
 
-                // Try to parse the announcement to get identifier
+        match validation_result {
+            AnnouncementResult::Reject(reason) => {
+                // Validation failed - check maintainer exception
+                // GRASP-01 Exception: Accept announcements from recursive maintainers
                 match RepositoryAnnouncement::from_event(event.clone()) {
                     Ok(announcement) => {
-                        // Check if author is listed as maintainer in any existing announcement
                         match self
                             .is_maintainer_in_any_announcement(
                                 &announcement.identifier,
@@ -55,16 +61,18 @@ impl AnnouncementPolicy {
                             .await
                         {
                             Ok(true) => AnnouncementResult::AcceptMaintainer,
-                            Ok(false) => AnnouncementResult::Reject(validation_err.to_string()),
+                            Ok(false) => AnnouncementResult::Reject(reason),
                             Err(_) => {
                                 // Fail-secure: reject on database errors
-                                AnnouncementResult::Reject(validation_err.to_string())
+                                AnnouncementResult::Reject(reason)
                             }
                         }
                     }
-                    Err(_) => AnnouncementResult::Reject(validation_err.to_string()),
+                    Err(_) => AnnouncementResult::Reject(reason),
                 }
             }
+            // Accept, AcceptArchive, or AcceptMaintainer - return as-is
+            result => result,
         }
     }
 

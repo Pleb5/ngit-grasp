@@ -177,6 +177,25 @@ let
         description = "Hours before removing relay from naughty list";
       };
 
+      archiveAll = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Enable GRASP-05 archive mode: accept all repository announcements.
+          WARNING: Storage and bandwidth risk.
+        '';
+      };
+
+      archiveWhitelist = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        example = [ "npub1alice..." "npub1bob.../linux" "bitcoin-core" ];
+        description = ''
+          GRASP-05 archive whitelist entries.
+          Formats: <npub>, <npub>/<identifier>, <identifier>
+        '';
+      };
+
       user = mkOption {
         type = types.str;
         default = "ngit-grasp-${name}";
@@ -217,6 +236,8 @@ let
         toString cfg.rejectedColdIndexExpirySecs;
       NGIT_NAUGHTY_LIST_EXPIRATION_HOURS =
         toString cfg.naughtyListExpirationHours;
+      NGIT_ARCHIVE_ALL = toString cfg.archiveAll;
+      NGIT_ARCHIVE_WHITELIST = concatStringsSep "," cfg.archiveWhitelist;
       RUST_LOG = cfg.logLevel;
     } // optionalAttrs (cfg.relayName != null) {
       NGIT_RELAY_NAME = cfg.relayName;
