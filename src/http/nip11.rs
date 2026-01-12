@@ -74,8 +74,15 @@ impl RelayInformationDocument {
         }
         supported_grasps.push("GRASP-02".to_string());
 
-        // Build curation field for archive read-only mode
+        // Build curation field for archive read-only mode or repository whitelist
+        let repository_config = config.repository_config().ok();
+        let repository_whitelist_enabled = repository_config
+            .as_ref()
+            .map(|rc| rc.enabled())
+            .unwrap_or(false);
+
         let curation = if archive_read_only {
+            // Archive read-only mode (GRASP-05 only)
             if let Some(ref ac) = archive_config {
                 if ac.archive_all {
                     Some("Read-only sync of all repositories found on network".to_string())
@@ -87,6 +94,18 @@ impl RelayInformationDocument {
             } else {
                 None
             }
+        } else if archive_enabled && repository_whitelist_enabled {
+            // Both archive (non-read-only) AND repository whitelist enabled
+            Some(
+                "Accepts whitelisted repositories (with or without service listing) and whitelisted repositories that list this service"
+                    .to_string(),
+            )
+        } else if repository_whitelist_enabled {
+            // Repository whitelist only
+            Some(
+                "Accepts only whitelisted repositories and maintainers that list this service"
+                    .to_string(),
+            )
         } else {
             None
         };
@@ -229,5 +248,49 @@ mod tests {
             .curation
             .unwrap()
             .contains("Read-only sync of whitelisted"));
+    }
+
+    #[test]
+    fn test_nip11_with_repository_whitelist() {
+        let keys = nostr_sdk::Keys::generate();
+        let test_npub = keys.public_key().to_bech32().unwrap();
+        let mut config = Config::for_testing();
+        config.domain = "relay.example.com".to_string();
+        config.repository_whitelist = format!("{},bitcoin-core", test_npub);
+
+        let doc = RelayInformationDocument::from_config(&config);
+
+        // Repository whitelist doesn't enable GRASP-05
+        assert_eq!(doc.supported_grasps, vec!["GRASP-01", "GRASP-02"]);
+        // Should have curation field for repository whitelist
+        assert!(doc.curation.is_some());
+        assert!(doc
+            .curation
+            .unwrap()
+            .contains("Accepts only whitelisted repositories"));
+    }
+
+    #[test]
+    fn test_nip11_with_archive_and_repository_whitelist() {
+        let keys = nostr_sdk::Keys::generate();
+        let test_npub = keys.public_key().to_bech32().unwrap();
+        let mut config = Config::for_testing();
+        config.domain = "relay.example.com".to_string();
+        config.archive_whitelist = "bitcoin-core".to_string();
+        config.archive_read_only = Some(false); // Non-read-only archive mode
+        config.repository_whitelist = test_npub;
+
+        let doc = RelayInformationDocument::from_config(&config);
+
+        // Should have GRASP-05 enabled due to archive whitelist
+        assert_eq!(
+            doc.supported_grasps,
+            vec!["GRASP-01", "GRASP-05", "GRASP-02"]
+        );
+        // Should have curation field reflecting BOTH archive and repository whitelist
+        assert!(doc.curation.is_some());
+        let curation = doc.curation.unwrap();
+        assert!(curation.contains("whitelisted repositories"));
+        assert!(curation.contains("with or without service listing"));
     }
 }

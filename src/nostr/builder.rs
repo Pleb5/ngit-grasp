@@ -51,15 +51,14 @@ impl std::fmt::Debug for Nip34WritePolicy {
 
 impl Nip34WritePolicy {
     pub fn new(
-        domain: impl Into<String>,
         database: SharedDatabase,
         git_data_path: impl Into<std::path::PathBuf>,
         purgatory: std::sync::Arc<crate::purgatory::Purgatory>,
-        archive_config: crate::config::ArchiveConfig,
+        config: crate::config::Config,
     ) -> Self {
-        let ctx = PolicyContext::new(domain, database, git_data_path, purgatory);
+        let ctx = PolicyContext::new(&config.domain, database, git_data_path, purgatory);
         Self {
-            announcement_policy: AnnouncementPolicy::new(ctx.clone(), archive_config),
+            announcement_policy: AnnouncementPolicy::new(ctx.clone(), config.clone()),
             state_policy: StatePolicy::new(ctx.clone()),
             pr_event_policy: PrEventPolicy::new(ctx.clone()),
             related_event_policy: RelatedEventPolicy::new(ctx.clone()),
@@ -568,28 +567,31 @@ pub async fn create_relay(
     // Clone Arc for the write policy so both relay and policy can access the database
     let git_data_path = config.effective_git_data_path();
 
-    // Parse archive configuration
-    let archive_config = config
-        .archive_config()
-        .map_err(|e| anyhow::anyhow!("Failed to parse archive configuration: {}", e))?;
+    // Parse and log archive configuration
+    if let Ok(archive_config) = config.archive_config() {
+        if archive_config.enabled() {
+            tracing::info!(
+                "GRASP-05 archive mode enabled: archive_all={}, whitelist_entries={}, read_only={}",
+                archive_config.archive_all,
+                archive_config.whitelist.len(),
+                archive_config.read_only
+            );
+        }
+    }
 
-    if archive_config.enabled() {
-        tracing::info!(
-            "GRASP-05 archive mode enabled: archive_all={}, whitelist_entries={}, read_only={}",
-            archive_config.archive_all,
-            archive_config.whitelist.len(),
-            archive_config.read_only
-        );
+    // Parse and log repository configuration
+    if let Ok(repository_config) = config.repository_config() {
+        if repository_config.enabled() {
+            tracing::info!(
+                "Repository whitelist enabled: whitelist_entries={}",
+                repository_config.whitelist.len()
+            );
+        }
     }
 
     // Create write policy with purgatory integration
-    let write_policy = Nip34WritePolicy::new(
-        &config.domain,
-        database.clone(),
-        &git_data_path,
-        purgatory,
-        archive_config,
-    );
+    let write_policy =
+        Nip34WritePolicy::new(database.clone(), &git_data_path, purgatory, config.clone());
 
     let relay = LocalRelayBuilder::default()
         .database(database.clone())

@@ -617,6 +617,13 @@ NGIT_ARCHIVE_ALL=false
 NGIT_ARCHIVE_WHITELIST=
 # → Server fails to start: "NGIT_ARCHIVE_READ_ONLY=true requires either 
 #    NGIT_ARCHIVE_ALL=true or NGIT_ARCHIVE_WHITELIST to be set"
+
+# ERROR: Cannot use repository whitelist with archive read-only
+NGIT_ARCHIVE_READ_ONLY=true
+NGIT_ARCHIVE_WHITELIST=npub1alice...
+NGIT_REPOSITORY_WHITELIST=npub1bob...
+# → Server fails to start: "NGIT_REPOSITORY_WHITELIST cannot be used with
+#    NGIT_ARCHIVE_READ_ONLY=true"
 ```
 
 **NIP-11 Impact:**
@@ -642,6 +649,98 @@ NGIT_ARCHIVE_READ_ONLY=true  # Default
 NGIT_ARCHIVE_WHITELIST=npub1alice...
 NGIT_ARCHIVE_READ_ONLY=false
 ```
+
+---
+
+### Repository Whitelist
+
+#### `NGIT_REPOSITORY_WHITELIST`
+
+**Description:** Whitelist specific repositories/pubkeys/identifiers for GRASP-01 acceptance  
+**Type:** Comma-separated list  
+**Default:** Empty (all repos listing our service are accepted)  
+**Required:** No
+
+**Format:** Same as `NGIT_ARCHIVE_WHITELIST`:
+- `npub1...` - Accept all repos from this pubkey (if they list our service)
+- `npub1.../identifier` - Accept specific repo (if it lists our service)
+- `identifier` - Accept repos with this identifier (if they list our service)
+
+**Difference from Archive Whitelist:**
+- **Repository whitelist**: Announcements **MUST** list our service **AND** match whitelist
+- **Archive whitelist**: Announcements don't need to list our service, just match whitelist
+
+**Examples:**
+
+```bash
+# Accept only repos from specific pubkey (that list our service)
+NGIT_REPOSITORY_WHITELIST=npub1alice23
+
+# Accept specific repos only
+NGIT_REPOSITORY_WHITELIST=npub1alice23/linux,npub1bob23/bitcoin-core
+
+# Accept repos with specific identifiers
+NGIT_REPOSITORY_WHITELIST=bitcoin-core,linux,rust
+
+# Combined whitelist
+NGIT_REPOSITORY_WHITELIST=npub1alice23...,npub1bob23.../linux,bitcoin-core
+```
+
+**Behavior:**
+
+- When set:
+  - Announcements **must** list our service in both `clone` and `relays` tags (GRASP-01 requirement)
+  - Announcements **must** match the whitelist (pubkey, repo, or identifier)
+  - NIP-11 `curation` field set to: `"Accepts only whitelisted repositories and maintainers that list this service"`
+- When empty (default):
+  - All announcements listing our service are accepted (standard GRASP-01 behavior)
+
+**Error Conditions:**
+
+```bash
+# ERROR: Cannot use with archive read-only mode
+NGIT_ARCHIVE_READ_ONLY=true
+NGIT_ARCHIVE_WHITELIST=npub1archive...
+NGIT_REPOSITORY_WHITELIST=npub1bob...
+# → Server fails to start: "NGIT_REPOSITORY_WHITELIST cannot be used with
+#    NGIT_ARCHIVE_READ_ONLY=true. Either set NGIT_ARCHIVE_READ_ONLY=false
+#    or use NGIT_ARCHIVE_WHITELIST instead"
+```
+
+**NIP-11 Impact:**
+
+When `NGIT_REPOSITORY_WHITELIST` is set:
+- `curation`: `"Accepts only whitelisted repositories and maintainers that list this service"`
+- `supported_grasps`: Does **not** include `GRASP-05` (still GRASP-01 compliant)
+
+**Use Cases:**
+
+```bash
+# Curated relay for specific projects (GRASP-01 mode)
+NGIT_REPOSITORY_WHITELIST=bitcoin-core,linux,rust
+
+# Personal relay for self and trusted collaborators
+NGIT_REPOSITORY_WHITELIST=npub1me...,npub1alice...,npub1bob...
+
+# Project-specific relay (e.g., Rust ecosystem)
+NGIT_REPOSITORY_WHITELIST=rust,cargo,rustc,tokio,serde
+
+# Hybrid: specific projects AND specific maintainer's repos
+NGIT_REPOSITORY_WHITELIST=bitcoin-core,npub1alice...
+```
+
+**Comparison Table:**
+
+| Configuration | Lists Service? | Matches Whitelist? | Result |
+|---------------|----------------|-------------------|---------|
+| No whitelist | Yes | N/A | ✅ Accept (GRASP-01) |
+| No whitelist | No | N/A | ❌ Reject |
+| Repository whitelist | Yes | Yes | ✅ Accept (GRASP-01) |
+| Repository whitelist | Yes | No | ❌ Reject (not whitelisted) |
+| Repository whitelist | No | Yes | ❌ Reject (doesn't list service) |
+| Archive whitelist (read-only=true) | No | Yes | ✅ Accept (GRASP-05) |
+| Archive whitelist (read-only=false) | Yes | N/A | ✅ Accept (GRASP-01) |
+| Archive whitelist (read-only=false) | No | Yes | ✅ Accept (GRASP-05) |
 
 ---
 

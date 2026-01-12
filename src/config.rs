@@ -5,21 +5,21 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-/// GRASP-05 Archive whitelist entry
+/// Whitelist entry for repository/archive filtering
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum ArchiveWhitelistEntry {
-    /// Archive all repos from this pubkey: "npub1..."
+pub enum WhitelistEntry {
+    /// All repos from this pubkey: "npub1..."
     Pubkey(String),
 
-    /// Archive specific repo: "npub1.../identifier"
+    /// Specific repo: "npub1.../identifier"
     Repository { npub: String, identifier: String },
 
-    /// Archive any repo with this identifier: "identifier"
+    /// Any repo with this identifier: "identifier"
     Identifier(String),
 }
 
-impl ArchiveWhitelistEntry {
+impl WhitelistEntry {
     /// Parse a whitelist entry from string
     ///
     /// Formats:
@@ -83,6 +83,20 @@ impl ArchiveWhitelistEntry {
             Self::Identifier(i) => identifier == i,
         }
     }
+
+    /// Parse whitelist from comma-separated string
+    pub fn parse_whitelist(input: &str) -> Result<Vec<Self>> {
+        if input.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        input
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(Self::parse)
+            .collect()
+    }
 }
 
 /// GRASP-05 Archive mode configuration
@@ -97,7 +111,7 @@ pub struct ArchiveConfig {
     /// Whitelist entries for selective archiving
     ///
     /// If empty and archive_all is false, GRASP-05 is disabled (GRASP-01 strict mode).
-    pub whitelist: Vec<ArchiveWhitelistEntry>,
+    pub whitelist: Vec<WhitelistEntry>,
 
     /// Read-only archive mode: relay is a read-only sync of archived repositories
     ///
@@ -127,20 +141,6 @@ impl ArchiveConfig {
             .iter()
             .any(|entry| entry.matches(npub, identifier))
     }
-
-    /// Parse archive whitelist from comma-separated string
-    pub fn parse_whitelist(input: &str) -> Result<Vec<ArchiveWhitelistEntry>> {
-        if input.trim().is_empty() {
-            return Ok(Vec::new());
-        }
-
-        input
-            .split(',')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(ArchiveWhitelistEntry::parse)
-            .collect()
-    }
 }
 
 impl Default for ArchiveConfig {
@@ -149,6 +149,39 @@ impl Default for ArchiveConfig {
             archive_all: false,
             whitelist: Vec::new(),
             read_only: false,
+        }
+    }
+}
+
+/// Repository whitelist configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepositoryConfig {
+    /// Whitelist entries for selective repository acceptance
+    ///
+    /// If empty, all repositories listing the service are accepted (GRASP-01 mode).
+    pub whitelist: Vec<WhitelistEntry>,
+}
+
+impl RepositoryConfig {
+    /// Check if repository whitelist is enabled (non-empty whitelist)
+    pub fn enabled(&self) -> bool {
+        !self.whitelist.is_empty()
+    }
+
+    /// Check if an announcement matches the repository whitelist
+    ///
+    /// Returns true if announcement matches any whitelist entry
+    pub fn matches(&self, npub: &str, identifier: &str) -> bool {
+        self.whitelist
+            .iter()
+            .any(|entry| entry.matches(npub, identifier))
+    }
+}
+
+impl Default for RepositoryConfig {
+    fn default() -> Self {
+        Self {
+            whitelist: Vec::new(),
         }
     }
 }
@@ -325,6 +358,12 @@ pub struct Config {
     /// Throws error if set to true without archive_all or archive_whitelist
     #[arg(long, env = "NGIT_ARCHIVE_READ_ONLY")]
     pub archive_read_only: Option<bool>,
+
+    /// Repository whitelist: comma-separated list of npub/identifier/npub/identifier entries
+    /// Formats: "npub1...", "npub1.../identifier", "identifier"
+    /// When set, only announcements matching the whitelist AND listing the service are accepted
+    #[arg(long, env = "NGIT_REPOSITORY_WHITELIST", default_value = "")]
+    pub repository_whitelist: String,
 }
 
 impl Config {
@@ -430,7 +469,7 @@ impl Config {
     /// Read-only mode defaults to true if archive mode is enabled, false otherwise.
     /// Throws error if explicitly set to true without archive mode enabled.
     pub fn archive_config(&self) -> Result<ArchiveConfig> {
-        let whitelist = ArchiveConfig::parse_whitelist(&self.archive_whitelist)?;
+        let whitelist = WhitelistEntry::parse_whitelist(&self.archive_whitelist)?;
         let archive_enabled = self.archive_all || !whitelist.is_empty();
 
         let read_only = match self.archive_read_only {
@@ -454,6 +493,28 @@ impl Config {
             whitelist,
             read_only,
         })
+    }
+
+    /// Get parsed repository whitelist configuration
+    ///
+    /// Throws error if repository_whitelist is set together with archive_read_only=true
+    pub fn repository_config(&self) -> Result<RepositoryConfig> {
+        let whitelist = WhitelistEntry::parse_whitelist(&self.repository_whitelist)?;
+
+        // Validate incompatible configurations
+        if !whitelist.is_empty() {
+            let archive_config = self.archive_config()?;
+            if archive_config.read_only {
+                return Err(anyhow!(
+                    "NGIT_REPOSITORY_WHITELIST cannot be used with NGIT_ARCHIVE_READ_ONLY=true. \
+                     Archive read-only mode rejects announcements that don't match the archive whitelist, \
+                     regardless of service listing. Either set NGIT_ARCHIVE_READ_ONLY=false or use \
+                     NGIT_ARCHIVE_WHITELIST instead of NGIT_REPOSITORY_WHITELIST."
+                ));
+            }
+        }
+
+        Ok(RepositoryConfig { whitelist })
     }
 
     /// Create config for testing
@@ -489,6 +550,7 @@ impl Config {
             archive_all: false,
             archive_whitelist: String::new(),
             archive_read_only: None,
+            repository_whitelist: String::new(),
         }
     }
 }
@@ -629,9 +691,9 @@ mod tests {
         // Generate a valid test npub
         let keys = Keys::generate();
         let test_npub = keys.public_key().to_bech32().unwrap();
-        let entry = ArchiveWhitelistEntry::parse(&test_npub).unwrap();
-        assert!(matches!(entry, ArchiveWhitelistEntry::Pubkey(_)));
-        if let ArchiveWhitelistEntry::Pubkey(npub) = entry {
+        let entry = WhitelistEntry::parse(&test_npub).unwrap();
+        assert!(matches!(entry, WhitelistEntry::Pubkey(_)));
+        if let WhitelistEntry::Pubkey(npub) = entry {
             assert_eq!(npub, test_npub);
         }
     }
@@ -640,9 +702,9 @@ mod tests {
     fn test_parse_whitelist_entry_repository() {
         let keys = Keys::generate();
         let test_npub = keys.public_key().to_bech32().unwrap();
-        let entry = ArchiveWhitelistEntry::parse(&format!("{}/linux", test_npub)).unwrap();
-        assert!(matches!(entry, ArchiveWhitelistEntry::Repository { .. }));
-        if let ArchiveWhitelistEntry::Repository { npub, identifier } = entry {
+        let entry = WhitelistEntry::parse(&format!("{}/linux", test_npub)).unwrap();
+        assert!(matches!(entry, WhitelistEntry::Repository { .. }));
+        if let WhitelistEntry::Repository { npub, identifier } = entry {
             assert_eq!(npub, test_npub);
             assert_eq!(identifier, "linux");
         }
@@ -650,16 +712,16 @@ mod tests {
 
     #[test]
     fn test_parse_whitelist_entry_identifier() {
-        let entry = ArchiveWhitelistEntry::parse("bitcoin-core").unwrap();
-        assert!(matches!(entry, ArchiveWhitelistEntry::Identifier(_)));
-        if let ArchiveWhitelistEntry::Identifier(id) = entry {
+        let entry = WhitelistEntry::parse("bitcoin-core").unwrap();
+        assert!(matches!(entry, WhitelistEntry::Identifier(_)));
+        if let WhitelistEntry::Identifier(id) = entry {
             assert_eq!(id, "bitcoin-core");
         }
     }
 
     #[test]
     fn test_parse_whitelist_entry_invalid_npub() {
-        let result = ArchiveWhitelistEntry::parse("npub1invalid");
+        let result = WhitelistEntry::parse("npub1invalid");
         assert!(result.is_err());
     }
 
@@ -667,7 +729,7 @@ mod tests {
     fn test_whitelist_entry_matches() {
         let keys = Keys::generate();
         let test_npub = keys.public_key().to_bech32().unwrap();
-        let entry = ArchiveWhitelistEntry::Pubkey(test_npub.clone());
+        let entry = WhitelistEntry::Pubkey(test_npub.clone());
         assert!(entry.matches(&test_npub, "any-identifier"));
         assert!(!entry.matches("npub1different", "any-identifier"));
     }
@@ -676,7 +738,7 @@ mod tests {
     fn test_whitelist_entry_matches_repository() {
         let keys = Keys::generate();
         let test_npub = keys.public_key().to_bech32().unwrap();
-        let entry = ArchiveWhitelistEntry::Repository {
+        let entry = WhitelistEntry::Repository {
             npub: test_npub.clone(),
             identifier: "linux".to_string(),
         };
@@ -687,7 +749,7 @@ mod tests {
 
     #[test]
     fn test_whitelist_entry_matches_identifier() {
-        let entry = ArchiveWhitelistEntry::Identifier("bitcoin-core".to_string());
+        let entry = WhitelistEntry::Identifier("bitcoin-core".to_string());
         assert!(entry.matches("npub1alice", "bitcoin-core"));
         assert!(entry.matches("npub1bob", "bitcoin-core"));
         assert!(!entry.matches("npub1alice", "other-repo"));
@@ -707,7 +769,7 @@ mod tests {
 
         let config = ArchiveConfig {
             archive_all: false,
-            whitelist: vec![ArchiveWhitelistEntry::Identifier("test".into())],
+            whitelist: vec![WhitelistEntry::Identifier("test".into())],
             read_only: true,
         };
         assert!(config.enabled());
@@ -720,8 +782,8 @@ mod tests {
         let config = ArchiveConfig {
             archive_all: false,
             whitelist: vec![
-                ArchiveWhitelistEntry::Pubkey(test_npub.clone()),
-                ArchiveWhitelistEntry::Identifier("bitcoin-core".into()),
+                WhitelistEntry::Pubkey(test_npub.clone()),
+                WhitelistEntry::Identifier("bitcoin-core".into()),
             ],
             read_only: false,
         };
@@ -745,10 +807,10 @@ mod tests {
 
     #[test]
     fn test_parse_whitelist_empty() {
-        let whitelist = ArchiveConfig::parse_whitelist("").unwrap();
+        let whitelist = WhitelistEntry::parse_whitelist("").unwrap();
         assert!(whitelist.is_empty());
 
-        let whitelist = ArchiveConfig::parse_whitelist("   ").unwrap();
+        let whitelist = WhitelistEntry::parse_whitelist("   ").unwrap();
         assert!(whitelist.is_empty());
     }
 
@@ -758,7 +820,7 @@ mod tests {
         let keys2 = Keys::generate();
         let test_npub1 = keys1.public_key().to_bech32().unwrap();
         let test_npub2 = keys2.public_key().to_bech32().unwrap();
-        let whitelist = ArchiveConfig::parse_whitelist(&format!(
+        let whitelist = WhitelistEntry::parse_whitelist(&format!(
             "{},bitcoin-core,{}/linux",
             test_npub1, test_npub2
         ))
@@ -849,5 +911,73 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("requires either"));
+    }
+
+    #[test]
+    fn test_repository_whitelist_parsing() {
+        let keys = Keys::generate();
+        let test_npub = keys.public_key().to_bech32().unwrap();
+        let config = Config {
+            repository_whitelist: format!("{},bitcoin-core", test_npub),
+            ..Config::for_testing()
+        };
+        let repo_config = config.repository_config().unwrap();
+        assert_eq!(repo_config.whitelist.len(), 2);
+        assert!(repo_config.enabled());
+    }
+
+    #[test]
+    fn test_repository_whitelist_empty() {
+        let config = Config::for_testing();
+        let repo_config = config.repository_config().unwrap();
+        assert!(repo_config.whitelist.is_empty());
+        assert!(!repo_config.enabled());
+    }
+
+    #[test]
+    fn test_repository_whitelist_incompatible_with_archive_read_only() {
+        let keys = Keys::generate();
+        let test_npub = keys.public_key().to_bech32().unwrap();
+        let config = Config {
+            archive_all: true,
+            archive_read_only: Some(true),
+            repository_whitelist: test_npub,
+            ..Config::for_testing()
+        };
+        let result = config.repository_config();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("cannot be used with"));
+        assert!(err.contains("NGIT_ARCHIVE_READ_ONLY=true"));
+    }
+
+    #[test]
+    fn test_repository_whitelist_compatible_with_archive_read_only_false() {
+        let keys = Keys::generate();
+        let test_npub = keys.public_key().to_bech32().unwrap();
+        let config = Config {
+            archive_all: true,
+            archive_read_only: Some(false),
+            repository_whitelist: test_npub,
+            ..Config::for_testing()
+        };
+        // Should not error
+        assert!(config.repository_config().is_ok());
+    }
+
+    #[test]
+    fn test_repository_config_matches() {
+        let keys = Keys::generate();
+        let test_npub = keys.public_key().to_bech32().unwrap();
+        let config = RepositoryConfig {
+            whitelist: vec![
+                WhitelistEntry::Pubkey(test_npub.clone()),
+                WhitelistEntry::Identifier("bitcoin-core".into()),
+            ],
+        };
+
+        assert!(config.matches(&test_npub, "any-repo"));
+        assert!(config.matches("npub1bob", "bitcoin-core"));
+        assert!(!config.matches("npub1bob", "other-repo"));
     }
 }

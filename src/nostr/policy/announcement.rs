@@ -5,7 +5,7 @@
 use nostr_relay_builder::prelude::{Alphabet, Event, Filter, Kind, PublicKey, SingleLetterTag};
 
 use super::PolicyContext;
-use crate::config::ArchiveConfig;
+use crate::config::Config;
 use crate::nostr::events::{validate_announcement, RepositoryAnnouncement};
 
 /// Result of announcement policy evaluation
@@ -25,15 +25,12 @@ pub enum AnnouncementResult {
 #[derive(Clone)]
 pub struct AnnouncementPolicy {
     ctx: PolicyContext,
-    archive_config: ArchiveConfig,
+    config: Config,
 }
 
 impl AnnouncementPolicy {
-    pub fn new(ctx: PolicyContext, archive_config: ArchiveConfig) -> Self {
-        Self {
-            ctx,
-            archive_config,
-        }
+    pub fn new(ctx: PolicyContext, config: Config) -> Self {
+        Self { ctx, config }
     }
 
     /// Validate a repository announcement event
@@ -44,8 +41,7 @@ impl AnnouncementPolicy {
     /// or `Reject` with reason.
     pub async fn validate(&self, event: &Event) -> AnnouncementResult {
         // First, try validation (GRASP-01 + GRASP-05)
-        let validation_result =
-            validate_announcement(event, &self.ctx.domain, &self.archive_config);
+        let validation_result = validate_announcement(event, &self.config);
 
         match validation_result {
             AnnouncementResult::Reject(reason) => {

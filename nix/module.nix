@@ -207,6 +207,20 @@ let
             - Repository announcements not listing this service are accepted per whitelist/archive-all
           Default: true if archiveAll or archiveWhitelist is set, false otherwise
           Note: Setting to true without archive config causes startup error
+          Note: Cannot be used with repositoryWhitelist (mutually exclusive)
+        '';
+      };
+
+      repositoryWhitelist = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        example = [ "npub1alice..." "npub1bob.../linux" "bitcoin-core" ];
+        description = ''
+          Repository whitelist for GRASP-01 acceptance.
+          Announcements must BOTH list our service AND match this whitelist.
+          Formats: <npub>, <npub>/<identifier>, <identifier>
+          Cannot be used with archiveReadOnly=true (mutually exclusive)
+          When set, NIP-11 curation field indicates curated repository acceptance
         '';
       };
 
@@ -252,6 +266,7 @@ let
         toString cfg.naughtyListExpirationHours;
       NGIT_ARCHIVE_ALL = toString cfg.archiveAll;
       NGIT_ARCHIVE_WHITELIST = concatStringsSep "," cfg.archiveWhitelist;
+      NGIT_REPOSITORY_WHITELIST = concatStringsSep "," cfg.repositoryWhitelist;
       RUST_LOG = cfg.logLevel;
     } // optionalAttrs (cfg.relayName != null) {
       NGIT_RELAY_NAME = cfg.relayName;
