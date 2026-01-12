@@ -229,7 +229,7 @@ git ls-remote https://ngit.example.com/<npub>/<repo>.git
 
 ### Network
 - `bindAddress` - IP to bind to (default: "127.0.0.1")
-- `port` - Port to listen on (default: 8080)
+- `port` - Port to listen on (default: 7334)
 
 ### Storage
 - `dataDir` - Base directory for data (default: /var/lib/ngit-grasp-{name})

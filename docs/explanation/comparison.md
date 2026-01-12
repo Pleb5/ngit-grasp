@@ -65,7 +65,7 @@ This document compares ngit-grasp (this project) with ngit-relay (the reference 
 ┌────────────── ngit-grasp (Single Binary) ─────────────┐
 │                                                        │
 │  ┌──────────────────────────────────────────────────┐ │
-│  │         hyper HTTP Server (:8080)                 │ │
+│  │         hyper HTTP Server (:7334)                 │ │
 │  │  - WebSocket upgrade for Nostr relay              │ │
 │  │  - Git Smart HTTP handlers                        │ │
 │  │  - Landing page + metrics endpoint                │ │

@@ -25,20 +25,20 @@ Configuration is loaded at startup and validated before the server starts.
 
 **Description:** Address and port for the HTTP server to bind to  
 **Type:** String (IP:PORT format)  
-**Default:** `127.0.0.1:8080`  
+**Default:** `127.0.0.1:7334`  
 **Required:** No
 
 **Examples:**
 
 ```bash
 # Localhost only (development)
-NGIT_BIND_ADDRESS=127.0.0.1:8080
+NGIT_BIND_ADDRESS=127.0.0.1:7334
 
 # All interfaces (production)
-NGIT_BIND_ADDRESS=0.0.0.0:8080
+NGIT_BIND_ADDRESS=0.0.0.0:7334
 
 # IPv6
-NGIT_BIND_ADDRESS=[::1]:8080
+NGIT_BIND_ADDRESS=[::1]:7334
 
 # Custom port
 NGIT_BIND_ADDRESS=127.0.0.1:3000
@@ -64,7 +64,7 @@ NGIT_BIND_ADDRESS=127.0.0.1:3000
 ```bash
 NGIT_DOMAIN=gitnostr.com
 NGIT_DOMAIN=git.example.org
-NGIT_DOMAIN=localhost:8080  # Development only
+NGIT_DOMAIN=localhost:7334  # Development only
 ```
 
 **Used for:**
@@ -77,7 +77,7 @@ NGIT_DOMAIN=localhost:8080  # Development only
 **Notes:**
 
 - Must be accessible from the internet for production
-- Include port if non-standard (e.g., `localhost:8080`)
+- Include port if non-standard (e.g., `localhost:7334`)
 - Used in repository clone URLs: `https://{NGIT_DOMAIN}/{npub}/{repo}.git`
 
 ---
@@ -1007,13 +1007,13 @@ For development, create a `.env` file in the project root:
 
 ```bash
 # .env file example
-NGIT_DOMAIN=localhost:8080
+NGIT_DOMAIN=localhost:7334
 NGIT_OWNER_NPUB=npub1alice...
 NGIT_RELAY_NAME="Development Relay"
 NGIT_RELAY_DESCRIPTION="Local development instance"
 NGIT_GIT_DATA_PATH=./data/git
 NGIT_RELAY_DATA_PATH=./data/relay
-NGIT_BIND_ADDRESS=127.0.0.1:8080
+NGIT_BIND_ADDRESS=127.0.0.1:7334
 RUST_LOG=debug
 ```
 
@@ -1057,7 +1057,7 @@ NGIT_RELAY_NAME="GitNostr Public Relay"
 NGIT_RELAY_DESCRIPTION="Public GRASP relay for open source projects"
 NGIT_GIT_DATA_PATH=/var/lib/ngit-grasp/git
 NGIT_RELAY_DATA_PATH=/var/lib/ngit-grasp/relay
-NGIT_BIND_ADDRESS=0.0.0.0:8080
+NGIT_BIND_ADDRESS=0.0.0.0:7334
 RUST_LOG=info,ngit_grasp=debug
 ```
 
@@ -1076,13 +1076,13 @@ RUST_LOG=info,ngit_grasp=debug
 
 ```bash
 # Development .env
-NGIT_DOMAIN=localhost:8080
+NGIT_DOMAIN=localhost:7334
 NGIT_OWNER_NPUB=npub1test...
 NGIT_RELAY_NAME="Dev Relay"
 NGIT_RELAY_DESCRIPTION="Local development"
 NGIT_GIT_DATA_PATH=./data/git
 NGIT_RELAY_DATA_PATH=./data/relay
-NGIT_BIND_ADDRESS=127.0.0.1:8080
+NGIT_BIND_ADDRESS=127.0.0.1:7334
 RUST_LOG=debug
 ```
 
@@ -1124,7 +1124,7 @@ When multiple configuration sources exist:
 
 ```bash
 # .env file
-NGIT_BIND_ADDRESS=127.0.0.1:8080
+NGIT_BIND_ADDRESS=127.0.0.1:7334
 
 # Environment variable (overrides .env)
 NGIT_BIND_ADDRESS=0.0.0.0:3000 cargo run

@@ -13,7 +13,7 @@ This guide shows how to configure Prometheus and Grafana to monitor ngit-grasp.
 First, verify that ngit-grasp is exposing metrics:
 
 ```bash
-curl http://localhost:8080/metrics
+curl http://localhost:7334/metrics
 ```
 
 You should see Prometheus-formatted metrics like:
@@ -41,7 +41,7 @@ services.prometheus = {
     {
       job_name = "ngit-grasp";
       static_configs = [{
-        targets = [ "localhost:8080" ];  # ngit-grasp bind address
+        targets = [ "localhost:7334" ];  # ngit-grasp bind address
       }];
       scrape_interval = "15s";
       metrics_path = "/metrics";
@@ -105,7 +105,7 @@ global:
 scrape_configs:
   - job_name: 'ngit-grasp'
     static_configs:
-      - targets: ['host.docker.internal:8080']  # or your ngit-grasp host
+      - targets: ['host.docker.internal:7334']  # or your ngit-grasp host
     metrics_path: /metrics
 ```
 

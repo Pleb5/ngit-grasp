@@ -43,7 +43,7 @@ let
 
       port = mkOption {
         type = types.port;
-        default = 8080;
+        default = 7334;
         description = "Port to listen on";
       };
 

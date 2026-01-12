@@ -184,7 +184,7 @@ nix develop -c cargo run
 
 # In another terminal, run audit tool
 cd grasp-audit
-nix develop -c cargo run -- --url ws://127.0.0.1:8080
+nix develop -c cargo run -- --url ws://127.0.0.1:7334
 ```
 
 ### For CI/CD
@@ -424,7 +424,7 @@ nix develop -c cargo test --test nip01_compliance --test nip34_announcements
 **For deep compliance check:**
 ```bash
 cd grasp-audit
-nix develop -c cargo run -- --url ws://127.0.0.1:8080
+nix develop -c cargo run -- --url ws://127.0.0.1:7334
 ```
 
 **Key points:**

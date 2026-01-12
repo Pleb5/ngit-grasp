@@ -580,7 +580,7 @@ RUN cargo build --release
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/target/release/ngit-grasp /usr/local/bin/
-EXPOSE 8080
+EXPOSE 7334
 CMD ["ngit-grasp"]
 ```
 

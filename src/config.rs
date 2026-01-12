@@ -352,7 +352,7 @@ pub struct Config {
     pub relay_data_path: String,
 
     /// Server bind address (IP:PORT)
-    #[arg(long, env = "NGIT_BIND_ADDRESS", default_value = "127.0.0.1:8080")]
+    #[arg(long, env = "NGIT_BIND_ADDRESS", default_value = "127.0.0.1:7334")]
     pub bind_address: String,
 
     /// Database backend type
@@ -678,13 +678,13 @@ impl Config {
             .expect("Failed to generate test nsec");
 
         Self {
-            domain: "localhost:8080".to_string(),
+            domain: "localhost:7334".to_string(),
             relay_owner_nsec: Some(nsec),
             relay_name_override: Some("test relay".to_string()),
             relay_description: "test description".to_string(),
             git_data_path: "./test_data/git".to_string(),
             relay_data_path: "./test_data/relay".to_string(),
-            bind_address: "127.0.0.1:8080".to_string(),
+            bind_address: "127.0.0.1:7334".to_string(),
             database_backend: DatabaseBackend::Memory,
             metrics_enabled: true,
             metrics_connection_per_ip_abuse_threshold: 10,
@@ -714,8 +714,8 @@ mod tests {
     #[test]
     fn test_default_values() {
         let config = Config::for_testing();
-        assert_eq!(config.domain, "localhost:8080");
-        assert_eq!(config.bind_address, "127.0.0.1:8080");
+        assert_eq!(config.domain, "localhost:7334");
+        assert_eq!(config.bind_address, "127.0.0.1:7334");
         // for_testing() uses Memory, but the actual default is Lmdb
         assert_eq!(config.database_backend, DatabaseBackend::Memory);
     }

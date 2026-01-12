@@ -381,7 +381,7 @@ This means CLI flags always take precedence over environment variables, which ta
 ngit-grasp --help
 
 # Run with CLI flags (override everything else)
-ngit-grasp --domain relay.example.com --relay-owner-nsec nsec1... --bind-address 0.0.0.0:8080
+ngit-grasp --domain relay.example.com --relay-owner-nsec nsec1... --bind-address 0.0.0.0:7334
 
 # Mix CLI flags with environment variables
 NGIT_RELAY_OWNER_NSEC=nsec1... ngit-grasp --domain relay.example.com
@@ -399,7 +399,7 @@ NGIT_RELAY_OWNER_NSEC=nsec1... ngit-grasp --domain relay.example.com
 | Relay description | `--relay-description` | `NGIT_RELAY_DESCRIPTION` | `Git Nostr Relay - a grasp implementation`   |
 | Git data path     | `--git-data-path`     | `NGIT_GIT_DATA_PATH`     | `./data/git` (temp dir for memory backend)   |
 | Relay data path   | `--relay-data-path`   | `NGIT_RELAY_DATA_PATH`   | `./data/relay` (temp dir for memory backend) |
-| Bind address      | `--bind-address`      | `NGIT_BIND_ADDRESS`      | `127.0.0.1:8080`                             |
+| Bind address      | `--bind-address`      | `NGIT_BIND_ADDRESS`      | `127.0.0.1:7334` (NGIT on phone keypad)      |
 | Database backend  | `--database-backend`  | `NGIT_DATABASE_BACKEND`  | `lmdb`                                       |
 
 #### GRASP-02 Sync Settings
@@ -445,7 +445,7 @@ NGIT_RELAY_OWNER_NSEC=nsec1... ngit-grasp --domain relay.example.com
 # Using environment variables (recommended for production)
 export NGIT_DOMAIN=gitnostr.com
 export NGIT_RELAY_OWNER_NSEC=nsec1...  # Or let it auto-generate from .relay-owner.nsec
-export NGIT_BIND_ADDRESS=0.0.0.0:8080
+export NGIT_BIND_ADDRESS=0.0.0.0:7334
 export NGIT_DATABASE_BACKEND=lmdb
 
 # Optional: Enable proactive sync from a bootstrap relay

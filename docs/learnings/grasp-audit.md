@@ -110,7 +110,7 @@ use grasp_audit::client::AuditClient;
 use grasp_audit::audit::AuditConfig;
 
 let config = AuditConfig::isolated();
-let client = AuditClient::new("ws://localhost:8080", config).await?;
+let client = AuditClient::new("ws://localhost:7334", config).await?;
 
 // Create and send an event - cleanup tags are added automatically
 let event = client.event_builder()
