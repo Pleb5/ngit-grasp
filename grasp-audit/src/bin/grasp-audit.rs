@@ -27,7 +27,7 @@ enum Commands {
         #[arg(short, long, default_value = "shared")]
         mode: String,
 
-        /// Spec to test (nip01-smoke, nip11, event-acceptance, cors, git-clone, push-auth, repo-creation, all)
+        /// Spec to test (nip01-smoke, nip11, event-acceptance, cors, git-clone, git-filter, push-auth, repo-creation, all)
         #[arg(short, long, default_value = "all")]
         spec: String,
 
@@ -124,6 +124,10 @@ async fn main() -> Result<()> {
                     println!("Running Git clone tests...\n");
                     specs::GitCloneTests::run_all(&client, &relay_domain).await
                 }
+                "git-filter" => {
+                    println!("Running Git filter capability tests...\n");
+                    specs::GitFilterTests::run_all(&client, &relay_domain).await
+                }
                 "push-auth" => {
                     println!("Running push authorization tests...\n");
                     specs::PushAuthorizationTests::run_all(&client, &relay_domain).await
@@ -145,6 +149,11 @@ async fn main() -> Result<()> {
                     println!("  → Git clone tests...");
                     let clone_results = specs::GitCloneTests::run_all(&client, &relay_domain).await;
                     all_results.merge(clone_results);
+
+                    // Git filter capability tests
+                    println!("  → Git filter capability tests...");
+                    let filter_results = specs::GitFilterTests::run_all(&client, &relay_domain).await;
+                    all_results.merge(filter_results);
 
                     // Push authorization tests
                     println!("  → Push authorization tests...");
@@ -176,7 +185,7 @@ async fn main() -> Result<()> {
                 }
                 _ => {
                     return Err(anyhow!(
-                        "Unknown spec: {}. Use 'nip01-smoke', 'nip11', 'event-acceptance', 'cors', 'git-clone', 'push-auth', 'repo-creation', or 'all'",
+                        "Unknown spec: {}. Use 'nip01-smoke', 'nip11', 'event-acceptance', 'cors', 'git-clone', 'git-filter', 'push-auth', 'repo-creation', or 'all'",
                         spec
                     ))
                 }

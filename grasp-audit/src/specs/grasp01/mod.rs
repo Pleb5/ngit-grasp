@@ -9,12 +9,14 @@
 //! - [`EventAcceptancePolicyTests`] - Event acceptance rules (WebSocket-only)
 //! - [`CorsTests`] - CORS headers on Git HTTP endpoints (requires git-data-dir)
 //! - [`GitCloneTests`] - Git clone operations (requires git-data-dir)
+//! - [`GitFilterTests`] - Git filter capability for partial clone (requires git-data-dir)
 //! - [`PushAuthorizationTests`] - Push authorization (requires git-data-dir)
 //! - [`RepositoryCreationTests`] - Repository creation (requires git-data-dir)
 
 pub mod cors;
 pub mod event_acceptance_policy;
 pub mod git_clone;
+pub mod git_filter;
 pub mod nip01_smoke;
 pub mod nip11_document;
 pub mod push_authorization;
@@ -24,6 +26,7 @@ pub mod spec_requirements;
 pub use cors::CorsTests;
 pub use event_acceptance_policy::EventAcceptancePolicyTests;
 pub use git_clone::GitCloneTests;
+pub use git_filter::GitFilterTests;
 pub use nip01_smoke::Nip01SmokeTests;
 pub use nip11_document::Nip11DocumentTests;
 pub use push_authorization::PushAuthorizationTests;

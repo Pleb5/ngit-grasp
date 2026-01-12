@@ -6,6 +6,6 @@ pub mod grasp01;
 
 // Re-export all test structs from grasp01 module
 pub use grasp01::{
-    CorsTests, EventAcceptancePolicyTests, GitCloneTests, Nip01SmokeTests, Nip11DocumentTests,
-    PushAuthorizationTests, RepositoryCreationTests,
+    CorsTests, EventAcceptancePolicyTests, GitCloneTests, GitFilterTests, Nip01SmokeTests,
+    Nip11DocumentTests, PushAuthorizationTests, RepositoryCreationTests,
 };
