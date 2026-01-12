@@ -201,6 +201,8 @@ Git data related to deleted Repositories should be archvied (and deleted after 9
 
 Delete Request Disrepector - so that events dont get removes - its problematic if someone elses PR event and comments gets deleted if the owner deletes the repo. having at least some archival grasp servers retaining it so it can be recovered is important. also we need to make left-pad impossible.
 
+[Deletion Request Archecture](docs/explanation/deletion-request.md) designed by not yet implemented.
+
 ### Grasp Server Removed from Announcement Event
 
 Unless GRASP-05, This should cause the git data and events related ONLY to this repository to be archived (and deleted after 90 days).
