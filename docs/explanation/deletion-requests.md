@@ -68,9 +68,27 @@ The deletion system uses three separate data stores:
 2. **Holding Database:** Recovery mechanism, prevents accidental permanent deletion
 3. **Archive Filesystem:** Git data backup, compressed storage
 
+### Holding Database Operations
+
+**Automatic Operations:**
+- **Move to holding:** NIP-09 deletions, blacklist deletions
+- **Automatic recovery:** Re-publishing after NIP-09 deletion (within retention window)
+- **Expiry cleanup:** Daily background task removes entries older than retention period
+
+**Manual Operations:**
+- **Manual ejection:** Operator force-deletes before retention expires
+  - Use case: Large repos consuming excessive storage
+  - Use case: Confirmed malware requiring immediate permanent deletion
+  - Mechanism: CLI command or admin tool (design in Phase 6)
+  - Logged for audit trail
+- **Manual restoration:** Operator restores blacklisted repo after removal from blacklist
+  - Future: May support automatic restoration
+
 ## Deletion Flow
 
 ### Standard Mode (Respects Deletions)
+
+#### NIP-09 Deletion Requests
 
 ```
 1. Kind 5 deletion request arrives
@@ -95,6 +113,34 @@ The deletion system uses three separate data stores:
    - Delete corresponding archive files
 ```
 
+#### Blacklist-Triggered Deletion
+
+When a repository is added to `NGIT_REPOSITORY_BLACKLIST`, the same deletion flow applies:
+
+```
+1. Startup: Scan main DB for repos matching blacklist
+   ↓
+2. For each matching repository:
+   - Query dependent events (same cascade logic)
+   - Archive git repository to .archive/<npub>/<identifier>-<timestamp>.tar.gz
+   - Mark metadata as "blacklist-triggered" (not NIP-09)
+   - Move events to holding database
+   - Delete from main database
+   ↓
+3. Background task (daily):
+   - Check holding database for expired entries
+   - Delete events older than retention period
+   - Delete corresponding archive files
+```
+
+**Key Differences from NIP-09:**
+- No author validation required (operator decision)
+- Triggered on startup, not by event arrival
+- Metadata marks deletion as blacklist-triggered
+- `deletion_request_disrespector` does NOT prevent blacklist deletion (see below)
+
+**Future:** When dynamic blacklist updates are supported, deletion will trigger immediately on config change instead of waiting for restart.
+
 ### Archival Mode (Disrespector)
 
 When `deletion_request_disrespector = true`:
@@ -111,11 +157,21 @@ When `deletion_request_disrespector = true`:
 Result: Archival relay preserves all content
 ```
 
+**Important:** Disrespector mode ONLY affects NIP-09 user-initiated deletions. It does NOT prevent blacklist-triggered deletions.
+
+**Rationale:**
+- NIP-09 deletions are user agency decisions (left-pad protection needed)
+- Blacklist deletions are operator moderation decisions (spam/malware/abuse)
+- Archival relays still need ability to moderate malicious content
+- Different policy goals: preservation vs. safety
+
 **Implementation Note:** We need to verify that `nostr-relay-builder` doesn't automatically process deletion requests at the relay library level. If it does, we'll need to override or disable this behavior when disrespector mode is enabled. This will be investigated in Phase 6.
 
 ## Recovery Mechanism
 
 The holding database enables **accidental deletion recovery**:
+
+### Automatic Recovery (NIP-09 Deletions)
 
 ```
 Scenario: Owner deletes repository, then changes their mind
@@ -139,9 +195,102 @@ Scenario: Owner deletes repository, then changes their mind
    - Return: "New repository created"
 ```
 
+### Blacklist Recovery
+
+When a repository is removed from the blacklist:
+
+**Option 1: Manual Restoration (Initial Implementation)**
+- Operator removes from blacklist config
+- Operator manually restores from holding DB if desired
+- Provides explicit control over recovery decisions
+
+**Option 2: Automatic Restoration (Future Enhancement)**
+- On startup, detect repos in holding area no longer blacklisted
+- Automatically restore to main DB if within retention period
+- Requires careful design to prevent unwanted restorations
+
+**Decision:** Start with manual restoration, evaluate automatic restoration in Phase 6.
+
+### Manual Ejection from Holding Area
+
+Operators need ability to **force-delete** items from holding area before retention period expires:
+
+**Use Cases:**
+1. Large repositories consuming excessive storage
+2. Confirmed malware/abuse that shouldn't be recoverable
+3. Legal/compliance requirements for immediate permanent deletion
+
+**Mechanism (TBD in Phase 6):**
+- Admin CLI command: `ngit-grasp eject <npub>/<identifier>`
+- Or database operation with proper tooling
+- Immediately delete from holding DB and archive filesystem
+- Log operation for audit trail
+- Metric: `ngit_manual_ejections_total`
+
+**Safety Considerations:**
+- Manual ejection is permanent (no undo)
+- Should require confirmation for safety
+- Should log npub, identifier, reason, operator
+- Consider retention policy override vs immediate deletion
+
+## Blacklist Deletion Integration
+
+### Overview
+
+Blacklist-triggered deletions use the **same infrastructure** as NIP-09 deletion requests:
+- Same holding database for 90-day retention
+- Same git archive mechanism
+- Same cascade deletion logic
+- Same recovery capabilities (if unblacklisted)
+
+### Key Differences from NIP-09
+
+| Aspect | NIP-09 Deletion | Blacklist Deletion |
+|--------|----------------|-------------------|
+| **Trigger** | Kind 5 event arrives | Startup scan of main DB |
+| **Author validation** | Required (pubkey match) | Not applicable (operator decision) |
+| **Disrespector mode** | Prevents deletion | Does NOT prevent deletion |
+| **Purpose** | User agency | Moderation/safety |
+| **Recovery** | Automatic (re-publish) | Manual (operator decision) |
+| **Metadata** | Links to Kind 5 event | Marks "blacklist-triggered" |
+
+### Why Disrespector Doesn't Prevent Blacklist Deletion
+
+**Design Decision:** The `deletion_request_disrespector` configuration ONLY affects NIP-09 user-initiated deletions. It does NOT prevent blacklist-triggered deletions.
+
+**Rationale:**
+1. **Different Policy Goals:**
+   - NIP-09 = User agency (prevent left-pad)
+   - Blacklist = Operator safety (prevent spam/malware/abuse)
+
+2. **Archival Relays Need Moderation:**
+   - Archive mode preserves valuable deleted content
+   - But still must handle malicious content
+   - Spam, malware, abuse require operator intervention
+
+3. **Separate Concerns:**
+   - Disrespector = "Don't honor user deletion requests"
+   - Blacklist = "Don't accept these specific repos regardless of source"
+
+### Detection and Timing
+
+**Initial Implementation (Startup Scan):**
+```
+1. Relay starts up
+2. Load blacklist configuration
+3. Scan main database for matching repos
+4. For each match: archive → holding DB → delete from main
+5. Continue normal operation
+```
+
+**Future Enhancement (Dynamic Updates):**
+- Watch for configuration file changes
+- Trigger deletion immediately on blacklist addition
+- Requires careful design to avoid race conditions
+
 ## Cascade Deletion Strategy
 
-When a repository announcement is deleted, we cascade delete **all dependent events**:
+When a repository announcement is deleted (NIP-09 or blacklist), we cascade delete **all dependent events**:
 
 ### Rationale
 
@@ -244,7 +393,9 @@ When npub1alice deletes her announcement:
 **Env:** `NGIT_DELETION_REQUEST_DISRESPECTOR`
 
 **Description:**
-When `true`, relay ignores deletion requests and acts as an archival server. Critical for preventing left-pad scenarios by ensuring at least some relays preserve deleted content.
+When `true`, relay ignores **NIP-09 deletion requests** and acts as an archival server. Critical for preventing left-pad scenarios by ensuring at least some relays preserve deleted content.
+
+**IMPORTANT:** This setting does NOT prevent blacklist-triggered deletions. Blacklist is for operator moderation (spam/malware/abuse), which archival relays still need.
 
 **Use Cases:**
 - Community archival relays
@@ -335,6 +486,10 @@ When implementation is complete, the following documentation will be updated:
 - Large-scale testing
 - Race condition investigation
 - Lock strategy finalization
+- **Blacklist deletion behavior** (startup scanning, cascade logic, metadata)
+- **Blacklist + disrespector interaction** (disrespector doesn't prevent blacklist deletion)
+- **Manual ejection mechanism** (CLI command, safety, logging)
+- **Blacklist recovery flow** (manual vs automatic restoration)
 
 ## Security Considerations
 
@@ -357,23 +512,32 @@ When implementation is complete, the following documentation will be updated:
 - Mitigation: Background cleanup enforces retention limits
 - Mitigation: Compressed tar.gz archives
 - Mitigation: Configurable retention period
+- Mitigation: Manual ejection mechanism for emergency storage relief
 
 **Recovery Abuse:**
 - Mitigation: Recovery only within retention window
 - Mitigation: Must be original owner (pubkey match)
 - Mitigation: Normal announcement validation applies
 
+**Blacklist Bypass:**
+- Mitigation: Blacklist checked on startup (retroactive deletion)
+- Mitigation: Blacklist checked during announcement validation (prevents new)
+- Mitigation: Blacklist deletion not affected by disrespector mode
+- Note: Manual ejection available for confirmed abuse
+
 ## Monitoring & Metrics
 
 **Prometheus Metrics (Planned):**
-- `ngit_deletion_requests_total` - Count of deletion requests received
+- `ngit_deletion_requests_total` - Count of NIP-09 deletion requests received
 - `ngit_deletion_requests_processed` - Count actually processed (disrespector mode = 0)
+- `ngit_blacklist_deletions_total` - Count of blacklist-triggered deletions
 - `ngit_holding_database_events` - Current event count in holding DB
 - `ngit_holding_database_size_bytes` - Holding DB disk usage
 - `ngit_archive_files_total` - Count of archive tar.gz files
 - `ngit_archive_size_bytes` - Total archive disk usage
-- `ngit_recoveries_total` - Count of successful recoveries
+- `ngit_recoveries_total` - Count of successful automatic recoveries
 - `ngit_permanent_deletions_total` - Count of events permanently deleted (post-retention)
+- `ngit_manual_ejections_total` - Count of operator-initiated ejections from holding area
 
 ## Testing Strategy
 
@@ -420,6 +584,27 @@ Coordinate between archival relays to ensure redundant preservation of deleted c
 
 ### Recovery Notifications
 Notify repository owner when content is recovered from holding database, allowing them to confirm or re-delete.
+
+### Dynamic Blacklist Updates
+Currently blacklist changes only take effect on startup. Future enhancement:
+- Monitor configuration file for changes
+- Apply blacklist additions immediately (trigger deletion)
+- Apply blacklist removals immediately (optional auto-recovery)
+- Requires careful concurrency design
+
+### Automatic Blacklist Recovery
+Currently removing from blacklist requires manual restoration. Future enhancement:
+- Detect unblacklisted repos in holding area on startup
+- Automatically restore if within retention period
+- Configurable policy: auto-restore vs manual-only
+
+### Enhanced Manual Ejection
+Current design includes basic manual ejection. Future enhancements:
+- Web UI for holding area management
+- Batch ejection operations
+- Selective ejection (events only, keep git archive)
+- Export before ejection (backup)
+- Enhanced audit logging with operator identity
 
 ## Conclusion
 
