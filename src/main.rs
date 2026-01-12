@@ -28,7 +28,14 @@ async fn main() -> Result<()> {
     // Load configuration (priority: CLI flags > env vars > .env file > defaults)
     let config = Config::load()?;
 
-    info!("Configuration loaded: {}", config.bind_address);
+    // Validate configuration and fail fast on fatal errors
+    // Recoverable issues (e.g., malformed whitelist entries) are logged as warnings
+    config.validate()?;
+
+    info!(
+        "Configuration loaded and validated: {}",
+        config.bind_address
+    );
     info!("Domain: {}", config.domain);
     info!("Relay name: {}", config.relay_name());
     info!("Git data directory: {}", config.effective_git_data_path());

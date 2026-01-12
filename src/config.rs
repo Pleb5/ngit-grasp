@@ -85,16 +85,25 @@ impl WhitelistEntry {
     }
 
     /// Parse whitelist from comma-separated string
-    pub fn parse_whitelist(input: &str) -> Result<Vec<Self>> {
+    ///
+    /// Skips invalid entries with warnings instead of failing.
+    /// This allows the config to load even if some whitelist entries are malformed.
+    pub fn parse_whitelist(input: &str) -> Vec<Self> {
         if input.trim().is_empty() {
-            return Ok(Vec::new());
+            return Vec::new();
         }
 
         input
             .split(',')
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
-            .map(Self::parse)
+            .filter_map(|s| match Self::parse(s) {
+                Ok(entry) => Some(entry),
+                Err(e) => {
+                    tracing::warn!("Skipping invalid whitelist entry '{}': {}", s, e);
+                    None
+                }
+            })
             .collect()
     }
 }
@@ -464,47 +473,38 @@ impl Config {
         }
     }
 
-    /// Get parsed archive configuration with computed read-only mode
+    /// Validate configuration and return fatal errors
     ///
-    /// Read-only mode defaults to true if archive mode is enabled, false otherwise.
-    /// Throws error if explicitly set to true without archive mode enabled.
-    pub fn archive_config(&self) -> Result<ArchiveConfig> {
-        let whitelist = WhitelistEntry::parse_whitelist(&self.archive_whitelist)?;
-        let archive_enabled = self.archive_all || !whitelist.is_empty();
+    /// This should be called immediately after Config::load() to fail fast on config errors.
+    /// Recoverable issues (e.g., malformed whitelist entries) are logged as warnings and skipped.
+    pub fn validate(&self) -> Result<()> {
+        // Validate relay owner nsec (should always be set by Config::load())
+        let nsec = self
+            .relay_owner_nsec
+            .as_ref()
+            .context("relay_owner_nsec not set (should be set by Config::load())")?;
+        Keys::parse(nsec).context("Invalid relay_owner_nsec format")?;
 
-        let read_only = match self.archive_read_only {
-            Some(true) => {
-                if !archive_enabled {
-                    return Err(anyhow!(
-                        "NGIT_ARCHIVE_READ_ONLY=true requires either NGIT_ARCHIVE_ALL=true or NGIT_ARCHIVE_WHITELIST to be set"
-                    ));
-                }
-                true
+        // Validate archive configuration
+        let archive_whitelist = WhitelistEntry::parse_whitelist(&self.archive_whitelist);
+        let archive_enabled = self.archive_all || !archive_whitelist.is_empty();
+
+        // Fatal error: archive_read_only=true without archive mode enabled
+        if let Some(true) = self.archive_read_only {
+            if !archive_enabled {
+                return Err(anyhow!(
+                    "NGIT_ARCHIVE_READ_ONLY=true requires either NGIT_ARCHIVE_ALL=true or NGIT_ARCHIVE_WHITELIST to be set"
+                ));
             }
-            Some(false) => false,
-            None => {
-                // Default: true if archive mode enabled, false otherwise
-                archive_enabled
-            }
-        };
+        }
 
-        Ok(ArchiveConfig {
-            archive_all: self.archive_all,
-            whitelist,
-            read_only,
-        })
-    }
+        // Validate repository whitelist configuration
+        let repository_whitelist = WhitelistEntry::parse_whitelist(&self.repository_whitelist);
 
-    /// Get parsed repository whitelist configuration
-    ///
-    /// Throws error if repository_whitelist is set together with archive_read_only=true
-    pub fn repository_config(&self) -> Result<RepositoryConfig> {
-        let whitelist = WhitelistEntry::parse_whitelist(&self.repository_whitelist)?;
-
-        // Validate incompatible configurations
-        if !whitelist.is_empty() {
-            let archive_config = self.archive_config()?;
-            if archive_config.read_only {
+        // Fatal error: repository_whitelist with archive_read_only=true (incompatible)
+        if !repository_whitelist.is_empty() {
+            let read_only = self.archive_read_only.unwrap_or(archive_enabled);
+            if read_only {
                 return Err(anyhow!(
                     "NGIT_REPOSITORY_WHITELIST cannot be used with NGIT_ARCHIVE_READ_ONLY=true. \
                      Archive read-only mode rejects announcements that don't match the archive whitelist, \
@@ -514,7 +514,39 @@ impl Config {
             }
         }
 
-        Ok(RepositoryConfig { whitelist })
+        Ok(())
+    }
+
+    /// Get parsed archive configuration with computed read-only mode
+    ///
+    /// Read-only mode defaults to true if archive mode is enabled, false otherwise.
+    /// This method assumes config has been validated - call Config::validate() first!
+    pub fn archive_config(&self) -> ArchiveConfig {
+        let whitelist = WhitelistEntry::parse_whitelist(&self.archive_whitelist);
+        let archive_enabled = self.archive_all || !whitelist.is_empty();
+
+        let read_only = match self.archive_read_only {
+            Some(true) => true, // Already validated in validate()
+            Some(false) => false,
+            None => {
+                // Default: true if archive mode enabled, false otherwise
+                archive_enabled
+            }
+        };
+
+        ArchiveConfig {
+            archive_all: self.archive_all,
+            whitelist,
+            read_only,
+        }
+    }
+
+    /// Get parsed repository whitelist configuration
+    ///
+    /// This method assumes config has been validated - call Config::validate() first!
+    pub fn repository_config(&self) -> RepositoryConfig {
+        let whitelist = WhitelistEntry::parse_whitelist(&self.repository_whitelist);
+        RepositoryConfig { whitelist }
     }
 
     /// Create config for testing
@@ -807,10 +839,10 @@ mod tests {
 
     #[test]
     fn test_parse_whitelist_empty() {
-        let whitelist = WhitelistEntry::parse_whitelist("").unwrap();
+        let whitelist = WhitelistEntry::parse_whitelist("");
         assert!(whitelist.is_empty());
 
-        let whitelist = WhitelistEntry::parse_whitelist("   ").unwrap();
+        let whitelist = WhitelistEntry::parse_whitelist("   ");
         assert!(whitelist.is_empty());
     }
 
@@ -823,9 +855,19 @@ mod tests {
         let whitelist = WhitelistEntry::parse_whitelist(&format!(
             "{},bitcoin-core,{}/linux",
             test_npub1, test_npub2
-        ))
-        .unwrap();
+        ));
         assert_eq!(whitelist.len(), 3);
+    }
+
+    #[test]
+    fn test_parse_whitelist_invalid_npub_skipped() {
+        // Invalid entries should be skipped with warnings, not fail
+        let whitelist = WhitelistEntry::parse_whitelist("npub1invalid,bitcoin-core");
+        assert_eq!(whitelist.len(), 1); // Only bitcoin-core should be parsed
+        assert!(matches!(
+            &whitelist[0],
+            WhitelistEntry::Identifier(id) if id == "bitcoin-core"
+        ));
     }
 
     #[test]
@@ -836,31 +878,22 @@ mod tests {
             archive_whitelist: format!("{},bitcoin-core", test_npub),
             ..Config::for_testing()
         };
-        let archive_config = config.archive_config().unwrap();
+        let archive_config = config.archive_config();
         assert_eq!(archive_config.whitelist.len(), 2);
-    }
-
-    #[test]
-    fn test_archive_config_invalid_npub() {
-        let config = Config {
-            archive_whitelist: "npub1invalid".to_string(),
-            ..Config::for_testing()
-        };
-        assert!(config.archive_config().is_err());
     }
 
     #[test]
     fn test_archive_read_only_defaults() {
         // Default: false when no archive mode
         let config = Config::for_testing();
-        assert_eq!(config.archive_config().unwrap().read_only, false);
+        assert_eq!(config.archive_config().read_only, false);
 
         // Default: true when archive_all is set
         let config = Config {
             archive_all: true,
             ..Config::for_testing()
         };
-        assert_eq!(config.archive_config().unwrap().read_only, true);
+        assert_eq!(config.archive_config().read_only, true);
 
         // Default: true when archive_whitelist is set
         let keys = Keys::generate();
@@ -869,7 +902,7 @@ mod tests {
             archive_whitelist: test_npub,
             ..Config::for_testing()
         };
-        assert_eq!(config.archive_config().unwrap().read_only, true);
+        assert_eq!(config.archive_config().read_only, true);
     }
 
     #[test]
@@ -880,7 +913,7 @@ mod tests {
             archive_read_only: Some(true),
             ..Config::for_testing()
         };
-        assert_eq!(config.archive_config().unwrap().read_only, true);
+        assert_eq!(config.archive_config().read_only, true);
 
         // Explicit false with archive_all (unusual but allowed)
         let config = Config {
@@ -888,29 +921,26 @@ mod tests {
             archive_read_only: Some(false),
             ..Config::for_testing()
         };
-        assert_eq!(config.archive_config().unwrap().read_only, false);
+        assert_eq!(config.archive_config().read_only, false);
 
         // Explicit false without archive mode
         let config = Config {
             archive_read_only: Some(false),
             ..Config::for_testing()
         };
-        assert_eq!(config.archive_config().unwrap().read_only, false);
+        assert_eq!(config.archive_config().read_only, false);
     }
 
     #[test]
-    fn test_archive_read_only_error() {
-        // Error: true without archive mode
+    fn test_archive_read_only_validation_error() {
+        // Error: true without archive mode should fail validation
         let config = Config {
             archive_read_only: Some(true),
             ..Config::for_testing()
         };
-        assert!(config.archive_config().is_err());
-        assert!(config
-            .archive_config()
-            .unwrap_err()
-            .to_string()
-            .contains("requires either"));
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("requires either"));
     }
 
     #[test]
@@ -921,7 +951,7 @@ mod tests {
             repository_whitelist: format!("{},bitcoin-core", test_npub),
             ..Config::for_testing()
         };
-        let repo_config = config.repository_config().unwrap();
+        let repo_config = config.repository_config();
         assert_eq!(repo_config.whitelist.len(), 2);
         assert!(repo_config.enabled());
     }
@@ -929,13 +959,13 @@ mod tests {
     #[test]
     fn test_repository_whitelist_empty() {
         let config = Config::for_testing();
-        let repo_config = config.repository_config().unwrap();
+        let repo_config = config.repository_config();
         assert!(repo_config.whitelist.is_empty());
         assert!(!repo_config.enabled());
     }
 
     #[test]
-    fn test_repository_whitelist_incompatible_with_archive_read_only() {
+    fn test_repository_whitelist_validation_incompatible_with_archive_read_only() {
         let keys = Keys::generate();
         let test_npub = keys.public_key().to_bech32().unwrap();
         let config = Config {
@@ -944,7 +974,7 @@ mod tests {
             repository_whitelist: test_npub,
             ..Config::for_testing()
         };
-        let result = config.repository_config();
+        let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("cannot be used with"));
@@ -961,8 +991,8 @@ mod tests {
             repository_whitelist: test_npub,
             ..Config::for_testing()
         };
-        // Should not error
-        assert!(config.repository_config().is_ok());
+        // Should not error on validation
+        assert!(config.validate().is_ok());
     }
 
     #[test]
@@ -979,5 +1009,100 @@ mod tests {
         assert!(config.matches(&test_npub, "any-repo"));
         assert!(config.matches("npub1bob", "bitcoin-core"));
         assert!(!config.matches("npub1bob", "other-repo"));
+    }
+
+    #[test]
+    fn test_validate_success_with_valid_config() {
+        // Valid config should pass validation
+        let keys = Keys::generate();
+        let test_npub = keys.public_key().to_bech32().unwrap();
+        let config = Config {
+            archive_whitelist: format!("{},bitcoin-core", test_npub),
+            archive_read_only: Some(false),
+            repository_whitelist: "rust".to_string(),
+            ..Config::for_testing()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_with_all_invalid_whitelist_entries() {
+        // All invalid entries should be skipped with warnings, but validation should succeed
+        let config = Config {
+            archive_whitelist: "npub1invalid,npub1bad,npub1wrong".to_string(),
+            ..Config::for_testing()
+        };
+        assert!(config.validate().is_ok());
+        // All entries should be skipped
+        let archive_config = config.archive_config();
+        assert_eq!(archive_config.whitelist.len(), 0);
+        assert!(!archive_config.enabled());
+    }
+
+    #[test]
+    fn test_validate_with_mixed_valid_invalid_entries() {
+        let keys = Keys::generate();
+        let test_npub = keys.public_key().to_bech32().unwrap();
+        // Mixed valid and invalid entries - should keep valid ones
+        let config = Config {
+            repository_whitelist: format!("npub1invalid,{},bitcoin-core,npub1bad", test_npub),
+            ..Config::for_testing()
+        };
+        assert!(config.validate().is_ok());
+        let repo_config = config.repository_config();
+        // Should have 2 valid entries: the test_npub and bitcoin-core
+        assert_eq!(repo_config.whitelist.len(), 2);
+    }
+
+    #[test]
+    fn test_whitelist_entry_with_extra_whitespace() {
+        let keys = Keys::generate();
+        let test_npub = keys.public_key().to_bech32().unwrap();
+        // Whitespace should be trimmed
+        let whitelist =
+            WhitelistEntry::parse_whitelist(&format!("  {} , bitcoin-core  ,  rust  ", test_npub));
+        assert_eq!(whitelist.len(), 3);
+    }
+
+    #[test]
+    fn test_archive_config_with_all_invalid_entries_not_enabled() {
+        // If all whitelist entries are invalid, archive mode should not be enabled
+        let config = Config {
+            archive_whitelist: "npub1invalid,npub1bad".to_string(),
+            ..Config::for_testing()
+        };
+        let archive_config = config.archive_config();
+        assert!(!archive_config.enabled());
+        assert_eq!(archive_config.whitelist.len(), 0);
+    }
+
+    #[test]
+    fn test_validate_detects_invalid_relay_owner_nsec() {
+        // Invalid nsec should fail validation
+        let config = Config {
+            relay_owner_nsec: Some("nsec1invalid".to_string()),
+            ..Config::for_testing()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid relay_owner_nsec"));
+    }
+
+    #[test]
+    fn test_validate_requires_relay_owner_nsec() {
+        // Missing nsec should fail validation
+        let config = Config {
+            relay_owner_nsec: None,
+            ..Config::for_testing()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("relay_owner_nsec not set"));
     }
 }

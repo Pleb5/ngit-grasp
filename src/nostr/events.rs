@@ -400,15 +400,9 @@ pub fn validate_announcement(
         Err(e) => return AnnouncementResult::Reject(format!("Invalid announcement: {}", e)),
     };
 
-    // Get archive and repository configs (fail-secure: reject on config errors)
-    let archive_config = match config.archive_config() {
-        Ok(c) => c,
-        Err(e) => return AnnouncementResult::Reject(format!("Config error: {}", e)),
-    };
-    let repository_config = match config.repository_config() {
-        Ok(c) => c,
-        Err(e) => return AnnouncementResult::Reject(format!("Config error: {}", e)),
-    };
+    // Get validated configs (config.validate() must be called at startup)
+    let archive_config = config.archive_config();
+    let repository_config = config.repository_config();
 
     let npub = announcement.owner_npub();
     let lists_service = announcement.lists_service(&config.domain);

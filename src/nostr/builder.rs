@@ -567,26 +567,24 @@ pub async fn create_relay(
     // Clone Arc for the write policy so both relay and policy can access the database
     let git_data_path = config.effective_git_data_path();
 
-    // Parse and log archive configuration
-    if let Ok(archive_config) = config.archive_config() {
-        if archive_config.enabled() {
-            tracing::info!(
-                "GRASP-05 archive mode enabled: archive_all={}, whitelist_entries={}, read_only={}",
-                archive_config.archive_all,
-                archive_config.whitelist.len(),
-                archive_config.read_only
-            );
-        }
+    // Log archive configuration (config.validate() must be called at startup)
+    let archive_config = config.archive_config();
+    if archive_config.enabled() {
+        tracing::info!(
+            "GRASP-05 archive mode enabled: archive_all={}, whitelist_entries={}, read_only={}",
+            archive_config.archive_all,
+            archive_config.whitelist.len(),
+            archive_config.read_only
+        );
     }
 
-    // Parse and log repository configuration
-    if let Ok(repository_config) = config.repository_config() {
-        if repository_config.enabled() {
-            tracing::info!(
-                "Repository whitelist enabled: whitelist_entries={}",
-                repository_config.whitelist.len()
-            );
-        }
+    // Log repository configuration
+    let repository_config = config.repository_config();
+    if repository_config.enabled() {
+        tracing::info!(
+            "Repository whitelist enabled: whitelist_entries={}",
+            repository_config.whitelist.len()
+        );
     }
 
     // Create write policy with purgatory integration

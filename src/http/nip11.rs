@@ -56,16 +56,10 @@ pub struct RelayInformationDocument {
 impl RelayInformationDocument {
     /// Create NIP-11 relay information document from configuration
     pub fn from_config(config: &Config) -> Self {
-        // Determine if archive mode is enabled
-        let archive_config = config.archive_config().ok();
-        let archive_enabled = archive_config
-            .as_ref()
-            .map(|ac| ac.enabled())
-            .unwrap_or(false);
-        let archive_read_only = archive_config
-            .as_ref()
-            .map(|ac| ac.read_only)
-            .unwrap_or(false);
+        // Get validated configuration (config.validate() must be called at startup)
+        let archive_config = config.archive_config();
+        let archive_enabled = archive_config.enabled();
+        let archive_read_only = archive_config.read_only;
 
         // Build supported_grasps list
         let mut supported_grasps = vec!["GRASP-01".to_string()];
@@ -75,22 +69,15 @@ impl RelayInformationDocument {
         supported_grasps.push("GRASP-02".to_string());
 
         // Build curation field for archive read-only mode or repository whitelist
-        let repository_config = config.repository_config().ok();
-        let repository_whitelist_enabled = repository_config
-            .as_ref()
-            .map(|rc| rc.enabled())
-            .unwrap_or(false);
+        let repository_config = config.repository_config();
+        let repository_whitelist_enabled = repository_config.enabled();
 
         let curation = if archive_read_only {
             // Archive read-only mode (GRASP-05 only)
-            if let Some(ref ac) = archive_config {
-                if ac.archive_all {
-                    Some("Read-only sync of all repositories found on network".to_string())
-                } else if !ac.whitelist.is_empty() {
-                    Some("Read-only sync of whitelisted repositories and maintainers".to_string())
-                } else {
-                    None
-                }
+            if archive_config.archive_all {
+                Some("Read-only sync of all repositories found on network".to_string())
+            } else if !archive_config.whitelist.is_empty() {
+                Some("Read-only sync of whitelisted repositories and maintainers".to_string())
             } else {
                 None
             }
