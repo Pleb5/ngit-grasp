@@ -148,12 +148,11 @@ impl SelfSubscriber {
     ) -> LoopControl {
         match notification {
             Ok(RelayPoolNotification::Event { event, .. }) => {
-                // Only process 30617 events that list our relay
+                // Process 30617 events for relay discovery
+                // Note: Events reaching here have already passed write policy validation
+                // (archive_all, archive_whitelist, blacklist, etc.) so no additional
+                // filtering is needed.
                 if event.kind == Kind::GitRepoAnnouncement {
-                    if !self.lists_our_relay(&event) {
-                        return LoopControl::Continue;
-                    }
-
                     // Extract repo ID and relays
                     if let Some(repo_id) = Self::extract_repo_id(&event) {
                         let relays = Self::extract_relay_urls(&event);
@@ -249,15 +248,6 @@ impl SelfSubscriber {
         // their 'a' tags to find which repo they belong to.
         // That processing happens in the batch processing, not here.
         None
-    }
-
-    /// Check if announcement lists our relay
-    ///
-    /// Returns true if any extracted relay URL contains our domain
-    fn lists_our_relay(&self, event: &Event) -> bool {
-        Self::extract_relay_urls(event)
-            .iter()
-            .any(|url| url.contains(&self.relay_domain) || url == &self.own_relay_url)
     }
 
     /// Main run loop
