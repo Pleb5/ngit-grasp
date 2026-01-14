@@ -237,6 +237,48 @@ NGIT_EVENT_BLACKLIST=npub1spam1...,npub1spam2...
 
 **See**: [Configuration Reference](docs/reference/configuration.md) for complete details
 
+## Defensive Measures & Rate Limiting
+
+ngit-grasp implements multiple layers of defense against abuse, spam, and denial-of-service attacks:
+
+**Per-Connection Rate Limits:**
+- Max 500 concurrent subscriptions per connection
+- Max 60 events published per minute per connection
+- Built-in to rust-nostr relay-builder
+
+**Per-IP Connection Monitoring:**
+- Tracks connections per IP address (default threshold: 10)
+- Flags potential abusers in logs and metrics
+- **Does NOT enforce limits** (monitoring only)
+- Privacy-preserving (IP addresses never exposed in Prometheus)
+
+**Content Filtering (Blacklists/Whitelists):**
+- **Event blacklist** - Block ALL events from specific authors (npubs)
+- **Repository blacklist** - Block specific repositories/developers/identifiers
+- **Repository whitelist** - Curate which repositories are accepted (GRASP-01 mode)
+- **Archive whitelist** - Mirror specific repositories (GRASP-05 mode)
+- See [Curation & Moderation](#curation--moderation) section above for details
+
+**Relay Sync Protection (GRASP-02):**
+- **Exponential backoff** - Failed connections: 5s → 10s → 20s → ... → 1 hour max
+- **Naughty list** - Track relays with infrastructure issues separately (12h expiry)
+- **Rate limit detection** - Auto 65s cooldown when remote relays rate limit us
+- **Domain throttling** - Max 5 concurrent, 30/min per domain for git data fetching
+
+**Event Validation:**
+- Strict GRASP-01 protocol validation via WritePolicy plugin system
+- Extensible for custom validation logic (has access to client IP address)
+
+**Total Connection Limit:**
+- Max 500 total connections (configurable via `NGIT_MAX_CONNECTIONS`)
+- Prevents connection exhaustion DoS attacks
+
+**Not Implemented:**
+- Per-IP connection limits (only monitored, not enforced)
+- Per-IP event rate limits (tracked per connection, not per IP)
+
+**See**: [Defensive Measures](docs/explanation/defensive-measures.md) for complete details and future enhancements.
+
 ## Roadmap
 
 ### GRASP-02 Enhancements

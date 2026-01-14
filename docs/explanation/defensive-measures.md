@@ -2,6 +2,8 @@
 
 This document describes the defensive measures implemented in ngit-grasp to protect against abuse, spam, and denial-of-service attacks.
 
+**Note:** A point-in-time analysis of defensive measures in other Nostr relays (strfry, nostr-rs-relay, khatru) was conducted to inform these design decisions. The analysis examined connection limits, rate limiting approaches, and per-IP enforcement strategies across the ecosystem.
+
 ## Overview
 
 ngit-grasp employs multiple layers of defense:
@@ -35,7 +37,7 @@ These limits prevent individual connections from overwhelming the relay.
 - **Privacy:** IP addresses never exposed in Prometheus metrics, only aggregate counts
 - Logs warnings when threshold exceeded
 
-**Future:** Could be extended to enforce per-IP connection limits.
+**Note on enforcement:** Per-IP connection limits are not built into rust-nostr relay-builder (tracks per WebSocket connection, not per IP). If abuse is detected via metrics, enforcement should be implemented as a PR to rust-nostr/relay-builder to benefit the entire Nostr ecosystem, rather than custom code in ngit-grasp.
 
 ### Content Filtering (Blacklists/Whitelists)
 
@@ -111,69 +113,21 @@ These limits prevent individual connections from overwhelming the relay.
 
 **To implement:** Would require custom middleware/WritePolicy to aggregate across connections from the same IP.
 
-### Total Connection Limit
-
-**Status:** Supported by relay-builder but not currently configured in ngit-grasp.
-
-**To implement:** Add `max_connections(n)` to relay builder configuration.
-
 ### Query Filtering
 
 **Status:** QueryPolicy trait available but not currently used.
 
 **Potential uses:** Rate limit queries per IP, block expensive queries, restrict access to certain event kinds.
 
-## Future Enhancements: Per-IP Rate Limiting (Deferred)
+## Future Enhancements
 
-### Decision: Defer Until Abuse Detected
+### Per-IP Rate Limiting
 
-After comprehensive review (2026-01-14), we decided to defer per-IP rate limiting (Phase 2 & 3) until abuse patterns are detected in production.
+Per-IP connection and event rate limiting were considered but deferred until abuse is detected in production. The current protections (per-connection limits, total connection limit, content filtering) are sufficient for the git relay use case.
 
-**Current protection (Phase 1):**
-- Per-connection limits: 500 subscriptions, 60 events/min
-- Total connection limit: 500 (configurable via `NGIT_MAX_CONNECTIONS`)
-- Connection monitoring: Tracks IPs, flags abuse at 10 connections
-- Content filtering: Event blacklist, repository blacklist/whitelist
+**Decision rationale:** The primary DoS vector is connection exhaustion, which is addressed by the total connection limit (`NGIT_MAX_CONNECTIONS`). Per-IP enforcement would require custom middleware in rust-nostr relay-builder (which currently tracks limits per WebSocket connection, not per IP). If abuse is detected via the per-IP monitoring metrics, enforcement should be implemented as a PR to rust-nostr/relay-builder to benefit the entire Nostr ecosystem.
 
-**Deferred features (Phase 2 & 3):**
-- Per-IP connection enforcement (reject after 10 connections)
-- Per-IP event rate limiting (reject after 100 events/min)
-
-### Rationale for Deferral
-
-1. **Config-only approach sufficient** - Total connection limit addresses primary DoS vector
-2. **Git relay context** - Developer users less likely to abuse than general public
-3. **Existing protections strong** - Per-connection limits + content filtering already robust
-4. **Data-driven approach** - Monitor ConnectionTracker metrics, implement if needed
-5. **Minimal maintenance** - Avoid custom rate limiting code until proven necessary
-
-### Implementation Path if Needed
-
-**Preferred approach:** Contribute to rust-nostr/relay-builder as PR
-- Propose IP-based rate limiting as optional feature
-- Let upstream maintain the code
-- Benefits entire Nostr ecosystem
-
-**Fallback:** Implement in ngit-grasp
-- Per-IP connection enforcement via actix middleware
-- Per-IP event rate limiting via token bucket in WritePolicy
-- See issue d6ee for detailed implementation plan
-
-### Monitoring for Abuse
-
-Watch these metrics to determine if Phase 2 is needed:
-- `ngit_connections_per_ip` - IPs exceeding 10 connections
-- `ngit_flagged_abusers` - IPs flagged by ConnectionTracker
-- Event publishing patterns from single IPs
-
-**Trigger for Phase 2:** If abuse detected for 2-4 weeks after Phase 1 deployment
-
-### Related Work
-
-**Git endpoint throttling:** Separate concern, tracked in issue ff38
-- Git HTTP endpoints have different threat model (bandwidth/CPU intensive)
-- Requires separate IP-based throttling (5 concurrent, 30/min per IP)
-- No interaction with relay code
+**Related:** Git endpoint throttling (issue ff38) is a separate concern with different requirements.
 
 ## Summary Table
 
@@ -198,7 +152,7 @@ Watch these metrics to determine if Phase 2 is needed:
 | Naughty list | ✅ Active | Yes | Yes (12h default) |
 | Rate limit detection | ✅ Active | Yes | Automatic |
 | Domain throttling | ✅ Active | Yes | Hardcoded (5/30) |
-| **Deferred (Phase 2)** |
+| **Not Implemented** |
 | Per-IP connection limit | ⚠️ Deferred | No | - |
 | Per-IP rate limiting | ⚠️ Deferred | No | - |
 | Query filtering | ⚠️ Available | No | Not implemented |

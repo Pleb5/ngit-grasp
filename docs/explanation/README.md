@@ -151,6 +151,48 @@ Explanation documentation helps you **understand concepts** and design decisions
 
 ---
 
+### [Defensive Measures & Rate Limiting](defensive-measures.md)
+**Protection against abuse, spam, and denial-of-service attacks**
+
+**Topics:**
+- Connection and subscription management
+- Event publishing rate limits
+- Content filtering (blacklists/whitelists)
+- Event validation plugin system (WritePolicy/QueryPolicy)
+- Relay health management (naughty list, exponential backoff)
+- Privacy-preserving IP tracking
+- Future enhancements (per-IP rate limiting)
+
+**Read when:** You want to understand how ngit-grasp protects against abuse and what defensive features are available
+
+---
+
+### [GRASP-05 Archive Mode](grasp-05-archive.md)
+**Read-only mirroring of repositories**
+
+**Topics:**
+- Archive whitelist configuration
+- Archive-all mode
+- Read-only mode defaults
+- Use cases for backup/mirror relays
+
+**Read when:** You want to understand how to run an archive/backup relay
+
+---
+
+### [Deletion Requests](deletion-requests.md)
+**Handling repository and event deletion**
+
+**Topics:**
+- Deletion request architecture
+- Delete disrespector concept
+- Preventing left-pad scenarios
+- Archival policies
+
+**Read when:** You want to understand how ngit-grasp handles deletion events (planned feature)
+
+---
+
 ## Planned Explanation Documentation
 
 ### GRASP Protocol Design
