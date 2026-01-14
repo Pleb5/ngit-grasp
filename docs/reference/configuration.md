@@ -925,6 +925,46 @@ Event blacklist does **not** affect NIP-11 metadata:
 
 ---
 
+### Rate Limiting & DoS Protection
+
+#### `NGIT_MAX_CONNECTIONS`
+
+**Description:** Maximum total connections to the relay. Prevents connection exhaustion DoS attacks.  
+**Type:** Integer  
+**Default:** `500`  
+**Required:** No
+
+**Examples:**
+
+```bash
+# Default: 500 connections
+NGIT_MAX_CONNECTIONS=500
+
+# Higher limit for large public relay
+NGIT_MAX_CONNECTIONS=1000
+
+# Lower limit for private relay
+NGIT_MAX_CONNECTIONS=100
+```
+
+**Notes:**
+
+- Limits total concurrent WebSocket connections to the relay
+- Prevents connection exhaustion attacks
+- Works in conjunction with per-connection limits (500 subscriptions, 60 events/min)
+- When limit is reached, new connections are rejected
+- Existing connections continue to work normally
+
+**Related Limits:**
+
+Per-connection limits (built-in to relay-builder, not configurable):
+- Max subscriptions per connection: 500
+- Max events per minute per connection: 60
+- Max subscription ID length: 250 characters
+- Max results per filter: 500
+
+---
+
 ### Logging Configuration
 
 #### `RUST_LOG`

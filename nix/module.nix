@@ -250,6 +250,12 @@ let
         '';
       };
 
+      maxConnections = mkOption {
+        type = types.int;
+        default = 500;
+        description = "Maximum total connections to the relay";
+      };
+
       user = mkOption {
         type = types.str;
         default = "ngit-grasp-${name}";
@@ -295,6 +301,7 @@ let
       NGIT_REPOSITORY_WHITELIST = concatStringsSep "," cfg.repositoryWhitelist;
       NGIT_REPOSITORY_BLACKLIST = concatStringsSep "," cfg.repositoryBlacklist;
       NGIT_EVENT_BLACKLIST = concatStringsSep "," cfg.eventBlacklist;
+      NGIT_MAX_CONNECTIONS = toString cfg.maxConnections;
       RUST_LOG = cfg.logLevel;
     } // optionalAttrs (cfg.relayName != null) {
       NGIT_RELAY_NAME = cfg.relayName;
