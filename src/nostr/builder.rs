@@ -624,6 +624,14 @@ pub async fn create_relay(
     let relay = LocalRelayBuilder::default()
         .database(database.clone())
         .write_policy(write_policy.clone())
+        // Explicitly set rate limits (make defaults visible in code)
+        // Per-connection limits: 500 max subscriptions, 60 events/min
+        .rate_limit(RateLimit {
+            max_reqs: 500,        // Max concurrent subscriptions per connection
+            notes_per_minute: 60, // Max events per minute per connection
+        })
+        // Total connection limit to prevent DoS attacks
+        .max_connections(config.max_connections)
         .build();
 
     tracing::info!(

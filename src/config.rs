@@ -469,6 +469,11 @@ pub struct Config {
     /// All events from these authors are blocked from both relay storage and purgatory
     #[arg(long, env = "NGIT_EVENT_BLACKLIST", default_value = "")]
     pub event_blacklist: String,
+
+    /// Maximum total connections to the relay (default: 500)
+    /// Prevents connection exhaustion DoS attacks
+    #[arg(long, env = "NGIT_MAX_CONNECTIONS", default_value_t = 500)]
+    pub max_connections: usize,
 }
 
 impl Config {
@@ -703,6 +708,7 @@ impl Config {
             repository_whitelist: String::new(),
             repository_blacklist: String::new(),
             event_blacklist: String::new(),
+            max_connections: 500,
         }
     }
 }
