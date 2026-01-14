@@ -3,7 +3,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use tokio::signal;
-use tracing::{info, Level};
+use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use ngit_grasp::{
@@ -64,6 +64,22 @@ async fn main() -> Result<()> {
     )));
     info!("Purgatory initialized for event coordination");
 
+    // Restore purgatory state from disk if available
+    let purgatory_path =
+        PathBuf::from(config.effective_git_data_path()).join("purgatory-state.json");
+
+    if purgatory_path.exists() {
+        match purgatory.restore_from_disk(&purgatory_path) {
+            Ok(()) => {
+                info!("Restored purgatory state from disk");
+                // Re-queueing will happen later after sync system is created
+            }
+            Err(e) => {
+                warn!("Failed to restore purgatory state: {}, starting empty", e);
+            }
+        }
+    }
+
     // Create Nostr relay with NIP-34 validation
     // Returns both the relay and database for direct queries in handlers
     if let Ok(relay_with_db) = nostr::builder::create_relay(&config, purgatory.clone()).await {
@@ -88,6 +104,7 @@ async fn main() -> Result<()> {
             relay_with_db.write_policy.clone(),
             relay_with_db.relay.clone(),
             &config,
+            PathBuf::from(config.effective_git_data_path()),
             metrics.as_ref().and_then(|m| m.sync_metrics().cloned()),
         );
 
@@ -99,6 +116,21 @@ async fn main() -> Result<()> {
         } else {
             info!("Proactive sync enabled (will discover relays from stored announcements)");
         }
+
+        // Re-queue all restored purgatory repos for sync
+        let restored_identifiers = purgatory.get_all_identifiers();
+        if !restored_identifiers.is_empty() {
+            info!(
+                "Re-queueing {} restored repositories for sync",
+                restored_identifiers.len()
+            );
+            for identifier in restored_identifiers {
+                purgatory.enqueue_sync_immediate(&identifier);
+            }
+        }
+
+        // Get a reference to the rejected events index for shutdown persistence
+        let shutdown_rejected_index = sync_manager.rejected_events_index();
 
         tokio::spawn(async move {
             sync_manager.run().await;
@@ -188,6 +220,22 @@ async fn main() -> Result<()> {
             _ = signal::ctrl_c() => {
                 info!("Received shutdown signal, cleaning up...");
             }
+        }
+
+        // Save purgatory state to disk
+        let purgatory_save_path = PathBuf::from(&git_data_path).join("purgatory-state.json");
+        if let Err(e) = shutdown_purgatory.save_to_disk(&purgatory_save_path) {
+            error!("Failed to save purgatory state: {}", e);
+        } else {
+            info!("Purgatory state saved to disk");
+        }
+
+        // Save rejected events cache to disk
+        let rejected_cache_path = PathBuf::from(&git_data_path).join("rejected-events-cache.json");
+        if let Err(e) = shutdown_rejected_index.save_to_disk(&rejected_cache_path) {
+            error!("Failed to save rejected events cache: {}", e);
+        } else {
+            info!("Rejected events cache saved to disk");
         }
 
         // Cleanup placeholder refs on shutdown
