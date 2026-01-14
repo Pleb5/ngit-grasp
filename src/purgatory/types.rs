@@ -5,7 +5,13 @@
 //! problem where either the nostr event or git push can arrive first.
 
 use nostr_sdk::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::time::Instant;
+
+/// Default value for Instant fields during deserialization
+fn instant_now() -> Instant {
+    Instant::now()
+}
 
 /// A reference name and its target object.
 ///
@@ -59,7 +65,10 @@ impl RefUpdate {
 /// State events declare the current state of a repository but may arrive
 /// before the corresponding git data has been pushed. This entry holds
 /// the event and associated metadata until the git data arrives.
-#[derive(Debug, Clone)]
+///
+/// Note: `Instant` fields cannot be serialized directly. Use the `persistence`
+/// module to convert to/from serializable wrapper types.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatePurgatoryEntry {
     /// The nostr state event (kind 30618) awaiting git data
     pub event: Event,
@@ -71,9 +80,11 @@ pub struct StatePurgatoryEntry {
     pub author: PublicKey,
 
     /// When this entry was added to purgatory
+    #[serde(skip, default = "instant_now")]
     pub created_at: Instant,
 
     /// Expiry deadline (30 min from creation, may be extended)
+    #[serde(skip, default = "instant_now")]
     pub expires_at: Instant,
 }
 
@@ -82,7 +93,10 @@ pub struct StatePurgatoryEntry {
 /// PR events reference specific commits but may arrive before the git push
 /// containing those commits. Alternatively, a git push may arrive first,
 /// creating a placeholder entry waiting for the corresponding PR event.
-#[derive(Debug, Clone)]
+///
+/// Note: `Instant` fields cannot be serialized directly. Use the `persistence`
+/// module to convert to/from serializable wrapper types.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrPurgatoryEntry {
     /// The nostr PR event, if received (None = git data arrived first)
     pub event: Option<Event>,
@@ -92,8 +106,10 @@ pub struct PrPurgatoryEntry {
     pub commit: String,
 
     /// When this entry was added to purgatory
+    #[serde(skip, default = "instant_now")]
     pub created_at: Instant,
 
     /// Expiry deadline (30 min from creation, may be extended)
+    #[serde(skip, default = "instant_now")]
     pub expires_at: Instant,
 }
