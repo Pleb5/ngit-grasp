@@ -931,17 +931,17 @@ Event blacklist does **not** affect NIP-11 metadata:
 
 **Description:** Maximum total connections to the relay. Prevents connection exhaustion DoS attacks.  
 **Type:** Integer  
-**Default:** `500`  
+**Default:** `4096`  
 **Required:** No
 
 **Examples:**
 
 ```bash
-# Default: 500 connections
-NGIT_MAX_CONNECTIONS=500
+# Default: 4096 connections
+NGIT_MAX_CONNECTIONS=4096
 
 # Higher limit for large public relay
-NGIT_MAX_CONNECTIONS=1000
+NGIT_MAX_CONNECTIONS=8000
 
 # Lower limit for private relay
 NGIT_MAX_CONNECTIONS=100

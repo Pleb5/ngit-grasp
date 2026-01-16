@@ -252,7 +252,7 @@ let
 
       maxConnections = mkOption {
         type = types.int;
-        default = 500;
+        default = 4096;
         description = "Maximum total connections to the relay";
       };
 

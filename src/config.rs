@@ -470,9 +470,9 @@ pub struct Config {
     #[arg(long, env = "NGIT_EVENT_BLACKLIST", default_value = "")]
     pub event_blacklist: String,
 
-    /// Maximum total connections to the relay (default: 500)
+    /// Maximum total connections to the relay (default: 4096)
     /// Prevents connection exhaustion DoS attacks
-    #[arg(long, env = "NGIT_MAX_CONNECTIONS", default_value_t = 500)]
+    #[arg(long, env = "NGIT_MAX_CONNECTIONS", default_value_t = 4096)]
     pub max_connections: usize,
 }
 
