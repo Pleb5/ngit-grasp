@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 // ANSI color codes
-const GREEN: &str = "\x1b[32m";
-const RED: &str = "\x1b[31m";
+const GREEN: &str = "\x1b[1;92m"; // Bold bright green - ANSI standard for high visibility
+const RED: &str = "\x1b[1;91m"; // Bold bright red - ANSI standard for high visibility
 const YELLOW: &str = "\x1b[33m";
 const BLUE: &str = "\x1b[34m";
 const CYAN: &str = "\x1b[36m";
