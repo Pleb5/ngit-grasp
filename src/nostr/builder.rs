@@ -103,7 +103,7 @@ impl Nip34WritePolicy {
         let event_id_str = event.id.to_bech32().unwrap_or_else(|_| event.id.to_hex());
 
         match self.announcement_policy.validate(event).await {
-            AnnouncementResult::Accept => {
+            AnnouncementResult::Accept | AnnouncementResult::AcceptArchive => {
                 // Parse announcement to get repository details
                 match RepositoryAnnouncement::from_event(event.clone()) {
                     Ok(announcement) => {
@@ -159,34 +159,6 @@ impl Nip34WritePolicy {
                     Err(e) => {
                         tracing::warn!(
                             "Failed to parse maintainer announcement {}: {}",
-                            event_id_str,
-                            e
-                        );
-                        WritePolicyResult::reject(format!("Failed to parse announcement: {}", e))
-                    }
-                }
-            }
-            AnnouncementResult::AcceptArchive => {
-                // GRASP-05: Archive mode - accept announcement but don't create bare repository
-                match RepositoryAnnouncement::from_event(event.clone()) {
-                    Ok(announcement) => {
-                        tracing::info!(
-                            "Accepted archive announcement {} for {}/{} (GRASP-05 read-only mirror)",
-                            event_id_str,
-                            announcement.owner_npub(),
-                            announcement.identifier
-                        );
-                        // Don't create bare repository for archived announcements
-
-                        // Check purgatory for state events that might now be authorized
-                        self.check_purgatory_state_events_for_identifier(&announcement.identifier)
-                            .await;
-
-                        WritePolicyResult::Accept
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to parse archive announcement {}: {}",
                             event_id_str,
                             e
                         );

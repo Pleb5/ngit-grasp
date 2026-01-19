@@ -562,9 +562,10 @@ impl Config {
     }
 
     /// Get effective git data path
-    /// Returns a temp directory when using memory backend, otherwise the configured path
+    /// Returns a temp directory when using memory backend with default path, otherwise the configured path
     pub fn effective_git_data_path(&self) -> String {
-        if self.database_backend == DatabaseBackend::Memory {
+        if self.database_backend == DatabaseBackend::Memory && self.git_data_path == "./data/git" {
+            // Only use default temp directory if git_data_path is still the default value
             std::env::temp_dir()
                 .join("ngit-grasp-git")
                 .to_string_lossy()
@@ -733,13 +734,27 @@ mod tests {
     }
 
     #[test]
-    fn test_memory_backend_uses_temp_dir() {
+    fn test_memory_backend_uses_temp_dir_with_default_path() {
+        // When git_data_path is the default value, memory backend uses temp dir
         let config = Config {
             database_backend: DatabaseBackend::Memory,
+            git_data_path: "./data/git".to_string(), // Default value
             ..Config::for_testing()
         };
         let git_path = config.effective_git_data_path();
         assert!(git_path.contains("ngit-grasp-git"));
+    }
+
+    #[test]
+    fn test_memory_backend_respects_custom_path() {
+        // When git_data_path is explicitly set, memory backend respects it
+        let config = Config {
+            database_backend: DatabaseBackend::Memory,
+            git_data_path: "./custom/git/path".to_string(),
+            ..Config::for_testing()
+        };
+        let git_path = config.effective_git_data_path();
+        assert_eq!(git_path, "./custom/git/path");
     }
 
     #[test]

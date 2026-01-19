@@ -3,6 +3,7 @@
 //! Provides automatic relay lifecycle management for integration tests.
 
 use nostr_sdk::ToBech32;
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tokio::time::sleep;
@@ -15,6 +16,11 @@ pub struct TestRelay {
     process: Child,
     url: String,
     port: u16,
+    /// Temporary directory for git repositories
+    /// Kept alive for the lifetime of the relay
+    _git_data_dir: tempfile::TempDir,
+    /// Path to git data directory (for test assertions)
+    git_data_path: PathBuf,
 }
 
 impl TestRelay {
@@ -98,6 +104,37 @@ impl TestRelay {
         Self::start_with_full_options(Self::find_free_port(), bootstrap_relay_url, true).await
     }
 
+    /// Start relay with archive configuration
+    ///
+    /// This is useful for testing GRASP-05 archive mode behavior.
+    ///
+    /// # Arguments
+    /// * `archive_all` - Accept all repository announcements (GRASP-05)
+    /// * `archive_read_only` - Reject git pushes (read-only archive mode)
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use common::TestRelay;
+    ///
+    /// #[tokio::test]
+    /// async fn test_archive_mode() {
+    ///     let relay = TestRelay::start_with_archive_config(true, true).await;
+    ///     // ... test archive behavior ...
+    ///     relay.stop().await;
+    /// }
+    /// ```
+    pub async fn start_with_archive_config(archive_all: bool, archive_read_only: bool) -> Self {
+        Self::start_with_archive_and_sync(
+            Self::find_free_port(),
+            None,
+            false,
+            archive_all,
+            archive_read_only,
+        )
+        .await
+    }
+
     /// Start relay with options (internal, maintains backward compatibility)
     async fn start_with_options(port: u16, bootstrap_relay_url: Option<String>) -> Self {
         Self::start_with_full_options(port, bootstrap_relay_url, false).await
@@ -108,6 +145,34 @@ impl TestRelay {
         port: u16,
         bootstrap_relay_url: Option<String>,
         disable_negentropy: bool,
+    ) -> Self {
+        Self::start_with_archive_and_sync(
+            port,
+            bootstrap_relay_url,
+            disable_negentropy,
+            false,
+            false,
+        )
+        .await
+    }
+
+    /// Start relay with all options including archive configuration and sync
+    ///
+    /// This is the most flexible method for starting a test relay with all options.
+    /// Use this when you need both archive mode AND sync from a bootstrap relay.
+    ///
+    /// # Arguments
+    /// * `port` - Port to bind to
+    /// * `bootstrap_relay_url` - URL of relay to sync from (optional)
+    /// * `disable_negentropy` - Whether to disable NIP-77 negentropy sync
+    /// * `archive_all` - Accept all repository announcements (GRASP-05)
+    /// * `archive_read_only` - Reject git pushes (read-only archive mode)
+    pub async fn start_with_archive_and_sync(
+        port: u16,
+        bootstrap_relay_url: Option<String>,
+        disable_negentropy: bool,
+        archive_all: bool,
+        archive_read_only: bool,
     ) -> Self {
         let bind_address = format!("127.0.0.1:{}", port);
         let url = format!("ws://127.0.0.1:{}", port);
@@ -161,9 +226,26 @@ impl TestRelay {
             cmd.env("NGIT_SYNC_DISABLE_NEGENTROPY", "true");
         }
 
+        // Add archive configuration if requested
+        if archive_all {
+            cmd.env("NGIT_ARCHIVE_ALL", "true");
+        }
+        if archive_read_only {
+            cmd.env("NGIT_ARCHIVE_READ_ONLY", "true");
+        }
+
         let process = cmd.spawn().expect("Failed to start relay process");
 
-        let relay = Self { process, url, port };
+        // Store git data path for test assertions
+        let git_data_path = git_data_dir.path().to_path_buf();
+
+        let relay = Self {
+            process,
+            url,
+            port,
+            _git_data_dir: git_data_dir,
+            git_data_path,
+        };
 
         // Wait for relay to be ready
         relay.wait_for_ready().await;
@@ -179,6 +261,14 @@ impl TestRelay {
     /// Get the relay domain (host:port)
     pub fn domain(&self) -> String {
         format!("127.0.0.1:{}", self.port)
+    }
+
+    /// Get the git data directory path
+    ///
+    /// This is useful for test assertions that need to verify
+    /// git repositories were created correctly.
+    pub fn git_data_path(&self) -> &PathBuf {
+        &self.git_data_path
     }
 
     /// Wait for the relay to be ready to accept connections
