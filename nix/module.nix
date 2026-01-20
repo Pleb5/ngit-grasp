@@ -326,6 +326,20 @@ let
       # Working directory where .relay-owner.nsec will be created if needed
       WorkingDirectory = cfg.dataDir;
 
+      # Ensure data directories exist before service starts
+      # The + prefix runs these commands as root
+      # This is necessary because tmpfiles.rules aren't automatically executed
+      # during nixos-rebuild switch, causing service failures with custom dataDirs
+      ExecStartPre = [
+        "+${pkgs.coreutils}/bin/mkdir -p '${cfg.dataDir}'"
+        "+${pkgs.coreutils}/bin/mkdir -p '${cfg.dataDir}/git'"
+        "+${pkgs.coreutils}/bin/mkdir -p '${cfg.dataDir}/relay'"
+        "+${pkgs.coreutils}/bin/chown -R ${cfg.user}:${cfg.group} '${cfg.dataDir}'"
+        "+${pkgs.coreutils}/bin/chmod 750 '${cfg.dataDir}'"
+        "+${pkgs.coreutils}/bin/chmod 750 '${cfg.dataDir}/git'"
+        "+${pkgs.coreutils}/bin/chmod 750 '${cfg.dataDir}/relay'"
+      ];
+
       # Add git, openssh, and coreutils to PATH for purgatory sync operations
       Environment =
         "PATH=${pkgs.git}/bin:${pkgs.openssh}/bin:${pkgs.coreutils}/bin";
@@ -373,7 +387,9 @@ let
       SystemCallErrorNumber = "EPERM";
     };
 
-    # Directory creation handled by systemd tmpfiles (see config section below)
+    # Directory creation handled by both ExecStartPre (above) and tmpfiles (below)
+    # ExecStartPre ensures directories exist at service start time
+    # tmpfiles provides boot-time setup and consistency
   };
 
   enabledInstances =
