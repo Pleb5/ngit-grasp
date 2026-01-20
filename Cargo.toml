@@ -79,3 +79,6 @@ path = "src/main.rs"
 
 [workspace]
 members = [".", "grasp-audit"]
+
+[workspace.metadata.crane]
+name = "ngit-grasp"
