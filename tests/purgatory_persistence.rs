@@ -260,8 +260,7 @@ async fn test_purgatory_downtime_adjustment() {
     let purgatory = Purgatory::new(&git_data_path);
     let keys = Keys::generate();
 
-    let state_event = create_state_event_with_refs(&keys, "repo1", &[("main", "abc123")])
-        .unwrap();
+    let state_event = create_state_event_with_refs(&keys, "repo1", &[("main", "abc123")]).unwrap();
 
     purgatory.add_state(state_event.clone(), "repo1".to_string(), keys.public_key());
 
@@ -339,8 +338,7 @@ async fn test_purgatory_file_cleanup_after_restore() {
     let purgatory = Purgatory::new(&git_data_path);
     let keys = Keys::generate();
 
-    let state_event = create_state_event_with_refs(&keys, "repo1", &[("main", "abc123")])
-        .unwrap();
+    let state_event = create_state_event_with_refs(&keys, "repo1", &[("main", "abc123")]).unwrap();
 
     purgatory.add_state(state_event, "repo1".to_string(), keys.public_key());
 
@@ -546,10 +544,8 @@ async fn test_purgatory_multiple_state_events_same_identifier() {
     let keys1 = Keys::generate();
     let keys2 = Keys::generate();
 
-    let event1 = create_state_event_with_refs(&keys1, "repo1", &[("main", "abc123")])
-        .unwrap();
-    let event2 = create_state_event_with_refs(&keys2, "repo1", &[("main", "def456")])
-        .unwrap();
+    let event1 = create_state_event_with_refs(&keys1, "repo1", &[("main", "abc123")]).unwrap();
+    let event2 = create_state_event_with_refs(&keys2, "repo1", &[("main", "def456")]).unwrap();
 
     purgatory.add_state(event1.clone(), "repo1".to_string(), keys1.public_key());
     purgatory.add_state(event2.clone(), "repo1".to_string(), keys2.public_key());
@@ -579,8 +575,7 @@ async fn test_purgatory_continues_working_after_restore() {
     let purgatory = Purgatory::new(&git_data_path);
     let keys = Keys::generate();
 
-    let event1 = create_state_event_with_refs(&keys, "repo1", &[("main", "abc123")])
-        .unwrap();
+    let event1 = create_state_event_with_refs(&keys, "repo1", &[("main", "abc123")]).unwrap();
 
     purgatory.add_state(event1.clone(), "repo1".to_string(), keys.public_key());
 
@@ -591,8 +586,7 @@ async fn test_purgatory_continues_working_after_restore() {
     purgatory2.restore_from_disk(&state_path).unwrap();
 
     // Add new events after restore
-    let event2 = create_state_event_with_refs(&keys, "repo2", &[("main", "xyz789")])
-        .unwrap();
+    let event2 = create_state_event_with_refs(&keys, "repo2", &[("main", "xyz789")]).unwrap();
 
     purgatory2.add_state(event2.clone(), "repo2".to_string(), keys.public_key());
 
@@ -673,8 +667,7 @@ async fn test_purgatory_entries_expired_during_downtime() {
     let purgatory = Purgatory::new(&git_data_path);
     let keys = Keys::generate();
 
-    let event = create_state_event_with_refs(&keys, "repo1", &[("main", "abc123")])
-        .unwrap();
+    let event = create_state_event_with_refs(&keys, "repo1", &[("main", "abc123")]).unwrap();
 
     purgatory.add_state(event.clone(), "repo1".to_string(), keys.public_key());
 
