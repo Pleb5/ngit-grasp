@@ -478,6 +478,18 @@ impl RelayConnection {
         true
     }
 
+    /// Mark this relay as not supporting NIP-77 negentropy (for external callers)
+    ///
+    /// This is called by SyncManager when negentropy retry returns zero events,
+    /// indicating the relay's negentropy implementation is broken. Future batches
+    /// will skip negentropy and use REQ+EOSE directly.
+    ///
+    /// Note: Internal code in this struct uses direct field access instead.
+    pub fn mark_negentropy_unsupported(&self) {
+        self.nip77_supported
+            .store(2, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Perform a negentropy sync diff (dry run) to identify missing events
     ///
     /// This method performs NIP-77 negentropy reconciliation without downloading events.

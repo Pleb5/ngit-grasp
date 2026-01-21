@@ -904,10 +904,9 @@ impl SyncManager {
                     // (REQ by ID) show they DO have these events. This appears to be relay-
                     // specific behavior where the relay refuses to serve events via negentropy
                     // retry for unknown reasons (rate limiting, negentropy implementation bugs,
-                    // or other internal logic). We abort here to prevent infinite loops, but
-                    // future enhancement could fall back to REQ+EOSE when retry returns zero.
+                    // or other internal logic). When retry returns zero, fall back to REQ+EOSE.
                     if retry_count > 0 && received_count == 0 {
-                        tracing::error!(
+                        tracing::info!(
                             relay = %relay_url,
                             batch_id = batch.batch_id,
                             retry_count = retry_count,
@@ -915,20 +914,119 @@ impl SyncManager {
                             missing_count = missing.len(),
                             missing_ids = ?missing.iter().map(|id| id.to_hex()).collect::<Vec<_>>(),
                             "Negentropy retry made no progress - relay returned zero requested events. \
-                             Aborting retry to prevent infinite loop. Completing batch with partial results."
-                            // TODO: Track this failure in Prometheus metrics (sync_failed_batches_total)
+                             Marking relay as not supporting negentropy and falling back to REQ+EOSE."
                         );
 
-                        // Extract and complete batch with partial results, marking as failed
-                        let batch_idx_for_completion = batch_idx;
-                        let mut completed_batch = batches.remove(batch_idx_for_completion);
-                        completed_batch.failed = true; // Mark as failed for ConnectedDegraded transition
-                        if batches.is_empty() {
-                            pending.remove(relay_url);
+                        // Mark relay as not supporting negentropy so future batches skip it
+                        if let Some(conn) = self.connections.get(relay_url) {
+                            conn.mark_negentropy_unsupported();
                         }
+
+                        // Prepare for REQ+EOSE fallback using semantic filters
+                        // (not ID-based queries which already failed)
+                        let relay_url_for_fallback = relay_url.to_string();
+                        let batch_id = batch.batch_id;
+                        let batch_repos = batch.items.repos.clone();
+                        let batch_root_events = batch.items.root_events.clone();
+                        let missing_count = missing.len();
+
+                        // Drop the lock before async operations
                         drop(pending);
-                        self.confirm_batch(relay_url, completed_batch).await;
-                        return;
+
+                        // Create REQ+EOSE subscriptions using original semantic filters
+                        // This queries by kind/author/tags instead of by ID, which may
+                        // succeed even when ID-based queries fail
+                        let fallback_filters = filters::build_layer2_and_layer3_filters(
+                            &batch_repos,
+                            &batch_root_events,
+                            None,
+                        );
+
+                        if fallback_filters.is_empty() {
+                            tracing::warn!(
+                                relay = %relay_url_for_fallback,
+                                batch_id = batch_id,
+                                repos = batch_repos.len(),
+                                root_events = batch_root_events.len(),
+                                "Cannot create semantic fallback filters - no repos or root_events in batch"
+                            );
+                            // Fall through to ID-based fallback as last resort
+                        }
+
+                        let mut new_sub_ids = HashSet::new();
+                        if let Some(conn) = self.connections.get(&relay_url_for_fallback) {
+                            for filter in fallback_filters {
+                                match conn.subscribe_filter(filter, true).await {
+                                    Ok(sub_id) => {
+                                        new_sub_ids.insert(sub_id);
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            relay = %relay_url_for_fallback,
+                                            batch_id = batch_id,
+                                            error = %e,
+                                            "Failed to create REQ+EOSE fallback subscription"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
+                        if !new_sub_ids.is_empty() {
+                            // Re-acquire lock and update batch to use REQ+EOSE
+                            let mut pending = self.pending_sync_index.write().await;
+                            if let Some(batches) = pending.get_mut(&relay_url_for_fallback) {
+                                if let Some(batch) =
+                                    batches.iter_mut().find(|b| b.batch_id == batch_id)
+                                {
+                                    // Switch to REQ+EOSE sync method
+                                    batch.sync_method = SyncMethod::ReqEose;
+                                    // Clear negentropy-specific tracking
+                                    batch.requested_event_ids = None;
+                                    batch.received_event_ids = None;
+                                    // Reset retry count for REQ+EOSE flow
+                                    batch.retry_count = 0;
+                                    // Add new subscriptions to outstanding_subs
+                                    batch.outstanding_subs.extend(new_sub_ids.clone());
+
+                                    tracing::info!(
+                                        relay = %relay_url_for_fallback,
+                                        batch_id = batch_id,
+                                        fallback_subs = new_sub_ids.len(),
+                                        missing_events = missing_count,
+                                        "Switched batch to REQ+EOSE fallback, waiting for EOSE"
+                                    );
+                                }
+                            }
+                            // Early return - batch not complete yet, waiting for REQ+EOSE EOSE
+                            return;
+                        } else {
+                            // Failed to create any fallback subscriptions, mark as failed
+                            tracing::error!(
+                                relay = %relay_url_for_fallback,
+                                batch_id = batch_id,
+                                missing_count = missing_count,
+                                "Failed to create REQ+EOSE fallback subscriptions - completing batch with partial results"
+                            );
+
+                            // Re-acquire lock to extract the batch
+                            let mut pending = self.pending_sync_index.write().await;
+                            if let Some(batches) = pending.get_mut(&relay_url_for_fallback) {
+                                if let Some(idx) =
+                                    batches.iter().position(|b| b.batch_id == batch_id)
+                                {
+                                    let mut completed_batch = batches.remove(idx);
+                                    completed_batch.failed = true; // Mark as failed
+                                    if batches.is_empty() {
+                                        pending.remove(&relay_url_for_fallback);
+                                    }
+                                    drop(pending);
+                                    self.confirm_batch(&relay_url_for_fallback, completed_batch)
+                                        .await;
+                                }
+                            }
+                            return;
+                        }
                     }
 
                     tracing::warn!(
