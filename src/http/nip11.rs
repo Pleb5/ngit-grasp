@@ -100,7 +100,7 @@ impl RelayInformationDocument {
         Self {
             name: config.relay_name(),
             description: config.relay_description.clone(),
-            pubkey: config.relay_owner_npub().ok(),
+            pubkey: config.relay_owner_pubkey_hex().ok(),
             contact: None, // Could be added to config if needed
             supported_nips: vec![
                 1,  // NIP-01: Basic protocol flow
@@ -145,10 +145,11 @@ mod tests {
         assert_eq!(doc.name, "Test Relay");
         assert_eq!(doc.description, "A test relay");
 
-        // Verify pubkey is present and is a valid npub
+        // Verify pubkey is present and is a valid hex string (64 chars)
         assert!(doc.pubkey.is_some());
         let pubkey = doc.pubkey.unwrap();
-        assert!(pubkey.starts_with("npub1"));
+        assert_eq!(pubkey.len(), 64);
+        assert!(pubkey.chars().all(|c| c.is_ascii_hexdigit()));
 
         assert!(doc.supported_nips.contains(&1));
         assert!(doc.supported_nips.contains(&11));

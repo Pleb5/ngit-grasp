@@ -574,7 +574,13 @@ impl Config {
         Keys::parse(nsec).context("Invalid relay_owner_nsec")
     }
 
-    /// Get the relay owner's public key (npub format) for NIP-11
+    /// Get the relay owner's public key (hex format) for NIP-11
+    pub fn relay_owner_pubkey_hex(&self) -> Result<String> {
+        let keys = self.relay_owner_keys()?;
+        Ok(keys.public_key().to_hex())
+    }
+
+    /// Get the relay owner's public key (npub format)
     pub fn relay_owner_npub(&self) -> Result<String> {
         let keys = self.relay_owner_keys()?;
         Ok(keys.public_key().to_bech32()?)
