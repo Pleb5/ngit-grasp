@@ -159,14 +159,23 @@ impl Service<Request<Incoming>> for HttpService {
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string());
 
+            // Extract Content-Encoding header to handle gzip-compressed request bodies
+            // Modern git clients send gzip-compressed POST bodies for efficiency
+            let content_encoding = req
+                .headers()
+                .get("content-encoding")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_lowercase());
+
             tracing::debug!(
-                "Git request: {} {} (npub={}, id={}, subpath={}, protocol={:?})",
+                "Git request: {} {} (npub={}, id={}, subpath={}, protocol={:?}, encoding={:?})",
                 method,
                 path,
                 npub,
                 identifier,
                 subpath,
-                git_protocol
+                git_protocol,
+                content_encoding
             );
 
             let repo_path = git::resolve_repo_path(&git_data_path, &npub, &identifier);
@@ -175,11 +184,38 @@ impl Service<Request<Incoming>> for HttpService {
 
             return Box::pin(async move {
                 // Collect request body once before the match statement
-                let body_bytes = req
+                let raw_body = req
                     .collect()
                     .await
                     .map(|collected| collected.to_bytes())
                     .unwrap_or_else(|_| Bytes::new());
+
+                // Decompress gzip-encoded request bodies
+                // Git clients send Content-Encoding: gzip for POST requests
+                let body_bytes = if content_encoding.as_deref() == Some("gzip") {
+                    use flate2::read::GzDecoder;
+                    use std::io::Read;
+
+                    let mut decoder = GzDecoder::new(&raw_body[..]);
+                    let mut decompressed = Vec::new();
+                    match decoder.read_to_end(&mut decompressed) {
+                        Ok(_) => {
+                            tracing::debug!(
+                                "Decompressed gzip body: {} -> {} bytes",
+                                raw_body.len(),
+                                decompressed.len()
+                            );
+                            Bytes::from(decompressed)
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to decompress gzip body: {}", e);
+                            // Fall back to raw body (might work if not actually gzip)
+                            raw_body
+                        }
+                    }
+                } else {
+                    raw_body
+                };
 
                 let result = match (method.as_ref(), subpath.as_str()) {
                     // GET /info/refs?service=git-upload-pack or git-receive-pack
