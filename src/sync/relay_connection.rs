@@ -282,9 +282,7 @@ impl RelayConnection {
                                     || msg.contains("negentropy");
 
                                 if is_negentropy_notice {
-                                    // Mark relay as not supporting NIP-77
-                                    self.nip77_supported
-                                        .store(2, std::sync::atomic::Ordering::Relaxed);
+                                    self.mark_negentropy_unsupported();
 
                                     tracing::info!(
                                         relay = %url,
@@ -478,13 +476,14 @@ impl RelayConnection {
         true
     }
 
-    /// Mark this relay as not supporting NIP-77 negentropy (for external callers)
+    /// Mark this relay as not supporting NIP-77 negentropy
     ///
-    /// This is called by SyncManager when negentropy retry returns zero events,
-    /// indicating the relay's negentropy implementation is broken. Future batches
-    /// will skip negentropy and use REQ+EOSE directly.
+    /// Called when we detect negentropy isn't working for this relay:
+    /// - NOTICE message contains negentropy-related error
+    /// - negentropy_sync_diff() fails
+    /// - Negentropy retry returns zero events
     ///
-    /// Note: Internal code in this struct uses direct field access instead.
+    /// Future batches will skip negentropy and use REQ+EOSE directly.
     pub fn mark_negentropy_unsupported(&self) {
         self.nip77_supported
             .store(2, std::sync::atomic::Ordering::Relaxed);
@@ -576,9 +575,7 @@ impl RelayConnection {
                 Ok(reconciliation)
             }
             Err(e) => {
-                // Mark relay as not supporting NIP-77
-                self.nip77_supported
-                    .store(2, std::sync::atomic::Ordering::Relaxed);
+                self.mark_negentropy_unsupported();
 
                 // Log warning only once per relay to avoid spam
                 if !self
