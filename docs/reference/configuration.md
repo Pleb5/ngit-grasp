@@ -574,11 +574,79 @@ NGIT_ARCHIVE_WHITELIST=npub1alice23...,npub1bob23.../linux,bitcoin-core
 
 ---
 
+#### `NGIT_ARCHIVE_GRASP_SERVICES`
+
+**Description:** Comma-separated list of GRASP server domains to archive  
+**Type:** String (comma-separated domain names)  
+**Default:** (empty)  
+**Required:** No
+
+**Format:**
+- `<domain>` - Archive all repositories from this GRASP server domain
+- **Must be bare domains only** (e.g., `git.example.com`, NOT `wss://git.example.com`)
+- Matching extracts domains from announcement clone URLs and compares them exactly (case-sensitive)
+
+**Examples:**
+
+```bash
+# Archive all repos from a single GRASP server
+NGIT_ARCHIVE_GRASP_SERVICES=git.example.com
+
+# Archive repos from multiple GRASP servers
+NGIT_ARCHIVE_GRASP_SERVICES=git.example.com,git.nostr.dev,relay.gitnostr.com
+
+# Archive from localhost (testing)
+NGIT_ARCHIVE_GRASP_SERVICES=localhost:7334
+```
+
+**Validation:**
+
+- Domain entries must be bare domains without scheme prefixes (ws://, wss://, https://, etc.)
+- Whitespace is trimmed
+- Empty entries are ignored
+- **Mutually exclusive** with `NGIT_ARCHIVE_ALL` and `NGIT_ARCHIVE_WHITELIST`
+
+**Security Notes:**
+
+- Archives ALL repositories from the specified GRASP server domains
+- Use with caution - ensure you trust the GRASP servers you're archiving from
+- Storage requirements depend on the size of repositories on the archived servers
+- Automatically sets `NGIT_ARCHIVE_READ_ONLY=true` by default
+
+**Error Conditions:**
+
+```bash
+# ERROR: Cannot use with NGIT_ARCHIVE_ALL
+NGIT_ARCHIVE_GRASP_SERVICES=git.example.com
+NGIT_ARCHIVE_ALL=true
+# → Server fails to start: "NGIT_ARCHIVE_GRASP_SERVICES cannot be used with
+#    NGIT_ARCHIVE_ALL=true. These options are mutually exclusive."
+
+# ERROR: Cannot use with NGIT_ARCHIVE_WHITELIST
+NGIT_ARCHIVE_GRASP_SERVICES=git.example.com
+NGIT_ARCHIVE_WHITELIST=npub1alice...
+# → Server fails to start: "NGIT_ARCHIVE_GRASP_SERVICES cannot be used with
+#    NGIT_ARCHIVE_WHITELIST. These options are mutually exclusive."
+```
+
+**Use Cases:**
+
+```bash
+# Backup/mirror a specific GRASP server
+NGIT_ARCHIVE_GRASP_SERVICES=git.example.com
+NGIT_ARCHIVE_READ_ONLY=true  # Default
+
+# Archive multiple trusted GRASP servers
+NGIT_ARCHIVE_GRASP_SERVICES=git.nostr.dev,relay.gitnostr.com
+```
+
+---
+
 #### `NGIT_ARCHIVE_READ_ONLY`
 
 **Description:** Configure relay as read-only sync of archived repositories  
 **Type:** Boolean  
-**Default:** `true` if `NGIT_ARCHIVE_ALL` or `NGIT_ARCHIVE_WHITELIST` is set, `false` otherwise  
+**Default:** `true` if `NGIT_ARCHIVE_ALL`, `NGIT_ARCHIVE_WHITELIST`, or `NGIT_ARCHIVE_GRASP_SERVICES` is set, `false` otherwise  
 **Required:** No
 
 **Examples:**
@@ -591,7 +659,7 @@ NGIT_ARCHIVE_READ_ONLY=true
 NGIT_ARCHIVE_READ_ONLY=false
 
 # Automatic (default behavior)
-# - If NGIT_ARCHIVE_ALL or NGIT_ARCHIVE_WHITELIST is set → true
+# - If NGIT_ARCHIVE_ALL, NGIT_ARCHIVE_WHITELIST, or NGIT_ARCHIVE_GRASP_SERVICES is set → true
 # - Otherwise → false
 # NGIT_ARCHIVE_READ_ONLY=
 ```
@@ -615,8 +683,9 @@ NGIT_ARCHIVE_READ_ONLY=false
 NGIT_ARCHIVE_READ_ONLY=true
 NGIT_ARCHIVE_ALL=false
 NGIT_ARCHIVE_WHITELIST=
+NGIT_ARCHIVE_GRASP_SERVICES=
 # → Server fails to start: "NGIT_ARCHIVE_READ_ONLY=true requires either 
-#    NGIT_ARCHIVE_ALL=true or NGIT_ARCHIVE_WHITELIST to be set"
+#    NGIT_ARCHIVE_ALL=true, NGIT_ARCHIVE_WHITELIST, or NGIT_ARCHIVE_GRASP_SERVICES to be set"
 
 # ERROR: Cannot use repository whitelist with archive read-only
 NGIT_ARCHIVE_READ_ONLY=true
@@ -633,6 +702,7 @@ When `NGIT_ARCHIVE_READ_ONLY=true`:
 - `curation`: Set to one of:
   - `"Read-only sync of all repositories found on network"` (if `NGIT_ARCHIVE_ALL=true`)
   - `"Read-only sync of whitelisted repositories and maintainers"` (if `NGIT_ARCHIVE_WHITELIST` set)
+  - `"Read-only sync of repositories from specified GRASP servers"` (if `NGIT_ARCHIVE_GRASP_SERVICES` set)
 
 **Use Cases:**
 
@@ -648,6 +718,10 @@ NGIT_ARCHIVE_READ_ONLY=true  # Default
 # Writable mirror (advanced, not typical)
 NGIT_ARCHIVE_WHITELIST=npub1alice...
 NGIT_ARCHIVE_READ_ONLY=false
+
+# Archive specific GRASP servers
+NGIT_ARCHIVE_GRASP_SERVICES=git.example.com,git.nostr.dev
+NGIT_ARCHIVE_READ_ONLY=true  # Default
 ```
 
 ---

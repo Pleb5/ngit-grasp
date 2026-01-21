@@ -196,6 +196,19 @@ let
         '';
       };
 
+      archiveGraspServices = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        example = [ "git.example.com" "git.nostr.dev" ];
+        description = ''
+          GRASP-05 archive GRASP services: list of GRASP server domains to archive.
+          Archives all repositories from the specified GRASP server domains.
+          Must be bare domains only (e.g., git.example.com, NOT wss://git.example.com).
+          Mutually exclusive with archiveAll and archiveWhitelist.
+          Automatically sets archiveReadOnly to true by default.
+        '';
+      };
+
       archiveReadOnly = mkOption {
         type = types.nullOr types.bool;
         default = null;
@@ -205,7 +218,7 @@ let
             - NIP-11 includes GRASP-05 in supported_grasps
             - NIP-11 curation field describes archive scope
             - Repository announcements not listing this service are accepted per whitelist/archive-all
-          Default: true if archiveAll or archiveWhitelist is set, false otherwise
+          Default: true if archiveAll, archiveWhitelist, or archiveGraspServices is set, false otherwise
           Note: Setting to true without archive config causes startup error
           Note: Cannot be used with repositoryWhitelist (mutually exclusive)
         '';
@@ -298,6 +311,8 @@ let
         toString cfg.naughtyListExpirationHours;
       NGIT_ARCHIVE_ALL = if cfg.archiveAll then "true" else "false";
       NGIT_ARCHIVE_WHITELIST = concatStringsSep "," cfg.archiveWhitelist;
+      NGIT_ARCHIVE_GRASP_SERVICES =
+        concatStringsSep "," cfg.archiveGraspServices;
       NGIT_REPOSITORY_WHITELIST = concatStringsSep "," cfg.repositoryWhitelist;
       NGIT_REPOSITORY_BLACKLIST = concatStringsSep "," cfg.repositoryBlacklist;
       NGIT_EVENT_BLACKLIST = concatStringsSep "," cfg.eventBlacklist;

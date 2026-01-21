@@ -122,6 +122,11 @@ pub struct ArchiveConfig {
     /// If empty and archive_all is false, GRASP-05 is disabled (GRASP-01 strict mode).
     pub whitelist: Vec<WhitelistEntry>,
 
+    /// GRASP server domains to archive (archive all repositories from these domains)
+    ///
+    /// If non-empty, archives all repositories from the specified GRASP server domains.
+    pub grasp_services: Vec<String>,
+
     /// Read-only archive mode: relay is a read-only sync of archived repositories
     ///
     /// When true, the relay ONLY accepts announcements matching the archive whitelist/all.
@@ -131,9 +136,9 @@ pub struct ArchiveConfig {
 }
 
 impl ArchiveConfig {
-    /// Check if GRASP-05 is enabled (either archive_all or non-empty whitelist)
+    /// Check if GRASP-05 is enabled (either archive_all, non-empty whitelist, or non-empty grasp_services)
     pub fn enabled(&self) -> bool {
-        self.archive_all || !self.whitelist.is_empty()
+        self.archive_all || !self.whitelist.is_empty() || !self.grasp_services.is_empty()
     }
 
     /// Check if an announcement matches the archive configuration
@@ -141,6 +146,7 @@ impl ArchiveConfig {
     /// Returns true if:
     /// - archive_all is true, OR
     /// - announcement matches any whitelist entry
+    /// Note: grasp_services matching is handled via matches_grasp_services()
     pub fn matches(&self, npub: &str, identifier: &str) -> bool {
         if self.archive_all {
             return true;
@@ -150,6 +156,19 @@ impl ArchiveConfig {
             .iter()
             .any(|entry| entry.matches(npub, identifier))
     }
+
+    /// Check if any of the given domains match the configured grasp_services
+    ///
+    /// Returns true if any domain in the list matches any configured grasp_services entry.
+    pub fn matches_grasp_services(&self, domains: &[String]) -> bool {
+        if self.grasp_services.is_empty() {
+            return false;
+        }
+
+        domains
+            .iter()
+            .any(|domain| self.grasp_services.iter().any(|service| service == domain))
+    }
 }
 
 impl Default for ArchiveConfig {
@@ -157,6 +176,7 @@ impl Default for ArchiveConfig {
         Self {
             archive_all: false,
             whitelist: Vec::new(),
+            grasp_services: Vec::new(),
             read_only: false,
         }
     }
@@ -447,9 +467,15 @@ pub struct Config {
     #[arg(long, env = "NGIT_ARCHIVE_WHITELIST", default_value = "")]
     pub archive_whitelist: String,
 
+    /// GRASP-05 archive GRASP services: comma-separated list of GRASP server domains to archive
+    /// When set, archives all repositories from the specified GRASP server domains
+    /// Mutually exclusive with archive_all and archive_whitelist
+    #[arg(long, env = "NGIT_ARCHIVE_GRASP_SERVICES", default_value = "")]
+    pub archive_grasp_services: String,
+
     /// Archive read-only mode: relay is a read-only sync of archived repositories
-    /// Defaults to true if archive_all or archive_whitelist is set, false otherwise
-    /// Throws error if set to true without archive_all or archive_whitelist
+    /// Defaults to true if archive_all, archive_whitelist, or archive_grasp_services is set, false otherwise
+    /// Throws error if set to true without archive_all, archive_whitelist, or archive_grasp_services
     #[arg(long, env = "NGIT_ARCHIVE_READ_ONLY")]
     pub archive_read_only: Option<bool>,
 
@@ -589,13 +615,32 @@ impl Config {
 
         // Validate archive configuration
         let archive_whitelist = WhitelistEntry::parse_whitelist(&self.archive_whitelist);
-        let archive_enabled = self.archive_all || !archive_whitelist.is_empty();
+        let archive_grasp_services = self.parse_archive_grasp_services();
+        let archive_enabled =
+            self.archive_all || !archive_whitelist.is_empty() || !archive_grasp_services.is_empty();
+
+        // Fatal error: archive_grasp_services cannot be used with archive_all or archive_whitelist
+        if !archive_grasp_services.is_empty() {
+            if self.archive_all {
+                return Err(anyhow!(
+                    "NGIT_ARCHIVE_GRASP_SERVICES cannot be used with NGIT_ARCHIVE_ALL=true. \
+                     These options are mutually exclusive."
+                ));
+            }
+            if !archive_whitelist.is_empty() {
+                return Err(anyhow!(
+                    "NGIT_ARCHIVE_GRASP_SERVICES cannot be used with NGIT_ARCHIVE_WHITELIST. \
+                     These options are mutually exclusive."
+                ));
+            }
+        }
 
         // Fatal error: archive_read_only=true without archive mode enabled
         if let Some(true) = self.archive_read_only {
             if !archive_enabled {
                 return Err(anyhow!(
-                    "NGIT_ARCHIVE_READ_ONLY=true requires either NGIT_ARCHIVE_ALL=true or NGIT_ARCHIVE_WHITELIST to be set"
+                    "NGIT_ARCHIVE_READ_ONLY=true requires either NGIT_ARCHIVE_ALL=true, \
+                     NGIT_ARCHIVE_WHITELIST, or NGIT_ARCHIVE_GRASP_SERVICES to be set"
                 ));
             }
         }
@@ -619,13 +664,32 @@ impl Config {
         Ok(())
     }
 
+    /// Parse archive GRASP services from comma-separated string
+    ///
+    /// Returns a list of domain names (GRASP server domains to archive).
+    /// Whitespace is trimmed and empty entries are ignored.
+    pub fn parse_archive_grasp_services(&self) -> Vec<String> {
+        if self.archive_grasp_services.trim().is_empty() {
+            return Vec::new();
+        }
+
+        self.archive_grasp_services
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect()
+    }
+
     /// Get parsed archive configuration with computed read-only mode
     ///
     /// Read-only mode defaults to true if archive mode is enabled, false otherwise.
     /// This method assumes config has been validated - call Config::validate() first!
     pub fn archive_config(&self) -> ArchiveConfig {
         let whitelist = WhitelistEntry::parse_whitelist(&self.archive_whitelist);
-        let archive_enabled = self.archive_all || !whitelist.is_empty();
+        let archive_grasp_services = self.parse_archive_grasp_services();
+        let archive_enabled =
+            self.archive_all || !whitelist.is_empty() || !archive_grasp_services.is_empty();
 
         let read_only = match self.archive_read_only {
             Some(true) => true, // Already validated in validate()
@@ -639,6 +703,7 @@ impl Config {
         ArchiveConfig {
             archive_all: self.archive_all,
             whitelist,
+            grasp_services: archive_grasp_services,
             read_only,
         }
     }
@@ -705,6 +770,7 @@ impl Config {
             naughty_list_expiration_hours: 12,
             archive_all: false,
             archive_whitelist: String::new(),
+            archive_grasp_services: String::new(),
             archive_read_only: None,
             repository_whitelist: String::new(),
             repository_blacklist: String::new(),
@@ -936,6 +1002,7 @@ mod tests {
         let config = ArchiveConfig {
             archive_all: true,
             whitelist: Vec::new(),
+            grasp_services: Vec::new(),
             read_only: true,
         };
         assert!(config.enabled());
@@ -943,6 +1010,7 @@ mod tests {
         let config = ArchiveConfig {
             archive_all: false,
             whitelist: vec![WhitelistEntry::Identifier("test".into())],
+            grasp_services: Vec::new(),
             read_only: true,
         };
         assert!(config.enabled());
@@ -958,6 +1026,7 @@ mod tests {
                 WhitelistEntry::Pubkey(test_npub.clone()),
                 WhitelistEntry::Identifier("bitcoin-core".into()),
             ],
+            grasp_services: Vec::new(),
             read_only: false,
         };
 
@@ -971,6 +1040,7 @@ mod tests {
         let config = ArchiveConfig {
             archive_all: true,
             whitelist: Vec::new(),
+            grasp_services: Vec::new(),
             read_only: true,
         };
 
@@ -1378,5 +1448,186 @@ mod tests {
 
         let result = config.check(&allowed_npub);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_archive_grasp_services_empty() {
+        let config = Config::for_testing();
+        let services = config.parse_archive_grasp_services();
+        assert!(services.is_empty());
+
+        let config = Config {
+            archive_grasp_services: "   ".to_string(),
+            ..Config::for_testing()
+        };
+        let services = config.parse_archive_grasp_services();
+        assert!(services.is_empty());
+    }
+
+    #[test]
+    fn test_parse_archive_grasp_services_single() {
+        let config = Config {
+            archive_grasp_services: "git.example.com".to_string(),
+            ..Config::for_testing()
+        };
+        let services = config.parse_archive_grasp_services();
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0], "git.example.com");
+    }
+
+    #[test]
+    fn test_parse_archive_grasp_services_multiple() {
+        let config = Config {
+            archive_grasp_services: "git.example.com,git.nostr.dev,relay.gitnostr.com".to_string(),
+            ..Config::for_testing()
+        };
+        let services = config.parse_archive_grasp_services();
+        assert_eq!(services.len(), 3);
+        assert_eq!(services[0], "git.example.com");
+        assert_eq!(services[1], "git.nostr.dev");
+        assert_eq!(services[2], "relay.gitnostr.com");
+    }
+
+    #[test]
+    fn test_parse_archive_grasp_services_with_whitespace() {
+        let config = Config {
+            archive_grasp_services: "  git.example.com , git.nostr.dev  ,  relay.gitnostr.com  "
+                .to_string(),
+            ..Config::for_testing()
+        };
+        let services = config.parse_archive_grasp_services();
+        assert_eq!(services.len(), 3);
+        assert_eq!(services[0], "git.example.com");
+        assert_eq!(services[1], "git.nostr.dev");
+        assert_eq!(services[2], "relay.gitnostr.com");
+    }
+
+    #[test]
+    fn test_archive_grasp_services_validation_error_with_archive_all() {
+        let config = Config {
+            archive_all: true,
+            archive_grasp_services: "git.example.com".to_string(),
+            ..Config::for_testing()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("NGIT_ARCHIVE_GRASP_SERVICES"));
+        assert!(err.contains("NGIT_ARCHIVE_ALL"));
+        assert!(err.contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn test_archive_grasp_services_validation_error_with_archive_whitelist() {
+        let keys = Keys::generate();
+        let test_npub = keys.public_key().to_bech32().unwrap();
+        let config = Config {
+            archive_whitelist: test_npub,
+            archive_grasp_services: "git.example.com".to_string(),
+            ..Config::for_testing()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("NGIT_ARCHIVE_GRASP_SERVICES"));
+        assert!(err.contains("NGIT_ARCHIVE_WHITELIST"));
+        assert!(err.contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn test_archive_grasp_services_enables_archive_mode() {
+        let config = Config {
+            archive_grasp_services: "git.example.com".to_string(),
+            ..Config::for_testing()
+        };
+        let archive_config = config.archive_config();
+        assert!(archive_config.enabled());
+        assert_eq!(archive_config.read_only, true); // Default to true
+    }
+
+    #[test]
+    fn test_archive_grasp_services_read_only_default() {
+        // Default: true when archive_grasp_services is set
+        let config = Config {
+            archive_grasp_services: "git.example.com".to_string(),
+            ..Config::for_testing()
+        };
+        assert_eq!(config.archive_config().read_only, true);
+    }
+
+    #[test]
+    fn test_archive_grasp_services_read_only_explicit_false() {
+        // Explicit false should be respected
+        let config = Config {
+            archive_grasp_services: "git.example.com".to_string(),
+            archive_read_only: Some(false),
+            ..Config::for_testing()
+        };
+        assert_eq!(config.archive_config().read_only, false);
+    }
+
+    #[test]
+    fn test_archive_read_only_validation_with_grasp_services() {
+        // Should succeed with archive_grasp_services set
+        let config = Config {
+            archive_grasp_services: "git.example.com".to_string(),
+            archive_read_only: Some(true),
+            ..Config::for_testing()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_archive_config_matches_grasp_services() {
+        let config = ArchiveConfig {
+            archive_all: false,
+            whitelist: Vec::new(),
+            grasp_services: vec!["git.example.com".to_string(), "gitlab.org".to_string()],
+            read_only: true,
+        };
+
+        // Should match configured services
+        assert!(config.matches_grasp_services(&["git.example.com".to_string()]));
+        assert!(config.matches_grasp_services(&["gitlab.org".to_string()]));
+
+        // Should not match unconfigured services
+        assert!(!config.matches_grasp_services(&["github.com".to_string()]));
+        assert!(!config.matches_grasp_services(&["other.com".to_string()]));
+    }
+
+    #[test]
+    fn test_archive_config_matches_grasp_services_empty() {
+        let config = ArchiveConfig {
+            archive_all: false,
+            whitelist: Vec::new(),
+            grasp_services: Vec::new(),
+            read_only: true,
+        };
+
+        // Should not match anything when grasp_services is empty
+        assert!(!config.matches_grasp_services(&["git.example.com".to_string()]));
+        assert!(!config.matches_grasp_services(&[]));
+    }
+
+    #[test]
+    fn test_archive_config_matches_grasp_services_multiple_domains() {
+        let config = ArchiveConfig {
+            archive_all: false,
+            whitelist: Vec::new(),
+            grasp_services: vec!["git.example.com".to_string()],
+            read_only: true,
+        };
+
+        // Should match if any domain matches
+        assert!(config.matches_grasp_services(&[
+            "github.com".to_string(),
+            "git.example.com".to_string(),
+            "gitlab.org".to_string(),
+        ]));
+
+        // Should not match if no domain matches
+        assert!(
+            !config.matches_grasp_services(&["github.com".to_string(), "gitlab.org".to_string(),])
+        );
     }
 }

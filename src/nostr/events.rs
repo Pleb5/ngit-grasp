@@ -436,6 +436,17 @@ pub fn validate_announcement(
         return AnnouncementResult::AcceptArchive;
     }
 
+    // GRASP-05: Archive mode - accept if announcement lists any configured GRASP service in clone URLs
+    // Only check clone URLs (not relays) since we're archiving from OTHER services
+    // Check if announcement matches any configured GRASP service domains
+    if archive_config
+        .grasp_services
+        .iter()
+        .any(|service| announcement.has_clone_url(service))
+    {
+        return AnnouncementResult::AcceptArchive;
+    }
+
     // Reject with appropriate error message
     if archive_config.read_only {
         AnnouncementResult::Reject(format!(

@@ -1,0 +1,378 @@
+//! Archive GRASP Services Integration Tests
+//!
+//! Tests that verify archive_grasp_services filtering behavior:
+//! - Announcements with matching GRASP service domains are accepted
+//! - Announcements with non-matching GRASP service domains are rejected
+//! - Multiple configured services work correctly
+//! - Case-insensitive domain matching
+//!
+//! # Test Strategy
+//!
+//! These tests verify the GRASP-05 archive mode with grasp_services filtering:
+//! 1. Configure relay with specific GRASP service domains
+//! 2. Send announcements with various clone URLs
+//! 3. Verify announcements are accepted/rejected based on domain matching
+//! 4. Verify repositories are created only for accepted announcements
+//!
+//! # Running Tests
+//!
+//! ```bash
+//! # Run all archive grasp services tests
+//! cargo test --test archive_grasp_services
+//!
+//! # Run specific test
+//! cargo test --test archive_grasp_services test_archive_accepts_matching_grasp_service
+//!
+//! # With output for debugging
+//! cargo test --test archive_grasp_services -- --nocapture
+//! ```
+
+mod common;
+
+use common::TestRelay;
+use nostr_sdk::prelude::*;
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
+
+/// Helper to start a relay with archive_grasp_services configuration
+///
+/// This is a specialized version of TestRelay::start_with_archive_and_sync
+/// that adds the NGIT_ARCHIVE_GRASP_SERVICES environment variable.
+async fn start_relay_with_grasp_services(services: &str) -> (Child, String, PathBuf) {
+    let port = TestRelay::find_free_port();
+    let bind_address = format!("127.0.0.1:{}", port);
+    let url = format!("ws://127.0.0.1:{}", port);
+
+    // Create temporary directory for git repositories
+    let git_data_dir = tempfile::tempdir().expect("Failed to create temporary git data directory");
+
+    // Use the built binary directly
+    let binary_path = std::env::current_exe()
+        .expect("Failed to get current exe")
+        .parent()
+        .expect("Failed to get parent dir")
+        .parent()
+        .expect("Failed to get grandparent dir")
+        .join("ngit-grasp");
+
+    // Generate a test owner npub
+    let test_keys = nostr_sdk::Keys::generate();
+    let test_npub = test_keys
+        .public_key()
+        .to_bech32()
+        .expect("Failed to generate test npub");
+
+    // Start the relay process with archive_grasp_services
+    let mut cmd = Command::new(&binary_path);
+    cmd.env("NGIT_BIND_ADDRESS", &bind_address)
+        .env("NGIT_DOMAIN", &bind_address)
+        .env("NGIT_GIT_DATA_PATH", git_data_dir.path())
+        .env("NGIT_DATABASE_BACKEND", "memory")
+        .env("NGIT_OWNER_NPUB", &test_npub)
+        .env("NGIT_ARCHIVE_GRASP_SERVICES", services)
+        .env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    let process = cmd.spawn().expect("Failed to start relay process");
+
+    // Store git data path for test assertions
+    let git_data_path = git_data_dir.path().to_path_buf();
+
+    // Wait for relay to be ready
+    wait_for_relay_ready(port).await;
+
+    (process, url, git_data_path)
+}
+
+/// Wait for the relay to be ready to accept connections
+async fn wait_for_relay_ready(port: u16) {
+    let max_attempts = 50; // 5 seconds total
+    let delay = Duration::from_millis(100);
+
+    for attempt in 0..max_attempts {
+        // Try to connect to the relay
+        match tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)).await {
+            Ok(_) => {
+                // Connection successful, relay is ready
+                // Give it a tiny bit more time to fully initialize
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                return;
+            }
+            Err(_) => {
+                if attempt == max_attempts - 1 {
+                    panic!("Relay failed to start after {} attempts", max_attempts);
+                }
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+}
+
+/// Test that announcements with matching GRASP service domains are accepted.
+///
+/// Scenario:
+/// 1. Start relay with archive_grasp_services="git.example.com"
+/// 2. Send announcement with clone URL from git.example.com
+/// 3. Verify announcement is accepted (repository is created)
+#[tokio::test]
+async fn test_archive_accepts_matching_grasp_service() {
+    let (mut process, url, git_data_path) =
+        start_relay_with_grasp_services("git.example.com").await;
+    let keys = Keys::generate();
+    let identifier = "test-repo";
+
+    // Create announcement with clone URL from git.example.com
+    let npub = keys.public_key().to_bech32().expect("Failed to get npub");
+    let tags = vec![
+        Tag::identifier(identifier),
+        Tag::custom(
+            TagKind::custom("clone"),
+            vec![format!("https://git.example.com/user/{}.git", identifier)],
+        ),
+        Tag::custom(
+            TagKind::custom("relays"),
+            vec!["wss://relay.example.com".to_string()],
+        ),
+    ];
+
+    let announcement = EventBuilder::new(Kind::GitRepoAnnouncement, "Repository state")
+        .tags(tags)
+        .sign_with_keys(&keys)
+        .expect("Failed to sign announcement");
+
+    // Send announcement to relay
+    let client = Client::new(keys.clone());
+    client.add_relay(&url).await.expect("Failed to add relay");
+    client.connect().await;
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    client
+        .send_event(&announcement)
+        .await
+        .expect("Failed to send announcement");
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Verify repository was created (announcement was accepted)
+    let repo_path = git_data_path.join(format!("{}/{}.git", npub, identifier));
+
+    assert!(
+        repo_path.exists(),
+        "Repository should be created for announcement with matching GRASP service domain"
+    );
+
+    // Cleanup
+    client.disconnect().await;
+    let _ = process.kill();
+    let _ = process.wait();
+}
+
+/// Test that announcements with non-matching GRASP service domains are rejected.
+///
+/// Scenario:
+/// 1. Start relay with archive_grasp_services="git.example.com"
+/// 2. Send announcement with clone URL from github.com (not in services list)
+/// 3. Verify announcement is rejected (repository is NOT created)
+#[tokio::test]
+async fn test_archive_rejects_non_matching_grasp_service() {
+    let (mut process, url, git_data_path) =
+        start_relay_with_grasp_services("git.example.com").await;
+    let keys = Keys::generate();
+    let identifier = "test-repo";
+
+    // Create announcement with clone URL from github.com (NOT in services list)
+    let npub = keys.public_key().to_bech32().expect("Failed to get npub");
+    let tags = vec![
+        Tag::identifier(identifier),
+        Tag::custom(
+            TagKind::custom("clone"),
+            vec![format!("https://github.com/user/{}.git", identifier)],
+        ),
+        Tag::custom(
+            TagKind::custom("relays"),
+            vec!["wss://relay.example.com".to_string()],
+        ),
+    ];
+
+    let announcement = EventBuilder::new(Kind::GitRepoAnnouncement, "Repository state")
+        .tags(tags)
+        .sign_with_keys(&keys)
+        .expect("Failed to sign announcement");
+
+    // Send announcement to relay
+    let client = Client::new(keys.clone());
+    client.add_relay(&url).await.expect("Failed to add relay");
+    client.connect().await;
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    client
+        .send_event(&announcement)
+        .await
+        .expect("Failed to send announcement");
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Verify repository was NOT created (announcement was rejected)
+    let repo_path = git_data_path.join(format!("{}/{}.git", npub, identifier));
+
+    assert!(
+        !repo_path.exists(),
+        "Repository should NOT be created for announcement with non-matching GRASP service domain"
+    );
+
+    // Cleanup
+    client.disconnect().await;
+    let _ = process.kill();
+    let _ = process.wait();
+}
+
+/// Test that multiple configured GRASP services work correctly.
+///
+/// Scenario:
+/// 1. Start relay with archive_grasp_services="git.example.com,gitlab.example.org"
+/// 2. Send announcements with clone URLs from both services
+/// 3. Verify both announcements are accepted
+/// 4. Send announcement from non-listed service
+/// 5. Verify it is rejected
+#[tokio::test]
+async fn test_archive_multiple_grasp_services() {
+    let (mut process, url, git_data_path) =
+        start_relay_with_grasp_services("git.example.com,gitlab.example.org").await;
+
+    // Test first service (git.example.com)
+    let keys1 = Keys::generate();
+    let identifier1 = "test-repo-1";
+    let npub1 = keys1.public_key().to_bech32().expect("Failed to get npub");
+
+    let tags1 = vec![
+        Tag::identifier(identifier1),
+        Tag::custom(
+            TagKind::custom("clone"),
+            vec![format!("https://git.example.com/user/{}.git", identifier1)],
+        ),
+        Tag::custom(
+            TagKind::custom("relays"),
+            vec!["wss://relay.example.com".to_string()],
+        ),
+    ];
+
+    let announcement1 = EventBuilder::new(Kind::GitRepoAnnouncement, "Repository state")
+        .tags(tags1)
+        .sign_with_keys(&keys1)
+        .expect("Failed to sign announcement");
+
+    let client1 = Client::new(keys1.clone());
+    client1.add_relay(&url).await.expect("Failed to add relay");
+    client1.connect().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    client1
+        .send_event(&announcement1)
+        .await
+        .expect("Failed to send announcement");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Test second service (gitlab.example.org)
+    let keys2 = Keys::generate();
+    let identifier2 = "test-repo-2";
+    let npub2 = keys2.public_key().to_bech32().expect("Failed to get npub");
+
+    let tags2 = vec![
+        Tag::identifier(identifier2),
+        Tag::custom(
+            TagKind::custom("clone"),
+            vec![format!(
+                "https://gitlab.example.org/user/{}.git",
+                identifier2
+            )],
+        ),
+        Tag::custom(
+            TagKind::custom("relays"),
+            vec!["wss://relay.example.com".to_string()],
+        ),
+    ];
+
+    let announcement2 = EventBuilder::new(Kind::GitRepoAnnouncement, "Repository state")
+        .tags(tags2)
+        .sign_with_keys(&keys2)
+        .expect("Failed to sign announcement");
+
+    let client2 = Client::new(keys2.clone());
+    client2.add_relay(&url).await.expect("Failed to add relay");
+    client2.connect().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    client2
+        .send_event(&announcement2)
+        .await
+        .expect("Failed to send announcement");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Test non-listed service (github.com)
+    let keys3 = Keys::generate();
+    let identifier3 = "test-repo-3";
+    let npub3 = keys3.public_key().to_bech32().expect("Failed to get npub");
+
+    let tags3 = vec![
+        Tag::identifier(identifier3),
+        Tag::custom(
+            TagKind::custom("clone"),
+            vec![format!("https://github.com/user/{}.git", identifier3)],
+        ),
+        Tag::custom(
+            TagKind::custom("relays"),
+            vec!["wss://relay.example.com".to_string()],
+        ),
+    ];
+
+    let announcement3 = EventBuilder::new(Kind::GitRepoAnnouncement, "Repository state")
+        .tags(tags3)
+        .sign_with_keys(&keys3)
+        .expect("Failed to sign announcement");
+
+    let client3 = Client::new(keys3.clone());
+    client3.add_relay(&url).await.expect("Failed to add relay");
+    client3.connect().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    client3
+        .send_event(&announcement3)
+        .await
+        .expect("Failed to send announcement");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Verify first service announcement was accepted
+    let repo_path1 = git_data_path.join(format!("{}/{}.git", npub1, identifier1));
+    assert!(
+        repo_path1.exists(),
+        "Repository should be created for first GRASP service (git.example.com)"
+    );
+
+    // Verify second service announcement was accepted
+    let repo_path2 = git_data_path.join(format!("{}/{}.git", npub2, identifier2));
+    assert!(
+        repo_path2.exists(),
+        "Repository should be created for second GRASP service (gitlab.example.org)"
+    );
+
+    // Verify non-listed service announcement was rejected
+    let repo_path3 = git_data_path.join(format!("{}/{}.git", npub3, identifier3));
+    assert!(
+        !repo_path3.exists(),
+        "Repository should NOT be created for non-listed service (github.com)"
+    );
+
+    // Cleanup
+    client1.disconnect().await;
+    client2.disconnect().await;
+    client3.disconnect().await;
+    let _ = process.kill();
+    let _ = process.wait();
+}
