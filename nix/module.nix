@@ -283,10 +283,27 @@ let
     };
   };
 
+  # Create systemd setup service to ensure directories exist before main service
+  # This runs without namespace restrictions so it can create directories
+  # that ReadWritePaths needs to exist before namespace setup
+  mkSetupService = name: cfg: {
+    description = "Create data directories for ngit-grasp (${name})";
+    before = [ "ngit-grasp-${name}.service" ];
+    requiredBy = [ "ngit-grasp-${name}.service" ];
+
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart =
+        "${pkgs.bash}/bin/bash -c '${pkgs.coreutils}/bin/mkdir -p \"${cfg.dataDir}/git\" \"${cfg.dataDir}/relay\" && ${pkgs.coreutils}/bin/chown -R ${cfg.user}:${cfg.group} \"${cfg.dataDir}\" && ${pkgs.coreutils}/bin/chmod 750 \"${cfg.dataDir}\" \"${cfg.dataDir}/git\" \"${cfg.dataDir}/relay\"'";
+    };
+  };
+
   # Create systemd service config for an instance
   mkService = name: cfg: {
     description = "ngit-grasp GRASP relay (${name})";
-    after = [ "network.target" ];
+    after = [ "network.target" "ngit-grasp-${name}-setup.service" ];
+    requires = [ "ngit-grasp-${name}-setup.service" ];
     wantedBy = [ "multi-user.target" ];
 
     environment = {
@@ -341,19 +358,8 @@ let
       # Working directory where .relay-owner.nsec will be created if needed
       WorkingDirectory = cfg.dataDir;
 
-      # Ensure data directories exist before service starts
-      # The + prefix runs these commands as root
-      # This is necessary because tmpfiles.rules aren't automatically executed
-      # during nixos-rebuild switch, causing service failures with custom dataDirs
-      ExecStartPre = [
-        "+${pkgs.coreutils}/bin/mkdir -p '${cfg.dataDir}'"
-        "+${pkgs.coreutils}/bin/mkdir -p '${cfg.dataDir}/git'"
-        "+${pkgs.coreutils}/bin/mkdir -p '${cfg.dataDir}/relay'"
-        "+${pkgs.coreutils}/bin/chown -R ${cfg.user}:${cfg.group} '${cfg.dataDir}'"
-        "+${pkgs.coreutils}/bin/chmod 750 '${cfg.dataDir}'"
-        "+${pkgs.coreutils}/bin/chmod 750 '${cfg.dataDir}/git'"
-        "+${pkgs.coreutils}/bin/chmod 750 '${cfg.dataDir}/relay'"
-      ];
+      # Directory creation is handled by ngit-grasp-${name}-setup.service
+      # which runs before this service and creates dataDir with proper ownership
 
       # Add git, openssh, and coreutils to PATH for purgatory sync operations
       Environment =
@@ -453,9 +459,12 @@ in {
     users.groups.ngit-grasp = { };
 
     # Create systemd services for all enabled instances
-    systemd.services = mapAttrs'
+    # Each instance has a setup service (creates directories) and main service
+    systemd.services = (mapAttrs'
       (name: cfg: nameValuePair "ngit-grasp-${name}" (mkService name cfg))
-      enabledInstances;
+      enabledInstances) // (mapAttrs' (name: cfg:
+        nameValuePair "ngit-grasp-${name}-setup" (mkSetupService name cfg))
+        enabledInstances);
 
     # Create data directories with proper ownership using tmpfiles
     # This runs as root before the service starts
