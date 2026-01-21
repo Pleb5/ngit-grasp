@@ -459,7 +459,12 @@ in {
 
     # Create data directories with proper ownership using tmpfiles
     # This runs as root before the service starts
+    # Note: Parent directories are created with root:root ownership (mode 0755)
+    # to ensure the path exists, while dataDir itself gets proper service ownership
     systemd.tmpfiles.rules = flatten (mapAttrsToList (name: cfg: [
+      # Create parent directories if they don't exist (root-owned, standard perms)
+      "d ${dirOf cfg.dataDir} 0755 root root -"
+      # Create service-owned directories
       "d ${cfg.dataDir} 0750 ${cfg.user} ${cfg.group} -"
       "d ${cfg.dataDir}/git 0750 ${cfg.user} ${cfg.group} -"
       "d ${cfg.dataDir}/relay 0750 ${cfg.user} ${cfg.group} -"
