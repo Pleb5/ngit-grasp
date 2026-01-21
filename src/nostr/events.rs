@@ -495,17 +495,19 @@ mod tests {
             vec![identifier.to_string()],
         )];
 
-        for url in clone_urls {
+        // NIP-34: Single clone tag with multiple values
+        if !clone_urls.is_empty() {
             tags.push(Tag::custom(
                 nostr_sdk::TagKind::Clone,
-                vec![url.to_string()],
+                clone_urls.iter().map(|s| s.to_string()),
             ));
         }
 
-        for relay in relays {
+        // NIP-34: Single relays tag with multiple values
+        if !relays.is_empty() {
             tags.push(Tag::custom(
                 nostr_sdk::TagKind::Relays,
-                vec![relay.to_string()],
+                relays.iter().map(|s| s.to_string()),
             ));
         }
 
