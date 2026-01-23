@@ -408,7 +408,45 @@ impl SyncContext for RealSyncContext {
                         }
                     }
 
-                    Err(anyhow::anyhow!("git fetch failed: {}", stderr))
+                    // Check for "not our ref" errors and provide a clearer error message
+                    let error_msg = if stderr.contains("upload-pack: not our ref") {
+                        // Parse out the missing OID from stderr (git only reports one at a time)
+                        let missing_oid = stderr
+                            .lines()
+                            .find_map(|line| {
+                                if line.contains("not our ref") {
+                                    // Extract the OID from lines like:
+                                    // "fatal: remote error: upload-pack: not our ref <oid>"
+                                    line.split("not our ref").nth(1).map(|s| s.trim().to_string())
+                                } else {
+                                    None
+                                }
+                            });
+
+                        let total_requested = missing_oids.len();
+
+                        if let Some(oid) = missing_oid {
+                            if total_requested > 1 {
+                                // BUG: Git stops at first missing OID, so we don't know if the others exist
+                                // We need retry logic to fetch remaining OIDs individually
+                                tracing::warn!(
+                                    url = %url,
+                                    missing_oid = %oid,
+                                    total_requested = total_requested,
+                                    "Git fetch failed on first missing OID - other requested OIDs may exist but were not fetched. Retry logic needed."
+                                );
+                                format!("remote missing oid {} (BUG: {} other oids not attempted)", oid, total_requested - 1)
+                            } else {
+                                format!("remote missing only oid requested: {}", oid)
+                            }
+                        } else {
+                            format!("git fetch failed: {}", stderr)
+                        }
+                    } else {
+                        format!("git fetch failed: {}", stderr)
+                    };
+
+                    Err(anyhow::anyhow!("{}", error_msg))
                 }
                 Err(e) => Err(anyhow::anyhow!("git fetch command error: {}", e)),
             }
