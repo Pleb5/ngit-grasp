@@ -21,6 +21,7 @@ pub use types::{PrPurgatoryEntry, RefPair, RefUpdate, StatePurgatoryEntry};
 
 use dashmap::DashMap;
 use nostr_sdk::prelude::*;
+use nostr_sdk::ToBech32;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -608,6 +609,9 @@ impl Purgatory {
     /// prevent infinite re-sync loops. Events that expire without finding git data
     /// will be filtered out during future negentropy/REQ sync operations.
     ///
+    /// Emits structured `[PURGATORY_EXPIRED]` log entries for each expired event
+    /// to support migration scripts and operational monitoring.
+    ///
     /// # Returns
     /// Tuple of (num_state_removed, num_pr_removed)
     pub fn cleanup(&self) -> (usize, usize) {
@@ -615,18 +619,24 @@ impl Purgatory {
         let mut state_removed = 0;
 
         // Remove expired state events and mark them as expired
-        self.state_events.retain(|_, entries| {
+        self.state_events.retain(|identifier, entries| {
             let original_len = entries.len();
-            // Collect event IDs before removing
-            let expired_ids: Vec<EventId> = entries
-                .iter()
-                .filter(|entry| entry.expires_at <= now)
-                .map(|entry| entry.event.id)
-                .collect();
 
-            // Mark as expired to prevent re-sync
-            for event_id in expired_ids {
-                self.mark_expired(event_id);
+            // Log and collect expired entries before removing
+            for entry in entries.iter().filter(|e| e.expires_at <= now) {
+                let npub = entry.author.to_bech32().unwrap_or_else(|_| entry.author.to_hex());
+                let event_id_short = &entry.event.id.to_hex()[..12];
+
+                // Structured log for migration scripts
+                tracing::warn!(
+                    "[PURGATORY_EXPIRED] repo={} npub={} event_id={}... kind={} reason=\"git data not received within 30 minutes\"",
+                    identifier,
+                    npub,
+                    event_id_short,
+                    entry.event.kind.as_u16()
+                );
+
+                self.mark_expired(entry.event.id);
             }
 
             // Remove expired entries
@@ -636,21 +646,80 @@ impl Purgatory {
         });
 
         // Remove expired PR events and mark them as expired
-        let expired_prs: Vec<(String, Option<EventId>)> = self
+        let expired_prs: Vec<_> = self
             .pr_events
             .iter()
             .filter(|entry| entry.value().expires_at <= now)
             .map(|entry| {
-                let event_id = entry.value().event.as_ref().map(|e| e.id);
-                (entry.key().clone(), event_id)
+                let pr_entry = entry.value();
+                let event_id_str = entry.key().clone();
+                let event_opt = pr_entry.event.clone();
+                let commit = pr_entry.commit.clone();
+                (event_id_str, event_opt, commit)
             })
             .collect();
 
         let pr_removed = expired_prs.len();
-        for (event_id_str, event_id_opt) in expired_prs {
-            // Mark actual PR events as expired (not placeholders)
-            if let Some(event_id) = event_id_opt {
-                self.mark_expired(event_id);
+        for (event_id_str, event_opt, commit) in expired_prs {
+            // Log structured entry for PR events (not placeholders)
+            if let Some(ref event) = event_opt {
+                let npub = event.pubkey.to_bech32().unwrap_or_else(|_| event.pubkey.to_hex());
+                let event_id_short = &event.id.to_hex()[..12];
+
+                // Extract ALL repo identifiers from 'a' tags
+                // (PR events can reference multiple repos when there are multiple maintainers)
+                let repos: Vec<String> = event
+                    .tags
+                    .iter()
+                    .filter_map(|tag| {
+                        let tag_vec = tag.clone().to_vec();
+                        if tag_vec.len() >= 2 && tag_vec[0] == "a" && tag_vec[1].starts_with("30617:") {
+                            // Format: 30617:<owner_pubkey>:<identifier>
+                            let parts: Vec<&str> = tag_vec[1].split(':').collect();
+                            if parts.len() >= 3 {
+                                Some(parts[2].to_string())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                // Deduplicate while preserving order
+                let mut seen = std::collections::HashSet::new();
+                let unique_repos: Vec<String> = repos
+                    .into_iter()
+                    .filter(|r| seen.insert(r.clone()))
+                    .collect();
+
+                let repos_to_log = if unique_repos.is_empty() {
+                    vec!["unknown".to_string()]
+                } else {
+                    unique_repos
+                };
+
+                // Structured log for migration scripts - log once per repo
+                for repo in &repos_to_log {
+                    tracing::warn!(
+                        "[PURGATORY_EXPIRED] repo={} npub={} event_id={}... kind={} commit={} reason=\"git data not received within 30 minutes\"",
+                        repo,
+                        npub,
+                        event_id_short,
+                        event.kind.as_u16(),
+                        &commit[..commit.len().min(12)]
+                    );
+                }
+
+                self.mark_expired(event.id);
+            } else {
+                // Placeholder (git data arrived first, but PR event never came)
+                tracing::debug!(
+                    "[PURGATORY_EXPIRED] placeholder event_id={} commit={} reason=\"PR event not received within 30 minutes\"",
+                    &event_id_str[..event_id_str.len().min(12)],
+                    &commit[..commit.len().min(12)]
+                );
             }
             self.pr_events.remove(&event_id_str);
         }
