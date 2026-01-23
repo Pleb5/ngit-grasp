@@ -62,9 +62,110 @@ See [Running the Analysis](#running-the-analysis) for detailed options.
 # Check required tools
 nak --version
 jq --version
+git --version
 
 # Check optional tools (for VPS phases)
 journalctl --version
+```
+
+## Gotchas and Common Issues
+
+Before running the analysis, be aware of these common issues discovered during real migrations:
+
+### Git Must Be Installed
+
+The analysis scripts require `git` to be installed and in PATH. This may not be present on minimal VPS installations.
+
+```bash
+# Check if git is available
+which git || echo "Git not found - install it first"
+
+# Install on Debian/Ubuntu
+apt install git
+
+# Install on NixOS (add to configuration.nix)
+environment.systemPackages = [ pkgs.git ];
+```
+
+### Archive Relay May Only Be Accessible Locally
+
+If your archive relay is configured to listen only on localhost (e.g., `ws://localhost:7443`), you must run the analysis **on the VPS itself**, not from a remote machine.
+
+```bash
+# Check if archive relay is accessible
+# This will fail if run remotely against a localhost-only relay
+nak req -k 30618 --limit 1 ws://localhost:7443
+
+# Solution: SSH into the VPS and run analysis there
+ssh user@your-vps
+cd /path/to/scripts
+./run-migration-analysis.sh --archive-relay ws://localhost:7443 ...
+```
+
+### Git Data Paths May Differ from Defaults
+
+Different deployments store git data in different locations. **Always verify paths before running the analysis.**
+
+```bash
+# Find actual git data paths from service configuration
+systemctl cat ngit-relay.service | grep -E 'ExecStart|WorkingDirectory|Environment'
+systemctl cat ngit-grasp-*.service | grep -E 'ExecStart|WorkingDirectory|Environment'
+
+# Common locations:
+# - /var/lib/ngit-relay/git (default)
+# - /var/lib/ngit-grasp/git (default)
+# - /persistent/*/data/repos (custom deployments)
+
+# Verify the path exists and contains expected structure
+ls /path/to/git/npub1*/  # Should show *.git directories
+```
+
+### Phase 4 Needs the Correct Service Name
+
+Phase 4 extracts structured logs (`[PARSE_FAIL]`, `[PURGATORY_EXPIRED]`) from journald. You must specify the service that has these logs - typically the **archive** service (ngit-grasp), not the production service (ngit-relay).
+
+```bash
+# Find all ngit-related services
+systemctl list-units 'ngit-*' --all
+
+# Check which service has structured logging
+journalctl -u ngit-grasp-*.service | grep -E '\[PARSE_FAIL\]|\[PURGATORY_EXPIRED\]' | head -5
+
+# Use the archive service name for Phase 4
+./run-migration-analysis.sh ... --service ngit-grasp-relay-ngit-dev.service
+```
+
+### Permission Issues with Service-Owned Directories
+
+Git data directories are typically owned by the service user and may require elevated permissions to read.
+
+```bash
+# Check directory permissions
+ls -la /var/lib/ngit-grasp/git
+
+# Options:
+# 1. Run as root/sudo
+sudo ./run-migration-analysis.sh ...
+
+# 2. Run as the service user
+sudo -u ngit-grasp ./run-migration-analysis.sh ...
+
+# 3. Add your user to the service group
+sudo usermod -aG ngit-grasp $USER
+# (logout/login required)
+```
+
+### Service Names Vary by Deployment
+
+NixOS multi-instance deployments use service names like `ngit-grasp-<instance>.service`. Always check actual service names.
+
+```bash
+# List all ngit services
+systemctl list-units 'ngit-*' --all --no-pager
+
+# Example output:
+# ngit-relay.service                loaded active running  ngit-relay
+# ngit-grasp-relay-ngit-dev.service loaded active running  ngit-grasp (relay-ngit-dev)
 ```
 
 ## Migration Overview
@@ -98,6 +199,26 @@ Once all issues are resolved:
 
 ## Running the Analysis
 
+### Before You Start
+
+**Verify paths and service names** before running the analysis. Incorrect paths are the most common source of errors.
+
+```bash
+# 1. Find actual git data paths
+systemctl cat ngit-relay.service | grep -E 'ExecStart|data|git'
+systemctl cat ngit-grasp-*.service | grep -E 'ExecStart|data|git'
+
+# 2. Find service names
+systemctl list-units 'ngit-*' --all --no-pager
+
+# 3. Verify git data exists at the paths
+ls /path/to/prod/git/npub1*/ | head -5
+ls /path/to/archive/git/npub1*/ | head -5
+
+# 4. Check if archive relay is accessible
+nak req -k 30618 --limit 1 ws://localhost:7443  # or your archive URL
+```
+
 ### Basic Usage
 
 ```bash
@@ -115,13 +236,18 @@ Once all issues are resolved:
 
 ### Full Analysis on VPS
 
+**Important:** If your archive relay is localhost-only, you must run this on the VPS.
+
 ```bash
+# First, discover your actual paths (see "Before You Start" above)
+# Then run with the correct values:
+
 ./run-migration-analysis.sh \
   --prod-relay wss://source-relay.example.com \
-  --archive-relay wss://target-relay.example.com \
-  --prod-git /var/lib/grasp-relay/git \
-  --archive-git /var/lib/ngit-grasp/git \
-  --service ngit-grasp.service
+  --archive-relay ws://localhost:7443 \
+  --prod-git /path/to/prod/git \
+  --archive-git /path/to/archive/git \
+  --service ngit-grasp-your-instance.service
 ```
 
 ### Phase Control
@@ -226,6 +352,21 @@ go install github.com/fiatjaf/nak@latest
 # Or download binary from releases
 ```
 
+### "git not found"
+
+Git must be installed and in PATH:
+
+```bash
+# Check if git is available
+which git
+
+# Install on Debian/Ubuntu
+sudo apt install git
+
+# Install on NixOS (add to configuration.nix)
+environment.systemPackages = [ pkgs.git ];
+```
+
 ### "Permission denied" on git directories
 
 Run with sudo or ensure your user has read access:
@@ -234,8 +375,38 @@ Run with sudo or ensure your user has read access:
 # Check permissions
 ls -la /var/lib/grasp-relay/git
 
-# Run with sudo if needed
+# Option 1: Run with sudo
 sudo ./run-migration-analysis.sh ...
+
+# Option 2: Run as service user
+sudo -u ngit-grasp ./run-migration-analysis.sh ...
+```
+
+### Archive relay connection failed
+
+If you get connection errors to the archive relay:
+
+```bash
+# Check if relay is running
+systemctl status ngit-grasp-*.service
+
+# Check if it's localhost-only
+# If archive is ws://localhost:7443, you MUST run on the VPS
+ssh user@your-vps
+./run-migration-analysis.sh --archive-relay ws://localhost:7443 ...
+```
+
+### Wrong git paths / "No such file or directory"
+
+Git data paths vary by deployment. Discover the actual paths:
+
+```bash
+# Find paths from service configuration
+systemctl cat ngit-relay.service | grep -E 'ExecStart|WorkingDirectory|Environment'
+systemctl cat ngit-grasp-*.service | grep -E 'ExecStart|WorkingDirectory|Environment'
+
+# Verify the path contains git repos
+ls /discovered/path/npub1*/
 ```
 
 ### Phase 2 takes too long
@@ -253,6 +424,18 @@ This is expected if:
 - No events actually failed to parse
 
 The analysis will continue without log data.
+
+### Phase 4 finds no structured logs
+
+Structured logging (`[PARSE_FAIL]`, `[PURGATORY_EXPIRED]`) is only available in ngit-grasp. If checking an ngit-relay service, no structured logs will be found.
+
+```bash
+# Verify you're checking the right service (should be ngit-grasp)
+journalctl -u ngit-grasp-*.service | grep -E '\[PARSE_FAIL\]|\[PURGATORY_EXPIRED\]' | head -5
+
+# If checking ngit-relay, structured logs won't exist
+# Use --service with the ngit-grasp archive service name instead
+```
 
 ### Event counts are multiples of 250
 
@@ -410,3 +593,67 @@ For advanced usage, you can run individual phase scripts:
 ```
 
 Each script has detailed help available with `--help` or by reading the script header.
+
+## relay.ngit.dev Migration Notes
+
+This section documents the specific configuration and lessons learned from migrating relay.ngit.dev from ngit-relay to ngit-grasp. Use this as a reference for similar deployments.
+
+### Deployment Configuration
+
+| Component | Value |
+|-----------|-------|
+| **Production relay** | `wss://relay.ngit.dev` |
+| **Production service** | `ngit-relay.service` |
+| **Production git path** | `/persistent/relay-ngit-dev-ngit-relay/data/repos` |
+| **Archive relay** | `ws://localhost:7443` (localhost only) |
+| **Archive service** | `ngit-grasp-relay-ngit-dev.service` |
+| **Archive git path** | `/persistent/grasp/relay-ngit-dev/git` |
+
+### Key Differences from Defaults
+
+1. **Git paths are non-standard**: The production relay uses `/persistent/relay-ngit-dev-ngit-relay/data/repos` instead of `/var/lib/ngit-relay/git`
+
+2. **Archive is localhost-only**: The archive relay listens on `ws://localhost:7443`, not a public URL. All analysis must run on the VPS.
+
+3. **Service names include instance**: NixOS multi-instance deployment uses `ngit-grasp-relay-ngit-dev.service`, not `ngit-grasp.service`
+
+### Analysis Command
+
+```bash
+# Run on VPS (archive is localhost-only)
+./docs/how-to/migration-scripts/run-migration-analysis.sh \
+  --prod-relay wss://relay.ngit.dev \
+  --archive-relay ws://localhost:7443 \
+  --prod-git /persistent/relay-ngit-dev-ngit-relay/data/repos \
+  --archive-git /persistent/grasp/relay-ngit-dev/git \
+  --service ngit-grasp-relay-ngit-dev.service
+```
+
+### Analysis Results (January 2026)
+
+| Category | Count | Notes |
+|----------|-------|-------|
+| Complete in both | ~400 | Ready for migration |
+| Complete in prod, missing from archive | 315 | Need re-sync |
+| Empty in both | 100 | Users never pushed git data |
+| Manual investigation | 5 | Unusual states |
+| Purgatory expired | 382 | Structured logging working |
+
+### Lessons Learned
+
+1. **Always verify paths first**: The default paths in examples didn't match the actual deployment. Use `systemctl cat <service>` to find real paths.
+
+2. **Check archive accessibility**: We initially tried to run analysis remotely, but the archive relay was localhost-only. Had to SSH to VPS.
+
+3. **Use archive service for Phase 4**: Structured logging (`[PARSE_FAIL]`, `[PURGATORY_EXPIRED]`) is in the ngit-grasp archive service, not the ngit-relay production service.
+
+4. **Install git on VPS**: Git wasn't installed on the minimal VPS. The scripts now check for this in prerequisites.
+
+5. **Permissions matter**: Some directories required `sudo` to access. Running as root or the service user resolved this.
+
+### Next Steps for relay.ngit.dev
+
+1. **Re-sync 315 repos**: Trigger archive to re-fetch from production
+2. **Investigate 5 edge cases**: Manual review of unusual states
+3. **Monitor purgatory**: 382 expired entries indicate sync issues to investigate
+4. **Plan cutover**: Once re-sync complete, switch DNS/proxy to ngit-grasp
