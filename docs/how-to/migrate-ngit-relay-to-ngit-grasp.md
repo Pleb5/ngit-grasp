@@ -51,7 +51,7 @@ The analysis is split into modular phases for fast iteration. Phases 1-3 and 5 c
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ PHASE 1: Fetch Events (~30s, local)                             │
-│ scripts/migration/01-fetch-events.sh <relay> <output-dir>       │
+│ migration-scripts/01-fetch-events.sh <relay> <output-dir>       │
 ├─────────────────────────────────────────────────────────────────┤
 │ Fetches from relay:                                             │
 │   - kind 30618 (state events)                                   │
@@ -64,7 +64,7 @@ The analysis is split into modular phases for fast iteration. Phases 1-3 and 5 c
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │ PHASE 2: Git Sync Check (~20 mins, VPS required)                │
-│ scripts/migration/10-check-git-sync.sh <events> <git-base> <out>│
+│ migration-scripts/10-check-git-sync.sh <events> <git-base> <out>│
 ├─────────────────────────────────────────────────────────────────┤
 │ For each state event, compares refs to actual git data on disk. │
 │                                                                 │
@@ -78,8 +78,8 @@ The analysis is split into modular phases for fast iteration. Phases 1-3 and 5 c
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │ PHASE 3: Categorize & Compare (fast, local)                     │
-│ scripts/migration/20-categorize.sh <sync-status> <output-dir>   │
-│ scripts/migration/21-compare-relays.sh <prod> <archive> <out>   │
+│ migration-scripts/20-categorize.sh <sync-status> <output-dir>   │
+│ migration-scripts/21-compare-relays.sh <prod> <archive> <out>   │
 ├─────────────────────────────────────────────────────────────────┤
 │ 20-categorize.sh applies 4-category logic:                      │
 │   - cat1: complete match (all refs match)                       │
@@ -87,18 +87,20 @@ The analysis is split into modular phases for fast iteration. Phases 1-3 and 5 c
 │   - cat3: partial match (some refs match)                       │
 │   - cat4: no match (git exists but refs don't match)            │
 │                                                                 │
-│ 21-compare-relays.sh finds gaps:                                │
-│   - in prod but not archive                                     │
-│   - in archive but not prod                                     │
-│   - different status between relays                             │
+│ 21-compare-relays.sh compares prod vs archive:                  │
+│   - complete-in-both.txt (no action needed)                     │
+│   - complete-prod-missing-archive.txt (needs investigation)     │
+│   - complete-prod-incomplete-archive.txt (sync in progress?)    │
+│   - incomplete-in-both.txt (git data incomplete)                │
+│   - in-archive-not-prod.txt (deleted or new)                    │
 │                                                                 │
-│ Output: category-{1,2,3,4}.txt, relay-gaps.txt                  │
+│ Output: category-{1,2,3,4}.txt, comparison/*.txt, summary.txt   │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │ PHASE 4: Log-Based Categories (VPS required)                    │
-│ scripts/migration/30-extract-parse-failures.sh <service> <out>  │
-│ scripts/migration/31-extract-purgatory-expiry.sh <service> <out>│
+│ migration-scripts/30-extract-parse-failures.sh <service> <out>  │
+│ migration-scripts/31-extract-purgatory-expiry.sh <service> <out>│
 ├─────────────────────────────────────────────────────────────────┤
 │ Extracts structured log entries from journalctl:                │
 │   - Parse failures: [PARSE_FAIL] kind=X event_id=Y reason=Z     │
@@ -112,7 +114,7 @@ The analysis is split into modular phases for fast iteration. Phases 1-3 and 5 c
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │ PHASE 5: Final Classification (fast, local)                     │
-│ scripts/migration/40-classify-actions.sh <all-inputs> <out>     │
+│ migration-scripts/40-classify-actions.sh <all-inputs> <out>     │
 ├─────────────────────────────────────────────────────────────────┤
 │ Combines all data sources to produce final classification:      │
 │                                                                 │
@@ -136,27 +138,38 @@ The analysis is split into modular phases for fast iteration. Phases 1-3 and 5 c
 work/migration-analysis-YYYYMMDD-HHMM/
 ├── prod/
 │   ├── raw/
-│   │   ├── state-events.json
-│   │   ├── announcements.json
-│   │   └── deletions.json
-│   ├── git-sync-status.tsv
-│   └── category-{1,2,3,4}.txt
+│   │   ├── state-events.json       # Phase 1 output
+│   │   ├── announcements.json      # Phase 1 output
+│   │   └── deletions.json          # Phase 1 output
+│   ├── git-sync-status.tsv         # Phase 2 output (optional)
+│   ├── category1-complete-match.txt    # Phase 2/3 output
+│   ├── category2-empty-blank.txt       # Phase 2/3 output
+│   ├── category3-partial-match.txt     # Phase 2/3 output
+│   └── category4-no-match.txt          # Phase 2/3 output
 ├── archive/
 │   ├── raw/
 │   │   ├── state-events.json
 │   │   ├── announcements.json
 │   │   └── deletions.json
 │   ├── git-sync-status.tsv
-│   └── category-{1,2,3,4}.txt
+│   ├── category1-complete-match.txt
+│   ├── category2-empty-blank.txt
+│   ├── category3-partial-match.txt
+│   └── category4-no-match.txt
 ├── logs/
-│   ├── parse-failures.txt
-│   └── purgatory-expired.txt
+│   ├── parse-failures.txt          # Phase 4 output
+│   └── purgatory-expired.txt       # Phase 4 output
 ├── comparison/
-│   └── relay-gaps.txt
+│   ├── complete-in-both.txt            # Phase 3 output (no action)
+│   ├── complete-prod-missing-archive.txt   # Phase 3 output (investigate)
+│   ├── complete-prod-incomplete-archive.txt # Phase 3 output (sync in progress?)
+│   ├── incomplete-in-both.txt          # Phase 3 output (git incomplete)
+│   ├── in-archive-not-prod.txt         # Phase 3 output (deleted/new)
+│   └── summary.txt                     # Phase 3 output (human-readable)
 └── results/
-    ├── no-action-required.txt
-    ├── action-required.txt
-    └── manual-investigation.txt
+    ├── no-action-required.txt      # Phase 5 output
+    ├── action-required.txt         # Phase 5 output
+    └── manual-investigation.txt    # Phase 5 output
 ```
 
 ## Prerequisites
