@@ -155,7 +155,7 @@ FROM_PHASE=""
 declare -A PHASE_TIMES
 
 usage() {
-    head -80 "$0" | tail -n +3 | sed 's/^# //' | sed 's/^#//'
+    head -73 "$0" | tail -n +3 | sed 's/^# //' | sed 's/^#//'
     exit 0
 }
 
@@ -285,7 +285,7 @@ check_prerequisites() {
     log_info "Checking prerequisites..."
     
     # Required tools
-    for tool in nak jq awk sort; do
+    for tool in git nak jq awk sort; do
         if command -v "$tool" &> /dev/null; then
             log_step "$tool: found"
         else

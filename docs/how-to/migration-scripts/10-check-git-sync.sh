@@ -118,6 +118,11 @@ usage() {
 check_prerequisites() {
     local missing=0
     
+    if ! command -v git &> /dev/null; then
+        log_error "git not found. Install with your package manager."
+        missing=1
+    fi
+    
     if ! command -v nak &> /dev/null; then
         log_error "nak not found. Install from: https://github.com/fiatjaf/nak"
         log_error "Or run: nix-shell -p nak jq --run \"$0 $*\""
@@ -161,13 +166,15 @@ count_git_refs() {
         return
     fi
     
-    # Use git show-ref to handle both packed and loose refs
-    # Fall back to counting loose refs if git show-ref fails
-    if git --git-dir="$git_dir" show-ref --heads 2>/dev/null | wc -l | tr -d ' '; then
+    # Try git show-ref first (handles packed refs correctly)
+    # Note: We capture output separately to avoid pipefail issues
+    local count
+    if count=$(git --git-dir="$git_dir" show-ref --heads 2>/dev/null | wc -l); then
+        echo "$count" | tr -d ' '
         return
     fi
     
-    # Fallback: count loose refs
+    # Fallback: count loose refs (when git is not available or fails)
     if [[ -d "$git_dir/refs/heads" ]]; then
         find "$git_dir/refs/heads" -type f 2>/dev/null | wc -l | tr -d ' '
     else
