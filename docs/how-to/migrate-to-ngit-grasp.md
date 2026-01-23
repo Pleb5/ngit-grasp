@@ -122,7 +122,7 @@ ls /path/to/git/npub1*/  # Should show *.git directories
 
 ### Phase 4 Needs the Correct Service Name
 
-> **CRITICAL:** Phase 4 extracts structured logs (`[PARSE_FAIL]`, `[PURGATORY_EXPIRED]`) from journald. These logs **ONLY exist in ngit-grasp services**, NOT in ngit-relay services.
+> **CRITICAL:** Phase 4 extracts structured logs (`[PARSE_FAIL]`, `[PURGATORY_EXPIRED]`, `Invalid announcement` rejections) from journald. These logs **ONLY exist in ngit-grasp services**, NOT in ngit-relay services.
 
 If you specify an ngit-relay service (like `ngit-relay.service`), Phase 4 will find **zero logs** and produce empty results. This is a common mistake that wastes time and produces misleading analysis.
 
@@ -140,10 +140,10 @@ If you specify an ngit-relay service (like `ngit-relay.service`), Phase 4 will f
 systemctl list-units 'ngit-*' --all
 
 # Check which service has structured logging (should be ngit-grasp)
-journalctl -u ngit-grasp-*.service | grep -E '\[PARSE_FAIL\]|\[PURGATORY_EXPIRED\]' | head -5
+journalctl -u ngit-grasp-*.service | grep -E '\[PARSE_FAIL\]|\[PURGATORY_EXPIRED\]|Invalid announcement' | head -5
 
 # Verify ngit-relay does NOT have structured logging
-journalctl -u ngit-relay.service | grep -E '\[PARSE_FAIL\]|\[PURGATORY_EXPIRED\]' | head -5
+journalctl -u ngit-relay.service | grep -E '\[PARSE_FAIL\]|\[PURGATORY_EXPIRED\]|Invalid announcement' | head -5
 # ^ This should return nothing
 
 # Use the archive service name for Phase 4
@@ -448,7 +448,7 @@ The analysis will continue without log data.
 
 **Most common cause:** You're querying the wrong service (ngit-relay instead of ngit-grasp).
 
-Structured logging (`[PARSE_FAIL]`, `[PURGATORY_EXPIRED]`) **only exists in ngit-grasp services**. If you specify an ngit-relay service, Phase 4 will find zero logs.
+Structured logging (`[PARSE_FAIL]`, `[PURGATORY_EXPIRED]`, `Invalid announcement` rejections) **only exists in ngit-grasp services**. If you specify an ngit-relay service, Phase 4 will find zero logs.
 
 **How to diagnose:**
 
@@ -464,7 +464,7 @@ systemctl list-units 'ngit-grasp*' --all
 
 # 4. Verify the ngit-grasp service has structured logs
 journalctl -u ngit-grasp-relay-ngit-dev.service --since "7 days ago" | \
-  grep -E '\[PARSE_FAIL\]|\[PURGATORY_EXPIRED\]' | head -5
+  grep -E '\[PARSE_FAIL\]|\[PURGATORY_EXPIRED\]|Invalid announcement' | head -5
 ```
 
 **How to fix:**
@@ -482,11 +482,13 @@ journalctl -u ngit-grasp-relay-ngit-dev.service --since "7 days ago" | \
 
 1. **Structured logging not deployed:** If the ngit-grasp instance doesn't have the logging improvements deployed, no structured logs will exist. Check the ngit-grasp version.
 
-2. **No events in time window:** If there genuinely were no parse failures or purgatory expiry events, the files will be empty. This is valid - it means everything parsed successfully.
+2. **No events in time window:** If there genuinely were no parse failures, purgatory expiry events, or invalid announcement rejections, the files will be empty. This is valid - it means everything parsed successfully.
 
 3. **Wrong time range:** The default is 30 days. If your archive has been running longer, you may need `--since` to extend the range.
 
 **Prevention:** The migration scripts now validate the service name and will error if you specify an ngit-relay service.
+
+**Note on "Invalid announcement" rejections:** These are announcements (kind 30617) that were rejected by the write policy due to format violations. The most common reason is "multiple clone tags found" - the NIP-34 spec requires a single clone tag with multiple values, not multiple clone tags. These rejections are logged as `Event rejected by write policy ... reason=Invalid announcement: ...`.
 
 ### Event counts are multiples of 250
 
@@ -529,7 +531,11 @@ The analysis is split into 5 modular phases:
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │ PHASE 4: Log-Based Categories (VPS required)                    │
-│ Extracts [PARSE_FAIL] and [PURGATORY_EXPIRED] from logs         │
+│ Extracts structured logs from the archive service:              │
+│   - [PARSE_FAIL] - Events that failed to parse                  │
+│   - [PURGATORY_EXPIRED] - Repos where git data never arrived    │
+│   - "Invalid announcement" - Announcements rejected for format  │
+│     violations (e.g., multiple clone tags)                      │
 │ Provides context for why repos failed to sync                   │
 └─────────────────────────────────────────────────────────────────┘
                               ↓

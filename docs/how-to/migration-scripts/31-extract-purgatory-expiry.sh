@@ -356,7 +356,7 @@ main() {
         parsed=$(parse_log_line "$line")
         if [[ -n "$parsed" ]]; then
             echo "$parsed" >> "$output_file"
-            ((count++))
+            count=$((count + 1))
         fi
     done <<< "$raw_lines"
     
@@ -374,9 +374,10 @@ main() {
     if [[ $count -gt 0 ]]; then
         echo ""
         log_info "Sample entries (first 5):"
-        tail -n +5 "$output_file" | head -5 | while IFS=$'\t' read -r repo npub timestamp reason; do
+        # Use a subshell to avoid SIGPIPE issues with set -e
+        (tail -n +5 "$output_file" | head -5 | while IFS=$'\t' read -r repo npub timestamp reason; do
             echo "  repo=$repo npub=${npub:0:20}... timestamp=$timestamp"
-        done
+        done) || true
     fi
     
     # Show unique repos affected
@@ -388,9 +389,10 @@ main() {
         
         echo ""
         log_info "Repositories with purgatory expiry:"
-        tail -n +5 "$output_file" | awk -F'\t' '{print $1}' | sort | uniq -c | sort -rn | head -10 | while read -r cnt repo; do
+        # Use a subshell to avoid SIGPIPE issues with set -e
+        (tail -n +5 "$output_file" | awk -F'\t' '{print $1}' | sort | uniq -c | sort -rn | head -10 | while read -r cnt repo; do
             echo "  $repo: $cnt expiry events"
-        done
+        done) || true
         
         local total_repos
         total_repos=$(tail -n +5 "$output_file" | awk -F'\t' '{print $1}' | sort -u | wc -l)
@@ -398,6 +400,9 @@ main() {
             echo "  ... and $((total_repos - 10)) more repositories"
         fi
     fi
+    
+    # Explicit success exit
+    exit 0
 }
 
 main "$@"

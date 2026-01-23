@@ -3,7 +3,8 @@
 # 30-extract-parse-failures.sh - Extract parse failure events from systemd logs
 #
 # PHASE 4a of the GRASP relay to ngit-grasp migration analysis pipeline.
-# Extracts structured [PARSE_FAIL] log entries from journalctl.
+# Extracts structured [PARSE_FAIL] log entries AND "Invalid announcement"
+# rejections from journalctl.
 #
 # USAGE:
 #   ./30-extract-parse-failures.sh <service-name> <output-dir> [options]
@@ -27,24 +28,34 @@
 #   <output-dir>/parse-failures.txt
 #
 # OUTPUT FORMAT (TSV):
-#   repo<TAB>npub<TAB>kind<TAB>event_id<TAB>reason
+#   event_id<TAB>kind<TAB>reason<TAB>repo<TAB>npub
 #
-# EXPECTED LOG FORMAT:
-#   The script looks for structured log entries in this format:
+# EXPECTED LOG FORMATS:
+#   The script looks for two types of log entries:
 #
-#   2026-01-22T10:30:45Z ngit-grasp[1234]: [PARSE_FAIL] kind=30618 event_id=abc123... reason="invalid refs format" repo=myrepo npub=npub1...
+#   1. Structured [PARSE_FAIL] entries:
+#      2026-01-22T10:30:45Z ngit-grasp[1234]: [PARSE_FAIL] kind=30618 event_id=abc123... reason="invalid refs format" repo=myrepo npub=npub1...
+#
+#   2. "Invalid announcement" rejections (write policy):
+#      Event rejected by write policy event_id=abc123... relay=wss://... kind=30617 reason=Invalid announcement: multiple clone tags found...
+#
+#   3. "Rejected repository announcement" (builder):
+#      Rejected repository announcement note1xxx: Invalid announcement: multiple clone tags found...
 #
 #   Required fields: kind, event_id, reason
-#   Optional fields: repo, npub (may not be available if parsing failed early)
+#   Optional fields: repo, npub (may not be available for all entry types)
 #
 # DEPENDENCY:
 #   This script requires logging improvements in ngit-grasp to emit structured
 #   [PARSE_FAIL] log entries. Until those are implemented, this script will
 #   find no matching entries (which is handled gracefully).
 #
+#   "Invalid announcement" rejections are logged by the write policy and
+#   should be present in any ngit-grasp deployment.
+#
 #   See: docs/how-to/migrate-to-ngit-grasp.md (Dependencies section)
 #
-#   Expected Rust logging code:
+#   Expected Rust logging code for [PARSE_FAIL]:
 #     tracing::warn!(
 #         target: "migration",
 #         "[PARSE_FAIL] kind={} event_id={} reason=\"{}\" repo={} npub={}",
@@ -53,7 +64,7 @@
 #
 # PREREQUISITES:
 #   - journalctl (systemd)
-#   - grep, awk (standard Unix tools)
+#   - grep, awk, sed (standard Unix tools)
 #   - Access to systemd journal (may require sudo or journal group membership)
 #
 # RUNTIME: Depends on log volume, typically < 30 seconds
@@ -121,15 +132,17 @@ usage() {
     echo "  $0 ngit-grasp.service output/logs --since '2026-01-01'"
     echo "  $0 ngit-grasp.service output/logs --since '2026-01-15' --until '2026-01-22'"
     echo ""
-    echo "Expected log format:"
+    echo "Expected log formats:"
     echo "  [PARSE_FAIL] kind=30618 event_id=abc123 reason=\"...\" repo=myrepo npub=npub1..."
+    echo "  Event rejected by write policy event_id=abc123 ... kind=30617 reason=Invalid announcement: ..."
+    echo "  Rejected repository announcement note1xxx: Invalid announcement: ..."
     exit 1
 }
 
-# Parse a single log line and extract fields
+# Parse a [PARSE_FAIL] log line and extract fields
 # Input: log line containing [PARSE_FAIL]
-# Output: TSV line: repo<TAB>npub<TAB>kind<TAB>event_id<TAB>reason
-parse_log_line() {
+# Output: TSV line: event_id<TAB>kind<TAB>reason<TAB>repo<TAB>npub
+parse_parse_fail_line() {
     local line="$1"
     
     # Extract fields using grep -oP (Perl regex) or awk
@@ -154,7 +167,56 @@ parse_log_line() {
     
     # Only output if we have the required fields
     if [[ -n "$kind" && -n "$event_id" && -n "$reason" ]]; then
-        printf '%s\t%s\t%s\t%s\t%s\n' "$repo" "$npub" "$kind" "$event_id" "$reason"
+        printf '%s\t%s\t%s\t%s\t%s\n' "$event_id" "$kind" "$reason" "$repo" "$npub"
+    fi
+}
+
+# Parse an "Invalid announcement" rejection log line from write policy
+# Input: log line containing "Event rejected by write policy" with "Invalid announcement"
+# Output: TSV line: event_id<TAB>kind<TAB>reason<TAB>repo<TAB>npub
+# Note: repo and npub are empty for these entries (not available in log format)
+parse_write_policy_rejection_line() {
+    local line="$1"
+    
+    local kind event_id reason
+    
+    # Extract event_id=VALUE (hex string)
+    event_id=$(echo "$line" | grep -oP 'event_id=\K[a-f0-9]+' || echo "")
+    
+    # Extract kind=VALUE
+    kind=$(echo "$line" | grep -oP 'kind=\K[0-9]+' || echo "")
+    
+    # Extract reason=VALUE (everything after "reason=")
+    # The reason is unquoted and goes to end of line
+    reason=$(echo "$line" | grep -oP 'reason=\K.*$' || echo "")
+    
+    # Only output if we have the required fields
+    if [[ -n "$kind" && -n "$event_id" && -n "$reason" ]]; then
+        # repo and npub are empty for invalid announcement entries
+        printf '%s\t%s\t%s\t\t\n' "$event_id" "$kind" "$reason"
+    fi
+}
+
+# Parse a "Rejected repository announcement" log line from builder
+# Input: log line containing "Rejected repository announcement <note_id>: Invalid announcement:"
+# Output: TSV line: event_id<TAB>kind<TAB>reason<TAB>repo<TAB>npub
+# Note: The note_id is bech32 encoded, we need to extract it
+parse_builder_rejection_line() {
+    local line="$1"
+    
+    local note_id reason
+    
+    # Extract note_id (note1...) from "Rejected repository announcement note1xxx:"
+    note_id=$(echo "$line" | grep -oP 'Rejected repository announcement \Knote1[a-z0-9]+' || echo "")
+    
+    # Extract reason (everything after the note_id and colon)
+    reason=$(echo "$line" | grep -oP 'Rejected repository announcement note1[a-z0-9]+: \K.*$' || echo "")
+    
+    # Only output if we have the required fields
+    # Kind is always 30617 for announcements
+    if [[ -n "$note_id" && -n "$reason" ]]; then
+        # Use note_id as event_id (bech32 format), kind=30617, repo and npub empty
+        printf '%s\t%s\t%s\t\t\n' "$note_id" "30617" "$reason"
     fi
 }
 
@@ -260,21 +322,27 @@ main() {
         journal_cmd="$journal_cmd --until '$until_date'"
     fi
     
-    log_info "Running: $journal_cmd | grep '\\[PARSE_FAIL\\]'"
+    log_info "Running: $journal_cmd | grep '[PARSE_FAIL]' or 'Invalid announcement'"
     
     if [[ "$dry_run" == true ]]; then
         log_info "[DRY RUN] Would extract to: $output_dir/parse-failures.txt"
         
         # Show sample of what would be extracted
         log_info "Checking for matching log entries..."
-        local sample_count
-        sample_count=$(eval "$journal_cmd" 2>/dev/null | grep -c '\[PARSE_FAIL\]' || echo "0")
-        sample_count="${sample_count//[^0-9]/}"  # Strip non-numeric characters
-        sample_count="${sample_count:-0}"
-        log_info "Found $sample_count matching log entries"
+        local parse_fail_count invalid_announcement_count
+        parse_fail_count=$(eval "$journal_cmd" 2>/dev/null | grep -c '\[PARSE_FAIL\]' || echo "0")
+        parse_fail_count="${parse_fail_count//[^0-9]/}"  # Strip non-numeric characters
+        parse_fail_count="${parse_fail_count:-0}"
         
-        if [[ "$sample_count" -eq 0 ]]; then
-            log_warn "No [PARSE_FAIL] entries found in logs."
+        invalid_announcement_count=$(eval "$journal_cmd" 2>/dev/null | grep 'Event rejected by write policy' | grep -c 'Invalid announcement' || echo "0")
+        invalid_announcement_count="${invalid_announcement_count//[^0-9]/}"
+        invalid_announcement_count="${invalid_announcement_count:-0}"
+        
+        log_info "Found $parse_fail_count [PARSE_FAIL] entries"
+        log_info "Found $invalid_announcement_count 'Invalid announcement' rejections"
+        
+        if [[ "$parse_fail_count" -eq 0 && "$invalid_announcement_count" -eq 0 ]]; then
+            log_warn "No matching entries found in logs."
             log_warn "This is expected if ngit-grasp logging improvements are not yet deployed."
             log_warn "See: docs/how-to/migrate-to-ngit-grasp.md (Dependencies section)"
         fi
@@ -289,69 +357,159 @@ main() {
     local temp_file
     temp_file=$(mktemp)
     
-    # Extract and parse log entries
+    # Extract and parse log entries using streaming (avoids loading all logs into memory)
     log_info "Extracting log entries..."
     
-    # Get raw log lines containing [PARSE_FAIL]
-    # Capture stderr separately to detect journalctl errors
-    local raw_lines journal_stderr journal_exit
-    local temp_stderr
+    # Create temp files for intermediate results
+    local temp_stderr temp_parse_fail temp_write_policy_rejection temp_builder_rejection
     temp_stderr=$(mktemp)
+    temp_parse_fail=$(mktemp)
+    temp_write_policy_rejection=$(mktemp)
+    temp_builder_rejection=$(mktemp)
     
-    raw_lines=$(eval "$journal_cmd" 2>"$temp_stderr" | grep '\[PARSE_FAIL\]' || true)
-    journal_exit=$?
+    # Extract [PARSE_FAIL] entries directly to temp file (streaming)
+    log_info "  Searching for [PARSE_FAIL] entries..."
+    eval "$journal_cmd" 2>"$temp_stderr" | grep '\[PARSE_FAIL\]' > "$temp_parse_fail" || true
+    
+    local journal_stderr
     journal_stderr=$(cat "$temp_stderr" 2>/dev/null || true)
-    rm -f "$temp_stderr"
-    
-    # Report any journalctl errors (but don't fail - empty logs are valid)
     if [[ -n "$journal_stderr" ]]; then
         log_warn "journalctl reported: $journal_stderr"
     fi
     
-    if [[ -z "$raw_lines" ]]; then
-        log_warn "No [PARSE_FAIL] entries found in logs."
+    # Extract "Event rejected by write policy" with "Invalid announcement" (streaming)
+    log_info "  Searching for write policy rejections..."
+    eval "$journal_cmd" 2>/dev/null | grep 'Event rejected by write policy' | grep 'Invalid announcement' > "$temp_write_policy_rejection" || true
+    
+    # Extract "Rejected repository announcement" from builder (streaming)
+    log_info "  Searching for builder rejections..."
+    eval "$journal_cmd" 2>/dev/null | grep 'Rejected repository announcement' | grep 'Invalid announcement' > "$temp_builder_rejection" || true
+    
+    rm -f "$temp_stderr"
+    
+    # Check if we found anything
+    local parse_fail_line_count write_policy_line_count builder_line_count
+    parse_fail_line_count=$(wc -l < "$temp_parse_fail")
+    parse_fail_line_count="${parse_fail_line_count//[^0-9]/}"
+    write_policy_line_count=$(wc -l < "$temp_write_policy_rejection")
+    write_policy_line_count="${write_policy_line_count//[^0-9]/}"
+    builder_line_count=$(wc -l < "$temp_builder_rejection")
+    builder_line_count="${builder_line_count//[^0-9]/}"
+    
+    log_info "  Found $parse_fail_line_count [PARSE_FAIL] log lines"
+    log_info "  Found $write_policy_line_count write policy rejection log lines"
+    log_info "  Found $builder_line_count builder rejection log lines"
+    
+    local total_invalid_announcement_lines=$((write_policy_line_count + builder_line_count))
+    
+    if [[ "$parse_fail_line_count" -eq 0 && "$total_invalid_announcement_lines" -eq 0 ]]; then
+        log_warn "No matching entries found in logs."
         log_warn ""
         log_warn "This is expected if ngit-grasp logging improvements are not yet deployed."
-        log_warn "The structured log format required by this script:"
+        log_warn "The script looks for:"
         log_warn ""
-        log_warn "  [PARSE_FAIL] kind=30618 event_id=abc123 reason=\"...\" repo=myrepo npub=npub1..."
+        log_warn "  1. [PARSE_FAIL] kind=30618 event_id=abc123 reason=\"...\" repo=myrepo npub=npub1..."
+        log_warn "  2. Event rejected by write policy event_id=... kind=30617 reason=Invalid announcement: ..."
         log_warn ""
         log_warn "See: docs/how-to/migrate-to-ngit-grasp.md (Dependencies section)"
         log_warn ""
         
         # Create empty output file with header comment
         {
-            echo "# Parse failures extracted from $service"
+            echo "# Parse failures and invalid announcements extracted from $service"
             echo "# Time range: ${since_date:-beginning} to ${until_date:-now}"
             echo "# Extracted: $(date -Iseconds)"
-            echo "# Format: repo<TAB>npub<TAB>kind<TAB>event_id<TAB>reason"
             echo "#"
-            echo "# NOTE: No [PARSE_FAIL] entries found."
+            echo "# Includes:"
+            echo "#   - [PARSE_FAIL] structured log entries"
+            echo "#   - \"Invalid announcement\" rejections"
+            echo "#"
+            echo "# Format: event_id<TAB>kind<TAB>reason<TAB>repo<TAB>npub"
+            echo "# Note: repo and npub may be empty for some entries"
+            echo "#"
+            echo "# NOTE: No matching entries found."
             echo "# This is expected if ngit-grasp logging improvements are not yet deployed."
         } > "$output_file"
         
+        rm -f "$temp_parse_fail" "$temp_write_policy_rejection" "$temp_builder_rejection"
         log_info "Created empty output file: $output_file"
         exit 0
     fi
     
     # Write header
     {
-        echo "# Parse failures extracted from $service"
+        echo "# Parse failures and invalid announcements extracted from $service"
         echo "# Time range: ${since_date:-beginning} to ${until_date:-now}"
         echo "# Extracted: $(date -Iseconds)"
-        echo "# Format: repo<TAB>npub<TAB>kind<TAB>event_id<TAB>reason"
+        echo "#"
+        echo "# Includes:"
+        echo "#   - [PARSE_FAIL] structured log entries"
+        echo "#   - \"Invalid announcement\" rejections"
+        echo "#"
+        echo "# Format: event_id<TAB>kind<TAB>reason<TAB>repo<TAB>npub"
+        echo "# Note: repo and npub may be empty for some entries"
     } > "$output_file"
     
-    # Parse each line
-    local count=0
-    while IFS= read -r line; do
-        local parsed
-        parsed=$(parse_log_line "$line")
-        if [[ -n "$parsed" ]]; then
-            echo "$parsed" >> "$output_file"
-            ((count++))
-        fi
-    done <<< "$raw_lines"
+    # Parse [PARSE_FAIL] entries
+    log_info "  Parsing [PARSE_FAIL] entries..."
+    local parse_fail_count=0
+    if [[ "$parse_fail_line_count" -gt 0 ]]; then
+        while IFS= read -r line; do
+            local parsed
+            parsed=$(parse_parse_fail_line "$line")
+            if [[ -n "$parsed" ]]; then
+                echo "$parsed" >> "$output_file"
+                parse_fail_count=$((parse_fail_count + 1))
+            fi
+        done < "$temp_parse_fail"
+    fi
+    
+    # Parse write policy rejection entries
+    log_info "  Parsing write policy rejection entries..."
+    local write_policy_count=0
+    if [[ "$write_policy_line_count" -gt 0 ]]; then
+        while IFS= read -r line; do
+            local parsed
+            parsed=$(parse_write_policy_rejection_line "$line")
+            if [[ -n "$parsed" ]]; then
+                echo "$parsed" >> "$output_file"
+                write_policy_count=$((write_policy_count + 1))
+            fi
+        done < "$temp_write_policy_rejection"
+    fi
+    
+    # Parse builder rejection entries
+    log_info "  Parsing builder rejection entries..."
+    local builder_count=0
+    if [[ "$builder_line_count" -gt 0 ]]; then
+        while IFS= read -r line; do
+            local parsed
+            parsed=$(parse_builder_rejection_line "$line")
+            if [[ -n "$parsed" ]]; then
+                echo "$parsed" >> "$output_file"
+                builder_count=$((builder_count + 1))
+            fi
+        done < "$temp_builder_rejection"
+    fi
+    
+    local invalid_announcement_count=$((write_policy_count + builder_count))
+    
+    rm -f "$temp_parse_fail" "$temp_write_policy_rejection" "$temp_builder_rejection"
+    
+    # Deduplicate by event_id (first column) - keep first occurrence
+    log_info "  Deduplicating entries..."
+    local deduped_file
+    deduped_file=$(mktemp)
+    # Preserve header lines (starting with #) and deduplicate data lines
+    grep '^#' "$output_file" > "$deduped_file"
+    grep -v '^#' "$output_file" | sort -t$'\t' -k1,1 -u >> "$deduped_file"
+    mv "$deduped_file" "$output_file"
+    
+    # Count final entries (excluding header lines)
+    local count
+    count=$(grep -v '^#' "$output_file" | wc -l)
+    count="${count//[^0-9]/}"  # Strip whitespace
+    count="${count:-0}"
     
     rm -f "$temp_file"
     
@@ -360,26 +518,45 @@ main() {
     log_info "=== Extraction Summary ==="
     log_info "Service: $service"
     log_info "Time range: ${since_date:-beginning} to ${until_date:-now}"
-    log_success "Extracted $count parse failure entries"
+    log_success "Extracted $count total entries"
+    log_info "  - [PARSE_FAIL] entries: $parse_fail_count"
+    log_info "  - Invalid announcement rejections: $invalid_announcement_count"
     echo ""
     log_info "Output file: $output_file"
     
     if [[ $count -gt 0 ]]; then
         echo ""
         log_info "Sample entries (first 5):"
-        tail -n +5 "$output_file" | head -5 | while IFS=$'\t' read -r repo npub kind event_id reason; do
-            echo "  kind=$kind repo=$repo reason=\"$reason\""
-        done
+        # Use a subshell to avoid SIGPIPE issues with set -e
+        # New format: event_id<TAB>kind<TAB>reason<TAB>repo<TAB>npub
+        (grep -v '^#' "$output_file" | head -5 | while IFS=$'\t' read -r event_id kind reason repo npub; do
+            echo "  kind=$kind event_id=${event_id:0:16}... reason=\"${reason:0:60}...\""
+        done) || true
     fi
     
     # Breakdown by kind
     if [[ $count -gt 0 ]]; then
         echo ""
         log_info "Breakdown by event kind:"
-        tail -n +5 "$output_file" | awk -F'\t' '{print $3}' | sort | uniq -c | sort -rn | while read -r cnt kind; do
+        # Use a subshell to avoid SIGPIPE issues with set -e
+        # kind is now column 2
+        (grep -v '^#' "$output_file" | awk -F'\t' '{print $2}' | sort | uniq -c | sort -rn | while read -r cnt kind; do
             echo "  kind $kind: $cnt failures"
-        done
+        done) || true
     fi
+    
+    # Breakdown by reason pattern (for invalid announcements)
+    if [[ $invalid_announcement_count -gt 0 ]]; then
+        echo ""
+        log_info "Breakdown by reason pattern:"
+        # Extract the main reason type (before the colon details)
+        (grep -v '^#' "$output_file" | awk -F'\t' '{print $3}' | sed 's/:.*//' | sort | uniq -c | sort -rn | head -10 | while read -r cnt reason; do
+            echo "  $reason: $cnt"
+        done) || true
+    fi
+    
+    # Explicit success exit
+    exit 0
 }
 
 main "$@"
