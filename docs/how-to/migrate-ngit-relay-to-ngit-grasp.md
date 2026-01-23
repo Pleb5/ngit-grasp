@@ -22,25 +22,173 @@
 
 ### No action required:
 
-- **Git Data Complete - Moved** (state event exists in archive and git data reflects it)
-- **Invalid Repositories Announcement** (Won't Parse)
-- **Deletion Request** (kind 5) tagging announcement event in archive
-- **Announcement Not on Production But In Archive** that lists service
+| Category | How to Detect | Source |
+|----------|---------------|--------|
+| **Git Data Complete - Moved** | prod cat1 AND archive cat1 (same repo) | Git sync check |
+| **Invalid Announcement** (Won't Parse) | Log: `[PARSE_FAIL] kind=30617` | Archive logs |
+| **Deletion Request** | kind 5 event tagging announcement | Event fetch |
+| **Announcement Not on Prod But In Archive** | In archive announcements, not in prod | Event comparison |
 
 ### Action/decision required:
 
-- **Invalid State Event** (Won't Parse)
-- **Incomplete Git Data** (at source and destination) And No State Event at Destination
-- **No Announcement In Archive** (and no related delete event)
-- **Complete Git Data at source, Announcement but no State Event in Archive** and empty bare git repo
-- **State event but incomplete git data in Archive**
+| Category | How to Detect | Source |
+|----------|---------------|--------|
+| **Invalid State Event** (Won't Parse) | Log: `[PARSE_FAIL] kind=30618` | Archive logs |
+| **Purgatory Expired** (sync should have worked) | Log: `[PURGATORY_EXPIRED]` | Archive logs |
+| **Incomplete Git Data** (both relays) | prod cat2/3/4 AND archive cat2/3/4 | Git sync check |
+| **No Announcement In Archive** | In prod, not in archive, no deletion | Event comparison |
+| **State but incomplete git in Archive** | archive cat3 or cat4 | Git sync check |
 
-## Analysis Approach
+### Manual investigation required:
 
-This analysis and categorization should be scripted to facilitate easy review and decision making.
+- Repos that don't fit above categories
+- Repos with unexpected state (e.g., complete in prod, missing in archive, no log entries)
 
-There are already some scripts that we need to build on in the old issue worktree to help facilitate this.
+## Analysis Script Architecture
+
+The analysis is split into modular phases for fast iteration. Phases 1-3 and 5 can run locally; Phase 2 and 4 require VPS access.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ PHASE 1: Fetch Events (~30s, local)                             │
+│ scripts/migration/01-fetch-events.sh <relay> <output-dir>       │
+├─────────────────────────────────────────────────────────────────┤
+│ Fetches from relay:                                             │
+│   - kind 30618 (state events)                                   │
+│   - kind 30617 (announcements)                                  │
+│   - kind 5 (deletion requests)                                  │
+│                                                                 │
+│ Run twice: once for prod (relay.ngit.dev), once for archive     │
+│ Output: <output-dir>/{state,announcements,deletions}.json       │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ PHASE 2: Git Sync Check (~20 mins, VPS required)                │
+│ scripts/migration/10-check-git-sync.sh <events> <git-base> <out>│
+├─────────────────────────────────────────────────────────────────┤
+│ For each state event, compares refs to actual git data on disk. │
+│                                                                 │
+│ Run twice:                                                      │
+│   - prod: GIT_BASE=/persistent/relay-ngit-dev-ngit-relay/...    │
+│   - archive: GIT_BASE=/persistent/grasp/sync-archive/git        │
+│                                                                 │
+│ Output: git-sync-status.tsv                                     │
+│   repo|npub|state_refs|git_refs|matches|status                  │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ PHASE 3: Categorize & Compare (fast, local)                     │
+│ scripts/migration/20-categorize.sh <sync-status> <output-dir>   │
+│ scripts/migration/21-compare-relays.sh <prod> <archive> <out>   │
+├─────────────────────────────────────────────────────────────────┤
+│ 20-categorize.sh applies 4-category logic:                      │
+│   - cat1: complete match (all refs match)                       │
+│   - cat2: empty/blank (no git data)                             │
+│   - cat3: partial match (some refs match)                       │
+│   - cat4: no match (git exists but refs don't match)            │
+│                                                                 │
+│ 21-compare-relays.sh finds gaps:                                │
+│   - in prod but not archive                                     │
+│   - in archive but not prod                                     │
+│   - different status between relays                             │
+│                                                                 │
+│ Output: category-{1,2,3,4}.txt, relay-gaps.txt                  │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ PHASE 4: Log-Based Categories (VPS required)                    │
+│ scripts/migration/30-extract-parse-failures.sh <service> <out>  │
+│ scripts/migration/31-extract-purgatory-expiry.sh <service> <out>│
+├─────────────────────────────────────────────────────────────────┤
+│ Extracts structured log entries from journalctl:                │
+│   - Parse failures: [PARSE_FAIL] kind=X event_id=Y reason=Z     │
+│   - Purgatory expiry: [PURGATORY_EXPIRED] repo=X npub=Y         │
+│                                                                 │
+│ NOTE: Requires logging improvements in ngit-grasp to emit       │
+│ these structured log entries. See issue: TBD                    │
+│                                                                 │
+│ Output: parse-failures.txt, purgatory-expired.txt               │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ PHASE 5: Final Classification (fast, local)                     │
+│ scripts/migration/40-classify-actions.sh <all-inputs> <out>     │
+├─────────────────────────────────────────────────────────────────┤
+│ Combines all data sources to produce final classification:      │
+│                                                                 │
+│ Inputs:                                                         │
+│   - category files (prod and archive)                           │
+│   - relay-gaps.txt                                              │
+│   - parse-failures.txt                                          │
+│   - purgatory-expired.txt                                       │
+│   - deletions.json                                              │
+│                                                                 │
+│ Output:                                                         │
+│   - no-action-required.txt (repo|reason)                        │
+│   - action-required.txt (repo|reason|suggested_action)          │
+│   - manual-investigation.txt (repo|notes)                       │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Directory Structure
+
+```
+work/migration-analysis-YYYYMMDD-HHMM/
+├── prod/
+│   ├── raw/
+│   │   ├── state-events.json
+│   │   ├── announcements.json
+│   │   └── deletions.json
+│   ├── git-sync-status.tsv
+│   └── category-{1,2,3,4}.txt
+├── archive/
+│   ├── raw/
+│   │   ├── state-events.json
+│   │   ├── announcements.json
+│   │   └── deletions.json
+│   ├── git-sync-status.tsv
+│   └── category-{1,2,3,4}.txt
+├── logs/
+│   ├── parse-failures.txt
+│   └── purgatory-expired.txt
+├── comparison/
+│   └── relay-gaps.txt
+└── results/
+    ├── no-action-required.txt
+    ├── action-required.txt
+    └── manual-investigation.txt
+```
+
+## Prerequisites
+
+- `nak` - Nostr Army Knife for fetching events
+- `jq` - JSON processing
+- SSH access to VPS for Phase 2 and 4
+- Logging improvements in ngit-grasp for Phase 4 (see Dependencies)
+
+## Dependencies
+
+Phase 4 requires structured logging in ngit-grasp. Create a separate issue to add:
+
+```rust
+// On parse failure:
+tracing::warn!(
+    target: "migration",
+    "[PARSE_FAIL] kind={} event_id={} reason=\"{}\"",
+    event.kind, event.id, reason
+);
+
+// On purgatory expiry:
+tracing::warn!(
+    target: "migration",
+    "[PURGATORY_EXPIRED] repo={} npub={}",
+    identifier, npub
+);
+```
 
 ## Gotchas
 
-Always use `nak req` with `--paginate` flag so we don't miss any events. If we receive increments of 250 eg 500 then it's a red flag that we are not paginating and there are probably more events.
+- Always use `nak req` with `--paginate` flag so we don't miss any events. If we receive increments of 250 (e.g., exactly 500) then it's a red flag that we are not paginating and there are probably more events.
+- Phase 1 and 2 should run back-to-back for an accurate snapshot.
+- The git sync check (Phase 2) takes ~20 minutes per relay - this is the slow part.
+- Existing analysis data from Jan 22 can be used for developing Phase 3/5 logic before re-running Phase 2.
