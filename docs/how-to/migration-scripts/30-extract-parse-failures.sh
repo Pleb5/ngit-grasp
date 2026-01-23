@@ -125,18 +125,25 @@ usage() {
     echo "  output-dir    Directory to store extracted log data"
     echo ""
     echo "Options:"
-    echo "  --since <date>   Start date (default: 30 days ago)"
-    echo "  --until <date>   End date (default: now)"
-    echo "  --dry-run        Show what would be extracted without writing"
+    echo "  --since <date>        Start date (default: 30 days ago)"
+    echo "  --until <date>        End date (default: now)"
+    echo "  --analysis-root <dir> Filter to only missing announcements from analysis"
+    echo "  --dry-run             Show what would be extracted without writing"
     echo ""
     echo "Examples:"
     echo "  $0 ngit-grasp.service output/logs"
     echo "  $0 ngit-grasp.service output/logs --since '2026-01-01'"
     echo "  $0 ngit-grasp.service output/logs --since '2026-01-15' --until '2026-01-22'"
+    echo "  $0 ngit-grasp.service output/logs --analysis-root /tmp/migration-analysis-20260123"
     echo ""
     echo "Expected log formats:"
     echo "  [PARSE_FAIL] kind=30618 event_id=abc123 reason=\"...\" repo=myrepo npub=npub1..."
     echo "  Event rejected by write policy event_id=abc123 ... kind=30617 reason=Invalid announcement: ..."
+    echo ""
+    echo "Filtering with --analysis-root:"
+    echo "  When provided, only parse failures for announcements that are in production"
+    echo "  but missing from the archive will be included. This filters out rejections"
+    echo "  for events from other relays that don't affect the migration."
     exit 1
 }
 
@@ -204,6 +211,155 @@ parse_write_policy_rejection_line() {
 # the same event to be counted twice. Write policy logs contain the same
 # events, so we don't lose any data by only extracting from that source.
 
+# Filter parse failures to only those for missing announcements
+# This is used when --analysis-root is provided to scope results to the migration
+#
+# Arguments:
+#   $1 - parse failures file to filter (modified in place)
+#   $2 - analysis root directory containing comparison/ and prod/ subdirs
+#
+# The function:
+#   1. Reads missing announcements from comparison/complete-prod-missing-archive.txt
+#   2. Extracts pubkey/identifier pairs for those announcements
+#   3. Reads production announcements from prod/raw/announcements.json
+#   4. Gets event IDs for announcements matching the missing pubkey/identifier pairs
+#   5. Filters parse failures to only those event IDs
+filter_to_missing_announcements() {
+    local parse_failures_file="$1"
+    local analysis_root="$2"
+    
+    local missing_file="$analysis_root/comparison/complete-prod-missing-archive.txt"
+    local prod_announcements="$analysis_root/prod/raw/announcements.json"
+    
+    # Validate required files exist
+    if [[ ! -f "$missing_file" ]]; then
+        log_warn "Missing announcements file not found: $missing_file"
+        log_warn "Skipping filter - all parse failures will be included"
+        return 0
+    fi
+    
+    if [[ ! -f "$prod_announcements" ]]; then
+        log_warn "Production announcements file not found: $prod_announcements"
+        log_warn "Skipping filter - all parse failures will be included"
+        return 0
+    fi
+    
+    # Check if jq is available
+    if ! command -v jq &> /dev/null; then
+        log_warn "jq not found - cannot filter parse failures"
+        log_warn "Install jq or run without --analysis-root"
+        return 0
+    fi
+    
+    log_info "Filtering parse failures to missing announcements only..."
+    
+    # Step 1: Extract pubkey/identifier pairs from missing announcements
+    # Format: identifier | npub | prod=complete | archive=missing
+    local missing_pairs_file
+    missing_pairs_file=$(mktemp)
+    
+    # Extract identifier and npub, convert npub to hex pubkey for matching
+    while IFS=' | ' read -r identifier npub rest; do
+        # Skip empty lines
+        [[ -z "$identifier" ]] && continue
+        # Trim whitespace
+        identifier=$(echo "$identifier" | xargs)
+        npub=$(echo "$npub" | xargs)
+        echo "${identifier}|${npub}"
+    done < "$missing_file" > "$missing_pairs_file"
+    
+    local missing_count
+    missing_count=$(wc -l < "$missing_pairs_file")
+    missing_count="${missing_count//[^0-9]/}"
+    log_info "  Found $missing_count missing announcements to filter for"
+    
+    # Step 2: Get event IDs from production announcements for these pairs
+    # We need to match on 'd' tag (identifier) and pubkey
+    local missing_event_ids_file
+    missing_event_ids_file=$(mktemp)
+    
+    # Create a lookup of identifier|npub -> event_id from production announcements
+    # The JSON has: id, pubkey (hex), tags (array with ["d", identifier])
+    log_info "  Extracting event IDs from production announcements..."
+    
+    # Use jq to extract id, pubkey, and d-tag value, then filter
+    # Output format: event_id|identifier|pubkey_hex
+    # Note: The JSON file is NDJSON (newline-delimited), not an array
+    jq -r 'select(.kind == 30617) | 
+        .id as $id | 
+        .pubkey as $pubkey |
+        (.tags[] | select(.[0] == "d") | .[1]) as $dtag |
+        "\($id)|\($dtag)|\($pubkey)"' "$prod_announcements" > "$missing_event_ids_file.all" 2>/dev/null || {
+        log_warn "Failed to parse production announcements JSON"
+        rm -f "$missing_pairs_file" "$missing_event_ids_file" "$missing_event_ids_file.all"
+        return 0
+    }
+    
+    # Now filter to only event IDs for missing announcements
+    # We need to convert npub to hex pubkey for comparison
+    # npub is bech32, pubkey in JSON is hex
+    # For simplicity, we'll match on identifier only (d-tag) since it should be unique per pubkey
+    # Actually, we need both because same identifier can exist for different pubkeys
+    
+    # Create a set of "identifier|pubkey_hex" to match against
+    # First, we need to convert npub to hex - but that requires a tool
+    # Alternative: match on identifier only and accept some false positives
+    # Better: use the comparison file which has npub, and match against announcements
+    
+    # Let's match on identifier only for now (simpler, may have minor false positives)
+    # Extract just the identifiers from missing announcements
+    local missing_identifiers_file
+    missing_identifiers_file=$(mktemp)
+    cut -d'|' -f1 "$missing_pairs_file" | sort -u > "$missing_identifiers_file"
+    
+    # Filter event IDs to only those with matching identifiers
+    while IFS='|' read -r event_id identifier pubkey_hex; do
+        if grep -qFx "$identifier" "$missing_identifiers_file"; then
+            echo "$event_id"
+        fi
+    done < "$missing_event_ids_file.all" | sort -u > "$missing_event_ids_file"
+    
+    local event_id_count
+    event_id_count=$(wc -l < "$missing_event_ids_file")
+    event_id_count="${event_id_count//[^0-9]/}"
+    log_info "  Found $event_id_count event IDs for missing announcements"
+    
+    # Step 3: Filter parse failures to only those event IDs
+    local filtered_file
+    filtered_file=$(mktemp)
+    
+    # Copy header lines
+    grep '^#' "$parse_failures_file" > "$filtered_file"
+    
+    # Add a note about filtering
+    echo "# Filtered to missing announcements only (--analysis-root)" >> "$filtered_file"
+    echo "# Analysis root: $analysis_root" >> "$filtered_file"
+    echo "# Missing announcements: $missing_count" >> "$filtered_file"
+    echo "# Matching event IDs: $event_id_count" >> "$filtered_file"
+    
+    # Filter data lines - only include if event_id is in our list
+    local filtered_count=0
+    while IFS=$'\t' read -r event_id kind reason repo npub; do
+        # Skip header lines (already copied)
+        [[ "$event_id" =~ ^# ]] && continue
+        
+        # Check if this event_id is in our missing list
+        if grep -qFx "$event_id" "$missing_event_ids_file"; then
+            printf '%s\t%s\t%s\t%s\t%s\n' "$event_id" "$kind" "$reason" "$repo" "$npub" >> "$filtered_file"
+            filtered_count=$((filtered_count + 1))
+        fi
+    done < "$parse_failures_file"
+    
+    # Replace original with filtered version
+    mv "$filtered_file" "$parse_failures_file"
+    
+    # Cleanup temp files
+    rm -f "$missing_pairs_file" "$missing_event_ids_file" "$missing_event_ids_file.all" "$missing_identifiers_file"
+    
+    log_info "  Filtered from $(grep -v '^#' "$parse_failures_file" | wc -l | xargs) to $filtered_count parse failures"
+    log_success "Filtered to parse failures for missing announcements only"
+}
+
 # Main
 main() {
     if [[ $# -lt 2 ]]; then
@@ -219,6 +375,7 @@ main() {
     since_date=$(date -d "30 days ago" "+%Y-%m-%d" 2>/dev/null || date -v-30d "+%Y-%m-%d" 2>/dev/null || echo "")
     local until_date=""
     local dry_run=false
+    local analysis_root=""
     
     # Parse options
     while [[ $# -gt 0 ]]; do
@@ -229,6 +386,10 @@ main() {
                 ;;
             --until)
                 until_date="$2"
+                shift 2
+                ;;
+            --analysis-root)
+                analysis_root="$2"
                 shift 2
                 ;;
             --dry-run)
@@ -469,6 +630,11 @@ main() {
     grep -v '^#' "$output_file" | sort -t$'\t' -k1,1 -u >> "$deduped_file"
     mv "$deduped_file" "$output_file"
     
+    # Filter to missing announcements only if analysis root provided
+    if [[ -n "$analysis_root" ]]; then
+        filter_to_missing_announcements "$output_file" "$analysis_root"
+    fi
+    
     # Count final entries (excluding header lines)
     local count
     count=$(grep -v '^#' "$output_file" | wc -l)
@@ -482,9 +648,15 @@ main() {
     log_info "=== Extraction Summary ==="
     log_info "Service: $service"
     log_info "Time range: ${since_date:-beginning} to ${until_date:-now}"
+    if [[ -n "$analysis_root" ]]; then
+        log_info "Filtered to: missing announcements only"
+    fi
     log_success "Extracted $count total entries"
     log_info "  - [PARSE_FAIL] entries: $parse_fail_count"
     log_info "  - Invalid announcement rejections: $invalid_announcement_count"
+    if [[ -n "$analysis_root" ]]; then
+        log_info "  (filtered from original extraction)"
+    fi
     echo ""
     log_info "Output file: $output_file"
     
