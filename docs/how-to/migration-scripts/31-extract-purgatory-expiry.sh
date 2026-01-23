@@ -243,6 +243,19 @@ main() {
         exit 1
     fi
     
+    # Validate service exists (check if journalctl can find any logs for it)
+    # Note: We don't require the service to be running, just that it has logs
+    if ! journalctl --no-pager -u "$service" -n 1 &>/dev/null; then
+        log_warn "Could not query logs for service: $service"
+        log_warn "This may indicate the service doesn't exist or you lack permissions."
+        log_warn ""
+        log_warn "To list available ngit-grasp services:"
+        log_warn "  systemctl list-units 'ngit-grasp*' --all"
+        log_warn "  journalctl --list-boots  # Check if you have journal access"
+        log_warn ""
+        # Continue anyway - the service might exist but have no logs yet
+    fi
+    
     # Build journalctl command
     local journal_cmd="journalctl -u $service --no-pager -o short-iso"
     
@@ -287,8 +300,20 @@ main() {
     log_info "Extracting log entries..."
     
     # Get raw log lines containing [PURGATORY_EXPIRED]
-    local raw_lines
-    raw_lines=$(eval "$journal_cmd" 2>/dev/null | grep '\[PURGATORY_EXPIRED\]' || true)
+    # Capture stderr separately to detect journalctl errors
+    local raw_lines journal_stderr journal_exit
+    local temp_stderr
+    temp_stderr=$(mktemp)
+    
+    raw_lines=$(eval "$journal_cmd" 2>"$temp_stderr" | grep '\[PURGATORY_EXPIRED\]' || true)
+    journal_exit=$?
+    journal_stderr=$(cat "$temp_stderr" 2>/dev/null || true)
+    rm -f "$temp_stderr"
+    
+    # Report any journalctl errors (but don't fail - empty logs are valid)
+    if [[ -n "$journal_stderr" ]]; then
+        log_warn "journalctl reported: $journal_stderr"
+    fi
     
     if [[ -z "$raw_lines" ]]; then
         log_warn "No [PURGATORY_EXPIRED] entries found in logs."

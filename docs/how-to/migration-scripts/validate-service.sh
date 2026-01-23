@@ -108,9 +108,10 @@ validate_service_for_structured_logging() {
         fi
         
         # Check for structured log entries
+        # IMPORTANT: Use --no-pager to prevent hanging when run non-interactively (e.g., via SSH)
         local has_parse_fail has_purgatory
-        has_parse_fail=$(journalctl -u "$service_name" --since "7 days ago" 2>/dev/null | grep -c '\[PARSE_FAIL\]' || echo "0")
-        has_purgatory=$(journalctl -u "$service_name" --since "7 days ago" 2>/dev/null | grep -c '\[PURGATORY_EXPIRED\]' || echo "0")
+        has_parse_fail=$(journalctl --no-pager -u "$service_name" --since "7 days ago" 2>/dev/null | grep -c '\[PARSE_FAIL\]' || echo "0")
+        has_purgatory=$(journalctl --no-pager -u "$service_name" --since "7 days ago" 2>/dev/null | grep -c '\[PURGATORY_EXPIRED\]' || echo "0")
         
         # Strip any non-numeric characters (grep -c can have trailing whitespace)
         has_parse_fail="${has_parse_fail//[^0-9]/}"
