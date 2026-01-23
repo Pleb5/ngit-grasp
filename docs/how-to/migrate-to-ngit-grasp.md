@@ -1,6 +1,21 @@
-# Migrate ngit-relay to ngit-grasp
+# Migrate to ngit-grasp from another GRASP implementation
 
-This guide walks you through migrating a production ngit-relay instance to ngit-grasp. The process involves analyzing your existing data to identify repositories that need attention before switching over.
+This guide walks you through migrating a production GRASP relay to ngit-grasp. The process involves analyzing your existing data to identify repositories that need attention before switching over.
+
+## Compatibility
+
+This migration process works with any GRASP implementation that:
+
+- Stores git data in the `<npub>/<identifier>.git` directory structure
+- Uses standard GRASP events (kind 30617 announcements, kind 30618 state, kind 5 deletions)
+- Exposes a Nostr relay WebSocket endpoint
+
+**Known compatible implementations:**
+- ngit-relay (reference implementation)
+- ngit-grasp (when migrating between instances or from archive mode)
+- Other GRASP-compliant relays following the specification
+
+The migration scripts analyze Nostr events and git data directly, making them implementation-agnostic.
 
 ## Quick Start
 
@@ -9,15 +24,15 @@ Run the migration analysis with a single command:
 ```bash
 # Basic analysis (fetches events, compares relays)
 ./docs/how-to/migration-scripts/run-migration-analysis.sh \
-  --prod-relay wss://relay.ngit.dev \
-  --archive-relay wss://archive.relay.ngit.dev
+  --prod-relay wss://source-relay.example.com \
+  --archive-relay wss://target-relay.example.com
 
 # Full analysis (includes git sync check - run on VPS)
 ./docs/how-to/migration-scripts/run-migration-analysis.sh \
-  --prod-relay wss://relay.ngit.dev \
-  --archive-relay wss://archive.relay.ngit.dev \
-  --prod-git /var/lib/ngit-relay/git \
-  --archive-git /var/lib/ngit-relay-archive/git \
+  --prod-relay wss://source-relay.example.com \
+  --archive-relay wss://target-relay.example.com \
+  --prod-git /var/lib/grasp-relay/git \
+  --archive-git /var/lib/ngit-grasp/git \
   --service ngit-grasp.service
 ```
 
@@ -37,7 +52,7 @@ See [Running the Analysis](#running-the-analysis) for detailed options.
 
 ### For Full Analysis (VPS)
 
-- SSH access to the VPS running ngit-relay
+- SSH access to the VPS running your source relay
 - Read access to git data directories
 - Access to systemd journal (for log extraction)
 
@@ -58,7 +73,7 @@ The migration process has three stages:
 
 ### Stage 1: Deploy Archive Instance
 
-Deploy ngit-grasp alongside your production ngit-relay:
+Deploy ngit-grasp alongside your production relay:
 
 1. Configure ngit-grasp with:
    - `domain` set to `<prod-domain>.internal` (temporary)
@@ -88,24 +103,24 @@ Once all issues are resolved:
 ```bash
 # Preview what will happen (dry run)
 ./run-migration-analysis.sh \
-  --prod-relay wss://relay.ngit.dev \
-  --archive-relay wss://archive.relay.ngit.dev \
+  --prod-relay wss://source-relay.example.com \
+  --archive-relay wss://target-relay.example.com \
   --dry-run
 
 # Run the analysis
 ./run-migration-analysis.sh \
-  --prod-relay wss://relay.ngit.dev \
-  --archive-relay wss://archive.relay.ngit.dev
+  --prod-relay wss://source-relay.example.com \
+  --archive-relay wss://target-relay.example.com
 ```
 
 ### Full Analysis on VPS
 
 ```bash
 ./run-migration-analysis.sh \
-  --prod-relay wss://relay.ngit.dev \
-  --archive-relay wss://archive.relay.ngit.dev \
-  --prod-git /var/lib/ngit-relay/git \
-  --archive-git /var/lib/ngit-relay-archive/git \
+  --prod-relay wss://source-relay.example.com \
+  --archive-relay wss://target-relay.example.com \
+  --prod-git /var/lib/grasp-relay/git \
+  --archive-git /var/lib/ngit-grasp/git \
   --service ngit-grasp.service
 ```
 
@@ -128,8 +143,8 @@ Skip or run specific phases:
 
 | Option | Description |
 |--------|-------------|
-| `--prod-relay <url>` | Production relay WebSocket URL (required) |
-| `--archive-relay <url>` | Archive relay WebSocket URL (required) |
+| `--prod-relay <url>` | Source relay WebSocket URL (required) |
+| `--archive-relay <url>` | Target relay WebSocket URL (required) |
 | `--prod-git <path>` | Git base directory for prod (enables Phase 2) |
 | `--archive-git <path>` | Git base directory for archive (enables Phase 2) |
 | `--service <name>` | Systemd service name (enables Phase 4) |
@@ -217,7 +232,7 @@ Run with sudo or ensure your user has read access:
 
 ```bash
 # Check permissions
-ls -la /var/lib/ngit-relay/git
+ls -la /var/lib/grasp-relay/git
 
 # Run with sudo if needed
 sudo ./run-migration-analysis.sh ...
@@ -332,16 +347,18 @@ work/migration-analysis-YYYYMMDD-HHMM/
     └── summary.txt                 # Phase 5
 ```
 
-## Key Differences: ngit-relay vs ngit-grasp
+## Why Migration May Require Attention
 
-Understanding these differences helps explain why some repositories need attention:
+Different GRASP implementations may handle edge cases differently. ngit-grasp has stricter validation and better observability, which can surface issues that were previously hidden:
 
-| Aspect | ngit-relay | ngit-grasp |
-|--------|------------|------------|
-| Git data validation | Accepts commits/tags referenced in state event | Requires all git data to reproduce state |
-| PR refs cleanup | Doesn't clear `refs/nostr/<event-id>` | Properly manages PR refs |
-| Parse failures | Silently ignores | Logs structured `[PARSE_FAIL]` entries |
-| Sync timeout | No timeout | Purgatory expires after configurable period |
+| Aspect | Typical Source Relay | ngit-grasp |
+|--------|---------------------|------------|
+| Git data validation | May accept partial data | Requires all git data to reproduce state |
+| PR refs cleanup | May not clear `refs/nostr/<event-id>` | Properly manages PR refs |
+| Parse failures | May silently ignore | Logs structured `[PARSE_FAIL]` entries |
+| Sync timeout | May have no timeout | Purgatory expires after configurable period |
+
+These differences explain why some repositories may need attention during migration - ngit-grasp's stricter validation catches issues that other implementations may have silently accepted.
 
 ## Next Steps
 
@@ -371,10 +388,10 @@ For advanced usage, you can run individual phase scripts:
 
 ```bash
 # Phase 1: Fetch events
-./migration-scripts/01-fetch-events.sh wss://relay.ngit.dev output/prod
+./migration-scripts/01-fetch-events.sh wss://source-relay.example.com output/prod
 
 # Phase 2: Git sync check
-./migration-scripts/10-check-git-sync.sh output/prod/raw/state-events.json /var/lib/ngit-relay/git output/prod --categorize
+./migration-scripts/10-check-git-sync.sh output/prod/raw/state-events.json /var/lib/grasp-relay/git output/prod --categorize
 
 # Phase 3a: Categorize
 ./migration-scripts/20-categorize.sh output/prod/git-sync-status.tsv output/prod

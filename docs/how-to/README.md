@@ -110,15 +110,15 @@ How-to guides are **recipes** that show you how to solve specific problems or ac
 
 ---
 
-### Migrate from ngit-relay
-**Status:** 🔜 Planned
+### [Migrate to ngit-grasp](migrate-to-ngit-grasp.md)
+**Status:** ✅ Available
 
-**Problem:** Switch from reference implementation  
+**Problem:** Switch from another GRASP implementation  
 **You'll learn:**
-- Export data from ngit-relay
-- Import to ngit-grasp
-- Update repository URLs
-- Verify migration
+- Analyze existing relay data
+- Identify repositories needing attention
+- Run migration analysis scripts
+- Plan and execute cutover
 
 ---
 

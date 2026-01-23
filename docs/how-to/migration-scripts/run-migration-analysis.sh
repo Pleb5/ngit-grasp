@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# run-migration-analysis.sh - Orchestrate the complete ngit-relay to ngit-grasp migration analysis
+# run-migration-analysis.sh - Orchestrate the complete GRASP relay to ngit-grasp migration analysis
 #
 # This script runs all 5 phases of the migration analysis pipeline in sequence,
 # with proper error handling, progress reporting, and timing information.
@@ -13,8 +13,8 @@
 #   ./run-migration-analysis.sh \
 #     --prod-relay wss://relay.ngit.dev \
 #     --archive-relay wss://archive.relay.ngit.dev \
-#     --prod-git /var/lib/ngit-relay/git \
-#     --archive-git /var/lib/ngit-relay-archive/git
+#     --prod-git /var/lib/grasp-relay/git \
+#     --archive-git /var/lib/ngit-grasp/git
 #
 # USAGE:
 #   ./run-migration-analysis.sh [options]
@@ -64,12 +64,12 @@
 #   ./run-migration-analysis.sh \
 #     --prod-relay wss://relay.ngit.dev \
 #     --archive-relay wss://archive.relay.ngit.dev \
-#     --prod-git /var/lib/ngit-relay/git \
-#     --archive-git /var/lib/ngit-relay-archive/git \
+#     --prod-git /var/lib/grasp-relay/git \
+#     --archive-git /var/lib/ngit-grasp/git \
 #     --service ngit-grasp.service
 #
 # SEE ALSO:
-#   docs/how-to/migrate-ngit-relay-to-ngit-grasp.md - Full migration guide
+#   docs/how-to/migrate-to-ngit-grasp.md - Full migration guide
 #
 
 set -euo pipefail
@@ -658,7 +658,7 @@ display_summary() {
 main() {
     parse_args "$@"
     
-    log_header "ngit-relay to ngit-grasp Migration Analysis"
+    log_header "GRASP Relay to ngit-grasp Migration Analysis"
     
     validate_args
     check_prerequisites

@@ -2,7 +2,7 @@
 #
 # 30-extract-parse-failures.sh - Extract parse failure events from systemd logs
 #
-# PHASE 4a of the ngit-relay to ngit-grasp migration analysis pipeline.
+# PHASE 4a of the GRASP relay to ngit-grasp migration analysis pipeline.
 # Extracts structured [PARSE_FAIL] log entries from journalctl.
 #
 # USAGE:
@@ -42,7 +42,7 @@
 #   [PARSE_FAIL] log entries. Until those are implemented, this script will
 #   find no matching entries (which is handled gracefully).
 #
-#   See: docs/how-to/migrate-ngit-relay-to-ngit-grasp.md (Dependencies section)
+#   See: docs/how-to/migrate-to-ngit-grasp.md (Dependencies section)
 #
 #   Expected Rust logging code:
 #     tracing::warn!(
@@ -59,7 +59,7 @@
 # RUNTIME: Depends on log volume, typically < 30 seconds
 #
 # SEE ALSO:
-#   docs/how-to/migrate-ngit-relay-to-ngit-grasp.md - Full migration guide
+#   docs/how-to/migrate-to-ngit-grasp.md - Full migration guide
 #   31-extract-purgatory-expiry.sh - Companion script for purgatory expiry logs
 #
 
@@ -231,7 +231,7 @@ main() {
         if [[ "$sample_count" -eq 0 ]]; then
             log_warn "No [PARSE_FAIL] entries found in logs."
             log_warn "This is expected if ngit-grasp logging improvements are not yet deployed."
-            log_warn "See: docs/how-to/migrate-ngit-relay-to-ngit-grasp.md (Dependencies section)"
+            log_warn "See: docs/how-to/migrate-to-ngit-grasp.md (Dependencies section)"
         fi
         
         exit 0
@@ -259,7 +259,7 @@ main() {
         log_warn ""
         log_warn "  [PARSE_FAIL] kind=30618 event_id=abc123 reason=\"...\" repo=myrepo npub=npub1..."
         log_warn ""
-        log_warn "See: docs/how-to/migrate-ngit-relay-to-ngit-grasp.md (Dependencies section)"
+        log_warn "See: docs/how-to/migrate-to-ngit-grasp.md (Dependencies section)"
         log_warn ""
         
         # Create empty output file with header comment

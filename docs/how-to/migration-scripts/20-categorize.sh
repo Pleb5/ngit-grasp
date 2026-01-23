@@ -2,7 +2,7 @@
 #
 # 20-categorize.sh - Categorize git sync status into 4 categories
 #
-# PHASE 3a of the ngit-relay to ngit-grasp migration analysis pipeline.
+# PHASE 3a of the GRASP relay to ngit-grasp migration analysis pipeline.
 # Takes git-sync-status.tsv from Phase 2 and categorizes into 4 files.
 #
 # USAGE:
@@ -39,7 +39,7 @@
 # RUNTIME: < 1 second (local processing only)
 #
 # SEE ALSO:
-#   docs/how-to/migrate-ngit-relay-to-ngit-grasp.md - Full migration guide
+#   docs/how-to/migrate-to-ngit-grasp.md - Full migration guide
 #   10-check-git-sync.sh - Phase 2 script that produces input for this script
 #
 

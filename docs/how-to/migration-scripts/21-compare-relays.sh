@@ -2,7 +2,7 @@
 #
 # 21-compare-relays.sh - Compare prod vs archive category files to find gaps
 #
-# PHASE 3b of the ngit-relay to ngit-grasp migration analysis pipeline.
+# PHASE 3b of the GRASP relay to ngit-grasp migration analysis pipeline.
 # Compares categorized output from prod and archive to identify:
 # - Repos complete in prod but missing/incomplete in archive
 # - Repos in archive but not in prod
@@ -39,7 +39,7 @@
 # RUNTIME: < 1 second (local processing only)
 #
 # SEE ALSO:
-#   docs/how-to/migrate-ngit-relay-to-ngit-grasp.md - Full migration guide
+#   docs/how-to/migrate-to-ngit-grasp.md - Full migration guide
 #   20-categorize.sh - Phase 3a script that produces input for this script
 #
 

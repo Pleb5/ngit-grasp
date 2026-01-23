@@ -2,7 +2,7 @@
 #
 # 01-fetch-events.sh - Fetch nostr events from a relay for migration analysis
 #
-# PHASE 1 of the ngit-relay to ngit-grasp migration analysis pipeline.
+# PHASE 1 of the GRASP relay to ngit-grasp migration analysis pipeline.
 # Fetches kind 30618 (state), 30617 (announcement), and 5 (deletion) events.
 #
 # USAGE:
@@ -41,7 +41,7 @@
 #   - Run Phase 1 and Phase 2 back-to-back for accurate snapshot
 #
 # SEE ALSO:
-#   docs/how-to/migrate-ngit-relay-to-ngit-grasp.md - Full migration guide
+#   docs/how-to/migrate-to-ngit-grasp.md - Full migration guide
 #
 
 set -euo pipefail

@@ -2,7 +2,7 @@
 #
 # 40-classify-actions.sh - Final classification of repos for migration action
 #
-# PHASE 5 of the ngit-relay to ngit-grasp migration analysis pipeline.
+# PHASE 5 of the GRASP relay to ngit-grasp migration analysis pipeline.
 # Combines all data sources from previous phases to produce actionable results.
 #
 # USAGE:
@@ -82,7 +82,7 @@
 # RUNTIME: < 5 seconds (local processing only)
 #
 # SEE ALSO:
-#   docs/how-to/migrate-ngit-relay-to-ngit-grasp.md - Full migration guide
+#   docs/how-to/migrate-to-ngit-grasp.md - Full migration guide
 #   01-fetch-events.sh - Phase 1 (fetch events)
 #   10-check-git-sync.sh - Phase 2 (git sync check)
 #   20-categorize.sh, 21-compare-relays.sh - Phase 3 (categorize and compare)

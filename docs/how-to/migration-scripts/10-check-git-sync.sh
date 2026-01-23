@@ -2,21 +2,21 @@
 #
 # 10-check-git-sync.sh - Compare state events to actual git data on disk
 #
-# PHASE 2 of the ngit-relay to ngit-grasp migration analysis pipeline.
+# PHASE 2 of the GRASP relay to ngit-grasp migration analysis pipeline.
 # Compares kind 30618 state events against actual git refs on disk.
 #
 # USAGE:
 #   ./10-check-git-sync.sh <state-events.json> <git-base-dir> <output-dir> [--categorize]
 #
 # EXAMPLES:
-#   # Check prod relay against prod git data
-#   ./10-check-git-sync.sh output/prod/raw/state-events.json /var/lib/ngit-relay/git output/prod
+#   # Check source relay against source git data
+#   ./10-check-git-sync.sh output/prod/raw/state-events.json /var/lib/grasp-relay/git output/prod
 #
-#   # Check archive relay against archive git data
-#   ./10-check-git-sync.sh output/archive/raw/state-events.json /var/lib/ngit-relay-archive/git output/archive
+#   # Check target relay against target git data
+#   ./10-check-git-sync.sh output/archive/raw/state-events.json /var/lib/ngit-grasp/git output/archive
 #
 #   # Check and categorize in one step (convenience mode)
-#   ./10-check-git-sync.sh output/prod/raw/state-events.json /var/lib/ngit-relay/git output/prod --categorize
+#   ./10-check-git-sync.sh output/prod/raw/state-events.json /var/lib/grasp-relay/git output/prod --categorize
 #
 # INPUT:
 #   state-events.json  - JSONL file from Phase 1 (01-fetch-events.sh)
@@ -53,7 +53,7 @@
 #   - Handles packed refs (git show-ref) and loose refs
 #
 # SEE ALSO:
-#   docs/how-to/migrate-ngit-relay-to-ngit-grasp.md - Full migration guide
+#   docs/how-to/migrate-to-ngit-grasp.md - Full migration guide
 #   01-fetch-events.sh - Phase 1 script that produces input for this script
 #   20-categorize.sh - Phase 3a script that consumes output from this script
 #
@@ -101,13 +101,13 @@ usage() {
     echo ""
     echo "Arguments:"
     echo "  state-events.json  JSONL file from Phase 1 (kind 30618 events)"
-    echo "  git-base-dir       Base directory for git repos (e.g., /var/lib/ngit-relay/git)"
+    echo "  git-base-dir       Base directory for git repos (e.g., /var/lib/grasp-relay/git)"
     echo "  output-dir         Directory to store output files"
     echo "  --categorize       Optional: also output category files (like Phase 3)"
     echo ""
     echo "Examples:"
-    echo "  $0 output/prod/raw/state-events.json /var/lib/ngit-relay/git output/prod"
-    echo "  $0 output/archive/raw/state-events.json /var/lib/ngit-relay-archive/git output/archive"
+    echo "  $0 output/prod/raw/state-events.json /var/lib/grasp-relay/git output/prod"
+    echo "  $0 output/archive/raw/state-events.json /var/lib/ngit-grasp/git output/archive"
     echo ""
     echo "Output:"
     echo "  git-sync-status.tsv - TSV with: repo, npub, state_refs, git_refs, matches, reason"
