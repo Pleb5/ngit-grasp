@@ -65,6 +65,14 @@
 
 set -euo pipefail
 
+# Get script directory for sourcing helpers
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source the service validation helper
+if [[ -f "$SCRIPT_DIR/validate-service.sh" ]]; then
+    source "$SCRIPT_DIR/validate-service.sh"
+fi
+
 # Colors for output (disabled if not a terminal)
 if [[ -t 1 ]]; then
     RED='\033[0;31m'
@@ -188,9 +196,33 @@ main() {
         esac
     done
     
-    # Validate service name
+    # Validate service name format
     if [[ ! "$service" =~ \.service$ ]]; then
         service="${service}.service"
+    fi
+    
+    # Validate service is appropriate for structured logging
+    # This prevents the common mistake of using ngit-relay instead of ngit-grasp
+    if type validate_service_for_structured_logging &>/dev/null; then
+        # Use non-interactive mode if not a terminal, skip log check (we'll do our own)
+        local interactive="true"
+        [[ ! -t 0 ]] && interactive="false"
+        
+        if ! validate_service_for_structured_logging "$service" "false" "$interactive"; then
+            log_error "Service validation failed. Use an ngit-grasp service for structured logging."
+            exit 1
+        fi
+    else
+        # Fallback validation if helper not available
+        if [[ "$service" == *"ngit-relay"* ]]; then
+            log_error "Service name appears to be ngit-relay: $service"
+            log_error "Structured logging ([PARSE_FAIL]) only exists in ngit-grasp services."
+            log_error "Please use the ngit-grasp archive service instead."
+            log_error ""
+            log_error "To find the correct service:"
+            log_error "  systemctl list-units 'ngit-grasp*' --all"
+            exit 1
+        fi
     fi
     
     log_info "Extracting parse failures from systemd logs"

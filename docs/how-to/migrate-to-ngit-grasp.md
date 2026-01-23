@@ -122,18 +122,35 @@ ls /path/to/git/npub1*/  # Should show *.git directories
 
 ### Phase 4 Needs the Correct Service Name
 
-Phase 4 extracts structured logs (`[PARSE_FAIL]`, `[PURGATORY_EXPIRED]`) from journald. You must specify the service that has these logs - typically the **archive** service (ngit-grasp), not the production service (ngit-relay).
+> **CRITICAL:** Phase 4 extracts structured logs (`[PARSE_FAIL]`, `[PURGATORY_EXPIRED]`) from journald. These logs **ONLY exist in ngit-grasp services**, NOT in ngit-relay services.
+
+If you specify an ngit-relay service (like `ngit-relay.service`), Phase 4 will find **zero logs** and produce empty results. This is a common mistake that wastes time and produces misleading analysis.
+
+**Correct service names (ngit-grasp):**
+- `ngit-grasp.service`
+- `ngit-grasp-relay-ngit-dev.service` (NixOS multi-instance)
+- `ngit-grasp-archive.service`
+
+**Incorrect service names (ngit-relay - NO structured logging):**
+- `ngit-relay.service`
+- `relay-ngit-dev.service`
 
 ```bash
 # Find all ngit-related services
 systemctl list-units 'ngit-*' --all
 
-# Check which service has structured logging
+# Check which service has structured logging (should be ngit-grasp)
 journalctl -u ngit-grasp-*.service | grep -E '\[PARSE_FAIL\]|\[PURGATORY_EXPIRED\]' | head -5
+
+# Verify ngit-relay does NOT have structured logging
+journalctl -u ngit-relay.service | grep -E '\[PARSE_FAIL\]|\[PURGATORY_EXPIRED\]' | head -5
+# ^ This should return nothing
 
 # Use the archive service name for Phase 4
 ./run-migration-analysis.sh ... --service ngit-grasp-relay-ngit-dev.service
 ```
+
+The migration scripts now validate the service name and will **error** if you specify an ngit-relay service, preventing this common mistake.
 
 ### Permission Issues with Service-Owned Directories
 
@@ -273,7 +290,7 @@ Skip or run specific phases:
 | `--archive-relay <url>` | Target relay WebSocket URL (required) |
 | `--prod-git <path>` | Git base directory for prod (enables Phase 2) |
 | `--archive-git <path>` | Git base directory for archive (enables Phase 2) |
-| `--service <name>` | Systemd service name (enables Phase 4) |
+| `--service <name>` | Systemd service name for Phase 4 log extraction. **MUST be an ngit-grasp service** (not ngit-relay). Structured logging only exists in ngit-grasp. |
 | `--output <dir>` | Output directory (default: auto-generated) |
 | `--skip-phase-N` | Skip phase N (1-5) |
 | `--only-phase-N` | Run only phase N |
@@ -427,15 +444,49 @@ The analysis will continue without log data.
 
 ### Phase 4 finds no structured logs
 
-Structured logging (`[PARSE_FAIL]`, `[PURGATORY_EXPIRED]`) is only available in ngit-grasp. If checking an ngit-relay service, no structured logs will be found.
+**Symptom:** Phase 4 completes but `parse-failures.txt` and `purgatory-expired.txt` are empty or contain only header comments.
+
+**Most common cause:** You're querying the wrong service (ngit-relay instead of ngit-grasp).
+
+Structured logging (`[PARSE_FAIL]`, `[PURGATORY_EXPIRED]`) **only exists in ngit-grasp services**. If you specify an ngit-relay service, Phase 4 will find zero logs.
+
+**How to diagnose:**
 
 ```bash
-# Verify you're checking the right service (should be ngit-grasp)
-journalctl -u ngit-grasp-*.service | grep -E '\[PARSE_FAIL\]|\[PURGATORY_EXPIRED\]' | head -5
+# 1. Check what service you configured
+cat /path/to/output/config.txt | grep SERVICE_NAME
 
-# If checking ngit-relay, structured logs won't exist
-# Use --service with the ngit-grasp archive service name instead
+# 2. If it contains "ngit-relay", that's the problem!
+# ngit-relay does NOT have structured logging
+
+# 3. Find the correct ngit-grasp service
+systemctl list-units 'ngit-grasp*' --all
+
+# 4. Verify the ngit-grasp service has structured logs
+journalctl -u ngit-grasp-relay-ngit-dev.service --since "7 days ago" | \
+  grep -E '\[PARSE_FAIL\]|\[PURGATORY_EXPIRED\]' | head -5
 ```
+
+**How to fix:**
+
+```bash
+# Update SERVICE_NAME to the ngit-grasp archive service and re-run
+./run-migration-analysis.sh \
+  --prod-relay wss://relay.ngit.dev \
+  --archive-relay ws://localhost:7443 \
+  --service ngit-grasp-relay-ngit-dev.service \
+  --from-phase-4  # Skip phases 1-3, just re-run phase 4
+```
+
+**Other possible causes:**
+
+1. **Structured logging not deployed:** If the ngit-grasp instance doesn't have the logging improvements deployed, no structured logs will exist. Check the ngit-grasp version.
+
+2. **No events in time window:** If there genuinely were no parse failures or purgatory expiry events, the files will be empty. This is valid - it means everything parsed successfully.
+
+3. **Wrong time range:** The default is 30 days. If your archive has been running longer, you may need `--since` to extend the range.
+
+**Prevention:** The migration scripts now validate the service name and will error if you specify an ngit-relay service.
 
 ### Event counts are multiples of 250
 
@@ -645,7 +696,7 @@ This section documents the specific configuration and lessons learned from migra
 
 2. **Check archive accessibility**: We initially tried to run analysis remotely, but the archive relay was localhost-only. Had to SSH to VPS.
 
-3. **Use archive service for Phase 4**: Structured logging (`[PARSE_FAIL]`, `[PURGATORY_EXPIRED]`) is in the ngit-grasp archive service, not the ngit-relay production service.
+3. **Use archive service for Phase 4 (CRITICAL)**: Structured logging (`[PARSE_FAIL]`, `[PURGATORY_EXPIRED]`) is **ONLY** in the ngit-grasp archive service, NOT the ngit-relay production service. Running Phase 4 against `ngit-relay.service` produces zero results because ngit-relay doesn't emit structured logs. The scripts now validate this and error if you specify an ngit-relay service.
 
 4. **Install git on VPS**: Git wasn't installed on the minimal VPS. The scripts now check for this in prerequisites.
 

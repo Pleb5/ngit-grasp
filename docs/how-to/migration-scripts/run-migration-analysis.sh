@@ -548,6 +548,34 @@ run_phase_4() {
         return 0
     fi
     
+    # Validate service name before running Phase 4
+    # Structured logging only exists in ngit-grasp, not ngit-relay
+    if [[ "$SERVICE_NAME" == *"ngit-relay"* ]]; then
+        log_error "SERVICE_NAME appears to be ngit-relay: $SERVICE_NAME"
+        log_error ""
+        log_error "Phase 4 requires an ngit-grasp service with structured logging."
+        log_error "Structured logging ([PARSE_FAIL], [PURGATORY_EXPIRED]) only exists"
+        log_error "in ngit-grasp services, NOT in ngit-relay services."
+        log_error ""
+        log_error "Please update --service to use the ngit-grasp archive service."
+        log_error ""
+        log_error "To find the correct service name:"
+        log_error "  systemctl list-units 'ngit-grasp*' --all"
+        log_error ""
+        log_error "Common ngit-grasp service names:"
+        log_error "  - ngit-grasp.service"
+        log_error "  - ngit-grasp-relay-ngit-dev.service (NixOS multi-instance)"
+        log_error "  - ngit-grasp-archive.service"
+        return 1
+    fi
+    
+    # Warn if service name doesn't look like ngit-grasp
+    if [[ "$SERVICE_NAME" != *"ngit-grasp"* && "$SERVICE_NAME" != *"grasp"* ]]; then
+        log_warn "SERVICE_NAME doesn't contain 'ngit-grasp': $SERVICE_NAME"
+        log_warn "Structured logging only exists in ngit-grasp services."
+        log_warn "If this is not an ngit-grasp service, Phase 4 will find no logs."
+    fi
+    
     local cmds=()
     
     cmds+=("'$SCRIPT_DIR/30-extract-parse-failures.sh' '$SERVICE_NAME' '$OUTPUT_DIR/logs'")
