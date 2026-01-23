@@ -39,8 +39,10 @@
 #   2. "Invalid announcement" rejections (write policy):
 #      Event rejected by write policy event_id=abc123... relay=wss://... kind=30617 reason=Invalid announcement: multiple clone tags found...
 #
-#   3. "Rejected repository announcement" (builder):
-#      Rejected repository announcement note1xxx: Invalid announcement: multiple clone tags found...
+#   NOTE: Builder logs ("Rejected repository announcement note1xxx:") are NOT extracted
+#   because they use bech32 (note1) IDs while write policy logs use hex IDs. Extracting
+#   both would cause double-counting since deduplication only works within each format.
+#   Write policy logs contain the same events, so we don't lose any data.
 #
 #   Required fields: kind, event_id, reason
 #   Optional fields: repo, npub (may not be available for all entry types)
@@ -135,7 +137,6 @@ usage() {
     echo "Expected log formats:"
     echo "  [PARSE_FAIL] kind=30618 event_id=abc123 reason=\"...\" repo=myrepo npub=npub1..."
     echo "  Event rejected by write policy event_id=abc123 ... kind=30617 reason=Invalid announcement: ..."
-    echo "  Rejected repository announcement note1xxx: Invalid announcement: ..."
     exit 1
 }
 
@@ -197,28 +198,11 @@ parse_write_policy_rejection_line() {
     fi
 }
 
-# Parse a "Rejected repository announcement" log line from builder
-# Input: log line containing "Rejected repository announcement <note_id>: Invalid announcement:"
-# Output: TSV line: event_id<TAB>kind<TAB>reason<TAB>repo<TAB>npub
-# Note: The note_id is bech32 encoded, we need to extract it
-parse_builder_rejection_line() {
-    local line="$1"
-    
-    local note_id reason
-    
-    # Extract note_id (note1...) from "Rejected repository announcement note1xxx:"
-    note_id=$(echo "$line" | grep -oP 'Rejected repository announcement \Knote1[a-z0-9]+' || echo "")
-    
-    # Extract reason (everything after the note_id and colon)
-    reason=$(echo "$line" | grep -oP 'Rejected repository announcement note1[a-z0-9]+: \K.*$' || echo "")
-    
-    # Only output if we have the required fields
-    # Kind is always 30617 for announcements
-    if [[ -n "$note_id" && -n "$reason" ]]; then
-        # Use note_id as event_id (bech32 format), kind=30617, repo and npub empty
-        printf '%s\t%s\t%s\t\t\n' "$note_id" "30617" "$reason"
-    fi
-}
+# NOTE: parse_builder_rejection_line() was removed to fix double-counting bug.
+# Builder logs use bech32 (note1) IDs while write policy logs use hex IDs.
+# Since deduplication only works within each format, extracting both caused
+# the same event to be counted twice. Write policy logs contain the same
+# events, so we don't lose any data by only extracting from that source.
 
 # Main
 main() {
@@ -361,11 +345,10 @@ main() {
     log_info "Extracting log entries..."
     
     # Create temp files for intermediate results
-    local temp_stderr temp_parse_fail temp_write_policy_rejection temp_builder_rejection
+    local temp_stderr temp_parse_fail temp_write_policy_rejection
     temp_stderr=$(mktemp)
     temp_parse_fail=$(mktemp)
     temp_write_policy_rejection=$(mktemp)
-    temp_builder_rejection=$(mktemp)
     
     # Extract [PARSE_FAIL] entries directly to temp file (streaming)
     log_info "  Searching for [PARSE_FAIL] entries..."
@@ -378,29 +361,24 @@ main() {
     fi
     
     # Extract "Event rejected by write policy" with "Invalid announcement" (streaming)
+    # NOTE: We only extract from write policy logs (hex IDs), not builder logs (note1 IDs)
+    # to avoid double-counting. Both log sources contain the same events.
     log_info "  Searching for write policy rejections..."
     eval "$journal_cmd" 2>/dev/null | grep 'Event rejected by write policy' | grep 'Invalid announcement' > "$temp_write_policy_rejection" || true
-    
-    # Extract "Rejected repository announcement" from builder (streaming)
-    log_info "  Searching for builder rejections..."
-    eval "$journal_cmd" 2>/dev/null | grep 'Rejected repository announcement' | grep 'Invalid announcement' > "$temp_builder_rejection" || true
     
     rm -f "$temp_stderr"
     
     # Check if we found anything
-    local parse_fail_line_count write_policy_line_count builder_line_count
+    local parse_fail_line_count write_policy_line_count
     parse_fail_line_count=$(wc -l < "$temp_parse_fail")
     parse_fail_line_count="${parse_fail_line_count//[^0-9]/}"
     write_policy_line_count=$(wc -l < "$temp_write_policy_rejection")
     write_policy_line_count="${write_policy_line_count//[^0-9]/}"
-    builder_line_count=$(wc -l < "$temp_builder_rejection")
-    builder_line_count="${builder_line_count//[^0-9]/}"
     
     log_info "  Found $parse_fail_line_count [PARSE_FAIL] log lines"
     log_info "  Found $write_policy_line_count write policy rejection log lines"
-    log_info "  Found $builder_line_count builder rejection log lines"
     
-    local total_invalid_announcement_lines=$((write_policy_line_count + builder_line_count))
+    local total_invalid_announcement_lines=$write_policy_line_count
     
     if [[ "$parse_fail_line_count" -eq 0 && "$total_invalid_announcement_lines" -eq 0 ]]; then
         log_warn "No matching entries found in logs."
@@ -431,7 +409,7 @@ main() {
             echo "# This is expected if ngit-grasp logging improvements are not yet deployed."
         } > "$output_file"
         
-        rm -f "$temp_parse_fail" "$temp_write_policy_rejection" "$temp_builder_rejection"
+        rm -f "$temp_parse_fail" "$temp_write_policy_rejection"
         log_info "Created empty output file: $output_file"
         exit 0
     fi
@@ -478,23 +456,9 @@ main() {
         done < "$temp_write_policy_rejection"
     fi
     
-    # Parse builder rejection entries
-    log_info "  Parsing builder rejection entries..."
-    local builder_count=0
-    if [[ "$builder_line_count" -gt 0 ]]; then
-        while IFS= read -r line; do
-            local parsed
-            parsed=$(parse_builder_rejection_line "$line")
-            if [[ -n "$parsed" ]]; then
-                echo "$parsed" >> "$output_file"
-                builder_count=$((builder_count + 1))
-            fi
-        done < "$temp_builder_rejection"
-    fi
+    local invalid_announcement_count=$write_policy_count
     
-    local invalid_announcement_count=$((write_policy_count + builder_count))
-    
-    rm -f "$temp_parse_fail" "$temp_write_policy_rejection" "$temp_builder_rejection"
+    rm -f "$temp_parse_fail" "$temp_write_policy_rejection"
     
     # Deduplicate by event_id (first column) - keep first occurrence
     log_info "  Deduplicating entries..."
