@@ -1,772 +1,594 @@
 #!/usr/bin/env bash
 #
-# 40-classify-actions.sh - Final classification of repos for migration action
+# 40-classify-actions.sh - Classify repos by migration action required
 #
-# PHASE 5 of the GRASP relay to ngit-grasp migration analysis pipeline.
-# Combines all data sources from previous phases to produce actionable results.
+# Implements the redesigned classification system (Option B) with user feedback:
 #
-# USAGE:
-#   ./40-classify-actions.sh <analysis-dir>
+# Tier 1: No Action Required (ready-for-migration.txt)
+#   - Complete in both (prod=cat1, archive=cat1)
+#   - Deleted by user (kind 5 event)
+#   - Empty in prod (prod=cat2, any archive status)
+#   - Archive-only (archive=any, prod=missing)
+#   - Not in prod (purgatory-only, prod=missing)
 #
-# EXAMPLES:
-#   ./40-classify-actions.sh work/migration-analysis-20260122-1430
+# Tier 2: Action Required (needs-resync.txt)
+#   - Complete in prod, missing from archive (with purgatory context)
+#   - Complete in prod, incomplete in archive (with purgatory context)
 #
-# INPUT DIRECTORY STRUCTURE:
-#   <analysis-dir>/
-#   ├── prod/
-#   │   ├── raw/
-#   │   │   └── deletions.json          # Phase 1: kind 5 deletion events
-#   │   ├── category1-complete-match.txt    # Phase 3: complete git sync
-#   │   ├── category2-empty-blank.txt       # Phase 3: no git data
-#   │   ├── category3-partial-match.txt     # Phase 3: partial git sync
-#   │   └── category4-no-match.txt          # Phase 3: git exists, refs don't match
-#   ├── archive/
-#   │   ├── raw/
-#   │   │   └── deletions.json
-#   │   ├── category1-complete-match.txt
-#   │   ├── category2-empty-blank.txt
-#   │   ├── category3-partial-match.txt
-#   │   └── category4-no-match.txt
-#   ├── comparison/
-#   │   ├── complete-in-both.txt            # Phase 3: no action needed
-#   │   ├── complete-prod-missing-archive.txt   # Phase 3: needs investigation
-#   │   ├── complete-prod-incomplete-archive.txt # Phase 3: sync in progress?
-#   │   ├── incomplete-in-both.txt          # Phase 3: git incomplete
-#   │   └── in-archive-not-prod.txt         # Phase 3: deleted or new
-#   └── logs/
-#       ├── parse-failures.txt              # Phase 4: events that failed to parse
-#       └── purgatory-expired.txt           # Phase 4: repos that expired from purgatory
+# Tier 3: Manual Investigation (manual-review.txt)
+#   - Partial in prod (prod=cat3)
+#   - No-match in prod (prod=cat4)
+#   - Parse failures
+#   - Conflicting states
 #
-# OUTPUT:
-#   <analysis-dir>/results/
-#   ├── no-action-required.txt      # Repos that are fine as-is
-#   ├── action-required.txt         # Repos needing intervention
-#   ├── manual-investigation.txt    # Repos needing human review
-#   └── summary.txt                 # Human-readable summary
+# Usage: ./40-classify-actions.sh <analysis-dir>
 #
-# OUTPUT FORMATS:
-#   no-action-required.txt:
-#     repo | npub | reason
-#
-#   action-required.txt:
-#     repo | npub | reason | suggested_action
-#
-#   manual-investigation.txt:
-#     repo | npub | reason | context
-#
-# CLASSIFICATION LOGIC:
-#
-#   NO ACTION REQUIRED:
-#   - Complete in both prod and archive (successfully migrated)
-#   - Empty/blank in both (user never pushed any data)
-#   - Deleted by user (kind 5 deletion event exists)
-#   - In purgatory expiry logs (system already handled it)
-#
-#   ACTION REQUIRED:
-#   - Complete in prod, missing from archive → Re-sync needed
-#   - Complete in prod, incomplete in archive → Wait for sync or re-trigger
-#   - Partial match in prod → Investigate why refs don't match
-#   - No match (category 4) → Investigate git data corruption
-#   - Parse failures → Fix event format or re-announce
-#
-#   MANUAL INVESTIGATION:
-#   - Conflicting states (e.g., complete in prod but parse failure logged)
-#   - In archive but not prod (deleted? or new announcement?)
-#   - Multiple issues for same repo
-#   - Unexpected state combinations
-#
-# PREREQUISITES:
-#   - jq (for parsing JSON)
-#   - awk, sort, comm (standard Unix tools)
-#
-# RUNTIME: < 5 seconds (local processing only)
-#
-# SEE ALSO:
-#   docs/how-to/migrate-to-ngit-grasp.md - Full migration guide
-#   01-fetch-events.sh - Phase 1 (fetch events)
-#   10-check-git-sync.sh - Phase 2 (git sync check)
-#   20-categorize.sh, 21-compare-relays.sh - Phase 3 (categorize and compare)
-#   30-extract-parse-failures.sh, 31-extract-purgatory-expiry.sh - Phase 4 (logs)
+# Output format: repo | npub | prod_status | archive_status | context | action
 #
 
 set -euo pipefail
 
-# Colors for output (disabled if not a terminal)
-if [[ -t 1 ]]; then
-    RED='\033[0;31m'
-    GREEN='\033[0;32m'
-    YELLOW='\033[0;33m'
-    BLUE='\033[0;34m'
-    BOLD='\033[1m'
-    NC='\033[0m'
-else
-    RED=''
-    GREEN=''
-    YELLOW=''
-    BLUE=''
-    BOLD=''
-    NC=''
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+log_info() { echo -e "${BLUE}[INFO]${NC} $*"; }
+log_success() { echo -e "${GREEN}[OK]${NC} $*"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
+
+# Check arguments
+if [[ $# -lt 1 ]]; then
+    echo "Usage: $0 <analysis-dir>"
+    echo "Example: $0 work/migration-analysis-20260123-200701"
+    exit 1
 fi
 
-log_info() {
-    echo -e "${BLUE}[INFO]${NC} $*" >&2
-}
+ANALYSIS_DIR="$1"
 
-log_success() {
-    echo -e "${GREEN}[OK]${NC} $*" >&2
-}
-
-log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $*" >&2
-}
-
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $*" >&2
-}
-
-usage() {
-    echo "Usage: $0 <analysis-dir>"
-    echo ""
-    echo "Arguments:"
-    echo "  analysis-dir  Directory containing Phase 1-4 output"
-    echo ""
-    echo "Examples:"
-    echo "  $0 work/migration-analysis-20260122-1430"
-    echo ""
-    echo "Required input structure:"
-    echo "  <analysis-dir>/prod/category*.txt"
-    echo "  <analysis-dir>/archive/category*.txt"
-    echo "  <analysis-dir>/comparison/*.txt"
-    echo "  <analysis-dir>/logs/*.txt (optional)"
-    echo "  <analysis-dir>/prod/raw/deletions.json"
-    echo ""
-    echo "Output:"
-    echo "  <analysis-dir>/results/no-action-required.txt"
-    echo "  <analysis-dir>/results/action-required.txt"
-    echo "  <analysis-dir>/results/manual-investigation.txt"
-    echo "  <analysis-dir>/results/summary.txt"
+# Validate analysis directory
+if [[ ! -d "$ANALYSIS_DIR" ]]; then
+    log_error "Analysis directory not found: $ANALYSIS_DIR"
     exit 1
-}
+fi
 
-# Extract repo|npub key from category line
-# Input: "repo | npub | state_refs=N | ..."
-# Output: "repo|npub"
-extract_key() {
-    awk -F' \\| ' '{print $1 "|" $2}'
-}
+# Define paths
+PROD_DIR="$ANALYSIS_DIR/prod"
+ARCHIVE_DIR="$ANALYSIS_DIR/archive"
+COMPARISON_DIR="$ANALYSIS_DIR/comparison"
+LOGS_DIR="$ANALYSIS_DIR/logs"
+RESULTS_DIR="$ANALYSIS_DIR/results"
 
-# Extract repo from category line
-# Input: "repo | npub | ..."
-# Output: "repo"
-extract_repo() {
-    awk -F' \\| ' '{print $1}'
-}
-
-# Extract npub from category line
-# Input: "repo | npub | ..."
-# Output: "npub"
-extract_npub() {
-    awk -F' \\| ' '{print $2}'
-}
-
-# Check if a file exists and has content (ignoring comment lines)
-file_has_content() {
-    local file="$1"
-    if [[ ! -f "$file" ]]; then
-        return 1
-    fi
-    # Check for non-comment, non-empty lines
-    grep -v '^#' "$file" 2>/dev/null | grep -q '.' 2>/dev/null
-}
-
-# Count non-comment lines in a file
-count_lines() {
-    local file="$1"
-    if [[ ! -f "$file" ]]; then
-        echo "0"
-        return
-    fi
-    local count
-    count=$(grep -v '^#' "$file" 2>/dev/null | grep -c '.' 2>/dev/null) || count=0
-    # Ensure we return a clean integer
-    echo "${count:-0}"
-}
-
-# Parse deletions.json to extract deleted repo identifiers
-# Kind 5 events have "e" tags pointing to the deleted event
-# We need to cross-reference with announcements to get repo/npub
-# For now, we extract the pubkey and any "a" tags (addressable event references)
-parse_deletions() {
-    local deletions_file="$1"
-    local output_file="$2"
-    
-    if [[ ! -f "$deletions_file" ]]; then
-        touch "$output_file"
-        return
-    fi
-    
-    # Extract deletion targets from kind 5 events
-    # Kind 5 events can reference:
-    # - "e" tag: specific event ID
-    # - "a" tag: addressable event (kind:pubkey:identifier)
-    # For 30617 announcements, "a" tag format is: 30617:<pubkey>:<repo-identifier>
-    jq -r '
-        select(.kind == 5) |
-        .pubkey as $pubkey |
-        .tags[] |
-        select(.[0] == "a") |
-        .[1] |
-        split(":") |
-        select(.[0] == "30617") |
-        "\(.[2])|\($pubkey)"
-    ' "$deletions_file" 2>/dev/null | sort -u > "$output_file" || touch "$output_file"
-}
-
-# Build a lookup set from a file (repo|npub format)
-# Returns keys one per line
-build_key_set() {
-    local file="$1"
-    if [[ ! -f "$file" ]]; then
-        return 0
-    fi
-    # Use || true to prevent pipefail from exiting on empty grep
-    { grep -v '^#' "$file" 2>/dev/null || true; } | extract_key | sort -u
-}
-
-# Main classification logic
-main() {
-    if [[ $# -ne 1 ]]; then
-        usage
-    fi
-    
-    local analysis_dir="$1"
-    
-    # Validate input directory
-    if [[ ! -d "$analysis_dir" ]]; then
-        log_error "Analysis directory not found: $analysis_dir"
+# Validate required directories
+for dir in "$PROD_DIR" "$ARCHIVE_DIR" "$COMPARISON_DIR" "$LOGS_DIR"; do
+    if [[ ! -d "$dir" ]]; then
+        log_error "Required directory not found: $dir"
         exit 1
     fi
-    
-    # Check for required subdirectories
-    local prod_dir="$analysis_dir/prod"
-    local archive_dir="$analysis_dir/archive"
-    local comparison_dir="$analysis_dir/comparison"
-    local logs_dir="$analysis_dir/logs"
-    local results_dir="$analysis_dir/results"
-    
-    for dir in "$prod_dir" "$archive_dir" "$comparison_dir"; do
-        if [[ ! -d "$dir" ]]; then
-            log_error "Required directory not found: $dir"
-            log_error "Run Phases 1-3 first to generate input data."
-            exit 1
-        fi
-    done
-    
-    # Check for required category files
-    if [[ ! -f "$prod_dir/category1-complete-match.txt" ]]; then
-        log_error "Missing category files in $prod_dir"
-        log_error "Run Phase 3 (20-categorize.sh) first."
-        exit 1
-    fi
-    
-    log_info "Starting final classification"
-    log_info "Analysis directory: $analysis_dir"
-    
-    # Create output directory
-    mkdir -p "$results_dir"
-    
-    # Create temp directory for intermediate files
-    local tmp_dir
-    tmp_dir=$(mktemp -d)
-    # shellcheck disable=SC2064
-    trap "rm -rf '$tmp_dir'" EXIT
-    
-    # Initialize output files
-    local no_action="$results_dir/no-action-required.txt"
-    local action_req="$results_dir/action-required.txt"
-    local manual_inv="$results_dir/manual-investigation.txt"
-    local summary="$results_dir/summary.txt"
-    
-    # Write headers
-    {
-        echo "# No Action Required - Repos that are fine as-is"
-        echo "# Generated: $(date -Iseconds)"
-        echo "# Format: repo | npub | reason"
-        echo "#"
-    } > "$no_action"
-    
-    {
-        echo "# Action Required - Repos needing intervention"
-        echo "# Generated: $(date -Iseconds)"
-        echo "# Format: repo | npub | reason | suggested_action"
-        echo "#"
-    } > "$action_req"
-    
-    {
-        echo "# Manual Investigation Required - Repos needing human review"
-        echo "# Generated: $(date -Iseconds)"
-        echo "# Format: repo | npub | reason | context"
-        echo "#"
-    } > "$manual_inv"
-    
-    # =========================================================================
-    # STEP 1: Parse deletion events
-    # =========================================================================
-    log_info "Parsing deletion events..."
-    
-    parse_deletions "$prod_dir/raw/deletions.json" "$tmp_dir/prod_deletions.txt"
-    parse_deletions "$archive_dir/raw/deletions.json" "$tmp_dir/archive_deletions.txt"
-    
-    # Combine deletions (union of both)
-    cat "$tmp_dir/prod_deletions.txt" "$tmp_dir/archive_deletions.txt" 2>/dev/null | sort -u > "$tmp_dir/all_deletions.txt"
-    
-    local deletion_count
-    deletion_count=$(wc -l < "$tmp_dir/all_deletions.txt" | tr -d ' ')
-    log_info "Found $deletion_count deletion requests"
-    
-    # =========================================================================
-    # STEP 2: Parse log-based categories (Phase 4)
-    # =========================================================================
-    log_info "Parsing log-based categories..."
-    
-    # Parse failures: event_id<TAB>kind<TAB>reason<TAB>repo<TAB>npub
-    # Note: repo and npub are in columns 4 and 5 (enriched by Phase 4 from announcements.json)
-    # Some entries may have empty repo/npub if the event_id wasn't found in announcements
-    if [[ -f "$logs_dir/parse-failures.txt" ]] && file_has_content "$logs_dir/parse-failures.txt"; then
-        grep -v '^#' "$logs_dir/parse-failures.txt" | awk -F'\t' '{print $4 "|" $5}' | sort -u > "$tmp_dir/parse_failures.txt"
-        log_info "Found $(wc -l < "$tmp_dir/parse_failures.txt" | tr -d ' ') parse failure entries"
-    else
-        touch "$tmp_dir/parse_failures.txt"
-        log_info "No parse failures found (logs may be empty or not yet generated)"
-    fi
-    
-    # Purgatory expired: repo<TAB>npub<TAB>timestamp<TAB>reason
-    if [[ -f "$logs_dir/purgatory-expired.txt" ]] && file_has_content "$logs_dir/purgatory-expired.txt"; then
-        grep -v '^#' "$logs_dir/purgatory-expired.txt" | awk -F'\t' '{print $1 "|" $2}' | sort -u > "$tmp_dir/purgatory_expired.txt"
-        log_info "Found $(wc -l < "$tmp_dir/purgatory_expired.txt" | tr -d ' ') purgatory expiry entries"
-    else
-        touch "$tmp_dir/purgatory_expired.txt"
-        log_info "No purgatory expiry entries found (logs may be empty or not yet generated)"
-    fi
-    
-    # =========================================================================
-    # STEP 3: Build lookup tables from category files
-    # =========================================================================
-    log_info "Building lookup tables..."
-    
-    # Build key sets for each category (prod)
-    build_key_set "$prod_dir/category1-complete-match.txt" > "$tmp_dir/prod_cat1.txt"
-    build_key_set "$prod_dir/category2-empty-blank.txt" > "$tmp_dir/prod_cat2.txt"
-    build_key_set "$prod_dir/category3-partial-match.txt" > "$tmp_dir/prod_cat3.txt"
-    build_key_set "$prod_dir/category4-no-match.txt" > "$tmp_dir/prod_cat4.txt"
-    
-    # Build key sets for each category (archive)
-    build_key_set "$archive_dir/category1-complete-match.txt" > "$tmp_dir/archive_cat1.txt"
-    build_key_set "$archive_dir/category2-empty-blank.txt" > "$tmp_dir/archive_cat2.txt"
-    build_key_set "$archive_dir/category3-partial-match.txt" > "$tmp_dir/archive_cat3.txt"
-    build_key_set "$archive_dir/category4-no-match.txt" > "$tmp_dir/archive_cat4.txt"
-    
-    # All repos in prod
-    cat "$tmp_dir"/prod_cat*.txt 2>/dev/null | sort -u > "$tmp_dir/all_prod.txt" || true
-    
-    # All repos in archive
-    cat "$tmp_dir"/archive_cat*.txt 2>/dev/null | sort -u > "$tmp_dir/all_archive.txt" || true
-    
-    # =========================================================================
-    # STEP 4: Process comparison files and apply classification
-    # =========================================================================
-    log_info "Applying classification logic..."
-    
-    # Track processed repos to detect duplicates/conflicts
-    > "$tmp_dir/processed.txt"
-    
-    # Counters
-    local count_no_action=0
-    local count_action=0
-    local count_manual=0
-    
-    # --- NO ACTION: Complete in both ---
-    if [[ -f "$comparison_dir/complete-in-both.txt" ]]; then
-        while IFS= read -r line; do
-            [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
-            
-            repo=$(echo "$line" | extract_repo)
-            npub=$(echo "$line" | extract_npub)
-            key="${repo}|${npub}"
-            
-            # Check if deleted (still no action, but different reason)
-            if grep -qF "$key" "$tmp_dir/all_deletions.txt" 2>/dev/null; then
-                echo "$repo | $npub | deleted by user (also complete in both)" >> "$no_action"
-            else
-                echo "$repo | $npub | complete in both prod and archive" >> "$no_action"
-            fi
-            echo "$key" >> "$tmp_dir/processed.txt"
-            ((count_no_action++)) || true
-        done < "$comparison_dir/complete-in-both.txt"
-    fi
-    
-    # --- NO ACTION: Deleted by user (not already processed) ---
-    while IFS='|' read -r repo npub; do
-        [[ -z "$repo" ]] && continue
-        key="${repo}|${npub}"
-        
-        # Skip if already processed
-        if grep -qF "$key" "$tmp_dir/processed.txt" 2>/dev/null; then
-            continue
-        fi
-        
-        # Convert pubkey to npub if needed (deletions use hex pubkey)
-        # For now, just use the pubkey as-is since we're matching by repo
-        echo "$repo | $npub | deleted by user" >> "$no_action"
-        echo "$key" >> "$tmp_dir/processed.txt"
-        ((count_no_action++)) || true
-    done < "$tmp_dir/all_deletions.txt"
-    
-    # --- NO ACTION: Empty/blank in both ---
-    # Find repos that are category 2 in both prod and archive
-    comm -12 "$tmp_dir/prod_cat2.txt" "$tmp_dir/archive_cat2.txt" 2>/dev/null | while IFS='|' read -r repo npub; do
-        [[ -z "$repo" ]] && continue
-        key="${repo}|${npub}"
-        
-        if grep -qF "$key" "$tmp_dir/processed.txt" 2>/dev/null; then
-            continue
-        fi
-        
-        echo "$repo | $npub | empty/blank in both (user never pushed)" >> "$no_action"
-        echo "$key" >> "$tmp_dir/processed.txt"
-    done
-    
-    # --- NO ACTION: Purgatory expired (system handled it) ---
-    while IFS='|' read -r repo npub; do
-        [[ -z "$repo" ]] && continue
-        key="${repo}|${npub}"
-        
-        if grep -qF "$key" "$tmp_dir/processed.txt" 2>/dev/null; then
-            continue
-        fi
-        
-        echo "$repo | $npub | purgatory expired (system already handled)" >> "$no_action"
-        echo "$key" >> "$tmp_dir/processed.txt"
-        ((count_no_action++)) || true
-    done < "$tmp_dir/purgatory_expired.txt"
-    
-    # --- ACTION REQUIRED: Complete in prod, missing from archive ---
-    if [[ -f "$comparison_dir/complete-prod-missing-archive.txt" ]]; then
-        while IFS= read -r line; do
-            [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
-            
-            repo=$(echo "$line" | extract_repo)
-            npub=$(echo "$line" | extract_npub)
-            key="${repo}|${npub}"
-            
-            if grep -qF "$key" "$tmp_dir/processed.txt" 2>/dev/null; then
-                continue
-            fi
-            
-            # Check for parse failure
-            if grep -qF "$key" "$tmp_dir/parse_failures.txt" 2>/dev/null; then
-                echo "$repo | $npub | complete in prod, missing from archive, parse failure logged | investigate parse failure, may need re-announcement" >> "$manual_inv"
-                echo "$key" >> "$tmp_dir/processed.txt"
-                ((count_manual++)) || true
-            else
-                echo "$repo | $npub | complete in prod, missing from archive | trigger re-sync or investigate why not archived" >> "$action_req"
-                echo "$key" >> "$tmp_dir/processed.txt"
-                ((count_action++)) || true
-            fi
-        done < "$comparison_dir/complete-prod-missing-archive.txt"
-    fi
-    
-    # --- ACTION REQUIRED: Complete in prod, incomplete in archive ---
-    if [[ -f "$comparison_dir/complete-prod-incomplete-archive.txt" ]]; then
-        while IFS= read -r line; do
-            [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
-            
-            repo=$(echo "$line" | extract_repo)
-            npub=$(echo "$line" | extract_npub)
-            key="${repo}|${npub}"
-            
-            if grep -qF "$key" "$tmp_dir/processed.txt" 2>/dev/null; then
-                continue
-            fi
-            
-            # Extract archive status from line
-            archive_status=$(echo "$line" | grep -oP 'archive=\K[^ ]+' || echo "unknown")
-            
-            echo "$repo | $npub | complete in prod, $archive_status in archive | wait for sync to complete or trigger re-sync" >> "$action_req"
-            echo "$key" >> "$tmp_dir/processed.txt"
-            ((count_action++)) || true
-        done < "$comparison_dir/complete-prod-incomplete-archive.txt"
-    fi
-    
-    # --- ACTION REQUIRED: Incomplete in both ---
-    if [[ -f "$comparison_dir/incomplete-in-both.txt" ]]; then
-        while IFS= read -r line; do
-            [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
-            
-            repo=$(echo "$line" | extract_repo)
-            npub=$(echo "$line" | extract_npub)
-            key="${repo}|${npub}"
-            
-            if grep -qF "$key" "$tmp_dir/processed.txt" 2>/dev/null; then
-                continue
-            fi
-            
-            # Extract statuses
-            prod_status=$(echo "$line" | grep -oP 'prod=\K[^ ]+' | tr -d '|' || echo "unknown")
-            archive_status=$(echo "$line" | grep -oP 'archive=\K[^ ]+' || echo "unknown")
-            
-            echo "$repo | $npub | incomplete in both (prod=$prod_status, archive=$archive_status) | investigate git data source, may need user to re-push" >> "$action_req"
-            echo "$key" >> "$tmp_dir/processed.txt"
-            ((count_action++)) || true
-        done < "$comparison_dir/incomplete-in-both.txt"
-    fi
-    
-    # --- MANUAL INVESTIGATION: In archive but not prod ---
-    if [[ -f "$comparison_dir/in-archive-not-prod.txt" ]]; then
-        while IFS= read -r line; do
-            [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
-            
-            repo=$(echo "$line" | extract_repo)
-            npub=$(echo "$line" | extract_npub)
-            key="${repo}|${npub}"
-            
-            if grep -qF "$key" "$tmp_dir/processed.txt" 2>/dev/null; then
-                continue
-            fi
-            
-            archive_status=$(echo "$line" | grep -oP 'archive=\K[^ ]+' || echo "unknown")
-            
-            # Check if it was deleted
-            if grep -qF "$key" "$tmp_dir/all_deletions.txt" 2>/dev/null; then
-                echo "$repo | $npub | in archive not prod, deletion exists | verify deletion was intentional" >> "$manual_inv"
-            else
-                echo "$repo | $npub | in archive ($archive_status) but not in prod | may be new announcement or deleted from prod" >> "$manual_inv"
-            fi
-            echo "$key" >> "$tmp_dir/processed.txt"
-            ((count_manual++)) || true
-        done < "$comparison_dir/in-archive-not-prod.txt"
-    fi
-    
-    # --- ACTION REQUIRED: Parse failures not yet processed ---
-    while IFS='|' read -r repo npub; do
-        [[ -z "$repo" ]] && continue
-        key="${repo}|${npub}"
-        
-        if grep -qF "$key" "$tmp_dir/processed.txt" 2>/dev/null; then
-            continue
-        fi
-        
-        echo "$repo | $npub | parse failure logged | fix event format or request user to re-announce" >> "$action_req"
-        echo "$key" >> "$tmp_dir/processed.txt"
-        ((count_action++)) || true
-    done < "$tmp_dir/parse_failures.txt"
-    
-    # --- MANUAL INVESTIGATION: Prod category 3/4 not yet processed ---
-    for cat_file in "$tmp_dir/prod_cat3.txt" "$tmp_dir/prod_cat4.txt"; do
-        [[ ! -f "$cat_file" ]] && continue
-        cat_name=$(basename "$cat_file" .txt | sed 's/prod_//')
-        while IFS='|' read -r repo npub; do
-            [[ -z "$repo" ]] && continue
-            key="${repo}|${npub}"
-            
-            if grep -qF "$key" "$tmp_dir/processed.txt" 2>/dev/null; then
-                continue
-            fi
-            
-            if [[ "$cat_name" == "cat3" ]]; then
-                echo "$repo | $npub | partial match in prod, not in comparison results | investigate git ref mismatch" >> "$manual_inv"
-            else
-                echo "$repo | $npub | no match in prod (git exists but refs don't match) | investigate git data corruption" >> "$manual_inv"
-            fi
-            echo "$key" >> "$tmp_dir/processed.txt"
-            ((count_manual++)) || true
-        done < "$cat_file"
-    done
-    
-    # =========================================================================
-    # STEP 5: Count final results
-    # =========================================================================
-    count_no_action=$(count_lines "$no_action")
-    count_action=$(count_lines "$action_req")
-    count_manual=$(count_lines "$manual_inv")
-    
-    # Ensure counts are valid integers
-    count_no_action=${count_no_action:-0}
-    count_action=${count_action:-0}
-    count_manual=${count_manual:-0}
-    
-    local total=$((count_no_action + count_action + count_manual))
-    
-    # Handle division by zero
-    if [[ $total -eq 0 ]]; then
-        total=1  # Avoid division by zero in percentage calculations
-        log_warn "No repos were classified. Check input files."
-    fi
-    
-    # =========================================================================
-    # STEP 6: Generate summary
-    # =========================================================================
-    log_info "Generating summary..."
-    
-    cat > "$summary" << EOF
-# Migration Classification Summary
-Generated: $(date -Iseconds)
-Analysis Directory: $analysis_dir
+done
 
-## Overview
+# Create results directory
+mkdir -p "$RESULTS_DIR"
 
-| Category | Count | Percentage |
-|----------|-------|------------|
-| No Action Required | $count_no_action | $(awk "BEGIN {printf \"%.1f\", ($count_no_action/$total)*100}")% |
-| Action Required | $count_action | $(awk "BEGIN {printf \"%.1f\", ($count_action/$total)*100}")% |
-| Manual Investigation | $count_manual | $(awk "BEGIN {printf \"%.1f\", ($count_manual/$total)*100}")% |
-| **Total** | **$total** | **100%** |
+# Output files
+READY_FILE="$RESULTS_DIR/ready-for-migration.txt"
+RESYNC_FILE="$RESULTS_DIR/needs-resync.txt"
+REVIEW_FILE="$RESULTS_DIR/manual-review.txt"
+SUMMARY_FILE="$RESULTS_DIR/summary.txt"
 
-## No Action Required ($count_no_action repos)
+# Temporary files for processing
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT
 
-These repositories are ready for migration or don't need migration:
+log_info "Starting classification with revised system (Option B)"
+log_info "Analysis directory: $ANALYSIS_DIR"
 
-EOF
+# ============================================================================
+# Phase 1: Build lookup tables from source data
+# ============================================================================
 
-    # Breakdown of no-action reasons
-    echo "| Reason | Count |" >> "$summary"
-    echo "|--------|-------|" >> "$summary"
-    grep -v '^#' "$no_action" 2>/dev/null | awk -F' \\| ' '{print $3}' | sort | uniq -c | sort -rn > "$tmp_dir/no_action_breakdown.txt" || true
-    while read -r cnt reason; do
-        echo "| $reason | $cnt |" >> "$summary"
-    done < "$tmp_dir/no_action_breakdown.txt"
+log_info "Building lookup tables..."
+
+# Build prod category lookup: repo|npub -> category
+declare -A PROD_CAT
+while IFS='|' read -r repo npub rest || [[ -n "$repo" ]]; do
+    repo="${repo// /}"  # Remove all spaces
+    npub="${npub// /}"  # Remove all spaces
+    [[ -z "$repo" || -z "$npub" ]] && continue
+    PROD_CAT["$repo|$npub"]="cat1"
+done < "$PROD_DIR/category1-complete-match.txt"
+
+while IFS='|' read -r repo npub rest || [[ -n "$repo" ]]; do
+    repo="${repo// /}"
+    npub="${npub// /}"
+    [[ -z "$repo" || -z "$npub" ]] && continue
+    PROD_CAT["$repo|$npub"]="cat2"
+done < "$PROD_DIR/category2-empty-blank.txt"
+
+while IFS='|' read -r repo npub rest || [[ -n "$repo" ]]; do
+    repo="${repo// /}"
+    npub="${npub// /}"
+    [[ -z "$repo" || -z "$npub" ]] && continue
+    PROD_CAT["$repo|$npub"]="cat3"
+done < "$PROD_DIR/category3-partial-match.txt"
+
+while IFS='|' read -r repo npub rest || [[ -n "$repo" ]]; do
+    repo="${repo// /}"
+    npub="${npub// /}"
+    [[ -z "$repo" || -z "$npub" ]] && continue
+    PROD_CAT["$repo|$npub"]="cat4"
+done < "$PROD_DIR/category4-no-match.txt"
+
+log_info "Loaded ${#PROD_CAT[@]} prod entries"
+
+# Build archive category lookup: repo|npub -> category
+declare -A ARCHIVE_CAT
+while IFS='|' read -r repo npub rest; do
+    repo="${repo// /}"
+    npub="${npub// /}"
+    [[ -z "$repo" || -z "$npub" ]] && continue
+    ARCHIVE_CAT["$repo|$npub"]="cat1"
+done < "$ARCHIVE_DIR/category1-complete-match.txt"
+
+while IFS='|' read -r repo npub rest; do
+    repo="${repo// /}"
+    npub="${npub// /}"
+    [[ -z "$repo" || -z "$npub" ]] && continue
+    ARCHIVE_CAT["$repo|$npub"]="cat2"
+done < "$ARCHIVE_DIR/category2-empty-blank.txt"
+
+while IFS='|' read -r repo npub rest; do
+    repo="${repo// /}"
+    npub="${npub// /}"
+    [[ -z "$repo" || -z "$npub" ]] && continue
+    ARCHIVE_CAT["$repo|$npub"]="cat3"
+done < "$ARCHIVE_DIR/category3-partial-match.txt"
+
+while IFS='|' read -r repo npub rest; do
+    repo="${repo// /}"
+    npub="${npub// /}"
+    [[ -z "$repo" || -z "$npub" ]] && continue
+    ARCHIVE_CAT["$repo|$npub"]="cat4"
+done < "$ARCHIVE_DIR/category4-no-match.txt"
+
+log_info "Loaded ${#ARCHIVE_CAT[@]} archive entries"
+
+# Build purgatory lookup: repo|npub -> 1 (if purgatory expired)
+declare -A PURGATORY
+PURGATORY_COUNT=0
+if [[ -f "$LOGS_DIR/purgatory-expired.txt" ]]; then
+    while IFS=$'\t' read -r repo npub timestamp reason || [[ -n "$repo" ]]; do
+        # Skip comments and empty lines
+        [[ "$repo" =~ ^# ]] && continue
+        [[ -z "$repo" || -z "$npub" ]] && continue
+        PURGATORY["$repo|$npub"]=1
+        ((PURGATORY_COUNT++))
+    done < "$LOGS_DIR/purgatory-expired.txt"
+fi
+log_info "Loaded $PURGATORY_COUNT purgatory entries"
+
+# Build parse failure lookup: repo|npub -> 1 (if parse failure logged)
+# Parse failures file format: event_id<TAB>kind<TAB>reason<TAB>repo<TAB>npub
+declare -A PARSE_FAIL
+PARSE_FAIL_COUNT=0
+if [[ -f "$LOGS_DIR/parse-failures.txt" ]]; then
+    while IFS=$'\t' read -r event_id kind reason repo npub || [[ -n "$event_id" ]]; do
+        # Skip comments and empty lines
+        [[ "$event_id" =~ ^# ]] && continue
+        [[ -z "$repo" || -z "$npub" ]] && continue
+        PARSE_FAIL["$repo|$npub"]=1
+        ((PARSE_FAIL_COUNT++))
+    done < "$LOGS_DIR/parse-failures.txt"
+fi
+log_info "Loaded $PARSE_FAIL_COUNT parse failure entries"
+
+# Build deletion lookup: repo|npub -> 1 (if kind 5 deletion event)
+# Deletions are in NDJSON format with "a" tags like "30617:pubkey_hex:repo"
+# We need to convert hex pubkeys to npub format using nak
+declare -A DELETED
+
+# Helper function to process deletion file (NDJSON format)
+# Extracts unique pubkey_hex:repo pairs and converts to npub
+process_deletions() {
+    local file="$1"
+    [[ ! -f "$file" ]] && return
     
-    cat >> "$summary" << EOF
-
-## Action Required ($count_action repos)
-
-These repositories need intervention before migration:
-
-EOF
-
-    # Breakdown of action reasons
-    echo "| Reason | Count | Suggested Action |" >> "$summary"
-    echo "|--------|-------|------------------|" >> "$summary"
-    grep -v '^#' "$action_req" 2>/dev/null | awk -F' \\| ' '{print $3 "|" $4}' | sort | uniq -c | sort -rn > "$tmp_dir/action_breakdown.txt" || true
-    while read -r cnt reason_action; do
-        reason=$(echo "$reason_action" | cut -d'|' -f1)
-        action=$(echo "$reason_action" | cut -d'|' -f2)
-        echo "| $reason | $cnt | $action |" >> "$summary"
-    done < "$tmp_dir/action_breakdown.txt"
+    # Extract unique pubkey_hex|repo pairs from NDJSON
+    # Each line is a JSON object, extract "a" tags
+    local pairs
+    pairs=$(jq -r '.tags[] | select(.[0] == "a") | .[1]' "$file" 2>/dev/null | \
+            sed 's/^30617://' | awk -F: '{print $1 "|" $2}' | sort -u)
     
-    cat >> "$summary" << EOF
-
-## Manual Investigation ($count_manual repos)
-
-These repositories have conflicting or unexpected states requiring human review:
-
-EOF
-
-    # Breakdown of manual investigation reasons
-    echo "| Reason | Count |" >> "$summary"
-    echo "|--------|-------|" >> "$summary"
-    grep -v '^#' "$manual_inv" 2>/dev/null | awk -F' \\| ' '{print $3}' | sort | uniq -c | sort -rn > "$tmp_dir/manual_breakdown.txt" || true
-    while read -r cnt reason; do
-        echo "| $reason | $cnt |" >> "$summary"
-    done < "$tmp_dir/manual_breakdown.txt"
+    # Get unique hex pubkeys for batch conversion
+    local hex_keys
+    hex_keys=$(echo "$pairs" | cut -d'|' -f1 | sort -u)
     
-    # Pre-compute counts from temp files before they might be cleaned up
-    local prod_del_count archive_del_count
-    local prod_cat1_count prod_cat2_count prod_cat3_count prod_cat4_count
-    local archive_cat1_count archive_cat2_count archive_cat3_count archive_cat4_count
-    local parse_fail_count purgatory_count
+    # Build hex->npub lookup via batch nak call
+    declare -A HEX_TO_NPUB
+    while read -r hex; do
+        [[ -z "$hex" ]] && continue
+        local npub
+        npub=$(nak encode npub "$hex" 2>/dev/null || echo "")
+        [[ -n "$npub" ]] && HEX_TO_NPUB["$hex"]="$npub"
+    done <<< "$hex_keys"
     
-    prod_del_count=$(wc -l < "$tmp_dir/prod_deletions.txt" 2>/dev/null | tr -d ' ') || prod_del_count=0
-    archive_del_count=$(wc -l < "$tmp_dir/archive_deletions.txt" 2>/dev/null | tr -d ' ') || archive_del_count=0
-    prod_cat1_count=$(wc -l < "$tmp_dir/prod_cat1.txt" 2>/dev/null | tr -d ' ') || prod_cat1_count=0
-    prod_cat2_count=$(wc -l < "$tmp_dir/prod_cat2.txt" 2>/dev/null | tr -d ' ') || prod_cat2_count=0
-    prod_cat3_count=$(wc -l < "$tmp_dir/prod_cat3.txt" 2>/dev/null | tr -d ' ') || prod_cat3_count=0
-    prod_cat4_count=$(wc -l < "$tmp_dir/prod_cat4.txt" 2>/dev/null | tr -d ' ') || prod_cat4_count=0
-    archive_cat1_count=$(wc -l < "$tmp_dir/archive_cat1.txt" 2>/dev/null | tr -d ' ') || archive_cat1_count=0
-    archive_cat2_count=$(wc -l < "$tmp_dir/archive_cat2.txt" 2>/dev/null | tr -d ' ') || archive_cat2_count=0
-    archive_cat3_count=$(wc -l < "$tmp_dir/archive_cat3.txt" 2>/dev/null | tr -d ' ') || archive_cat3_count=0
-    archive_cat4_count=$(wc -l < "$tmp_dir/archive_cat4.txt" 2>/dev/null | tr -d ' ') || archive_cat4_count=0
-    parse_fail_count=$(wc -l < "$tmp_dir/parse_failures.txt" 2>/dev/null | tr -d ' ') || parse_fail_count=0
-    purgatory_count=$(wc -l < "$tmp_dir/purgatory_expired.txt" 2>/dev/null | tr -d ' ') || purgatory_count=0
-    
-    cat >> "$summary" << EOF
-
-## Input Data Summary
-
-### Phase 1 (Events)
-- Prod deletions: $prod_del_count
-- Archive deletions: $archive_del_count
-
-### Phase 3 (Categories)
-**Prod:**
-- Category 1 (complete): $prod_cat1_count
-- Category 2 (empty): $prod_cat2_count
-- Category 3 (partial): $prod_cat3_count
-- Category 4 (no match): $prod_cat4_count
-
-**Archive:**
-- Category 1 (complete): $archive_cat1_count
-- Category 2 (empty): $archive_cat2_count
-- Category 3 (partial): $archive_cat3_count
-- Category 4 (no match): $archive_cat4_count
-
-### Phase 4 (Logs)
-- Parse failures: $parse_fail_count
-- Purgatory expired: $purgatory_count
-
-## Recommended Next Steps
-
-1. **Review action-required.txt** - Address these repos before migration
-2. **Review manual-investigation.txt** - Investigate unusual states
-3. **Verify no-action-required.txt** - Spot-check a few repos to confirm
-4. **Plan migration window** - Schedule cutover when action items are resolved
-
-## Output Files
-
-- \`results/no-action-required.txt\` - $count_no_action repos ready for migration
-- \`results/action-required.txt\` - $count_action repos needing intervention
-- \`results/manual-investigation.txt\` - $count_manual repos needing human review
-- \`results/summary.txt\` - This summary file
-EOF
-
-    # =========================================================================
-    # STEP 7: Display results
-    # =========================================================================
-    echo ""
-    log_info "=== Classification Complete ==="
-    echo ""
-    log_success "No Action Required: $count_no_action repos"
-    log_warn "Action Required: $count_action repos"
-    log_error "Manual Investigation: $count_manual repos"
-    echo ""
-    log_info "Total: $total repos classified"
-    echo ""
-    log_info "Output files:"
-    echo "  $no_action"
-    echo "  $action_req"
-    echo "  $manual_inv"
-    echo "  $summary"
-    echo ""
-    
-    # Show top action items
-    if [[ $count_action -gt 0 ]]; then
-        log_info "Top action items:"
-        grep -v '^#' "$action_req" 2>/dev/null | awk -F' \\| ' '{print $3}' | sort | uniq -c | sort -rn | head -5 | while read -r cnt reason; do
-            echo "  - $reason: $cnt repos"
-        done
-        echo ""
-    fi
-    
-    # Show top investigation items
-    if [[ $count_manual -gt 0 ]]; then
-        log_info "Top investigation items:"
-        grep -v '^#' "$manual_inv" 2>/dev/null | awk -F' \\| ' '{print $3}' | sort | uniq -c | sort -rn | head -5 | while read -r cnt reason; do
-            echo "  - $reason: $cnt repos"
-        done
-        echo ""
-    fi
-    
-    log_info "See $summary for full details and recommended next steps."
+    # Now process pairs with cached npub values
+    while IFS='|' read -r pubkey_hex repo; do
+        [[ -z "$repo" || -z "$pubkey_hex" ]] && continue
+        local npub="${HEX_TO_NPUB[$pubkey_hex]:-}"
+        [[ -z "$npub" ]] && continue
+        DELETED["$repo|$npub"]=1
+    done <<< "$pairs"
 }
 
-main "$@"
+# Process prod and archive deletions
+process_deletions "$PROD_DIR/raw/deletions.json"
+process_deletions "$ARCHIVE_DIR/raw/deletions.json"
+DELETED_COUNT=0
+[[ ${#DELETED[@]} -gt 0 ]] && DELETED_COUNT=${#DELETED[@]}
+log_info "Loaded $DELETED_COUNT deletion entries"
+
+# ============================================================================
+# Phase 2: Build unique repo list from all sources
+# ============================================================================
+
+log_info "Building unique repo list..."
+
+declare -A ALL_REPOS
+for key in "${!PROD_CAT[@]}"; do
+    ALL_REPOS["$key"]=1
+done
+for key in "${!ARCHIVE_CAT[@]}"; do
+    ALL_REPOS["$key"]=1
+done
+for key in "${!PURGATORY[@]}"; do
+    ALL_REPOS["$key"]=1
+done
+
+log_info "Total unique repos: ${#ALL_REPOS[@]}"
+
+# ============================================================================
+# Phase 3: Classify each repo according to revised decision tree
+# ============================================================================
+
+log_info "Classifying repos..."
+
+# Counters for summary
+declare -A COUNTS
+COUNTS[ready_complete_both]=0
+COUNTS[ready_deleted]=0
+COUNTS[ready_empty_prod]=0
+COUNTS[ready_archive_only]=0
+COUNTS[ready_not_in_prod]=0
+COUNTS[resync_missing_archive]=0
+COUNTS[resync_incomplete_archive]=0
+COUNTS[review_partial_prod]=0
+COUNTS[review_nomatch_prod]=0
+COUNTS[review_parse_failure]=0
+COUNTS[review_conflicting]=0
+
+# Output arrays
+declare -a READY_LINES
+declare -a RESYNC_LINES
+declare -a REVIEW_LINES
+
+# Helper function to get context string
+get_context() {
+    local key="$1"
+    local prod_status="$2"
+    local archive_status="$3"
+    local context=""
+    
+    # Check purgatory
+    if [[ -n "${PURGATORY[$key]:-}" ]]; then
+        context="purgatory-expired"
+    fi
+    
+    # Check parse failure
+    if [[ -n "${PARSE_FAIL[$key]:-}" ]]; then
+        if [[ -n "$context" ]]; then
+            context="$context, parse-failure"
+        else
+            context="parse-failure"
+        fi
+    fi
+    
+    # Add archive context for unexpected states
+    if [[ "$prod_status" == "empty" && "$archive_status" != "missing" && "$archive_status" != "empty" ]]; then
+        if [[ -n "$context" ]]; then
+            context="$context, archive-has-data"
+        else
+            context="archive-has-data"
+        fi
+    fi
+    
+    echo "${context:-none}"
+}
+
+# Helper to convert category to human-readable status
+cat_to_status() {
+    case "$1" in
+        cat1) echo "complete" ;;
+        cat2) echo "empty" ;;
+        cat3) echo "partial" ;;
+        cat4) echo "no-match" ;;
+        missing) echo "missing" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+LOOP_COUNT=0
+for key in "${!ALL_REPOS[@]}"; do
+    LOOP_COUNT=$((LOOP_COUNT + 1))
+    [[ $((LOOP_COUNT % 100)) -eq 0 ]] && log_info "Processed $LOOP_COUNT repos..."
+    IFS='|' read -r repo npub <<< "$key"
+    
+    prod_cat="${PROD_CAT[$key]:-missing}"
+    archive_cat="${ARCHIVE_CAT[$key]:-missing}"
+    prod_status=$(cat_to_status "$prod_cat")
+    archive_status=$(cat_to_status "$archive_cat")
+    
+    # Decision tree implementation
+    
+    # 1. Is there a kind 5 deletion event?
+    if [[ -n "${DELETED[$key]:-}" ]]; then
+        context=$(get_context "$key" "$prod_status" "$archive_status")
+        READY_LINES+=("$repo | $npub | $prod_status | $archive_status | $context | deleted by user")
+        COUNTS[ready_deleted]=$((COUNTS[ready_deleted] + 1))
+        continue
+    fi
+    
+    # 2. What is the prod status?
+    case "$prod_cat" in
+        missing)
+            # Not in prod
+            if [[ "$archive_cat" != "missing" ]]; then
+                # In archive but not in prod -> no action (archive-only)
+                context=$(get_context "$key" "$prod_status" "$archive_status")
+                READY_LINES+=("$repo | $npub | $prod_status | $archive_status | $context | archive-only (not in prod)")
+                COUNTS[ready_archive_only]=$((COUNTS[ready_archive_only] + 1))
+            elif [[ -n "${PURGATORY[$key]:-}" ]]; then
+                # Purgatory only, not in prod -> no action
+                context="purgatory-expired"
+                READY_LINES+=("$repo | $npub | $prod_status | $archive_status | $context | purgatory-only (not in prod)")
+                COUNTS[ready_not_in_prod]=$((COUNTS[ready_not_in_prod] + 1))
+            fi
+            # Otherwise skip (not a real repo - no data anywhere)
+            ;;
+            
+        cat2)
+            # Empty in prod -> ALWAYS no action required
+            context=$(get_context "$key" "$prod_status" "$archive_status")
+            READY_LINES+=("$repo | $npub | $prod_status | $archive_status | $context | empty in prod (user never pushed)")
+            COUNTS[ready_empty_prod]=$((COUNTS[ready_empty_prod] + 1))
+            ;;
+            
+        cat1)
+            # Complete in prod
+            if [[ "$archive_cat" == "cat1" ]]; then
+                # Complete in both -> no action
+                context=$(get_context "$key" "$prod_status" "$archive_status")
+                READY_LINES+=("$repo | $npub | $prod_status | $archive_status | $context | complete in both")
+                COUNTS[ready_complete_both]=$((COUNTS[ready_complete_both] + 1))
+            else
+                # Complete in prod, missing/incomplete in archive
+                # Check for parse failure - if so, needs manual review
+                if [[ -n "${PARSE_FAIL[$key]:-}" ]]; then
+                    context=$(get_context "$key" "$prod_status" "$archive_status")
+                    REVIEW_LINES+=("$repo | $npub | $prod_status | $archive_status | $context | complete in prod with parse failure")
+                    COUNTS[review_parse_failure]=$((COUNTS[review_parse_failure] + 1))
+                else
+                    # Needs resync - include purgatory context
+                    context=$(get_context "$key" "$prod_status" "$archive_status")
+                    if [[ "$archive_cat" == "missing" ]]; then
+                        RESYNC_LINES+=("$repo | $npub | $prod_status | $archive_status | $context | trigger re-sync to archive")
+                        COUNTS[resync_missing_archive]=$((COUNTS[resync_missing_archive] + 1))
+                    else
+                        RESYNC_LINES+=("$repo | $npub | $prod_status | $archive_status | $context | trigger re-sync (archive incomplete)")
+                        COUNTS[resync_incomplete_archive]=$((COUNTS[resync_incomplete_archive] + 1))
+                    fi
+                fi
+            fi
+            ;;
+            
+        cat3)
+            # Partial in prod -> ALWAYS manual investigation
+            context=$(get_context "$key" "$prod_status" "$archive_status")
+            REVIEW_LINES+=("$repo | $npub | $prod_status | $archive_status | $context | partial in prod (investigate git data)")
+            COUNTS[review_partial_prod]=$((COUNTS[review_partial_prod] + 1))
+            ;;
+            
+        cat4)
+            # No-match in prod -> ALWAYS manual investigation
+            context=$(get_context "$key" "$prod_status" "$archive_status")
+            REVIEW_LINES+=("$repo | $npub | $prod_status | $archive_status | $context | no-match in prod (git corruption)")
+            COUNTS[review_nomatch_prod]=$((COUNTS[review_nomatch_prod] + 1))
+            ;;
+    esac
+done
+
+# ============================================================================
+# Phase 4: Write output files
+# ============================================================================
+
+log_info "Writing output files..."
+
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")
+
+# Write ready-for-migration.txt
+{
+    echo "# Ready for Migration - No action required"
+    echo "# Generated: $TIMESTAMP"
+    echo "# Format: repo | npub | prod_status | archive_status | context | reason"
+    echo "#"
+    for line in "${READY_LINES[@]}"; do
+        echo "$line"
+    done
+} > "$READY_FILE"
+
+# Write needs-resync.txt
+{
+    echo "# Needs Re-sync - Action required"
+    echo "# Generated: $TIMESTAMP"
+    echo "# Format: repo | npub | prod_status | archive_status | context | action"
+    echo "#"
+    echo "# Context meanings:"
+    echo "#   purgatory-expired = archive tried to sync but failed (30min timeout)"
+    echo "#   none = archive never tried or announcement missing"
+    echo "#"
+    for line in "${RESYNC_LINES[@]}"; do
+        echo "$line"
+    done
+} > "$RESYNC_FILE"
+
+# Write manual-review.txt
+{
+    echo "# Manual Review Required - Investigation needed"
+    echo "# Generated: $TIMESTAMP"
+    echo "# Format: repo | npub | prod_status | archive_status | context | reason"
+    echo "#"
+    for line in "${REVIEW_LINES[@]}"; do
+        echo "$line"
+    done
+} > "$REVIEW_FILE"
+
+# ============================================================================
+# Phase 5: Generate summary
+# ============================================================================
+
+log_info "Generating summary..."
+
+TOTAL_READY="${#READY_LINES[@]}"
+TOTAL_RESYNC="${#RESYNC_LINES[@]}"
+TOTAL_REVIEW="${#REVIEW_LINES[@]}"
+TOTAL=$((TOTAL_READY + TOTAL_RESYNC + TOTAL_REVIEW))
+
+# Calculate percentages
+if [[ $TOTAL -gt 0 ]]; then
+    PCT_READY=$(awk "BEGIN {printf \"%.1f\", ($TOTAL_READY / $TOTAL) * 100}")
+    PCT_RESYNC=$(awk "BEGIN {printf \"%.1f\", ($TOTAL_RESYNC / $TOTAL) * 100}")
+    PCT_REVIEW=$(awk "BEGIN {printf \"%.1f\", ($TOTAL_REVIEW / $TOTAL) * 100}")
+else
+    PCT_READY="0.0"
+    PCT_RESYNC="0.0"
+    PCT_REVIEW="0.0"
+fi
+
+{
+    echo "# Migration Classification Summary"
+    echo "Generated: $TIMESTAMP"
+    echo "Analysis Directory: $ANALYSIS_DIR"
+    echo ""
+    echo "## Overview"
+    echo ""
+    echo "| Category | Count | Percentage |"
+    echo "|----------|-------|------------|"
+    echo "| Ready for Migration | $TOTAL_READY | $PCT_READY% |"
+    echo "| Needs Re-sync | $TOTAL_RESYNC | $PCT_RESYNC% |"
+    echo "| Manual Review | $TOTAL_REVIEW | $PCT_REVIEW% |"
+    echo "| **Total** | **$TOTAL** | **100%** |"
+    echo ""
+    echo "## Tier 1: Ready for Migration ($TOTAL_READY repos)"
+    echo ""
+    echo "These repositories are ready for migration or don't need migration:"
+    echo ""
+    echo "| Reason | Count |"
+    echo "|--------|-------|"
+    echo "| complete in both prod and archive | ${COUNTS[ready_complete_both]} |"
+    echo "| deleted by user | ${COUNTS[ready_deleted]} |"
+    echo "| empty in prod (user never pushed) | ${COUNTS[ready_empty_prod]} |"
+    echo "| archive-only (not in prod) | ${COUNTS[ready_archive_only]} |"
+    echo "| purgatory-only (not in prod) | ${COUNTS[ready_not_in_prod]} |"
+    echo ""
+    echo "## Tier 2: Needs Re-sync ($TOTAL_RESYNC repos)"
+    echo ""
+    echo "These repositories need re-sync to archive before migration:"
+    echo ""
+    echo "| Reason | Count | Action |"
+    echo "|--------|-------|--------|"
+    echo "| complete in prod, missing from archive | ${COUNTS[resync_missing_archive]} | trigger re-sync |"
+    echo "| complete in prod, incomplete in archive | ${COUNTS[resync_incomplete_archive]} | trigger re-sync |"
+    echo ""
+    echo "### Purgatory Context"
+    echo ""
+    echo "Repos in needs-resync.txt include purgatory context:"
+    echo "- **purgatory-expired**: Archive tried to sync but failed (30min timeout)"
+    echo "- **none**: Archive never tried or announcement missing"
+    echo ""
+    echo "## Tier 3: Manual Review ($TOTAL_REVIEW repos)"
+    echo ""
+    echo "These repositories require human investigation:"
+    echo ""
+    echo "| Reason | Count |"
+    echo "|--------|-------|"
+    echo "| partial in prod (cat3) | ${COUNTS[review_partial_prod]} |"
+    echo "| no-match in prod (cat4) | ${COUNTS[review_nomatch_prod]} |"
+    echo "| complete in prod with parse failure | ${COUNTS[review_parse_failure]} |"
+    echo ""
+    echo "## Input Data Summary"
+    echo ""
+    echo "### Prod Categories"
+    echo "- Category 1 (complete): $(wc -l < "$PROD_DIR/category1-complete-match.txt")"
+    echo "- Category 2 (empty): $(wc -l < "$PROD_DIR/category2-empty-blank.txt")"
+    echo "- Category 3 (partial): $(wc -l < "$PROD_DIR/category3-partial-match.txt")"
+    echo "- Category 4 (no match): $(wc -l < "$PROD_DIR/category4-no-match.txt")"
+    echo ""
+    echo "### Archive Categories"
+    echo "- Category 1 (complete): $(wc -l < "$ARCHIVE_DIR/category1-complete-match.txt")"
+    echo "- Category 2 (empty): $(wc -l < "$ARCHIVE_DIR/category2-empty-blank.txt")"
+    echo "- Category 3 (partial): $(wc -l < "$ARCHIVE_DIR/category3-partial-match.txt")"
+    echo "- Category 4 (no match): $(wc -l < "$ARCHIVE_DIR/category4-no-match.txt")"
+    echo ""
+    echo "### Logs"
+    echo "- Parse failures: $(grep -c -v '^#' "$LOGS_DIR/parse-failures.txt" 2>/dev/null || echo 0)"
+    echo "- Purgatory expired: $(grep -c -v '^#' "$LOGS_DIR/purgatory-expired.txt" 2>/dev/null || echo 0)"
+    echo ""
+    echo "## Output Files"
+    echo ""
+    echo "- \`results/ready-for-migration.txt\` - $TOTAL_READY repos ready for migration"
+    echo "- \`results/needs-resync.txt\` - $TOTAL_RESYNC repos needing re-sync"
+    echo "- \`results/manual-review.txt\` - $TOTAL_REVIEW repos needing investigation"
+    echo "- \`results/summary.txt\` - This summary file"
+    echo ""
+    echo "## Recommended Next Steps"
+    echo ""
+    echo "1. **Review needs-resync.txt** - Trigger re-sync for these repos"
+    echo "2. **Review manual-review.txt** - Investigate unusual states"
+    echo "3. **Verify ready-for-migration.txt** - Spot-check a few repos"
+    echo "4. **Plan migration window** - Schedule cutover when action items resolved"
+} > "$SUMMARY_FILE"
+
+# ============================================================================
+# Phase 6: Print summary to console
+# ============================================================================
+
+echo ""
+log_success "Classification complete!"
+echo ""
+echo "=== Summary ==="
+echo "Ready for Migration: $TOTAL_READY ($PCT_READY%)"
+echo "  - Complete in both: ${COUNTS[ready_complete_both]}"
+echo "  - Deleted by user: ${COUNTS[ready_deleted]}"
+echo "  - Empty in prod: ${COUNTS[ready_empty_prod]}"
+echo "  - Archive-only: ${COUNTS[ready_archive_only]}"
+echo "  - Purgatory-only: ${COUNTS[ready_not_in_prod]}"
+echo ""
+echo "Needs Re-sync: $TOTAL_RESYNC ($PCT_RESYNC%)"
+echo "  - Missing from archive: ${COUNTS[resync_missing_archive]}"
+echo "  - Incomplete in archive: ${COUNTS[resync_incomplete_archive]}"
+echo ""
+echo "Manual Review: $TOTAL_REVIEW ($PCT_REVIEW%)"
+echo "  - Partial in prod: ${COUNTS[review_partial_prod]}"
+echo "  - No-match in prod: ${COUNTS[review_nomatch_prod]}"
+echo "  - Parse failures: ${COUNTS[review_parse_failure]}"
+echo ""
+echo "Total: $TOTAL repos"
+echo ""
+echo "Output files:"
+echo "  $READY_FILE"
+echo "  $RESYNC_FILE"
+echo "  $REVIEW_FILE"
+echo "  $SUMMARY_FILE"
