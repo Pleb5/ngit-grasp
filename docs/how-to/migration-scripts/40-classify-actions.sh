@@ -165,7 +165,7 @@ if [[ -f "$LOGS_DIR/purgatory-expired.txt" ]]; then
         [[ "$repo" =~ ^# ]] && continue
         [[ -z "$repo" || -z "$npub" ]] && continue
         PURGATORY["$repo|$npub"]=1
-        ((PURGATORY_COUNT++))
+        PURGATORY_COUNT=$((PURGATORY_COUNT + 1))
     done < "$LOGS_DIR/purgatory-expired.txt"
 fi
 log_info "Loaded $PURGATORY_COUNT purgatory entries"
@@ -180,7 +180,7 @@ if [[ -f "$LOGS_DIR/parse-failures.txt" ]]; then
         [[ "$event_id" =~ ^# ]] && continue
         [[ -z "$repo" || -z "$npub" ]] && continue
         PARSE_FAIL["$repo|$npub"]=1
-        ((PARSE_FAIL_COUNT++))
+        PARSE_FAIL_COUNT=$((PARSE_FAIL_COUNT + 1))
     done < "$LOGS_DIR/parse-failures.txt"
 fi
 log_info "Loaded $PARSE_FAIL_COUNT parse failure entries"
