@@ -1442,6 +1442,7 @@ impl SyncManager {
             self.service_domain.clone(),
             Arc::clone(&self.repo_sync_index),
             action_tx,
+            self.database.clone(),
         );
         let subscriber_shutdown = shutdown_tx.subscribe();
         tokio::spawn(async move { self_subscriber.run(Some(subscriber_shutdown)).await });
