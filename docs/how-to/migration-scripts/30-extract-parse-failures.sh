@@ -211,6 +211,140 @@ parse_write_policy_rejection_line() {
 # the same event to be counted twice. Write policy logs contain the same
 # events, so we don't lose any data by only extracting from that source.
 
+# Enrich parse failures with repo/npub by looking up event_id in announcements.json
+# This is critical because "Invalid announcement" rejections only log event_id and kind,
+# not the repo name or npub. Without enrichment, Phase 5 shows event_id|kind instead
+# of repo|npub in action-required.txt, making the output unusable.
+#
+# Arguments:
+#   $1 - parse failures file to enrich (modified in place)
+#   $2 - analysis root directory containing prod/raw/announcements.json
+#
+# The function:
+#   1. Builds a lookup table from announcements.json: event_id -> repo|npub
+#   2. For each parse failure with empty repo/npub, looks up the event_id
+#   3. Populates repo and npub columns from the lookup
+enrich_with_repo_npub() {
+    local parse_failures_file="$1"
+    local analysis_root="$2"
+    
+    local prod_announcements="$analysis_root/prod/raw/announcements.json"
+    
+    # Validate required file exists
+    if [[ ! -f "$prod_announcements" ]]; then
+        log_warn "Production announcements file not found: $prod_announcements"
+        log_warn "Skipping enrichment - repo/npub columns will remain empty"
+        return 0
+    fi
+    
+    # Check if jq is available
+    if ! command -v jq &> /dev/null; then
+        log_warn "jq not found - cannot enrich parse failures with repo/npub"
+        log_warn "Install jq or run without --analysis-root"
+        return 0
+    fi
+    
+    log_info "Enriching parse failures with repo/npub from announcements..."
+    
+    # Step 1: Build lookup table from announcements.json
+    # Output format: event_id<TAB>repo<TAB>npub
+    local lookup_file
+    lookup_file=$(mktemp)
+    
+    # Extract id, d-tag (repo identifier), and pubkey from announcements
+    # Convert pubkey to npub using bech32 encoding
+    # Note: We use a simple hex-to-npub conversion via external tool if available,
+    # otherwise we'll use the hex pubkey (Phase 5 can still match on it)
+    log_info "  Building event_id -> repo/npub lookup table..."
+    
+    # First, extract the raw data: id, d-tag, pubkey (hex)
+    jq -r 'select(.kind == 30617) | 
+        .id as $id | 
+        .pubkey as $pubkey |
+        ((.tags[] | select(.[0] == "d") | .[1]) // "") as $dtag |
+        "\($id)\t\($dtag)\t\($pubkey)"' "$prod_announcements" > "$lookup_file.raw" 2>/dev/null || {
+        log_warn "Failed to parse production announcements JSON"
+        rm -f "$lookup_file" "$lookup_file.raw"
+        return 0
+    }
+    
+    # Convert hex pubkeys to npub format
+    # Check if we have a tool to do bech32 encoding (nak, nostr-tool, etc.)
+    local can_convert_npub=false
+    if command -v nak &> /dev/null; then
+        can_convert_npub=true
+        log_info "  Using 'nak' for pubkey->npub conversion"
+    fi
+    
+    # Process the lookup file, converting pubkeys to npubs if possible
+    while IFS=$'\t' read -r event_id repo pubkey_hex; do
+        local npub
+        if [[ "$can_convert_npub" == true && -n "$pubkey_hex" ]]; then
+            # Use nak to encode pubkey as npub
+            npub=$(nak encode npub "$pubkey_hex" 2>/dev/null || echo "")
+        fi
+        # Fall back to hex pubkey if conversion failed
+        [[ -z "$npub" ]] && npub="$pubkey_hex"
+        printf '%s\t%s\t%s\n' "$event_id" "$repo" "$npub"
+    done < "$lookup_file.raw" > "$lookup_file"
+    
+    rm -f "$lookup_file.raw"
+    
+    local lookup_count
+    lookup_count=$(wc -l < "$lookup_file")
+    lookup_count="${lookup_count//[^0-9]/}"
+    log_info "  Built lookup table with $lookup_count announcements"
+    
+    # Step 2: Enrich parse failures
+    local enriched_file
+    enriched_file=$(mktemp)
+    
+    # Copy header lines
+    grep '^#' "$parse_failures_file" > "$enriched_file"
+    
+    # Process data lines
+    local enriched_count=0
+    local total_count=0
+    while IFS=$'\t' read -r event_id kind reason repo npub; do
+        # Skip header lines (already copied)
+        [[ "$event_id" =~ ^# ]] && continue
+        
+        total_count=$((total_count + 1))
+        
+        # If repo and npub are already populated, keep them
+        if [[ -n "$repo" && -n "$npub" ]]; then
+            printf '%s\t%s\t%s\t%s\t%s\n' "$event_id" "$kind" "$reason" "$repo" "$npub" >> "$enriched_file"
+            continue
+        fi
+        
+        # Look up event_id in our table
+        local lookup_result
+        lookup_result=$(grep "^${event_id}"$'\t' "$lookup_file" 2>/dev/null | head -1 || echo "")
+        
+        if [[ -n "$lookup_result" ]]; then
+            local looked_up_repo looked_up_npub
+            looked_up_repo=$(echo "$lookup_result" | cut -f2)
+            looked_up_npub=$(echo "$lookup_result" | cut -f3)
+            
+            # Use looked-up values if original was empty
+            [[ -z "$repo" ]] && repo="$looked_up_repo"
+            [[ -z "$npub" ]] && npub="$looked_up_npub"
+            enriched_count=$((enriched_count + 1))
+        fi
+        
+        printf '%s\t%s\t%s\t%s\t%s\n' "$event_id" "$kind" "$reason" "$repo" "$npub" >> "$enriched_file"
+    done < "$parse_failures_file"
+    
+    # Replace original with enriched version
+    mv "$enriched_file" "$parse_failures_file"
+    
+    # Cleanup
+    rm -f "$lookup_file"
+    
+    log_info "  Enriched $enriched_count of $total_count parse failures with repo/npub"
+    log_success "Enrichment complete"
+}
+
 # Filter parse failures to only those for missing announcements
 # This is used when --analysis-root is provided to scope results to the migration
 #
@@ -629,6 +763,13 @@ main() {
     grep '^#' "$output_file" > "$deduped_file"
     grep -v '^#' "$output_file" | sort -t$'\t' -k1,1 -u >> "$deduped_file"
     mv "$deduped_file" "$output_file"
+    
+    # Enrich with repo/npub from announcements.json if analysis root provided
+    # This is critical for usability - without it, action-required.txt shows
+    # event_id|kind instead of repo|npub, making parse failures unidentifiable
+    if [[ -n "$analysis_root" ]]; then
+        enrich_with_repo_npub "$output_file" "$analysis_root"
+    fi
     
     # Filter to missing announcements only if analysis root provided
     if [[ -n "$analysis_root" ]]; then

@@ -329,9 +329,11 @@ main() {
     # =========================================================================
     log_info "Parsing log-based categories..."
     
-    # Parse failures: repo<TAB>npub<TAB>kind<TAB>event_id<TAB>reason
+    # Parse failures: event_id<TAB>kind<TAB>reason<TAB>repo<TAB>npub
+    # Note: repo and npub are in columns 4 and 5 (enriched by Phase 4 from announcements.json)
+    # Some entries may have empty repo/npub if the event_id wasn't found in announcements
     if [[ -f "$logs_dir/parse-failures.txt" ]] && file_has_content "$logs_dir/parse-failures.txt"; then
-        grep -v '^#' "$logs_dir/parse-failures.txt" | awk -F'\t' '{print $1 "|" $2}' | sort -u > "$tmp_dir/parse_failures.txt"
+        grep -v '^#' "$logs_dir/parse-failures.txt" | awk -F'\t' '{print $4 "|" $5}' | sort -u > "$tmp_dir/parse_failures.txt"
         log_info "Found $(wc -l < "$tmp_dir/parse_failures.txt" | tr -d ' ') parse failure entries"
     else
         touch "$tmp_dir/parse_failures.txt"
