@@ -500,6 +500,10 @@ pub struct Config {
     /// Prevents connection exhaustion DoS attacks
     #[arg(long, env = "NGIT_MAX_CONNECTIONS", default_value_t = 4096)]
     pub max_connections: usize,
+
+    /// Log level for application logging
+    #[arg(long, env = "NGIT_LOG_LEVEL", default_value = "info")]
+    pub log_level: String,
 }
 
 impl Config {
@@ -782,6 +786,7 @@ impl Config {
             repository_blacklist: String::new(),
             event_blacklist: String::new(),
             max_connections: 500,
+            log_level: "debug".to_string(),
         }
     }
 }

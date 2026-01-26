@@ -3,8 +3,8 @@ use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use tokio::signal;
-use tracing::{error, info, warn, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing::{error, info, warn};
+use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 use ngit_grasp::{
     config::{Config, DatabaseBackend},
@@ -17,16 +17,16 @@ use ngit_grasp::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing
+    // Load configuration first (priority: CLI flags > env vars > .env file > defaults)
+    let config = Config::load()?;
+
+    // Initialize tracing with configured log level
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::DEBUG)
+        .with_env_filter(EnvFilter::new(&config.log_level))
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
-    info!("Starting ngit-grasp with nostr-relay-builder...");
-
-    // Load configuration (priority: CLI flags > env vars > .env file > defaults)
-    let config = Config::load()?;
+    info!("Starting ngit-grasp with log level: {}", config.log_level);
 
     // Validate configuration and fail fast on fatal errors
     // Recoverable issues (e.g., malformed whitelist entries) are logged as warnings
