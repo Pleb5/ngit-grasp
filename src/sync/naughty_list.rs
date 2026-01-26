@@ -114,11 +114,15 @@ impl NaughtyListTracker {
     pub fn classify_error(error: &str) -> Option<NaughtyCategory> {
         let error_lower = error.to_lowercase();
 
-        // DNS lookup failures
+        // DNS lookup failures - use specific patterns to avoid false positives
+        // from URLs containing "dns" (e.g., npubs like "...cdns7..." or domains)
         if error_lower.contains("failed to lookup address")
             || error_lower.contains("name or service not known")
             || error_lower.contains("nodename nor servname provided")
-            || (error_lower.contains("dns") && !error_lower.contains("timeout"))
+            || error_lower.contains("dns error")
+            || error_lower.contains("dns lookup")
+            || error_lower.contains("dns resolution")
+            || error_lower.contains("getaddrinfo")
         {
             return Some(NaughtyCategory::DnsLookupFailed);
         }
@@ -372,6 +376,34 @@ mod tests {
         assert_eq!(
             NaughtyListTracker::classify_error("network unreachable"),
             None
+        );
+
+        // Repository not found is transient (not an infrastructure issue)
+        assert_eq!(
+            NaughtyListTracker::classify_error(
+                "fatal: repository 'https://example.com/repo.git/' not found"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_classify_false_positive_npub_with_dns() {
+        // This npub contains "dns" in its encoding: npub17plqkxhsv66g8quxxc9p5t9mxazzn20m426exqnl8lxnh5a4cDNS7jezx0
+        // A "not found" error with this npub should NOT be classified as DNS failure
+        let error = "fatal: repository 'https://git.shakespeare.diy/npub17plqkxhsv66g8quxxc9p5t9mxazzn20m426exqnl8lxnh5a4cdns7jezx0/kuboslopp%20by%20Shakespeare.git/' not found";
+        assert_eq!(
+            NaughtyListTracker::classify_error(error),
+            None,
+            "npub containing 'dns' should not trigger DNS failure classification"
+        );
+
+        // Same for relay.ngit.dev
+        let error2 = "fatal: repository 'https://relay.ngit.dev/npub17plqkxhsv66g8quxxc9p5t9mxazzn20m426exqnl8lxnh5a4cdns7jezx0/kuboslopp%20by%20Shakespeare.git/' not found";
+        assert_eq!(
+            NaughtyListTracker::classify_error(error2),
+            None,
+            "npub containing 'dns' should not trigger DNS failure classification"
         );
     }
 
