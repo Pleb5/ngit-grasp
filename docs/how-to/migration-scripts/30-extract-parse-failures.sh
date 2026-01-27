@@ -24,6 +24,12 @@
 #   --until <date>   End date for log extraction (default: now)
 #   --dry-run        Show what would be extracted without writing files
 #
+# ENRICHMENT:
+#   The script automatically enriches parse failures with repo/npub information
+#   by extracting from "Added rejected announcement" log entries which include
+#   pubkey and identifier fields. Hex pubkeys are converted to npub format using
+#   `nak encode npub <hex-pubkey>` if the nak tool is available.
+#
 # OUTPUT:
 #   <output-dir>/parse-failures.txt
 #
@@ -31,7 +37,7 @@
 #   event_id<TAB>kind<TAB>reason<TAB>repo<TAB>npub
 #
 # EXPECTED LOG FORMATS:
-#   The script looks for two types of log entries:
+#   The script looks for three types of log entries:
 #
 #   1. Structured [PARSE_FAIL] entries:
 #      2026-01-22T10:30:45Z ngit-grasp[1234]: [PARSE_FAIL] kind=30618 event_id=abc123... reason="invalid refs format" repo=myrepo npub=npub1...
@@ -39,13 +45,17 @@
 #   2. "Invalid announcement" rejections (write policy):
 #      Event rejected by write policy event_id=abc123... relay=wss://... kind=30617 reason=Invalid announcement: multiple clone tags found...
 #
+#   3. "Added rejected announcement" entries (for enrichment):
+#      Added rejected announcement to two-tier index event_id=abc123... kind=30617 identifier=myrepo pubkey=hex...
+#      These entries provide pubkey and identifier for enriching write policy rejections.
+#
 #   NOTE: Builder logs ("Rejected repository announcement note1xxx:") are NOT extracted
 #   because they use bech32 (note1) IDs while write policy logs use hex IDs. Extracting
 #   both would cause double-counting since deduplication only works within each format.
 #   Write policy logs contain the same events, so we don't lose any data.
 #
 #   Required fields: kind, event_id, reason
-#   Optional fields: repo, npub (may not be available for all entry types)
+#   Enrichment fields: repo (identifier), npub (converted from hex pubkey)
 #
 # DEPENDENCY:
 #   This script requires logging improvements in ngit-grasp to emit structured
@@ -127,23 +137,21 @@ usage() {
     echo "Options:"
     echo "  --since <date>        Start date (default: 30 days ago)"
     echo "  --until <date>        End date (default: now)"
-    echo "  --analysis-root <dir> Filter to only missing announcements from analysis"
     echo "  --dry-run             Show what would be extracted without writing"
     echo ""
     echo "Examples:"
     echo "  $0 ngit-grasp.service output/logs"
     echo "  $0 ngit-grasp.service output/logs --since '2026-01-01'"
     echo "  $0 ngit-grasp.service output/logs --since '2026-01-15' --until '2026-01-22'"
-    echo "  $0 ngit-grasp.service output/logs --analysis-root /tmp/migration-analysis-20260123"
     echo ""
     echo "Expected log formats:"
     echo "  [PARSE_FAIL] kind=30618 event_id=abc123 reason=\"...\" repo=myrepo npub=npub1..."
     echo "  Event rejected by write policy event_id=abc123 ... kind=30617 reason=Invalid announcement: ..."
     echo ""
-    echo "Filtering with --analysis-root:"
-    echo "  When provided, only parse failures for announcements that are in production"
-    echo "  but missing from the archive will be included. This filters out rejections"
-    echo "  for events from other relays that don't affect the migration."
+    echo "Enrichment:"
+    echo "  Parse failures are automatically enriched with repo/npub from"
+    echo "  'Added rejected announcement' log entries. Hex pubkeys are converted"
+    echo "  to npub format using 'nak encode npub' if available."
     exit 1
 }
 
@@ -211,96 +219,52 @@ parse_write_policy_rejection_line() {
 # the same event to be counted twice. Write policy logs contain the same
 # events, so we don't lose any data by only extracting from that source.
 
-# Enrich parse failures with repo/npub by looking up event_id in announcements.json
+# Enrich parse failures with repo/npub by looking up event_id in "Added rejected announcement" log entries
 # This is critical because "Invalid announcement" rejections only log event_id and kind,
 # not the repo name or npub. Without enrichment, Phase 5 shows event_id|kind instead
 # of repo|npub in action-required.txt, making the output unusable.
 #
 # Arguments:
 #   $1 - parse failures file to enrich (modified in place)
-#   $2 - analysis root directory containing prod/raw/announcements.json
+#   $2 - lookup file containing event_id -> identifier|pubkey mappings from logs
 #
 # The function:
-#   1. Builds a lookup table from announcements.json: event_id -> repo|npub
+#   1. Uses the lookup table built from "Added rejected announcement" log entries
 #   2. For each parse failure with empty repo/npub, looks up the event_id
 #   3. Populates repo and npub columns from the lookup
+#   4. Converts hex pubkeys to npub format using `nak encode npub` if available
 enrich_with_repo_npub() {
     local parse_failures_file="$1"
-    local analysis_root="$2"
+    local lookup_file="$2"
     
-    local prod_announcements="$analysis_root/prod/raw/announcements.json"
-    
-    # Validate required file exists
-    if [[ ! -f "$prod_announcements" ]]; then
-        log_warn "Production announcements file not found: $prod_announcements"
-        log_warn "Skipping enrichment - repo/npub columns will remain empty"
+    # Validate lookup file exists and has content
+    if [[ ! -f "$lookup_file" ]] || [[ ! -s "$lookup_file" ]]; then
+        log_warn "No enrichment data available - repo/npub columns will remain empty"
         return 0
     fi
     
-    # Check if jq is available
-    if ! command -v jq &> /dev/null; then
-        log_warn "jq not found - cannot enrich parse failures with repo/npub"
-        log_warn "Install jq or run without --analysis-root"
-        return 0
-    fi
+    log_info "Enriching parse failures with repo/npub from log entries..."
     
-    log_info "Enriching parse failures with repo/npub from announcements..."
-    
-    # Step 1: Build lookup table from announcements.json
-    # Output format: event_id<TAB>repo<TAB>npub
-    local lookup_file
-    lookup_file=$(mktemp)
-    
-    # Extract id, d-tag (repo identifier), and pubkey from announcements
-    # Convert pubkey to npub using bech32 encoding
-    # Note: We use a simple hex-to-npub conversion via external tool if available,
-    # otherwise we'll use the hex pubkey (Phase 5 can still match on it)
-    log_info "  Building event_id -> repo/npub lookup table..."
-    
-    # First, extract the raw data: id, d-tag, pubkey (hex)
-    jq -r 'select(.kind == 30617) | 
-        .id as $id | 
-        .pubkey as $pubkey |
-        ((.tags[] | select(.[0] == "d") | .[1]) // "") as $dtag |
-        "\($id)\t\($dtag)\t\($pubkey)"' "$prod_announcements" > "$lookup_file.raw" 2>/dev/null || {
-        log_warn "Failed to parse production announcements JSON"
-        rm -f "$lookup_file" "$lookup_file.raw"
-        return 0
-    }
-    
-    # Convert hex pubkeys to npub format
-    # Check if we have a tool to do bech32 encoding (nak, nostr-tool, etc.)
+    # Check if we have nak for pubkey->npub conversion
     local can_convert_npub=false
     if command -v nak &> /dev/null; then
         can_convert_npub=true
         log_info "  Using 'nak' for pubkey->npub conversion"
+    else
+        log_warn "  'nak' not found - will use hex pubkeys instead of npub"
     fi
-    
-    # Process the lookup file, converting pubkeys to npubs if possible
-    while IFS=$'\t' read -r event_id repo pubkey_hex; do
-        local npub
-        if [[ "$can_convert_npub" == true && -n "$pubkey_hex" ]]; then
-            # Use nak to encode pubkey as npub
-            npub=$(nak encode npub "$pubkey_hex" 2>/dev/null || echo "")
-        fi
-        # Fall back to hex pubkey if conversion failed
-        [[ -z "$npub" ]] && npub="$pubkey_hex"
-        printf '%s\t%s\t%s\n' "$event_id" "$repo" "$npub"
-    done < "$lookup_file.raw" > "$lookup_file"
-    
-    rm -f "$lookup_file.raw"
     
     local lookup_count
     lookup_count=$(wc -l < "$lookup_file")
     lookup_count="${lookup_count//[^0-9]/}"
-    log_info "  Built lookup table with $lookup_count announcements"
+    log_info "  Lookup table has $lookup_count entries"
     
-    # Step 2: Enrich parse failures
+    # Enrich parse failures
     local enriched_file
     enriched_file=$(mktemp)
     
     # Copy header lines
-    grep '^#' "$parse_failures_file" > "$enriched_file"
+    grep '^#' "$parse_failures_file" > "$enriched_file" 2>/dev/null || true
     
     # Process data lines
     local enriched_count=0
@@ -317,14 +281,21 @@ enrich_with_repo_npub() {
             continue
         fi
         
-        # Look up event_id in our table
+        # Look up event_id in our table (format: event_id<TAB>identifier<TAB>pubkey_hex)
         local lookup_result
         lookup_result=$(grep "^${event_id}"$'\t' "$lookup_file" 2>/dev/null | head -1 || echo "")
         
         if [[ -n "$lookup_result" ]]; then
-            local looked_up_repo looked_up_npub
+            local looked_up_repo looked_up_pubkey_hex looked_up_npub
             looked_up_repo=$(echo "$lookup_result" | cut -f2)
-            looked_up_npub=$(echo "$lookup_result" | cut -f3)
+            looked_up_pubkey_hex=$(echo "$lookup_result" | cut -f3)
+            
+            # Convert hex pubkey to npub if nak is available
+            if [[ "$can_convert_npub" == true && -n "$looked_up_pubkey_hex" ]]; then
+                looked_up_npub=$(nak encode npub "$looked_up_pubkey_hex" 2>/dev/null || echo "$looked_up_pubkey_hex")
+            else
+                looked_up_npub="$looked_up_pubkey_hex"
+            fi
             
             # Use looked-up values if original was empty
             [[ -z "$repo" ]] && repo="$looked_up_repo"
@@ -338,160 +309,31 @@ enrich_with_repo_npub() {
     # Replace original with enriched version
     mv "$enriched_file" "$parse_failures_file"
     
-    # Cleanup
-    rm -f "$lookup_file"
-    
     log_info "  Enriched $enriched_count of $total_count parse failures with repo/npub"
     log_success "Enrichment complete"
 }
 
-# Filter parse failures to only those for missing announcements
-# This is used when --analysis-root is provided to scope results to the migration
-#
-# Arguments:
-#   $1 - parse failures file to filter (modified in place)
-#   $2 - analysis root directory containing comparison/ and prod/ subdirs
-#
-# The function:
-#   1. Reads missing announcements from comparison/complete-prod-missing-archive.txt
-#   2. Extracts pubkey/identifier pairs for those announcements
-#   3. Reads production announcements from prod/raw/announcements.json
-#   4. Gets event IDs for announcements matching the missing pubkey/identifier pairs
-#   5. Filters parse failures to only those event IDs
-filter_to_missing_announcements() {
-    local parse_failures_file="$1"
-    local analysis_root="$2"
+# Parse "Added rejected announcement" log entries to build enrichment lookup table
+# Input: log line containing "Added rejected announcement to two-tier index"
+# Output: TSV line: event_id<TAB>identifier<TAB>pubkey_hex
+parse_rejected_announcement_line() {
+    local line="$1"
     
-    local missing_file="$analysis_root/comparison/complete-prod-missing-archive.txt"
-    local prod_announcements="$analysis_root/prod/raw/announcements.json"
+    local event_id identifier pubkey_hex
     
-    # Validate required files exist
-    if [[ ! -f "$missing_file" ]]; then
-        log_warn "Missing announcements file not found: $missing_file"
-        log_warn "Skipping filter - all parse failures will be included"
-        return 0
+    # Extract event_id=VALUE (hex string)
+    event_id=$(echo "$line" | grep -oP 'event_id=\K[a-f0-9]+' || echo "")
+    
+    # Extract identifier=VALUE (repo name)
+    identifier=$(echo "$line" | grep -oP 'identifier=\K[^ ]+' || echo "")
+    
+    # Extract pubkey=VALUE (hex string)
+    pubkey_hex=$(echo "$line" | grep -oP 'pubkey=\K[a-f0-9]+' || echo "")
+    
+    # Only output if we have all required fields
+    if [[ -n "$event_id" && -n "$identifier" && -n "$pubkey_hex" ]]; then
+        printf '%s\t%s\t%s\n' "$event_id" "$identifier" "$pubkey_hex"
     fi
-    
-    if [[ ! -f "$prod_announcements" ]]; then
-        log_warn "Production announcements file not found: $prod_announcements"
-        log_warn "Skipping filter - all parse failures will be included"
-        return 0
-    fi
-    
-    # Check if jq is available
-    if ! command -v jq &> /dev/null; then
-        log_warn "jq not found - cannot filter parse failures"
-        log_warn "Install jq or run without --analysis-root"
-        return 0
-    fi
-    
-    log_info "Filtering parse failures to missing announcements only..."
-    
-    # Step 1: Extract pubkey/identifier pairs from missing announcements
-    # Format: identifier | npub | prod=complete | archive=missing
-    local missing_pairs_file
-    missing_pairs_file=$(mktemp)
-    
-    # Extract identifier and npub, convert npub to hex pubkey for matching
-    while IFS=' | ' read -r identifier npub rest; do
-        # Skip empty lines
-        [[ -z "$identifier" ]] && continue
-        # Trim whitespace
-        identifier=$(echo "$identifier" | xargs)
-        npub=$(echo "$npub" | xargs)
-        echo "${identifier}|${npub}"
-    done < "$missing_file" > "$missing_pairs_file"
-    
-    local missing_count
-    missing_count=$(wc -l < "$missing_pairs_file")
-    missing_count="${missing_count//[^0-9]/}"
-    log_info "  Found $missing_count missing announcements to filter for"
-    
-    # Step 2: Get event IDs from production announcements for these pairs
-    # We need to match on 'd' tag (identifier) and pubkey
-    local missing_event_ids_file
-    missing_event_ids_file=$(mktemp)
-    
-    # Create a lookup of identifier|npub -> event_id from production announcements
-    # The JSON has: id, pubkey (hex), tags (array with ["d", identifier])
-    log_info "  Extracting event IDs from production announcements..."
-    
-    # Use jq to extract id, pubkey, and d-tag value, then filter
-    # Output format: event_id|identifier|pubkey_hex
-    # Note: The JSON file is NDJSON (newline-delimited), not an array
-    jq -r 'select(.kind == 30617) | 
-        .id as $id | 
-        .pubkey as $pubkey |
-        (.tags[] | select(.[0] == "d") | .[1]) as $dtag |
-        "\($id)|\($dtag)|\($pubkey)"' "$prod_announcements" > "$missing_event_ids_file.all" 2>/dev/null || {
-        log_warn "Failed to parse production announcements JSON"
-        rm -f "$missing_pairs_file" "$missing_event_ids_file" "$missing_event_ids_file.all"
-        return 0
-    }
-    
-    # Now filter to only event IDs for missing announcements
-    # We need to convert npub to hex pubkey for comparison
-    # npub is bech32, pubkey in JSON is hex
-    # For simplicity, we'll match on identifier only (d-tag) since it should be unique per pubkey
-    # Actually, we need both because same identifier can exist for different pubkeys
-    
-    # Create a set of "identifier|pubkey_hex" to match against
-    # First, we need to convert npub to hex - but that requires a tool
-    # Alternative: match on identifier only and accept some false positives
-    # Better: use the comparison file which has npub, and match against announcements
-    
-    # Let's match on identifier only for now (simpler, may have minor false positives)
-    # Extract just the identifiers from missing announcements
-    local missing_identifiers_file
-    missing_identifiers_file=$(mktemp)
-    cut -d'|' -f1 "$missing_pairs_file" | sort -u > "$missing_identifiers_file"
-    
-    # Filter event IDs to only those with matching identifiers
-    while IFS='|' read -r event_id identifier pubkey_hex; do
-        if grep -qFx "$identifier" "$missing_identifiers_file"; then
-            echo "$event_id"
-        fi
-    done < "$missing_event_ids_file.all" | sort -u > "$missing_event_ids_file"
-    
-    local event_id_count
-    event_id_count=$(wc -l < "$missing_event_ids_file")
-    event_id_count="${event_id_count//[^0-9]/}"
-    log_info "  Found $event_id_count event IDs for missing announcements"
-    
-    # Step 3: Filter parse failures to only those event IDs
-    local filtered_file
-    filtered_file=$(mktemp)
-    
-    # Copy header lines
-    grep '^#' "$parse_failures_file" > "$filtered_file"
-    
-    # Add a note about filtering
-    echo "# Filtered to missing announcements only (--analysis-root)" >> "$filtered_file"
-    echo "# Analysis root: $analysis_root" >> "$filtered_file"
-    echo "# Missing announcements: $missing_count" >> "$filtered_file"
-    echo "# Matching event IDs: $event_id_count" >> "$filtered_file"
-    
-    # Filter data lines - only include if event_id is in our list
-    local filtered_count=0
-    while IFS=$'\t' read -r event_id kind reason repo npub; do
-        # Skip header lines (already copied)
-        [[ "$event_id" =~ ^# ]] && continue
-        
-        # Check if this event_id is in our missing list
-        if grep -qFx "$event_id" "$missing_event_ids_file"; then
-            printf '%s\t%s\t%s\t%s\t%s\n' "$event_id" "$kind" "$reason" "$repo" "$npub" >> "$filtered_file"
-            filtered_count=$((filtered_count + 1))
-        fi
-    done < "$parse_failures_file"
-    
-    # Replace original with filtered version
-    mv "$filtered_file" "$parse_failures_file"
-    
-    # Cleanup temp files
-    rm -f "$missing_pairs_file" "$missing_event_ids_file" "$missing_event_ids_file.all" "$missing_identifiers_file"
-    
-    log_info "  Filtered from $(grep -v '^#' "$parse_failures_file" | wc -l | xargs) to $filtered_count parse failures"
-    log_success "Filtered to parse failures for missing announcements only"
 }
 
 # Main
@@ -509,7 +351,6 @@ main() {
     since_date=$(date -d "30 days ago" "+%Y-%m-%d" 2>/dev/null || date -v-30d "+%Y-%m-%d" 2>/dev/null || echo "")
     local until_date=""
     local dry_run=false
-    local analysis_root=""
     
     # Parse options
     while [[ $# -gt 0 ]]; do
@@ -520,10 +361,6 @@ main() {
                 ;;
             --until)
                 until_date="$2"
-                shift 2
-                ;;
-            --analysis-root)
-                analysis_root="$2"
                 shift 2
                 ;;
             --dry-run)
@@ -640,10 +477,11 @@ main() {
     log_info "Extracting log entries..."
     
     # Create temp files for intermediate results
-    local temp_stderr temp_parse_fail temp_write_policy_rejection
+    local temp_stderr temp_parse_fail temp_write_policy_rejection temp_rejected_announcement
     temp_stderr=$(mktemp)
     temp_parse_fail=$(mktemp)
     temp_write_policy_rejection=$(mktemp)
+    temp_rejected_announcement=$(mktemp)
     
     # Extract [PARSE_FAIL] entries directly to temp file (streaming)
     log_info "  Searching for [PARSE_FAIL] entries..."
@@ -661,17 +499,25 @@ main() {
     log_info "  Searching for write policy rejections..."
     eval "$journal_cmd" 2>/dev/null | grep 'Event rejected by write policy' | grep 'Invalid announcement' > "$temp_write_policy_rejection" || true
     
+    # Extract "Added rejected announcement" entries for enrichment (streaming)
+    # These contain pubkey and identifier which we use to enrich write policy rejections
+    log_info "  Searching for rejected announcement entries (for enrichment)..."
+    eval "$journal_cmd" 2>/dev/null | grep 'Added rejected announcement to two-tier index' > "$temp_rejected_announcement" || true
+    
     rm -f "$temp_stderr"
     
     # Check if we found anything
-    local parse_fail_line_count write_policy_line_count
+    local parse_fail_line_count write_policy_line_count rejected_announcement_line_count
     parse_fail_line_count=$(wc -l < "$temp_parse_fail")
     parse_fail_line_count="${parse_fail_line_count//[^0-9]/}"
     write_policy_line_count=$(wc -l < "$temp_write_policy_rejection")
     write_policy_line_count="${write_policy_line_count//[^0-9]/}"
+    rejected_announcement_line_count=$(wc -l < "$temp_rejected_announcement")
+    rejected_announcement_line_count="${rejected_announcement_line_count//[^0-9]/}"
     
     log_info "  Found $parse_fail_line_count [PARSE_FAIL] log lines"
     log_info "  Found $write_policy_line_count write policy rejection log lines"
+    log_info "  Found $rejected_announcement_line_count rejected announcement log lines (for enrichment)"
     
     local total_invalid_announcement_lines=$write_policy_line_count
     
@@ -704,7 +550,7 @@ main() {
             echo "# This is expected if ngit-grasp logging improvements are not yet deployed."
         } > "$output_file"
         
-        rm -f "$temp_parse_fail" "$temp_write_policy_rejection"
+        rm -f "$temp_parse_fail" "$temp_write_policy_rejection" "$temp_rejected_announcement"
         log_info "Created empty output file: $output_file"
         exit 0
     fi
@@ -753,7 +599,22 @@ main() {
     
     local invalid_announcement_count=$write_policy_count
     
-    rm -f "$temp_parse_fail" "$temp_write_policy_rejection"
+    # Build enrichment lookup table from "Added rejected announcement" entries
+    local enrichment_lookup_file
+    enrichment_lookup_file=$(mktemp)
+    
+    log_info "  Building enrichment lookup table..."
+    if [[ "$rejected_announcement_line_count" -gt 0 ]]; then
+        while IFS= read -r line; do
+            local parsed
+            parsed=$(parse_rejected_announcement_line "$line")
+            if [[ -n "$parsed" ]]; then
+                echo "$parsed" >> "$enrichment_lookup_file"
+            fi
+        done < "$temp_rejected_announcement"
+    fi
+    
+    rm -f "$temp_parse_fail" "$temp_write_policy_rejection" "$temp_rejected_announcement"
     
     # Deduplicate by event_id (first column) - keep first occurrence
     log_info "  Deduplicating entries..."
@@ -764,17 +625,18 @@ main() {
     grep -v '^#' "$output_file" | sort -t$'\t' -k1,1 -u >> "$deduped_file"
     mv "$deduped_file" "$output_file"
     
-    # Enrich with repo/npub from announcements.json if analysis root provided
-    # This is critical for usability - without it, action-required.txt shows
-    # event_id|kind instead of repo|npub, making parse failures unidentifiable
-    if [[ -n "$analysis_root" ]]; then
-        enrich_with_repo_npub "$output_file" "$analysis_root"
+    # Deduplicate enrichment lookup table by event_id
+    if [[ -s "$enrichment_lookup_file" ]]; then
+        sort -t$'\t' -k1,1 -u "$enrichment_lookup_file" > "$enrichment_lookup_file.deduped"
+        mv "$enrichment_lookup_file.deduped" "$enrichment_lookup_file"
     fi
     
-    # Filter to missing announcements only if analysis root provided
-    if [[ -n "$analysis_root" ]]; then
-        filter_to_missing_announcements "$output_file" "$analysis_root"
-    fi
+    # Enrich with repo/npub from "Added rejected announcement" log entries
+    # This is critical for usability - without it, action-required.txt shows
+    # event_id|kind instead of repo|npub, making parse failures unidentifiable
+    enrich_with_repo_npub "$output_file" "$enrichment_lookup_file"
+    
+    rm -f "$enrichment_lookup_file"
     
     # Count final entries (excluding header lines)
     local count
@@ -789,15 +651,9 @@ main() {
     log_info "=== Extraction Summary ==="
     log_info "Service: $service"
     log_info "Time range: ${since_date:-beginning} to ${until_date:-now}"
-    if [[ -n "$analysis_root" ]]; then
-        log_info "Filtered to: missing announcements only"
-    fi
     log_success "Extracted $count total entries"
     log_info "  - [PARSE_FAIL] entries: $parse_fail_count"
     log_info "  - Invalid announcement rejections: $invalid_announcement_count"
-    if [[ -n "$analysis_root" ]]; then
-        log_info "  (filtered from original extraction)"
-    fi
     echo ""
     log_info "Output file: $output_file"
     
