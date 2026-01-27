@@ -368,7 +368,7 @@ pub async fn sync_identifier_from_url<C: SyncContext + ?Sized>(
     let fetch_result = ctx.fetch_oids(&target_repo, url, &needed_oids).await;
     throttle_manager.complete_request(&domain);
 
-    let oids_fetched = match fetch_result {
+    let fetched_oids = match fetch_result {
         Ok(fetched) if !fetched.is_empty() => {
             debug!(
                 identifier = %identifier,
@@ -376,7 +376,7 @@ pub async fn sync_identifier_from_url<C: SyncContext + ?Sized>(
                 oids_fetched = fetched.len(),
                 "Fetch succeeded"
             );
-            fetched.len()
+            fetched
         }
         Ok(_) => {
             debug!(
@@ -384,7 +384,7 @@ pub async fn sync_identifier_from_url<C: SyncContext + ?Sized>(
                 url = %url,
                 "Fetch returned no OIDs (not available on remote)"
             );
-            0
+            vec![]
         }
         Err(e) => {
             debug!(
@@ -393,13 +393,13 @@ pub async fn sync_identifier_from_url<C: SyncContext + ?Sized>(
                 error = %e,
                 "Fetch failed"
             );
-            0
+            vec![]
         }
     };
 
     // Try to process any events that can now be satisfied
-    if oids_fetched > 0 {
-        let new_oids: HashSet<String> = needed_oids.into_iter().collect();
+    if !fetched_oids.is_empty() {
+        let new_oids: HashSet<String> = fetched_oids.iter().cloned().collect();
         if let Err(e) = ctx
             .process_newly_available_git_data(&target_repo, &new_oids)
             .await
@@ -412,7 +412,7 @@ pub async fn sync_identifier_from_url<C: SyncContext + ?Sized>(
         }
     }
 
-    oids_fetched
+    fetched_oids.len()
 }
 
 /// Sync git data for an identifier.
