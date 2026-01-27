@@ -232,12 +232,12 @@ impl NaughtyListTracker {
             }
         }
 
-        // Protocol errors
-        if error_lower.contains("websocket")
-            || error_lower.contains("protocol")
-            || error_lower.contains("invalid frame")
-        {
-            // Exclude connection errors
+        // Protocol errors - specifically WebSocket/Nostr protocol violations
+        // Note: We check for "websocket" specifically, NOT generic "protocol" keyword
+        // because git errors often contain "protocol error" (e.g., "fatal: protocol error: bad line length")
+        // which are transient network issues, not persistent infrastructure problems.
+        if error_lower.contains("websocket") || error_lower.contains("invalid frame") {
+            // Exclude connection errors (transient)
             if !error_lower.contains("connection")
                 && !error_lower.contains("timeout")
                 && !error_lower.contains("refused")
@@ -620,5 +620,70 @@ mod tests {
             "tls_certificate_invalid"
         );
         assert_eq!(NaughtyCategory::ProtocolError.as_str(), "protocol_error");
+    }
+}
+
+#[cfg(test)]
+mod production_tests {
+    use super::*;
+
+    /// Production case from relay.ngit.dev - remote warning should not be classified
+    #[test]
+    fn test_classify_production_relay_ngit_dev_warning() {
+        let error =
+            "remote: warning: unable to access '/root/.config/git/attributes': Permission denied";
+        assert_eq!(NaughtyListTracker::classify_error(error), None);
+    }
+
+    /// Git protocol errors are transient, not persistent infrastructure issues
+    #[test]
+    fn test_git_protocol_errors_not_naughty() {
+        // These are common git protocol errors that should NOT be classified as naughty
+        let git_protocol_errors = [
+            "fatal: protocol error: bad line length character: remo",
+            "fatal: protocol error: expected old/new/ref, got 'shallow",
+            "fatal: git upload-pack: protocol error",
+            "error: protocol error: bad pack header",
+            "fatal: protocol error: bad band #3",
+        ];
+
+        for error in git_protocol_errors {
+            assert_eq!(
+                NaughtyListTracker::classify_error(error),
+                None,
+                "Git protocol error should not be classified as naughty: {}",
+                error
+            );
+        }
+    }
+
+    /// Remote warning followed by git protocol error - both should be filtered/ignored
+    #[test]
+    fn test_warning_with_git_protocol_error() {
+        let error = "remote: warning: unable to access '/root/.config/git/attributes': Permission denied\nfatal: protocol error: bad line length character: remo";
+        assert_eq!(
+            NaughtyListTracker::classify_error(error),
+            None,
+            "Warning + git protocol error should not be classified as naughty"
+        );
+    }
+
+    /// WebSocket protocol errors ARE naughty (persistent infrastructure issues)
+    #[test]
+    fn test_websocket_errors_still_naughty() {
+        let websocket_errors = [
+            "websocket protocol error",
+            "websocket handshake failed",
+            "invalid frame received",
+        ];
+
+        for error in websocket_errors {
+            assert_eq!(
+                NaughtyListTracker::classify_error(error),
+                Some(NaughtyCategory::ProtocolError),
+                "WebSocket error should be classified as protocol_error: {}",
+                error
+            );
+        }
     }
 }
