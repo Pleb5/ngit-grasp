@@ -28,6 +28,8 @@
 #   --archive-git <path>    Git base directory for archive (enables Phase 2)
 #   --service <name>        Systemd service name for log extraction (enables Phase 4)
 #   --output <dir>          Output directory (default: work/migration-analysis-YYYYMMDD-HHMM)
+#   --since <date>          Start date for log extraction (default: 30 days ago)
+#   --until <date>          End date for log extraction (default: now)
 #
 # PHASE CONTROL:
 #   --skip-phase-1          Skip event fetching (use existing data)
@@ -141,6 +143,8 @@ SERVICE_NAME=""
 OUTPUT_DIR=""
 DRY_RUN=false
 CONTINUE_ON_ERROR=false
+LOG_SINCE=""
+LOG_UNTIL=""
 
 # Phase control
 SKIP_PHASE_1=false
@@ -222,6 +226,14 @@ parse_args() {
             --continue-on-error)
                 CONTINUE_ON_ERROR=true
                 shift
+                ;;
+            --since)
+                LOG_SINCE="$2"
+                shift 2
+                ;;
+            --until)
+                LOG_UNTIL="$2"
+                shift 2
                 ;;
             --help|-h)
                 usage
@@ -578,8 +590,17 @@ run_phase_4() {
     
     local cmds=()
     
-    cmds+=("'$SCRIPT_DIR/30-extract-parse-failures.sh' '$SERVICE_NAME' '$OUTPUT_DIR/logs'")
-    cmds+=("'$SCRIPT_DIR/31-extract-purgatory-expiry.sh' '$SERVICE_NAME' '$OUTPUT_DIR/logs'")
+    # Build log extraction options
+    local log_opts=""
+    if [[ -n "$LOG_SINCE" ]]; then
+        log_opts="$log_opts --since '$LOG_SINCE'"
+    fi
+    if [[ -n "$LOG_UNTIL" ]]; then
+        log_opts="$log_opts --until '$LOG_UNTIL'"
+    fi
+    
+    cmds+=("'$SCRIPT_DIR/30-extract-parse-failures.sh' '$SERVICE_NAME' '$OUTPUT_DIR/logs' $log_opts")
+    cmds+=("'$SCRIPT_DIR/31-extract-purgatory-expiry.sh' '$SERVICE_NAME' '$OUTPUT_DIR/logs' $log_opts")
     
     run_phase 4 "Extract Logs (VPS required)" "${cmds[@]}"
 }
