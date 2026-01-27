@@ -155,35 +155,18 @@ impl SelfSubscriber {
     /// 2. Second query: Get root events (1617/1618/1621) for handle_root_event()
     ///    to add root event IDs for Layer 3 filter creation
     ///
-    /// Both queries use `.since(last_connected)` if available for incremental
-    /// loading on reconnect.
-    ///
     /// Returns a PendingUpdates containing all repos that need Layer 2/3 filters.
     async fn load_existing_events(&self) -> PendingUpdates {
         let mut pending = PendingUpdates::new();
 
-        // Log whether this is a full or incremental load
-        if let Some(since) = self.last_connected {
-            tracing::info!(
-                since = %since,
-                "Loading events incrementally from database (reconnect)"
-            );
-        } else {
-            tracing::info!("Loading all events from database (first connection)");
-        }
+        tracing::info!("Loading all events from database");
 
-        // First query: Get announcements to populate repo_sync_index
-        let mut announcement_filter = Filter::new().kind(Kind::GitRepoAnnouncement);
-        if let Some(timestamp) = self.last_connected {
-            announcement_filter = announcement_filter.since(timestamp);
-        }
+        // First query: Get all announcements to populate repo_sync_index
+        let announcement_filter = Filter::new().kind(Kind::GitRepoAnnouncement);
 
         let announcements = match self.database.query(announcement_filter).await {
             Ok(events) => {
-                tracing::info!(
-                    count = events.len(),
-                    "Loaded announcements from database"
-                );
+                tracing::info!(count = events.len(), "Loaded announcements from database");
                 events
             }
             Err(e) => {
@@ -219,22 +202,13 @@ impl SelfSubscriber {
             }
         }
 
-        // Second query: Get root events for handle_root_event()
-        let mut root_filter = Filter::new().kinds(vec![
-            Kind::GitPatch,
-            Kind::GitIssue,
-            Kind::GitPullRequest,
-        ]);
-        if let Some(timestamp) = self.last_connected {
-            root_filter = root_filter.since(timestamp);
-        }
+        // Second query: Get all root events for handle_root_event()
+        let root_filter =
+            Filter::new().kinds(vec![Kind::GitPatch, Kind::GitIssue, Kind::GitPullRequest]);
 
         let root_events = match self.database.query(root_filter).await {
             Ok(events) => {
-                tracing::info!(
-                    count = events.len(),
-                    "Loaded root events from database"
-                );
+                tracing::info!(count = events.len(), "Loaded root events from database");
                 events
             }
             Err(e) => {
