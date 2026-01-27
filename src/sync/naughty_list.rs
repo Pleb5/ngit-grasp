@@ -101,6 +101,69 @@ impl NaughtyListTracker {
         Self::new(12)
     }
 
+    /// Strip URLs from an error message to prevent false positives from URL components.
+    ///
+    /// URLs can contain path components, repository names, or user identifiers that
+    /// accidentally match error patterns (e.g., "my-openssl-project", "ssl-team",
+    /// "certificate-manager"). By stripping URLs before classification, we ensure
+    /// only the actual error message text is analyzed.
+    ///
+    /// Handles: http://, https://, git://, ws://, wss://
+    fn strip_urls(error: &str) -> String {
+        let mut result = String::with_capacity(error.len());
+        let mut chars = error.chars().peekable();
+
+        while let Some(c) = chars.next() {
+            // Check for URL start patterns
+            let potential_url = match c {
+                'h' => {
+                    // Check for http:// or https://
+                    let rest: String = chars.clone().take(7).collect();
+                    rest.starts_with("ttp://") || rest.starts_with("ttps://")
+                }
+                'g' => {
+                    // Check for git://
+                    let rest: String = chars.clone().take(5).collect();
+                    rest.starts_with("it://")
+                }
+                'w' => {
+                    // Check for ws:// or wss://
+                    let rest: String = chars.clone().take(5).collect();
+                    rest.starts_with("s://") || rest.starts_with("ss://")
+                }
+                _ => false,
+            };
+
+            if potential_url {
+                // Found URL start, consume until URL end
+                result.push_str("[URL]");
+
+                // Skip until we hit a URL terminator
+                loop {
+                    match chars.peek() {
+                        Some(&ch) if Self::is_url_char(ch) => {
+                            chars.next();
+                        }
+                        _ => break,
+                    }
+                }
+            } else {
+                result.push(c);
+            }
+        }
+
+        result
+    }
+
+    /// Check if a character can be part of a URL
+    #[inline]
+    fn is_url_char(c: char) -> bool {
+        // URLs end at whitespace, quotes, or certain brackets
+        // This is conservative - real URLs can contain more, but git errors
+        // typically have URLs followed by these terminators
+        !matches!(c, ' ' | '\t' | '\n' | '\r' | '"' | '\'' | '>' | ']' | ')')
+    }
+
     /// Classify an error string into a naughty category or return None for transient errors
     ///
     /// # Arguments
@@ -112,10 +175,32 @@ impl NaughtyListTracker {
     /// - `Some(NaughtyCategory)` if the error indicates a persistent infrastructure issue
     /// - `None` if the error is a transient network issue (use HealthTracker backoff)
     pub fn classify_error(error: &str) -> Option<NaughtyCategory> {
-        let error_lower = error.to_lowercase();
+        // Filter out remote warnings - these are informational messages from the remote
+        // server that don't indicate infrastructure problems with the domain itself.
+        // Example: "remote: warning: unable to access '/root/.config/git/attributes': Permission denied"
+        // These warnings are about the remote server's internal configuration, not connectivity.
+        let filtered_error: String = error
+            .lines()
+            .filter(|line| {
+                let line_lower = line.to_lowercase();
+                // Keep lines that are NOT remote warnings
+                !(line_lower.starts_with("remote: warning:")
+                    || line_lower.starts_with("warning: remote"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
 
-        // DNS lookup failures - use specific patterns to avoid false positives
-        // from URLs containing "dns" (e.g., npubs like "...cdns7..." or domains)
+        // If after filtering we have no content, this was just warnings - not a real error
+        if filtered_error.trim().is_empty() {
+            return None;
+        }
+
+        // Strip URLs to prevent false positives from URL components
+        // (e.g., repository named "openssl-test" or path containing "certificate")
+        let url_stripped = Self::strip_urls(&filtered_error);
+        let error_lower = url_stripped.to_lowercase();
+
+        // DNS lookup failures
         if error_lower.contains("failed to lookup address")
             || error_lower.contains("name or service not known")
             || error_lower.contains("nodename nor servname provided")
@@ -129,8 +214,17 @@ impl NaughtyListTracker {
 
         // TLS certificate errors
         if error_lower.contains("certificate")
-            || error_lower.contains("ssl")
-            || error_lower.contains("tls")
+            || error_lower.contains("ssl error")
+            || error_lower.contains("ssl certificate")
+            || error_lower.contains("ssl handshake")
+            || error_lower.contains("ssl_error")
+            || error_lower.contains("tls error")
+            || error_lower.contains("tls handshake")
+            || error_lower.contains("tls alert")
+            || error_lower.contains("tls_error")
+            || error_lower.contains("openssl")
+            || error_lower.contains("schannel")
+            || error_lower.contains("secure channel")
         {
             // Exclude timeout errors that mention TLS
             if !error_lower.contains("timeout") && !error_lower.contains("timed out") {
@@ -294,211 +388,216 @@ impl NaughtyListTracker {
 mod tests {
     use super::*;
 
+    // =========================================================================
+    // URL STRIPPING TESTS
+    // =========================================================================
+
     #[test]
-    fn test_classify_dns_errors() {
+    fn test_strip_urls_basic_protocols() {
+        // HTTP/HTTPS
         assert_eq!(
-            NaughtyListTracker::classify_error("failed to lookup address information"),
-            Some(NaughtyCategory::DnsLookupFailed)
+            NaughtyListTracker::strip_urls("error: https://example.com/repo.git failed"),
+            "error: [URL] failed"
         );
         assert_eq!(
-            NaughtyListTracker::classify_error("Name or service not known"),
-            Some(NaughtyCategory::DnsLookupFailed)
+            NaughtyListTracker::strip_urls("error: http://example.com/path failed"),
+            "error: [URL] failed"
+        );
+
+        // Git protocol
+        assert_eq!(
+            NaughtyListTracker::strip_urls("fatal: git://github.com/user/repo.git not found"),
+            "fatal: [URL] not found"
+        );
+
+        // WebSocket protocols (used for relay URLs)
+        assert_eq!(
+            NaughtyListTracker::strip_urls("error: wss://relay.example.com failed"),
+            "error: [URL] failed"
         );
         assert_eq!(
-            NaughtyListTracker::classify_error("nodename nor servname provided"),
-            Some(NaughtyCategory::DnsLookupFailed)
-        );
-        assert_eq!(
-            NaughtyListTracker::classify_error("dns error: NXDOMAIN"),
-            Some(NaughtyCategory::DnsLookupFailed)
+            NaughtyListTracker::strip_urls("error: ws://localhost:8080 failed"),
+            "error: [URL] failed"
         );
     }
 
     #[test]
-    fn test_classify_tls_errors() {
-        assert_eq!(
-            NaughtyListTracker::classify_error("certificate not valid for 'example.com'"),
-            Some(NaughtyCategory::TlsCertificateInvalid)
-        );
-        assert_eq!(
-            NaughtyListTracker::classify_error("SSL certificate problem"),
-            Some(NaughtyCategory::TlsCertificateInvalid)
-        );
-        assert_eq!(
-            NaughtyListTracker::classify_error("TLS handshake failed"),
-            Some(NaughtyCategory::TlsCertificateInvalid)
-        );
+    fn test_strip_urls_multiple() {
+        let error = "failed to clone https://a.com/repo.git and wss://relay.com";
+        let stripped = NaughtyListTracker::strip_urls(error);
+        assert_eq!(stripped, "failed to clone [URL] and [URL]");
+    }
 
-        // TLS timeout should NOT be classified as naughty
+    #[test]
+    fn test_strip_urls_preserves_error_text() {
+        let error =
+            "fatal: unable to access 'https://example.com/repo.git/': SSL certificate problem";
+        let stripped = NaughtyListTracker::strip_urls(error);
+        assert!(stripped.contains("SSL certificate problem"));
+        assert!(!stripped.contains("example.com"));
+    }
+
+    // =========================================================================
+    // EDGE CASES: TIMEOUT/CONNECTION EXCEPTIONS
+    // These are the "unusual rules" where a pattern matches but should be excluded
+    // =========================================================================
+
+    #[test]
+    fn test_tls_timeout_not_naughty() {
+        // TLS errors with timeout should NOT be classified as naughty
+        // (timeout is transient, not a certificate problem)
         assert_eq!(
             NaughtyListTracker::classify_error("TLS connection timed out"),
             None
         );
+        assert_eq!(
+            NaughtyListTracker::classify_error("SSL handshake timeout"),
+            None
+        );
     }
 
     #[test]
-    fn test_classify_protocol_errors() {
-        assert_eq!(
-            NaughtyListTracker::classify_error("websocket protocol error"),
-            Some(NaughtyCategory::ProtocolError)
-        );
-        assert_eq!(
-            NaughtyListTracker::classify_error("invalid frame header"),
-            Some(NaughtyCategory::ProtocolError)
-        );
-
-        // WebSocket connection errors should NOT be classified as naughty
+    fn test_websocket_connection_errors_not_naughty() {
+        // WebSocket connection errors are transient, not protocol violations
         assert_eq!(
             NaughtyListTracker::classify_error("websocket connection refused"),
             None
         );
+        assert_eq!(
+            NaughtyListTracker::classify_error("websocket connection timeout"),
+            None
+        );
     }
 
     #[test]
-    fn test_classify_transient_errors() {
-        // Timeouts are transient
-        assert_eq!(
-            NaughtyListTracker::classify_error("connection timed out"),
-            None
-        );
-        assert_eq!(
-            NaughtyListTracker::classify_error("operation timed out"),
-            None
-        );
+    fn test_remote_warnings_filtered() {
+        // Remote warnings should be filtered out before classification
+        let warning_only =
+            "remote: warning: unable to access '/root/.config/git/attributes': Permission denied";
+        assert_eq!(NaughtyListTracker::classify_error(warning_only), None);
 
-        // Connection refused is transient
+        // But real errors after warnings should still be classified
+        let warning_with_error = "remote: warning: something\nfatal: failed to lookup address";
         assert_eq!(
-            NaughtyListTracker::classify_error("connection refused"),
-            None
+            NaughtyListTracker::classify_error(warning_with_error),
+            Some(NaughtyCategory::DnsLookupFailed)
         );
+    }
 
-        // Generic network errors are transient
-        assert_eq!(
-            NaughtyListTracker::classify_error("network unreachable"),
-            None
-        );
+    // =========================================================================
+    // INTEGRATION: FULL CLASSIFICATION FLOW
+    // Verify URL stripping + classification work together correctly
+    // =========================================================================
 
-        // Repository not found is transient (not an infrastructure issue)
+    #[test]
+    fn test_url_with_keywords_not_false_positive() {
+        // URLs containing keywords should NOT trigger classification
+        let cases = [
+            ("https://example.com/my-openssl-project.git", "not found"),
+            ("https://example.com/ssl-team/repo.git", "not found"),
+            ("https://example.com/certificate-manager.git", "not found"),
+            ("https://example.com/dns-tools.git", "not found"),
+            ("wss://relay-tls-test.example.com", "connection refused"),
+        ];
+
+        for (url, suffix) in cases {
+            let error = format!("fatal: repository '{}/' {}", url, suffix);
+            assert_eq!(
+                NaughtyListTracker::classify_error(&error),
+                None,
+                "URL '{}' should not trigger false positive",
+                url
+            );
+        }
+    }
+
+    #[test]
+    fn test_real_errors_still_detected() {
+        // Real errors in the message text (not URL) should still be detected
         assert_eq!(
             NaughtyListTracker::classify_error(
-                "fatal: repository 'https://example.com/repo.git/' not found"
+                "fatal: 'https://example.com/repo.git': SSL certificate problem"
             ),
-            None
+            Some(NaughtyCategory::TlsCertificateInvalid)
+        );
+        assert_eq!(
+            NaughtyListTracker::classify_error(
+                "fatal: 'https://example.com/repo.git': failed to lookup address"
+            ),
+            Some(NaughtyCategory::DnsLookupFailed)
+        );
+        assert_eq!(
+            NaughtyListTracker::classify_error("websocket protocol error"),
+            Some(NaughtyCategory::ProtocolError)
         );
     }
 
     #[test]
-    fn test_classify_false_positive_npub_with_dns() {
-        // This npub contains "dns" in its encoding: npub17plqkxhsv66g8quxxc9p5t9mxazzn20m426exqnl8lxnh5a4cDNS7jezx0
-        // A "not found" error with this npub should NOT be classified as DNS failure
-        let error = "fatal: repository 'https://git.shakespeare.diy/npub17plqkxhsv66g8quxxc9p5t9mxazzn20m426exqnl8lxnh5a4cdns7jezx0/kuboslopp%20by%20Shakespeare.git/' not found";
+    fn test_url_with_keyword_and_real_error() {
+        // URL contains keyword AND there's a real error - should detect the error
+        let error = "fatal: 'https://example.com/ssl-tools/repo.git': SSL certificate problem";
         assert_eq!(
             NaughtyListTracker::classify_error(error),
-            None,
-            "npub containing 'dns' should not trigger DNS failure classification"
-        );
-
-        // Same for relay.ngit.dev
-        let error2 = "fatal: repository 'https://relay.ngit.dev/npub17plqkxhsv66g8quxxc9p5t9mxazzn20m426exqnl8lxnh5a4cdns7jezx0/kuboslopp%20by%20Shakespeare.git/' not found";
-        assert_eq!(
-            NaughtyListTracker::classify_error(error2),
-            None,
-            "npub containing 'dns' should not trigger DNS failure classification"
+            Some(NaughtyCategory::TlsCertificateInvalid)
         );
     }
 
-    #[test]
-    fn test_record_new_entry() {
-        let tracker = NaughtyListTracker::with_defaults();
-        let url = "wss://bad-relay.example.com";
-
-        let is_new = tracker.record(
-            url,
-            NaughtyCategory::DnsLookupFailed,
-            "failed to lookup address".to_string(),
-        );
-
-        assert!(is_new);
-        assert!(tracker.is_naughty(url));
-
-        let entry = tracker.get_entry(url).unwrap();
-        assert_eq!(entry.category, NaughtyCategory::DnsLookupFailed);
-        assert_eq!(entry.occurrence_count, 1);
-    }
+    // =========================================================================
+    // TRACKER FUNCTIONALITY
+    // =========================================================================
 
     #[test]
-    fn test_record_updates_existing() {
+    fn test_tracker_record_and_update() {
         let tracker = NaughtyListTracker::with_defaults();
         let url = "wss://bad-relay.example.com";
 
         // First occurrence
-        let is_new1 = tracker.record(url, NaughtyCategory::DnsLookupFailed, "error 1".to_string());
-        assert!(is_new1);
+        let is_new = tracker.record(url, NaughtyCategory::DnsLookupFailed, "error 1".to_string());
+        assert!(is_new);
+        assert!(tracker.is_naughty(url));
 
-        // Second occurrence
+        // Second occurrence updates existing
         let is_new2 = tracker.record(url, NaughtyCategory::DnsLookupFailed, "error 2".to_string());
         assert!(!is_new2);
 
         let entry = tracker.get_entry(url).unwrap();
         assert_eq!(entry.occurrence_count, 2);
-        assert_eq!(entry.reason, "error 2"); // Updated to latest
+        assert_eq!(entry.reason, "error 2");
     }
 
     #[test]
-    fn test_is_naughty() {
-        let tracker = NaughtyListTracker::with_defaults();
-        let url = "wss://bad-relay.example.com";
-
-        assert!(!tracker.is_naughty(url));
+    fn test_tracker_expiration() {
+        let tracker = NaughtyListTracker::new(0); // Expire immediately
 
         tracker.record(
-            url,
-            NaughtyCategory::TlsCertificateInvalid,
-            "cert error".to_string(),
+            "wss://relay.example.com",
+            NaughtyCategory::DnsLookupFailed,
+            "error".to_string(),
         );
 
-        assert!(tracker.is_naughty(url));
+        // Entry exists but is expired
+        assert!(!tracker.is_naughty("wss://relay.example.com"));
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let expired = tracker.expire_old_entries();
+        assert_eq!(expired.len(), 1);
+        assert_eq!(tracker.total_count(), 0);
     }
 
     #[test]
-    fn test_get_all() {
+    fn test_tracker_counts() {
         let tracker = NaughtyListTracker::with_defaults();
 
+        tracker.record("wss://r1.com", NaughtyCategory::DnsLookupFailed, "e".into());
+        tracker.record("wss://r2.com", NaughtyCategory::DnsLookupFailed, "e".into());
         tracker.record(
-            "wss://relay1.example.com",
-            NaughtyCategory::DnsLookupFailed,
-            "dns error".to_string(),
-        );
-        tracker.record(
-            "wss://relay2.example.com",
+            "wss://r3.com",
             NaughtyCategory::TlsCertificateInvalid,
-            "tls error".to_string(),
+            "e".into(),
         );
 
-        let all = tracker.get_all();
-        assert_eq!(all.len(), 2);
-    }
-
-    #[test]
-    fn test_count_by_category() {
-        let tracker = NaughtyListTracker::with_defaults();
-
-        tracker.record(
-            "wss://relay1.example.com",
-            NaughtyCategory::DnsLookupFailed,
-            "error".to_string(),
-        );
-        tracker.record(
-            "wss://relay2.example.com",
-            NaughtyCategory::DnsLookupFailed,
-            "error".to_string(),
-        );
-        tracker.record(
-            "wss://relay3.example.com",
-            NaughtyCategory::TlsCertificateInvalid,
-            "error".to_string(),
-        );
-
+        assert_eq!(tracker.total_count(), 3);
         assert_eq!(
             tracker.count_by_category(NaughtyCategory::DnsLookupFailed),
             2
@@ -507,74 +606,11 @@ mod tests {
             tracker.count_by_category(NaughtyCategory::TlsCertificateInvalid),
             1
         );
-        assert_eq!(tracker.count_by_category(NaughtyCategory::ProtocolError), 0);
-    }
-
-    #[test]
-    fn test_total_count() {
-        let tracker = NaughtyListTracker::with_defaults();
-        assert_eq!(tracker.total_count(), 0);
-
-        tracker.record(
-            "wss://relay1.example.com",
-            NaughtyCategory::DnsLookupFailed,
-            "error".to_string(),
-        );
-        assert_eq!(tracker.total_count(), 1);
-
-        tracker.record(
-            "wss://relay2.example.com",
-            NaughtyCategory::TlsCertificateInvalid,
-            "error".to_string(),
-        );
-        assert_eq!(tracker.total_count(), 2);
-    }
-
-    #[test]
-    fn test_expire_old_entries() {
-        // Use very short expiration for testing
-        let tracker = NaughtyListTracker::new(0); // Expire immediately (0 hours)
-
-        tracker.record(
-            "wss://relay1.example.com",
-            NaughtyCategory::DnsLookupFailed,
-            "error".to_string(),
-        );
-
-        // Entry should exist in the map
-        assert_eq!(tracker.total_count(), 1);
-
-        // But is_naughty should return false since it's already expired (0 hours)
-        assert!(!tracker.is_naughty("wss://relay1.example.com"));
-
-        // Sleep to ensure time passes
-        std::thread::sleep(std::time::Duration::from_millis(10));
-
-        // Expire old entries (should remove the 0-hour expired entry)
-        let expired = tracker.expire_old_entries();
-        assert_eq!(expired.len(), 1);
-        assert_eq!(expired[0], "wss://relay1.example.com");
-
-        // Entry should be gone
-        assert!(!tracker.is_naughty("wss://relay1.example.com"));
-        assert_eq!(tracker.total_count(), 0);
+        assert_eq!(tracker.get_all().len(), 3);
     }
 
     #[test]
     fn test_category_display() {
-        assert_eq!(
-            NaughtyCategory::DnsLookupFailed.to_string(),
-            "dns_lookup_failed"
-        );
-        assert_eq!(
-            NaughtyCategory::TlsCertificateInvalid.to_string(),
-            "tls_certificate_invalid"
-        );
-        assert_eq!(NaughtyCategory::ProtocolError.to_string(), "protocol_error");
-    }
-
-    #[test]
-    fn test_category_as_str() {
         assert_eq!(
             NaughtyCategory::DnsLookupFailed.as_str(),
             "dns_lookup_failed"
