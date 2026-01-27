@@ -2812,6 +2812,7 @@ impl SyncManager {
                                     event_id = %event.id,
                                     kind = %event.kind.as_u16(),
                                     identifier = %identifier,
+                                    pubkey = %event.pubkey,
                                     "Added rejected announcement to two-tier index"
                                 );
                             }
