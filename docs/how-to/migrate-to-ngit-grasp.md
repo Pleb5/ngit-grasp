@@ -714,3 +714,317 @@ This section documents the specific configuration and lessons learned from migra
 2. **Investigate 5 edge cases**: Manual review of unusual states
 3. **Monitor purgatory**: 382 expired entries indicate sync issues to investigate
 4. **Plan cutover**: Once re-sync complete, switch DNS/proxy to ngit-grasp
+
+## ngit-relay Troubleshooting
+
+This section covers common issues encountered when running ngit-relay in production, including git permission errors and repository corruption. These issues were discovered during the relay.ngit.dev migration and may affect other deployments.
+
+### Git Permission Denied Errors
+
+#### Symptoms
+
+When cloning repositories, you see:
+
+```bash
+$ git clone https://relay.ngit.dev/npub.../repo.git
+Cloning into 'repo'...
+remote: warning: unable to access '/root/.config/git/attributes': Permission denied
+```
+
+Or in container logs:
+
+```
+warning: unable to access '/root/.config/git/attributes': Permission denied
+```
+
+#### Explanation
+
+This occurs when:
+1. Git operations run as a non-root user (typically `nginx` user, UID 101)
+2. Git tries to access `/root/.config/git/attributes` for global git configuration
+3. The `/root` directory has permissions `0700` (drwx------), preventing non-root users from traversing into it
+4. Even though the `attributes` file itself may be world-readable, the nginx user cannot reach it due to parent directory permissions
+
+**Root cause:** The container runs git commands via fcgiwrap as the nginx user, but `/root` is only accessible by root.
+
+#### Quick Fix (Temporary - Does Not Survive Container Restart)
+
+This fix resolves the issue immediately but will be lost when containers restart:
+
+```bash
+# For each ngit-relay container, exec in and create the git config directory
+sudo podman exec <container-name> sh -c "mkdir -p /root/.config/git && touch /root/.config/git/attributes && chmod 644 /root/.config/git/attributes"
+
+# Example for specific containers:
+sudo podman exec gitnostr-com-ngit-relay sh -c "mkdir -p /root/.config/git && touch /root/.config/git/attributes && chmod 644 /root/.config/git/attributes"
+
+sudo podman exec relay-ngit-dev-ngit-relay sh -c "mkdir -p /root/.config/git && touch /root/.config/git/attributes && chmod 644 /root/.config/git/attributes"
+```
+
+**Important:** This fix is temporary and will be lost when the container restarts. For a permanent solution, see the NixOS configuration below.
+
+#### Permanent Fix (NixOS Configuration)
+
+For NixOS deployments, add systemd services that automatically fix `/root` permissions after each container start:
+
+```nix
+# In your ngit-relay service configuration (e.g., services/relay-ngit-dev-ngit-relay.nix)
+
+systemd.services.relay-ngit-dev-fix-root-perms = {
+  description = "Fix /root permissions in relay.ngit.dev container for git access";
+  after = [ "podman-relay-ngit-dev-ngit-relay.service" ];
+  requires = [ "podman-relay-ngit-dev-ngit-relay.service" ];
+  wantedBy = [ "multi-user.target" ];
+  serviceConfig = {
+    Type = "oneshot";
+    RemainAfterExit = true;
+    ExecStart = "${pkgs.bash}/bin/bash -c 'sleep 5 && ${pkgs.podman}/bin/podman exec relay-ngit-dev-ngit-relay chmod 711 /root'";
+    Restart = "on-failure";
+    RestartSec = "10s";
+  };
+};
+```
+
+This changes `/root` permissions from `0700` to `0711`, allowing the nginx user to traverse through `/root` to reach `/root/.config/git/`.
+
+**Why 711?**
+- `7` (owner/root): Full read/write/execute
+- `1` (group): Execute only (traverse)
+- `1` (other): Execute only (traverse)
+
+This allows non-root users to traverse through `/root` to access subdirectories, while still protecting `/root` contents from being listed or read.
+
+#### Verification
+
+After applying the fix:
+
+```bash
+# Test that cloning works without permission warnings
+git clone https://relay.ngit.dev/npub.../repo.git
+
+# Should clone successfully with no "Permission denied" warnings
+
+# Verify /root permissions inside container
+sudo podman exec relay-ngit-dev-ngit-relay ls -ld /root
+# Should show: drwx--x--x (711)
+
+# Verify nginx user can access git config
+sudo podman exec relay-ngit-dev-ngit-relay su -s /bin/sh nginx -c "cat /root/.config/git/attributes"
+# Should succeed without "Permission denied"
+```
+
+### Git Repository Corruption
+
+#### Symptoms
+
+When cloning repositories, you see:
+
+```bash
+$ git clone https://relay.ngit.dev/npub.../repo.git
+Cloning into 'repo'...
+remote: fatal: bad tree object 8b765235809eb27159657eb4c97fb37d21c29bf0
+remote: aborting due to possible repository corruption on the remote side.
+fatal: early EOF
+fatal: fetch-pack: invalid index-pack output
+```
+
+Or when running `git fsck` on the server:
+
+```
+broken link from    tree 7d60270e1904c30ae6cef7b465ef842a9f9f63c3
+              to    tree 8b765235809eb27159657eb4c97fb37d21c29bf0
+missing tree 8b765235809eb27159657eb4c97fb37d21c29bf0
+```
+
+#### Explanation
+
+Repository corruption typically occurs due to:
+
+1. **Incomplete push operations**: A git push was interrupted mid-transfer, creating a commit that references objects that were never written to disk
+2. **Permission issues during push**: The git-receive-pack process couldn't write objects due to permission problems (e.g., files owned by wrong user)
+3. **Disk/filesystem issues**: Rare cases of disk errors or filesystem corruption
+
+**Common pattern:** A commit exists with references to tree objects, but those tree objects are missing from the repository. Sometimes individual blobs (files) exist as "dangling" objects but were never properly linked into the tree structure.
+
+**Warning signs:**
+- HEAD file or objects owned by root when they should be owned by the service user (UID 101)
+- Dangling blobs in `git fsck` output
+- Recent permission denied errors in logs
+
+#### How to Fix
+
+**Step 1: Locate the corrupted repository**
+
+```bash
+# SSH to the server
+ssh dc@ngit.dev
+
+# Find the repository path
+# For relay.ngit.dev: /persistent/relay-ngit-dev-ngit-relay/data/repos/npub.../repo.git
+# For gitnostr.com: /persistent/gitnostr-com-ngit-relay/data/repos/npub.../repo.git
+
+cd /persistent/relay-ngit-dev-ngit-relay/data/repos/npub1c03rad0r6q833vh57kyd3ndu2jry30nkr0wepqfpsm05vq7he25slryrnw/axepool.git
+```
+
+**Step 2: Diagnose the corruption**
+
+```bash
+# Run git fsck to identify missing/corrupted objects
+git fsck --full
+
+# Example output:
+# broken link from    tree 7d60270e1904c30ae6cef7b465ef842a9f9f63c3
+#               to    tree 8b765235809eb27159657eb4c97fb37d21c29bf0
+# missing tree 8b765235809eb27159657eb4c97fb37d21c29bf0
+# dangling blob 94490b902c9bceb6f901cd0c7c25b685e3685d87
+
+# Check which commit references the missing object
+git log --all --oneline | head -10
+
+# Inspect the broken commit
+git cat-file -p <commit-hash>
+# This will show which tree is missing
+```
+
+**Step 3: Attempt automatic repair**
+
+Try these in order:
+
+```bash
+# Option A: Repack and garbage collect
+git gc --aggressive --prune=now
+
+# Then check if corruption is fixed
+git fsck --full
+
+# Option B: If that doesn't work, try recovering from pack files
+git unpack-objects < .git/objects/pack/*.pack
+git fsck --full
+```
+
+**Step 4: Manual reconstruction (if automatic repair fails)**
+
+If the missing tree object can be reconstructed from dangling blobs:
+
+```bash
+# 1. Identify what should be in the missing tree
+# Look at the commit message and nearby commits to understand the structure
+
+# 2. Find dangling blobs that might belong to the tree
+git fsck --full | grep "dangling blob"
+
+# 3. Examine each dangling blob to identify files
+git cat-file -p 94490b902c9bceb6f901cd0c7c25b685e3685d87
+
+# 4. Reconstruct the tree manually
+# This requires creating a new tree object with the correct structure
+# Example (advanced):
+git mktree <<EOF
+100644 blob <blob-hash> filename1.rs
+100644 blob <blob-hash> filename2.rs
+EOF
+# This outputs a new tree hash
+
+# 5. Create a new commit with the fixed tree
+git commit-tree <new-tree-hash> -p <parent-commit> -m "Reconstructed commit message"
+# This outputs a new commit hash
+
+# 6. Update the branch reference
+git update-ref refs/heads/<branch-name> <new-commit-hash>
+
+# 7. Clean up
+git gc --prune=now
+```
+
+**Step 5: Verify the fix**
+
+```bash
+# Run fsck again - should show no errors
+git fsck --full
+
+# Test clone locally
+git clone /path/to/repo.git /tmp/test-clone
+
+# Test clone via HTTP
+git clone https://relay.ngit.dev/npub.../repo.git /tmp/test-clone-http
+```
+
+**Step 6: Fix ownership and permissions**
+
+Ensure all repository files are owned by the correct user:
+
+```bash
+# For ngit-relay containers, files should be owned by UID 101 (nginx user)
+sudo chown -R 101:101 /persistent/relay-ngit-dev-ngit-relay/data/repos/npub.../repo.git
+
+# Verify
+ls -la /persistent/relay-ngit-dev-ngit-relay/data/repos/npub.../repo.git
+```
+
+**Step 7: Replicate fix to other instances (if applicable)**
+
+If you have multiple relay instances (e.g., gitnostr.com and relay.ngit.dev), replicate the fix:
+
+```bash
+# Copy the repaired pack files
+sudo cp /persistent/relay-ngit-dev-ngit-relay/data/repos/npub.../repo.git/objects/pack/* \
+        /persistent/gitnostr-com-ngit-relay/data/repos/npub.../repo.git/objects/pack/
+
+# Update the branch reference
+cd /persistent/gitnostr-com-ngit-relay/data/repos/npub.../repo.git
+git update-ref refs/heads/<branch-name> <new-commit-hash>
+
+# Fix ownership
+sudo chown -R 101:101 /persistent/gitnostr-com-ngit-relay/data/repos/npub.../repo.git
+
+# Clean up
+git gc --prune=now
+```
+
+#### Prevention
+
+To prevent future corruption:
+
+1. **Fix permission issues first**: Ensure the permission denied errors are resolved (see previous section)
+2. **Monitor for root-owned files**: Files in git repositories should be owned by UID 101, not root
+3. **Check disk health**: Run `df -h` and `smartctl` to ensure disk is healthy
+4. **Enable git fsck in monitoring**: Periodically run `git fsck` on repositories to catch corruption early
+
+```bash
+# Add to monitoring/cron (example)
+find /persistent/*/data/repos -name "*.git" -type d | while read repo; do
+  echo "Checking $repo"
+  git -C "$repo" fsck --full 2>&1 | grep -v "^Checking\|^dangling"
+done
+```
+
+#### Real-World Example: axepool.git Corruption
+
+During the relay.ngit.dev migration, the `axepool.git` repository was corrupted:
+
+**Problem:**
+- Commit `e84518b` referenced tree `8b765235...` (the `src` directory)
+- Tree `8b765235...` was missing from the repository
+- Blob `94490b90...` (mint_client.rs) existed as a dangling object but wasn't linked
+
+**Root cause:**
+- An incomplete push operation
+- Permission issues (HEAD file was owned by root)
+- The commit was created but the tree object was never written
+
+**Solution:**
+1. Identified the missing tree should contain: `lib.rs`, `main.rs`, `mint_client.rs`
+2. Found the dangling blob `94490b90...` was `mint_client.rs`
+3. Reconstructed the `src` tree with all three files
+4. Created new commit `e12bc3cf...` with the fixed tree
+5. Updated `refs/heads/add-missing-hooks` to point to the new commit
+6. Ran `git gc --prune=now` to clean up
+7. Replicated fix to gitnostr.com instance
+
+**Result:** Both relays now clone successfully with all files intact.
+
+### Additional Resources
+
+- **ngit-relay repository**: https://github.com/danconwaydev/ngit-relay
+- **Git internals documentation**: https://git-scm.com/book/en/v2/Git-Internals-Plumbing-and-Porcelain
+- **Podman documentation**: https://docs.podman.io/
