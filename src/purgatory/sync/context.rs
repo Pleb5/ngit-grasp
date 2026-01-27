@@ -403,7 +403,7 @@ impl SyncContext for RealSyncContext {
                                 "Fetch completed after retries - some OIDs were missing from remote"
                             );
                         } else {
-                            debug!(fetched_count = fetched.len(), "Successfully fetched OIDs");
+                            debug!(url = %url, fetched_count = fetched.len(), "Successfully fetched OIDs");
                         }
 
                         return Ok(fetched);
@@ -418,7 +418,9 @@ impl SyncContext for RealSyncContext {
                                 if line.contains("not our ref") {
                                     // Extract the OID from lines like:
                                     // "fatal: remote error: upload-pack: not our ref <oid>"
-                                    line.split("not our ref").nth(1).map(|s| s.trim().to_string())
+                                    line.split("not our ref")
+                                        .nth(1)
+                                        .map(|s| s.trim().to_string())
                                 } else {
                                     None
                                 }
@@ -464,11 +466,7 @@ impl SyncContext for RealSyncContext {
                             }
                         }
 
-                        return Err(anyhow::anyhow!(
-                            "git fetch failed for {}: {}",
-                            url,
-                            stderr
-                        ));
+                        return Err(anyhow::anyhow!("git fetch failed for {}: {}", url, stderr));
                     }
                     Err(e) => {
                         return Err(anyhow::anyhow!(
