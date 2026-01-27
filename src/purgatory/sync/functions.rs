@@ -369,7 +369,7 @@ pub async fn sync_identifier_from_url<C: SyncContext + ?Sized>(
     throttle_manager.complete_request(&domain);
 
     let oids_fetched = match fetch_result {
-        Ok(fetched) => {
+        Ok(fetched) if !fetched.is_empty() => {
             debug!(
                 identifier = %identifier,
                 url = %url,
@@ -377,6 +377,14 @@ pub async fn sync_identifier_from_url<C: SyncContext + ?Sized>(
                 "Fetch succeeded"
             );
             fetched.len()
+        }
+        Ok(_) => {
+            debug!(
+                identifier = %identifier,
+                url = %url,
+                "Fetch returned no OIDs (not available on remote)"
+            );
+            0
         }
         Err(e) => {
             debug!(
