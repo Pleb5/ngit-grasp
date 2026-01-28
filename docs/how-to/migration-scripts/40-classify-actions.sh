@@ -412,7 +412,7 @@ for key in "${!ALL_REPOS[@]}"; do
                     COUNTS[review_parse_failure]=$((COUNTS[review_parse_failure] + 1))
                 else
                     # Check git ancestry to see if archive is actually ahead
-                    local git_relationship="${GIT_ANCESTRY[$key]:-unknown}"
+                    git_relationship="${GIT_ANCESTRY[$key]:-unknown}"
                     
                     if [[ "$git_relationship" == "archive-ahead" || "$git_relationship" == "in-sync" ]]; then
                         # Archive has newer/same git data - this is GOOD
