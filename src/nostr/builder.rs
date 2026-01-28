@@ -399,7 +399,7 @@ impl Nip34WritePolicy {
                 // Add to purgatory
                 self.ctx
                     .purgatory
-                    .add_pr(event.clone(), event.id.to_hex(), commit.clone());
+                    .add_pr(event.clone(), event.id.to_hex(), commit.clone(), is_synced);
 
                 WritePolicyResult::Reject {
                     status: true, // Client sees OK
