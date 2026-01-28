@@ -320,7 +320,7 @@ check_prerequisites() {
     fi
     
     # Check scripts exist
-    for script in 01-fetch-events.sh 10-check-git-sync.sh 20-categorize.sh 21-compare-relays.sh 30-extract-parse-failures.sh 31-extract-purgatory-expiry.sh 40-classify-actions.sh; do
+    for script in 01-fetch-events.sh 10-check-git-sync.sh 20-categorize.sh 21-compare-relays.sh 22-compare-git-data.sh 30-extract-parse-failures.sh 31-extract-purgatory-expiry.sh 40-classify-actions.sh; do
         if [[ ! -x "$SCRIPT_DIR/$script" ]]; then
             log_error "Script not found or not executable: $SCRIPT_DIR/$script"
             missing=1
@@ -551,6 +551,20 @@ run_phase_3() {
     fi
     
     run_phase 3 "Categorize & Compare (fast)" "${cmds[@]}"
+    
+    # Phase 3c: Compare git data between relays (requires git paths)
+    # This determines if archive is ahead of prod for repos with mismatched state
+    if [[ -n "$PROD_GIT" && -n "$ARCHIVE_GIT" ]]; then
+        # Build list of repos to compare: those where prod=complete but archive is not
+        local repos_to_compare="$OUTPUT_DIR/comparison/complete-prod-incomplete-archive.txt"
+        if [[ -f "$repos_to_compare" ]] && [[ ! -f "$OUTPUT_DIR/comparison/git-ancestry.tsv" ]]; then
+            log_info "Running git ancestry comparison (Phase 3c)..."
+            run_phase 3 "Git Ancestry Comparison" "'$SCRIPT_DIR/22-compare-git-data.sh' '$PROD_GIT' '$ARCHIVE_GIT' '$repos_to_compare' '$OUTPUT_DIR/comparison'"
+        fi
+    else
+        log_warn "Git paths not provided - skipping git ancestry comparison"
+        log_warn "Without git comparison, repos where archive is ahead will be incorrectly flagged as needing re-sync"
+    fi
 }
 
 # Phase 4: Extract logs

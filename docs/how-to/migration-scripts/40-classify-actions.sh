@@ -10,16 +10,25 @@
 #   - Empty in prod (prod=cat2, any archive status)
 #   - Archive-only (archive=any, prod=missing)
 #   - Not in prod (purgatory-only, prod=missing)
+#   - Archive ahead (archive has newer git data than prod - GRASP enforced)
 #
 # Tier 2: Action Required (needs-resync.txt)
 #   - Complete in prod, missing from archive (with purgatory context)
-#   - Complete in prod, incomplete in archive (with purgatory context)
+#   - Complete in prod, incomplete in archive AND prod is ahead (with purgatory context)
 #
 # Tier 3: Manual Investigation (manual-review.txt)
 #   - Partial in prod (prod=cat3)
 #   - No-match in prod (prod=cat4)
 #   - Parse failures
 #   - Conflicting states
+#   - Diverged git history (both have unique commits)
+#
+# KEY INSIGHT:
+#   Archive (ngit-grasp) enforces GRASP - git data ALWAYS matches a state event.
+#   If archive has different/newer data than prod, it means:
+#   - A state event authorized those commits at some point
+#   - Archive is actually MORE up-to-date than prod
+#   - Migration should use archive data (it's already correct)
 #
 # Usage: ./40-classify-actions.sh <analysis-dir>
 #
@@ -231,6 +240,25 @@ DELETED_COUNT=0
 [[ ${#DELETED[@]} -gt 0 ]] && DELETED_COUNT=${#DELETED[@]}
 log_info "Loaded $DELETED_COUNT deletion entries"
 
+# Build git ancestry lookup: repo|npub -> relationship (archive-ahead, prod-ahead, diverged, etc.)
+# This data comes from 22-compare-git-data.sh which compares actual git commits
+declare -A GIT_ANCESTRY
+GIT_ANCESTRY_COUNT=0
+if [[ -f "$COMPARISON_DIR/git-ancestry.tsv" ]]; then
+    while IFS=$'\t' read -r repo npub relationship details || [[ -n "$repo" ]]; do
+        # Skip header and comments
+        [[ "$repo" == "repo" ]] && continue
+        [[ "$repo" =~ ^# ]] && continue
+        [[ -z "$repo" || -z "$npub" ]] && continue
+        GIT_ANCESTRY["$repo|$npub"]="$relationship"
+        GIT_ANCESTRY_COUNT=$((GIT_ANCESTRY_COUNT + 1))
+    done < "$COMPARISON_DIR/git-ancestry.tsv"
+    log_info "Loaded $GIT_ANCESTRY_COUNT git ancestry entries"
+else
+    log_warn "No git-ancestry.tsv found - will not check if archive is ahead of prod"
+    log_warn "Run 22-compare-git-data.sh to enable archive-ahead detection"
+fi
+
 # ============================================================================
 # Phase 2: Build unique repo list from all sources
 # ============================================================================
@@ -263,12 +291,14 @@ COUNTS[ready_deleted]=0
 COUNTS[ready_empty_prod]=0
 COUNTS[ready_archive_only]=0
 COUNTS[ready_not_in_prod]=0
+COUNTS[ready_archive_ahead]=0
 COUNTS[resync_missing_archive]=0
 COUNTS[resync_incomplete_archive]=0
 COUNTS[review_partial_prod]=0
 COUNTS[review_nomatch_prod]=0
 COUNTS[review_parse_failure]=0
 COUNTS[review_conflicting]=0
+COUNTS[review_diverged]=0
 
 # Output arrays
 declare -a READY_LINES
@@ -381,14 +411,48 @@ for key in "${!ALL_REPOS[@]}"; do
                     REVIEW_LINES+=("$repo | $npub | $prod_status | $archive_status | $context | complete in prod with parse failure")
                     COUNTS[review_parse_failure]=$((COUNTS[review_parse_failure] + 1))
                 else
-                    # Needs resync - include purgatory context
-                    context=$(get_context "$key" "$prod_status" "$archive_status")
-                    if [[ "$archive_cat" == "missing" ]]; then
-                        RESYNC_LINES+=("$repo | $npub | $prod_status | $archive_status | $context | trigger re-sync to archive")
-                        COUNTS[resync_missing_archive]=$((COUNTS[resync_missing_archive] + 1))
+                    # Check git ancestry to see if archive is actually ahead
+                    local git_relationship="${GIT_ANCESTRY[$key]:-unknown}"
+                    
+                    if [[ "$git_relationship" == "archive-ahead" || "$git_relationship" == "in-sync" ]]; then
+                        # Archive has newer/same git data - this is GOOD
+                        # Archive's git data was authorized by a state event (GRASP enforced)
+                        context=$(get_context "$key" "$prod_status" "$archive_status")
+                        if [[ -n "$context" && "$context" != "none" ]]; then
+                            context="$context, git=$git_relationship"
+                        else
+                            context="git=$git_relationship"
+                        fi
+                        READY_LINES+=("$repo | $npub | $prod_status | $archive_status | $context | archive ahead (use archive data)")
+                        COUNTS[ready_archive_ahead]=$((COUNTS[ready_archive_ahead] + 1))
+                    elif [[ "$git_relationship" == "diverged" ]]; then
+                        # Git histories diverged - needs manual review
+                        context=$(get_context "$key" "$prod_status" "$archive_status")
+                        if [[ -n "$context" && "$context" != "none" ]]; then
+                            context="$context, git=diverged"
+                        else
+                            context="git=diverged"
+                        fi
+                        REVIEW_LINES+=("$repo | $npub | $prod_status | $archive_status | $context | git histories diverged (manual review)")
+                        COUNTS[review_diverged]=$((COUNTS[review_diverged] + 1))
                     else
-                        RESYNC_LINES+=("$repo | $npub | $prod_status | $archive_status | $context | trigger re-sync (archive incomplete)")
-                        COUNTS[resync_incomplete_archive]=$((COUNTS[resync_incomplete_archive] + 1))
+                        # prod-ahead, archive-only, prod-only, both-empty, or unknown
+                        # These need resync - include purgatory context
+                        context=$(get_context "$key" "$prod_status" "$archive_status")
+                        if [[ "$git_relationship" != "unknown" ]]; then
+                            if [[ -n "$context" && "$context" != "none" ]]; then
+                                context="$context, git=$git_relationship"
+                            else
+                                context="git=$git_relationship"
+                            fi
+                        fi
+                        if [[ "$archive_cat" == "missing" ]]; then
+                            RESYNC_LINES+=("$repo | $npub | $prod_status | $archive_status | $context | trigger re-sync to archive")
+                            COUNTS[resync_missing_archive]=$((COUNTS[resync_missing_archive] + 1))
+                        else
+                            RESYNC_LINES+=("$repo | $npub | $prod_status | $archive_status | $context | trigger re-sync (archive incomplete)")
+                            COUNTS[resync_incomplete_archive]=$((COUNTS[resync_incomplete_archive] + 1))
+                        fi
                     fi
                 fi
             fi
@@ -498,6 +562,7 @@ fi
     echo "| Reason | Count |"
     echo "|--------|-------|"
     echo "| complete in both prod and archive | ${COUNTS[ready_complete_both]} |"
+    echo "| archive ahead (has newer git data) | ${COUNTS[ready_archive_ahead]} |"
     echo "| deleted by user | ${COUNTS[ready_deleted]} |"
     echo "| empty in prod (user never pushed) | ${COUNTS[ready_empty_prod]} |"
     echo "| archive-only (not in prod) | ${COUNTS[ready_archive_only]} |"
@@ -527,6 +592,7 @@ fi
     echo "| partial in prod (cat3) | ${COUNTS[review_partial_prod]} |"
     echo "| no-match in prod (cat4) | ${COUNTS[review_nomatch_prod]} |"
     echo "| complete in prod with parse failure | ${COUNTS[review_parse_failure]} |"
+    echo "| git histories diverged | ${COUNTS[review_diverged]} |"
     echo ""
     echo "## Input Data Summary"
     echo ""
@@ -571,6 +637,7 @@ echo ""
 echo "=== Summary ==="
 echo "Ready for Migration: $TOTAL_READY ($PCT_READY%)"
 echo "  - Complete in both: ${COUNTS[ready_complete_both]}"
+echo "  - Archive ahead: ${COUNTS[ready_archive_ahead]}"
 echo "  - Deleted by user: ${COUNTS[ready_deleted]}"
 echo "  - Empty in prod: ${COUNTS[ready_empty_prod]}"
 echo "  - Archive-only: ${COUNTS[ready_archive_only]}"
@@ -584,6 +651,7 @@ echo "Manual Review: $TOTAL_REVIEW ($PCT_REVIEW%)"
 echo "  - Partial in prod: ${COUNTS[review_partial_prod]}"
 echo "  - No-match in prod: ${COUNTS[review_nomatch_prod]}"
 echo "  - Parse failures: ${COUNTS[review_parse_failure]}"
+echo "  - Git diverged: ${COUNTS[review_diverged]}"
 echo ""
 echo "Total: $TOTAL repos"
 echo ""
