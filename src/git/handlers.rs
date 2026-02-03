@@ -156,7 +156,10 @@ pub async fn handle_upload_pack(
         stdin
             .write_all(&request_body)
             .await
-            .map_err(GitError::IoError)?;
+            .map_err(|e| {
+                error!("Failed to write to git upload-pack stdin: {}", e);
+                GitError::IoError(e)
+            })?;
         // Close stdin to signal end of input
         drop(stdin);
     }
@@ -170,7 +173,10 @@ pub async fn handle_upload_pack(
         stdout
             .read_to_end(&mut output)
             .await
-            .map_err(GitError::IoError)?;
+            .map_err(|e| {
+                error!("Failed to read git upload-pack stdout: {}", e);
+                GitError::IoError(e)
+            })?;
     }
 
     if let Some(stderr) = git.take_stderr() {
@@ -178,11 +184,17 @@ pub async fn handle_upload_pack(
         stderr
             .read_to_end(&mut stderr_output)
             .await
-            .map_err(GitError::IoError)?;
+            .map_err(|e| {
+                error!("Failed to read git upload-pack stderr: {}", e);
+                GitError::IoError(e)
+            })?;
     }
 
     // Wait for process
-    let status = git.wait().await.map_err(GitError::IoError)?;
+    let status = git.wait().await.map_err(|e| {
+        error!("Failed to wait for git upload-pack process: {}", e);
+        GitError::IoError(e)
+    })?;
 
     if !status.success() {
         let stderr_str = String::from_utf8_lossy(&stderr_output);
@@ -299,7 +311,10 @@ pub async fn handle_receive_pack(
         stdin
             .write_all(&request_body)
             .await
-            .map_err(GitError::IoError)?;
+            .map_err(|e| {
+                error!("Failed to write to git receive-pack stdin: {}", e);
+                GitError::IoError(e)
+            })?;
         drop(stdin);
     }
 
@@ -312,7 +327,10 @@ pub async fn handle_receive_pack(
         stdout
             .read_to_end(&mut output)
             .await
-            .map_err(GitError::IoError)?;
+            .map_err(|e| {
+                error!("Failed to read git receive-pack stdout: {}", e);
+                GitError::IoError(e)
+            })?;
     }
 
     if let Some(stderr) = git.take_stderr() {
@@ -320,11 +338,17 @@ pub async fn handle_receive_pack(
         stderr
             .read_to_end(&mut stderr_output)
             .await
-            .map_err(GitError::IoError)?;
+            .map_err(|e| {
+                error!("Failed to read git receive-pack stderr: {}", e);
+                GitError::IoError(e)
+            })?;
     }
 
     // Wait for process
-    let status = git.wait().await.map_err(GitError::IoError)?;
+    let status = git.wait().await.map_err(|e| {
+        error!("Failed to wait for git receive-pack process: {}", e);
+        GitError::IoError(e)
+    })?;
 
     if !status.success() {
         let stderr_str = String::from_utf8_lossy(&stderr_output);
