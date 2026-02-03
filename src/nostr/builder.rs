@@ -557,9 +557,11 @@ impl Nip34WritePolicy {
                 let (addressable_refs, event_refs) =
                     RelatedEventPolicy::extract_reference_tags(event);
                 tracing::info!(
-                    "Rejected orphan {} event {}: no references to accepted repos or events (checked {} addressable, {} event refs)",
+                    "Rejected orphan {} event {} (kind={}, pubkey={}): no references to accepted repos or events (checked {} addressable, {} event refs)",
                     event_type,
-                    event_id_str,
+                    event.id.to_hex(),
+                    event.kind.as_u16(),
+                    event.pubkey.to_hex(),
                     addressable_refs.len(),
                     event_refs.len()
                 );
