@@ -419,14 +419,14 @@ pub fn validate_announcement(
     // GRASP-01: Normal mode - accept if announcement lists our service AND matches repository whitelist (if enabled)
     if lists_service && !archive_config.read_only {
         // Check repository whitelist if enabled
-        if repository_config.enabled() {
-            if !repository_config.matches(&npub, &announcement.identifier) {
-                return AnnouncementResult::Reject(format!(
-                    "Announcement lists service but does not match repository whitelist. \
-                     Repository {}/{} not in whitelist",
-                    npub, announcement.identifier
-                ));
-            }
+        if repository_config.enabled()
+            && !repository_config.matches(&npub, &announcement.identifier)
+        {
+            return AnnouncementResult::Reject(format!(
+                "Announcement lists service but does not match repository whitelist. \
+                 Repository {}/{} not in whitelist",
+                npub, announcement.identifier
+            ));
         }
         return AnnouncementResult::Accept;
     }

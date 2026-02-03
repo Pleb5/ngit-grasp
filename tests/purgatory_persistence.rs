@@ -94,11 +94,13 @@ async fn test_full_purgatory_save_restore_cycle() {
         state_event1.clone(),
         "repo1".to_string(),
         keys1.public_key(),
+        false,
     );
     purgatory.add_state(
         state_event2.clone(),
         "repo2".to_string(),
         keys2.public_key(),
+        false,
     );
 
     // Add PR events to purgatory
@@ -106,11 +108,13 @@ async fn test_full_purgatory_save_restore_cycle() {
         pr_event1.clone(),
         pr_event1.id.to_hex(),
         "commit-abc".to_string(),
+        false,
     );
     purgatory.add_pr(
         pr_event2.clone(),
         pr_event2.id.to_hex(),
         "commit-def".to_string(),
+        false,
     );
 
     // Add a PR placeholder (git-data-first scenario)
@@ -262,7 +266,12 @@ async fn test_purgatory_downtime_adjustment() {
 
     let state_event = create_state_event_with_refs(&keys, "repo1", &[("main", "abc123")]).unwrap();
 
-    purgatory.add_state(state_event.clone(), "repo1".to_string(), keys.public_key());
+    purgatory.add_state(
+        state_event.clone(),
+        "repo1".to_string(),
+        keys.public_key(),
+        false,
+    );
 
     // Save to disk
     purgatory.save_to_disk(&state_path).unwrap();
@@ -340,7 +349,7 @@ async fn test_purgatory_file_cleanup_after_restore() {
 
     let state_event = create_state_event_with_refs(&keys, "repo1", &[("main", "abc123")]).unwrap();
 
-    purgatory.add_state(state_event, "repo1".to_string(), keys.public_key());
+    purgatory.add_state(state_event, "repo1".to_string(), keys.public_key(), false);
 
     // Save to disk
     purgatory.save_to_disk(&state_path).unwrap();
@@ -408,7 +417,7 @@ async fn test_purgatory_restore_missing_file() {
     // Should be able to add events normally
     let keys = Keys::generate();
     let event = create_test_event(&keys, "test").await;
-    purgatory.add_state(event, "repo1".to_string(), keys.public_key());
+    purgatory.add_state(event, "repo1".to_string(), keys.public_key(), false);
 
     let (state_count, _) = purgatory.count();
     assert_eq!(state_count, 1);
@@ -547,8 +556,18 @@ async fn test_purgatory_multiple_state_events_same_identifier() {
     let event1 = create_state_event_with_refs(&keys1, "repo1", &[("main", "abc123")]).unwrap();
     let event2 = create_state_event_with_refs(&keys2, "repo1", &[("main", "def456")]).unwrap();
 
-    purgatory.add_state(event1.clone(), "repo1".to_string(), keys1.public_key());
-    purgatory.add_state(event2.clone(), "repo1".to_string(), keys2.public_key());
+    purgatory.add_state(
+        event1.clone(),
+        "repo1".to_string(),
+        keys1.public_key(),
+        false,
+    );
+    purgatory.add_state(
+        event2.clone(),
+        "repo1".to_string(),
+        keys2.public_key(),
+        false,
+    );
 
     // Save and restore
     purgatory.save_to_disk(&state_path).unwrap();
@@ -577,7 +596,12 @@ async fn test_purgatory_continues_working_after_restore() {
 
     let event1 = create_state_event_with_refs(&keys, "repo1", &[("main", "abc123")]).unwrap();
 
-    purgatory.add_state(event1.clone(), "repo1".to_string(), keys.public_key());
+    purgatory.add_state(
+        event1.clone(),
+        "repo1".to_string(),
+        keys.public_key(),
+        false,
+    );
 
     // Save and restore
     purgatory.save_to_disk(&state_path).unwrap();
@@ -588,7 +612,12 @@ async fn test_purgatory_continues_working_after_restore() {
     // Add new events after restore
     let event2 = create_state_event_with_refs(&keys, "repo2", &[("main", "xyz789")]).unwrap();
 
-    purgatory2.add_state(event2.clone(), "repo2".to_string(), keys.public_key());
+    purgatory2.add_state(
+        event2.clone(),
+        "repo2".to_string(),
+        keys.public_key(),
+        false,
+    );
 
     // Verify both old and new events work
     let (state_count, _) = purgatory2.count();
@@ -669,7 +698,7 @@ async fn test_purgatory_entries_expired_during_downtime() {
 
     let event = create_state_event_with_refs(&keys, "repo1", &[("main", "abc123")]).unwrap();
 
-    purgatory.add_state(event.clone(), "repo1".to_string(), keys.public_key());
+    purgatory.add_state(event.clone(), "repo1".to_string(), keys.public_key(), false);
 
     // Save to disk
     purgatory.save_to_disk(&state_path).unwrap();

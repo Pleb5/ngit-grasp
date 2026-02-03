@@ -127,9 +127,14 @@ let
       };
 
       logLevel = mkOption {
-        type = types.enum [ "trace" "debug" "info" "warn" "error" ];
+        type = types.str;
         default = "info";
-        description = "Logging level for RUST_LOG environment variable";
+        example = "debug";
+        description = ''
+          Logging level for application logging.
+          Can be a simple level (trace, debug, info, warn, error) or a filter expression.
+          Examples: "info", "debug", "ngit_grasp=debug,actix_web=info"
+        '';
       };
 
       syncMaxBackoffSecs = mkOption {
@@ -334,7 +339,7 @@ let
       NGIT_REPOSITORY_BLACKLIST = concatStringsSep "," cfg.repositoryBlacklist;
       NGIT_EVENT_BLACKLIST = concatStringsSep "," cfg.eventBlacklist;
       NGIT_MAX_CONNECTIONS = toString cfg.maxConnections;
-      RUST_LOG = cfg.logLevel;
+      NGIT_LOG_LEVEL = cfg.logLevel;
     } // optionalAttrs (cfg.relayName != null) {
       NGIT_RELAY_NAME = cfg.relayName;
     } // optionalAttrs (cfg.archiveReadOnly != null) {

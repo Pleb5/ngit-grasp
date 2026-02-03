@@ -8,6 +8,28 @@ use nostr_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
+/// Source of an event entering purgatory.
+///
+/// Tracks whether an event was submitted directly by a user or fetched via
+/// proactive sync from another relay. This distinction is used for:
+/// - Filtered logging: Direct submissions log at WARN level, synced at DEBUG
+/// - Operational monitoring: Helps identify user-facing issues vs sync noise
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum EventSource {
+    /// Event was published directly to this relay by a user
+    #[default]
+    Direct,
+    /// Event was fetched via proactive sync from another relay
+    Sync,
+}
+
+impl EventSource {
+    /// Returns true if this is a direct submission (not synced)
+    pub fn is_direct(&self) -> bool {
+        matches!(self, EventSource::Direct)
+    }
+}
+
 /// Default value for Instant fields during deserialization
 fn instant_now() -> Instant {
     Instant::now()
@@ -86,6 +108,10 @@ pub struct StatePurgatoryEntry {
     /// Expiry deadline (30 min from creation, may be extended)
     #[serde(skip, default = "instant_now")]
     pub expires_at: Instant,
+
+    /// Source of this event (direct submission vs sync)
+    #[serde(default)]
+    pub source: EventSource,
 }
 
 /// Entry for a PR event (kind 1617/1618) or placeholder waiting in purgatory.
@@ -112,4 +138,8 @@ pub struct PrPurgatoryEntry {
     /// Expiry deadline (30 min from creation, may be extended)
     #[serde(skip, default = "instant_now")]
     pub expires_at: Instant,
+
+    /// Source of this event (direct submission vs sync)
+    #[serde(default)]
+    pub source: EventSource,
 }

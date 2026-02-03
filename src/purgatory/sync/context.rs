@@ -361,94 +361,121 @@ impl SyncContext for RealSyncContext {
         let naughty_list = self.git_naughty_list.clone();
 
         tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
-            // git fetch <remote> <sha1> <sha2> ... - fetch all OIDs with full history
-            let mut args = vec!["fetch", &url];
-            args.extend(missing_oids.iter().map(|s| s.as_str()));
+            let mut remaining_oids = missing_oids.clone();
+            let mut missing_from_remote: Vec<String> = Vec::new();
 
-            let output = Command::new("git")
-                .args(&args)
-                .current_dir(&repo_path)
-                .output();
-
-            match output {
-                Ok(result) if result.status.success() => {
-                    // Count how many OIDs we now have
-                    let fetched: Vec<String> = missing_oids
-                        .iter()
-                        .filter(|oid| crate::git::oid_exists(&repo_path, oid))
-                        .cloned()
-                        .collect();
-
-                    debug!(fetched_count = fetched.len(), "Successfully fetched OIDs");
-
-                    Ok(fetched)
+            // Retry loop: keep fetching until success or no OIDs left
+            loop {
+                if remaining_oids.is_empty() {
+                    // All OIDs were missing from remote
+                    debug!(
+                        url = %url,
+                        missing_count = missing_from_remote.len(),
+                        "All requested OIDs missing from remote"
+                    );
+                    return Ok(vec![]);
                 }
-                Ok(result) => {
-                    let stderr = String::from_utf8_lossy(&result.stderr);
 
-                    // Extract domain and classify error for naughty list
-                    if let Some(domain) = extract_domain(&url) {
-                        if let Some(category) = NaughtyListTracker::classify_error(&stderr) {
-                            let is_new = naughty_list.record(&domain, category, stderr.to_string());
+                // git fetch <remote> <sha1> <sha2> ... - fetch all OIDs with full history
+                let mut args = vec!["fetch".to_string(), url.clone()];
+                args.extend(remaining_oids.iter().cloned());
 
-                            if is_new {
-                                tracing::warn!(
-                                    domain = %domain,
-                                    category = %category,
-                                    error = %stderr,
-                                    "Git remote domain added to naughty list"
-                                );
-                            } else {
-                                debug!(
-                                    domain = %domain,
-                                    category = %category,
-                                    "Git remote domain still on naughty list"
-                                );
-                            }
+                let output = Command::new("git")
+                    .args(&args)
+                    .current_dir(&repo_path)
+                    .output();
+
+                match output {
+                    Ok(result) if result.status.success() => {
+                        // Fetch succeeded - count how many OIDs we now have
+                        let fetched: Vec<String> = missing_oids
+                            .iter()
+                            .filter(|oid| crate::git::oid_exists(&repo_path, oid))
+                            .cloned()
+                            .collect();
+
+                        if !missing_from_remote.is_empty() {
+                            debug!(
+                                url = %url,
+                                fetched_count = fetched.len(),
+                                missing_count = missing_from_remote.len(),
+                                missing_oids = ?missing_from_remote,
+                                "Fetch completed after retries - some OIDs were missing from remote"
+                            );
+                        } else {
+                            debug!(url = %url, fetched_count = fetched.len(), "Successfully fetched OIDs");
                         }
-                    }
 
-                    // Check for "not our ref" errors and provide a clearer error message
-                    let error_msg = if stderr.contains("upload-pack: not our ref") {
-                        // Parse out the missing OID from stderr (git only reports one at a time)
-                        let missing_oid = stderr
-                            .lines()
-                            .find_map(|line| {
+                        return Ok(fetched);
+                    }
+                    Ok(result) => {
+                        let stderr = String::from_utf8_lossy(&result.stderr);
+
+                        // Check for "not our ref" error - this is retryable
+                        if stderr.contains("upload-pack: not our ref") {
+                            // Parse out the missing OID from stderr
+                            let missing_oid = stderr.lines().find_map(|line| {
                                 if line.contains("not our ref") {
                                     // Extract the OID from lines like:
                                     // "fatal: remote error: upload-pack: not our ref <oid>"
-                                    line.split("not our ref").nth(1).map(|s| s.trim().to_string())
+                                    line.split("not our ref")
+                                        .nth(1)
+                                        .map(|s| s.trim().to_string())
                                 } else {
                                     None
                                 }
                             });
 
-                        let total_requested = missing_oids.len();
+                            if let Some(ref oid) = missing_oid {
+                                // Remove the missing OID and retry with remaining
+                                remaining_oids.retain(|o| o != oid);
+                                missing_from_remote.push(oid.clone());
 
-                        if let Some(oid) = missing_oid {
-                            if total_requested > 1 {
-                                // BUG: Git stops at first missing OID, so we don't know if the others exist
-                                // We need retry logic to fetch remaining OIDs individually
-                                tracing::warn!(
+                                debug!(
                                     url = %url,
                                     missing_oid = %oid,
-                                    total_requested = total_requested,
-                                    "Git fetch failed on first missing OID - other requested OIDs may exist but were not fetched. Retry logic needed."
+                                    remaining_count = remaining_oids.len(),
+                                    "OID not found on remote, retrying with remaining OIDs"
                                 );
-                                format!("remote missing oid {} (BUG: {} other oids not attempted)", oid, total_requested - 1)
-                            } else {
-                                format!("remote missing only oid requested: {}", oid)
-                            }
-                        } else {
-                            format!("git fetch failed: {}", stderr)
-                        }
-                    } else {
-                        format!("git fetch failed: {}", stderr)
-                    };
 
-                    Err(anyhow::anyhow!("{}", error_msg))
+                                continue; // Retry with remaining OIDs
+                            }
+                        }
+
+                        // Non-retryable error - record to naughty list and return error
+                        if let Some(domain) = extract_domain(&url) {
+                            if let Some(category) = NaughtyListTracker::classify_error(&stderr) {
+                                let is_new =
+                                    naughty_list.record(&domain, category, stderr.to_string());
+
+                                if is_new {
+                                    tracing::warn!(
+                                        domain = %domain,
+                                        category = %category,
+                                        error = %stderr,
+                                        "Git remote domain added to naughty list"
+                                    );
+                                } else {
+                                    debug!(
+                                        domain = %domain,
+                                        category = %category,
+                                        error = %stderr,
+                                        "Git fetch failed (domain on naughty list)"
+                                    );
+                                }
+                            }
+                        }
+
+                        return Err(anyhow::anyhow!("git fetch failed for {}: {}", url, stderr));
+                    }
+                    Err(e) => {
+                        return Err(anyhow::anyhow!(
+                            "git fetch command error for {}: {}",
+                            url,
+                            e
+                        ))
+                    }
                 }
-                Err(e) => Err(anyhow::anyhow!("git fetch command error: {}", e)),
             }
         })
         .await

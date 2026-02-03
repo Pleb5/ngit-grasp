@@ -1041,10 +1041,10 @@ Per-connection limits (built-in to relay-builder, not configurable):
 
 ### Logging Configuration
 
-#### `RUST_LOG`
+#### `NGIT_LOG_LEVEL`
 
-**Description:** Logging level and filters (standard Rust environment variable)  
-**Type:** String (log level or filter)  
+**Description:** Logging level and filters for application logging  
+**Type:** String (log level or filter expression)  
 **Default:** `info`  
 **Required:** No
 
@@ -1052,17 +1052,17 @@ Per-connection limits (built-in to relay-builder, not configurable):
 
 ```bash
 # Simple levels
-RUST_LOG=error    # Errors only
-RUST_LOG=warn     # Warnings and errors
-RUST_LOG=info     # Info, warnings, errors
-RUST_LOG=debug    # Debug and above
-RUST_LOG=trace    # Everything
+NGIT_LOG_LEVEL=error    # Errors only
+NGIT_LOG_LEVEL=warn     # Warnings and errors
+NGIT_LOG_LEVEL=info     # Info, warnings, errors (default)
+NGIT_LOG_LEVEL=debug    # Debug and above
+NGIT_LOG_LEVEL=trace    # Everything (very verbose)
 
-# Module-specific
-RUST_LOG=ngit_grasp=debug,actix_web=info
+# Module-specific filtering
+NGIT_LOG_LEVEL=ngit_grasp=debug,actix_web=info
 
 # Complex filters
-RUST_LOG=debug,hyper=info,tokio=warn
+NGIT_LOG_LEVEL=debug,hyper=info,tokio=warn
 ```
 
 **Log levels (most to least verbose):**
@@ -1073,11 +1073,24 @@ RUST_LOG=debug,hyper=info,tokio=warn
 4. `warn` - Warnings about potential issues
 5. `error` - Errors only
 
+**CLI flag:**
+
+```bash
+ngit-grasp --log-level trace
+```
+
 **Production recommendation:**
 
 ```bash
-RUST_LOG=info,ngit_grasp=debug
+NGIT_LOG_LEVEL=info
 ```
+
+**Notes:**
+
+- Uses Rust's `tracing` crate filter syntax
+- Supports module-level filtering (e.g., `ngit_grasp=debug,hyper=info`)
+- `trace` level can significantly impact performance
+- For production, `info` or `warn` is recommended
 
 ---
 

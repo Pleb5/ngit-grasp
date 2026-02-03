@@ -584,6 +584,7 @@ impl SyncManager {
     /// * `config` - Configuration for sync settings
     /// * `data_path` - Path to git data directory (for persistence)
     /// * `sync_metrics` - Optional pre-registered SyncMetrics (passed from Metrics if metrics are enabled)
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         bootstrap_relay_url: Option<String>,
         service_domain: String,
@@ -1442,6 +1443,7 @@ impl SyncManager {
             self.service_domain.clone(),
             Arc::clone(&self.repo_sync_index),
             action_tx,
+            self.database.clone(),
         );
         let subscriber_shutdown = shutdown_tx.subscribe();
         tokio::spawn(async move { self_subscriber.run(Some(subscriber_shutdown)).await });
@@ -2811,6 +2813,7 @@ impl SyncManager {
                                     event_id = %event.id,
                                     kind = %event.kind.as_u16(),
                                     identifier = %identifier,
+                                    pubkey = %event.pubkey,
                                     "Added rejected announcement to two-tier index"
                                 );
                             }

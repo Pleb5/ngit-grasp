@@ -17,10 +17,11 @@ pub mod sync;
 mod types;
 
 pub use helpers::{can_apply_state, can_satisfy_state, extract_refs_from_state, get_unpushed_refs};
-pub use types::{PrPurgatoryEntry, RefPair, RefUpdate, StatePurgatoryEntry};
+pub use types::{EventSource, PrPurgatoryEntry, RefPair, RefUpdate, StatePurgatoryEntry};
 
 use dashmap::DashMap;
 use nostr_sdk::prelude::*;
+use nostr_sdk::ToBech32;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -57,6 +58,9 @@ struct SerializableStatePurgatoryEntry {
     created_at_offset_secs: u64,
     /// Duration offset from saved_at for expires_at
     expires_at_offset_secs: u64,
+    /// Source of this event (direct submission vs sync)
+    #[serde(default)]
+    source: types::EventSource,
 }
 
 /// Serializable wrapper for `PrPurgatoryEntry` with time offsets.
@@ -74,6 +78,9 @@ struct SerializablePrPurgatoryEntry {
     created_at_offset_secs: u64,
     /// Duration offset from saved_at for expires_at
     expires_at_offset_secs: u64,
+    /// Source of this event (direct submission vs sync)
+    #[serde(default)]
+    source: types::EventSource,
 }
 
 /// Serializable purgatory state for disk persistence.
@@ -270,11 +277,38 @@ impl Purgatory {
     /// For sync-triggered events, the SyncManager calls `enqueue_sync_immediate` separately
     /// to override this delay.
     ///
+    /// If an event already exists in purgatory with `Sync` source and the new submission
+    /// is direct (`!from_sync`), the source is upgraded to `Direct` without extending expiry.
+    ///
     /// # Arguments
     /// * `event` - The state event (kind 30618) to hold
     /// * `identifier` - The repository identifier from the 'd' tag
     /// * `author` - The event author's public key
-    pub fn add_state(&self, event: Event, identifier: String, author: PublicKey) {
+    /// * `from_sync` - True if this event came from proactive sync (vs user-submitted)
+    pub fn add_state(&self, event: Event, identifier: String, author: PublicKey, from_sync: bool) {
+        let source = if from_sync {
+            types::EventSource::Sync
+        } else {
+            types::EventSource::Direct
+        };
+
+        // Check if event already exists - if so, potentially upgrade source
+        if let Some(mut entries) = self.state_events.get_mut(&identifier) {
+            if let Some(existing) = entries.iter_mut().find(|e| e.event.id == event.id) {
+                // Upgrade source from Sync to Direct if new submission is direct
+                if existing.source == types::EventSource::Sync && !from_sync {
+                    existing.source = types::EventSource::Direct;
+                    existing.expires_at = Instant::now() + DEFAULT_EXPIRY;
+                    tracing::debug!(
+                        event_id = %event.id,
+                        identifier = %identifier,
+                        "Upgraded purgatory entry source from Sync to Direct, reset expiry"
+                    );
+                }
+                return; // Event already exists, don't add duplicate
+            }
+        }
+
         let now = Instant::now();
         let entry = StatePurgatoryEntry {
             event,
@@ -282,6 +316,7 @@ impl Purgatory {
             author,
             created_at: now,
             expires_at: now + DEFAULT_EXPIRY,
+            source,
         };
 
         self.state_events
@@ -301,11 +336,35 @@ impl Purgatory {
     /// Automatically enqueues the referenced repository identifier for background sync
     /// with the default delay (3 minutes), giving time for a git push to arrive.
     ///
+    /// If an event already exists in purgatory with `Sync` source and the new submission
+    /// is direct (`!from_sync`), the source is upgraded to `Direct` without extending expiry.
+    ///
     /// # Arguments
     /// * `event` - The PR event (kind 1617/1618) to hold
     /// * `event_id` - The event ID (hex string) from the 'e' tag
     /// * `commit` - The commit SHA from the 'c' tag
-    pub fn add_pr(&self, event: Event, event_id: String, commit: String) {
+    /// * `from_sync` - True if this event came from proactive sync (vs user-submitted)
+    pub fn add_pr(&self, event: Event, event_id: String, commit: String, from_sync: bool) {
+        let source = if from_sync {
+            types::EventSource::Sync
+        } else {
+            types::EventSource::Direct
+        };
+
+        // Check if event already exists - if so, potentially upgrade source
+        if let Some(mut existing) = self.pr_events.get_mut(&event_id) {
+            // Upgrade source from Sync to Direct if new submission is direct
+            if existing.source == types::EventSource::Sync && !from_sync {
+                existing.source = types::EventSource::Direct;
+                existing.expires_at = Instant::now() + DEFAULT_EXPIRY;
+                tracing::debug!(
+                    event_id = %event_id,
+                    "Upgraded PR purgatory entry source from Sync to Direct, reset expiry"
+                );
+            }
+            return; // Event already exists, don't add duplicate
+        }
+
         // Extract identifier from the event's `a` tag for sync enqueueing
         let identifier = crate::git::sync::extract_identifier_from_pr_event(&event);
 
@@ -315,6 +374,7 @@ impl Purgatory {
             commit,
             created_at: now,
             expires_at: now + DEFAULT_EXPIRY,
+            source,
         };
 
         self.pr_events.insert(event_id, entry);
@@ -328,6 +388,8 @@ impl Purgatory {
     /// Add a PR placeholder (git data arrived before PR event).
     ///
     /// Creates a placeholder entry waiting for the corresponding PR event.
+    /// Placeholders are always marked as `Direct` source since they originate
+    /// from git pushes (direct user action).
     ///
     /// # Arguments
     /// * `event_id` - The expected event ID (from git ref name)
@@ -339,6 +401,7 @@ impl Purgatory {
             commit,
             created_at: now,
             expires_at: now + DEFAULT_EXPIRY,
+            source: types::EventSource::Direct, // Git pushes are direct user actions
         };
 
         self.pr_events.insert(event_id, entry);
@@ -608,6 +671,9 @@ impl Purgatory {
     /// prevent infinite re-sync loops. Events that expire without finding git data
     /// will be filtered out during future negentropy/REQ sync operations.
     ///
+    /// Emits structured `[PURGATORY_EXPIRED]` log entries for each expired event
+    /// to support migration scripts and operational monitoring.
+    ///
     /// # Returns
     /// Tuple of (num_state_removed, num_pr_removed)
     pub fn cleanup(&self) -> (usize, usize) {
@@ -615,18 +681,38 @@ impl Purgatory {
         let mut state_removed = 0;
 
         // Remove expired state events and mark them as expired
-        self.state_events.retain(|_, entries| {
+        self.state_events.retain(|identifier, entries| {
             let original_len = entries.len();
-            // Collect event IDs before removing
-            let expired_ids: Vec<EventId> = entries
-                .iter()
-                .filter(|entry| entry.expires_at <= now)
-                .map(|entry| entry.event.id)
-                .collect();
 
-            // Mark as expired to prevent re-sync
-            for event_id in expired_ids {
-                self.mark_expired(event_id);
+            // Log and collect expired entries before removing
+            for entry in entries.iter().filter(|e| e.expires_at <= now) {
+                let npub = entry.author.to_bech32().unwrap_or_else(|_| entry.author.to_hex());
+                let event_id_short = &entry.event.id.to_hex()[..12];
+                let source_str = if entry.source.is_direct() { "direct" } else { "sync" };
+
+                // Structured log for migration scripts
+                // Direct submissions log at WARN, synced events at DEBUG
+                if entry.source.is_direct() {
+                    tracing::warn!(
+                        "[PURGATORY_EXPIRED] repo={} npub={} event_id={}... kind={} source={} reason=\"git data not received within 30 minutes\"",
+                        identifier,
+                        npub,
+                        event_id_short,
+                        entry.event.kind.as_u16(),
+                        source_str
+                    );
+                } else {
+                    tracing::debug!(
+                        "[PURGATORY_EXPIRED] repo={} npub={} event_id={}... kind={} source={} reason=\"git data not received within 30 minutes\"",
+                        identifier,
+                        npub,
+                        event_id_short,
+                        entry.event.kind.as_u16(),
+                        source_str
+                    );
+                }
+
+                self.mark_expired(entry.event.id);
             }
 
             // Remove expired entries
@@ -636,21 +722,103 @@ impl Purgatory {
         });
 
         // Remove expired PR events and mark them as expired
-        let expired_prs: Vec<(String, Option<EventId>)> = self
+        let expired_prs: Vec<_> = self
             .pr_events
             .iter()
             .filter(|entry| entry.value().expires_at <= now)
             .map(|entry| {
-                let event_id = entry.value().event.as_ref().map(|e| e.id);
-                (entry.key().clone(), event_id)
+                let pr_entry = entry.value();
+                let event_id_str = entry.key().clone();
+                let event_opt = pr_entry.event.clone();
+                let commit = pr_entry.commit.clone();
+                let source = pr_entry.source;
+                (event_id_str, event_opt, commit, source)
             })
             .collect();
 
         let pr_removed = expired_prs.len();
-        for (event_id_str, event_id_opt) in expired_prs {
-            // Mark actual PR events as expired (not placeholders)
-            if let Some(event_id) = event_id_opt {
-                self.mark_expired(event_id);
+        for (event_id_str, event_opt, commit, source) in expired_prs {
+            // Log structured entry for PR events (not placeholders)
+            if let Some(ref event) = event_opt {
+                let npub = event
+                    .pubkey
+                    .to_bech32()
+                    .unwrap_or_else(|_| event.pubkey.to_hex());
+                let event_id_short = &event.id.to_hex()[..12];
+                let source_str = if source.is_direct() { "direct" } else { "sync" };
+
+                // Extract ALL repo identifiers from 'a' tags
+                // (PR events can reference multiple repos when there are multiple maintainers)
+                let repos: Vec<String> = event
+                    .tags
+                    .iter()
+                    .filter_map(|tag| {
+                        let tag_vec = tag.clone().to_vec();
+                        if tag_vec.len() >= 2
+                            && tag_vec[0] == "a"
+                            && tag_vec[1].starts_with("30617:")
+                        {
+                            // Format: 30617:<owner_pubkey>:<identifier>
+                            let parts: Vec<&str> = tag_vec[1].split(':').collect();
+                            if parts.len() >= 3 {
+                                Some(parts[2].to_string())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                // Deduplicate while preserving order
+                let mut seen = std::collections::HashSet::new();
+                let unique_repos: Vec<String> = repos
+                    .into_iter()
+                    .filter(|r| seen.insert(r.clone()))
+                    .collect();
+
+                let repos_to_log = if unique_repos.is_empty() {
+                    vec!["unknown".to_string()]
+                } else {
+                    unique_repos
+                };
+
+                // Structured log for migration scripts - log once per repo
+                // Direct submissions log at WARN, synced events at DEBUG
+                for repo in &repos_to_log {
+                    if source.is_direct() {
+                        tracing::warn!(
+                            "[PURGATORY_EXPIRED] repo={} npub={} event_id={}... kind={} commit={} source={} reason=\"git data not received within 30 minutes\"",
+                            repo,
+                            npub,
+                            event_id_short,
+                            event.kind.as_u16(),
+                            &commit[..commit.len().min(12)],
+                            source_str
+                        );
+                    } else {
+                        tracing::debug!(
+                            "[PURGATORY_EXPIRED] repo={} npub={} event_id={}... kind={} commit={} source={} reason=\"git data not received within 30 minutes\"",
+                            repo,
+                            npub,
+                            event_id_short,
+                            event.kind.as_u16(),
+                            &commit[..commit.len().min(12)],
+                            source_str
+                        );
+                    }
+                }
+
+                self.mark_expired(event.id);
+            } else {
+                // Placeholder (git data arrived first, but PR event never came)
+                // Placeholders are always Direct source (from git push)
+                tracing::debug!(
+                    "[PURGATORY_EXPIRED] placeholder event_id={} commit={} source=direct reason=\"PR event not received within 30 minutes\"",
+                    &event_id_str[..event_id_str.len().min(12)],
+                    &commit[..commit.len().min(12)]
+                );
             }
             self.pr_events.remove(&event_id_str);
         }
@@ -800,6 +968,7 @@ impl Purgatory {
                         author: e.author,
                         created_at_offset_secs: created_offset.as_secs(),
                         expires_at_offset_secs: expires_offset.as_secs(),
+                        source: e.source,
                     }
                 })
                 .collect();
@@ -822,6 +991,7 @@ impl Purgatory {
                 commit: e.commit.clone(),
                 created_at_offset_secs: created_offset.as_secs(),
                 expires_at_offset_secs: expires_offset.as_secs(),
+                source: e.source,
             };
             pr_events.insert(event_id, serializable);
         }
@@ -923,6 +1093,7 @@ impl Purgatory {
                         author: e.author,
                         created_at,
                         expires_at,
+                        source: e.source,
                     }
                 })
                 .collect();
@@ -948,6 +1119,7 @@ impl Purgatory {
                 commit: e.commit,
                 created_at,
                 expires_at,
+                source: e.source,
             };
 
             self.pr_events.insert(event_id, entry);
@@ -1005,8 +1177,18 @@ mod tests {
             .sign_with_keys(&keys)
             .unwrap();
 
-        purgatory.add_state(event.clone(), "test-repo".to_string(), keys.public_key());
-        purgatory.add_pr(event, "test-event-id".to_string(), "abc123".to_string());
+        purgatory.add_state(
+            event.clone(),
+            "test-repo".to_string(),
+            keys.public_key(),
+            false,
+        );
+        purgatory.add_pr(
+            event,
+            "test-event-id".to_string(),
+            "abc123".to_string(),
+            false,
+        );
 
         let (state_count, pr_count) = purgatory.count();
         assert_eq!(state_count, 1);
@@ -1057,7 +1239,7 @@ mod tests {
         let event = EventBuilder::text_note("state")
             .sign_with_keys(&keys)
             .unwrap();
-        purgatory.add_state(event, "test-repo".to_string(), keys.public_key());
+        purgatory.add_state(event, "test-repo".to_string(), keys.public_key(), false);
 
         // Now should have pending events
         assert!(purgatory.has_pending_events("test-repo"));
@@ -1087,7 +1269,12 @@ mod tests {
             .sign_with_keys(&keys)
             .unwrap();
 
-        purgatory.add_pr(event, "pr-event-id".to_string(), "commit123".to_string());
+        purgatory.add_pr(
+            event,
+            "pr-event-id".to_string(),
+            "commit123".to_string(),
+            false,
+        );
 
         // Now should have pending events for test-repo
         assert!(purgatory.has_pending_events("test-repo"));
@@ -1152,6 +1339,7 @@ fn test_pr_event_vs_placeholder() {
         event.clone(),
         "event-id-1".to_string(),
         "commit-abc".to_string(),
+        false,
     );
 
     // Add a placeholder (no event)
@@ -1208,8 +1396,14 @@ fn test_cleanup_removes_expired_entries() {
         state_event.clone(),
         "test-repo".to_string(),
         keys.public_key(),
+        false,
     );
-    purgatory.add_pr(pr_event, "pr-123".to_string(), "commit-abc".to_string());
+    purgatory.add_pr(
+        pr_event,
+        "pr-123".to_string(),
+        "commit-abc".to_string(),
+        false,
+    );
     purgatory.add_pr_placeholder("pr-456".to_string(), "commit-def".to_string());
 
     // Verify entries are there
@@ -1256,8 +1450,18 @@ fn test_cleanup_preserves_non_expired_entries() {
         .unwrap();
 
     // Add fresh entries
-    purgatory.add_state(state_event, "test-repo".to_string(), keys.public_key());
-    purgatory.add_pr(pr_event, "pr-123".to_string(), "commit-abc".to_string());
+    purgatory.add_state(
+        state_event,
+        "test-repo".to_string(),
+        keys.public_key(),
+        false,
+    );
+    purgatory.add_pr(
+        pr_event,
+        "pr-123".to_string(),
+        "commit-abc".to_string(),
+        false,
+    );
 
     // Run cleanup
     let (state_removed, pr_removed) = purgatory.cleanup();
@@ -1287,8 +1491,8 @@ fn test_cleanup_mixed_expired_and_fresh() {
         .sign_with_keys(&keys)
         .unwrap();
 
-    purgatory.add_state(event1, "test-repo".to_string(), keys.public_key());
-    purgatory.add_state(event2, "test-repo".to_string(), keys.public_key());
+    purgatory.add_state(event1, "test-repo".to_string(), keys.public_key(), false);
+    purgatory.add_state(event2, "test-repo".to_string(), keys.public_key(), false);
 
     // Expire only the first one
     if let Some(mut entries) = purgatory.state_events.get_mut("test-repo") {
@@ -1305,8 +1509,8 @@ fn test_cleanup_mixed_expired_and_fresh() {
         .sign_with_keys(&keys)
         .unwrap();
 
-    purgatory.add_pr(pr1, "pr-1".to_string(), "commit-1".to_string());
-    purgatory.add_pr(pr2, "pr-2".to_string(), "commit-2".to_string());
+    purgatory.add_pr(pr1, "pr-1".to_string(), "commit-1".to_string(), false);
+    purgatory.add_pr(pr2, "pr-2".to_string(), "commit-2".to_string(), false);
 
     // Expire only first PR
     if let Some(mut entry) = purgatory.pr_events.get_mut("pr-1") {
@@ -1338,8 +1542,8 @@ fn test_remove_expired_legacy_method() {
         .unwrap();
     let pr_event = EventBuilder::text_note("pr").sign_with_keys(&keys).unwrap();
 
-    purgatory.add_state(state_event, "repo".to_string(), keys.public_key());
-    purgatory.add_pr(pr_event, "pr-id".to_string(), "commit".to_string());
+    purgatory.add_state(state_event, "repo".to_string(), keys.public_key(), false);
+    purgatory.add_pr(pr_event, "pr-id".to_string(), "commit".to_string(), false);
 
     // Expire both
     if let Some(mut entries) = purgatory.state_events.get_mut("repo") {
@@ -1373,8 +1577,8 @@ fn test_expired_event_tracking() {
     let pr_event_id = pr_event.id;
 
     // Add events to purgatory
-    purgatory.add_state(state_event, "repo".to_string(), keys.public_key());
-    purgatory.add_pr(pr_event, "pr-id".to_string(), "commit".to_string());
+    purgatory.add_state(state_event, "repo".to_string(), keys.public_key(), false);
+    purgatory.add_pr(pr_event, "pr-id".to_string(), "commit".to_string(), false);
 
     // Events should not be marked as expired yet
     assert!(!purgatory.is_expired(&state_event_id));
@@ -1426,7 +1630,7 @@ fn test_cleanup_expired_events() {
     let event2_id = event2.id;
 
     // Add and immediately expire event1
-    purgatory.add_state(event1, "repo1".to_string(), keys.public_key());
+    purgatory.add_state(event1, "repo1".to_string(), keys.public_key(), false);
     if let Some(mut entries) = purgatory.state_events.get_mut("repo1") {
         for entry in entries.iter_mut() {
             entry.expires_at = Instant::now() - Duration::from_secs(1);
@@ -1435,7 +1639,7 @@ fn test_cleanup_expired_events() {
     purgatory.cleanup();
 
     // Add and expire event2 (will be more recent)
-    purgatory.add_state(event2, "repo2".to_string(), keys.public_key());
+    purgatory.add_state(event2, "repo2".to_string(), keys.public_key(), false);
     if let Some(mut entries) = purgatory.state_events.get_mut("repo2") {
         for entry in entries.iter_mut() {
             entry.expires_at = Instant::now() - Duration::from_secs(1);
@@ -1477,7 +1681,7 @@ fn test_expired_events_prevent_readdition() {
     let event_id = event.id;
 
     // Add event to purgatory
-    purgatory.add_state(event.clone(), "repo".to_string(), keys.public_key());
+    purgatory.add_state(event.clone(), "repo".to_string(), keys.public_key(), false);
 
     // Expire it
     if let Some(mut entries) = purgatory.state_events.get_mut("repo") {
@@ -1497,7 +1701,7 @@ fn test_expired_events_prevent_readdition() {
     // This simulates what negentropy/REQ+EOSE should do:
     // Check if event is in event_ids() before adding
     if !ids.contains(&event_id) {
-        purgatory.add_state(event, "repo".to_string(), keys.public_key());
+        purgatory.add_state(event, "repo".to_string(), keys.public_key(), false);
     }
 
     // Event should NOT be re-added
@@ -1540,7 +1744,7 @@ fn test_user_can_resubmit_expired_event() {
     let event_id = event.id;
 
     // Add event to purgatory
-    purgatory.add_state(event.clone(), "repo".to_string(), keys.public_key());
+    purgatory.add_state(event.clone(), "repo".to_string(), keys.public_key(), false);
 
     // Expire it
     if let Some(mut entries) = purgatory.state_events.get_mut("repo") {
@@ -1589,8 +1793,18 @@ async fn test_save_and_restore_state_events() {
     let event1_id = event1.id;
     let event2_id = event2.id;
 
-    purgatory.add_state(event1.clone(), "test-repo".to_string(), keys.public_key());
-    purgatory.add_state(event2.clone(), "test-repo".to_string(), keys.public_key());
+    purgatory.add_state(
+        event1.clone(),
+        "test-repo".to_string(),
+        keys.public_key(),
+        false,
+    );
+    purgatory.add_state(
+        event2.clone(),
+        "test-repo".to_string(),
+        keys.public_key(),
+        false,
+    );
 
     // Save to disk
     purgatory.save_to_disk(&state_file).unwrap();
@@ -1652,6 +1866,7 @@ async fn test_save_and_restore_pr_events() {
         pr_event.clone(),
         "pr-event-id".to_string(),
         "commit-abc".to_string(),
+        false,
     );
 
     // Save to disk
@@ -1721,7 +1936,7 @@ async fn test_save_and_restore_expired_events() {
     let event_id = event.id;
 
     // Add and expire event
-    purgatory.add_state(event, "repo".to_string(), keys.public_key());
+    purgatory.add_state(event, "repo".to_string(), keys.public_key(), false);
     if let Some(mut entries) = purgatory.state_events.get_mut("repo") {
         for entry in entries.iter_mut() {
             entry.expires_at = Instant::now() - Duration::from_secs(1);
@@ -1860,7 +2075,7 @@ async fn test_downtime_calculation() {
         .sign_with_keys(&keys)
         .unwrap();
 
-    purgatory.add_state(event.clone(), "repo".to_string(), keys.public_key());
+    purgatory.add_state(event.clone(), "repo".to_string(), keys.public_key(), false);
 
     // Get original expiry time
     let original_entries = purgatory.find_state("repo");
@@ -1916,7 +2131,7 @@ async fn test_expiry_times_preserved() {
         .sign_with_keys(&keys)
         .unwrap();
 
-    purgatory.add_state(event.clone(), "repo".to_string(), keys.public_key());
+    purgatory.add_state(event.clone(), "repo".to_string(), keys.public_key(), false);
 
     // Manually set expiry to a specific time in the future
     let custom_expiry = Instant::now() + Duration::from_secs(600); // 10 minutes
@@ -1975,16 +2190,19 @@ async fn test_multiple_state_events_same_identifier() {
         event1.clone(),
         "shared-repo".to_string(),
         keys1.public_key(),
+        false,
     );
     purgatory.add_state(
         event2.clone(),
         "shared-repo".to_string(),
         keys2.public_key(),
+        false,
     );
     purgatory.add_state(
         event3.clone(),
         "shared-repo".to_string(),
         keys3.public_key(),
+        false,
     );
 
     // Save to disk
@@ -2031,6 +2249,7 @@ async fn test_mixed_pr_events_and_placeholders() {
         pr_event.clone(),
         "pr-with-event".to_string(),
         "commit-abc".to_string(),
+        false,
     );
 
     // Add PR placeholder
@@ -2076,7 +2295,7 @@ async fn test_file_cleanup_after_successful_restore() {
     let event = EventBuilder::text_note("test")
         .sign_with_keys(&keys)
         .unwrap();
-    purgatory.add_state(event, "repo".to_string(), keys.public_key());
+    purgatory.add_state(event, "repo".to_string(), keys.public_key(), false);
 
     // Save to disk
     purgatory.save_to_disk(&state_file).unwrap();
@@ -2110,8 +2329,18 @@ async fn test_comprehensive_roundtrip() {
         .sign_with_keys(&keys2)
         .unwrap();
 
-    purgatory.add_state(state1.clone(), "repo1".to_string(), keys1.public_key());
-    purgatory.add_state(state2.clone(), "repo2".to_string(), keys2.public_key());
+    purgatory.add_state(
+        state1.clone(),
+        "repo1".to_string(),
+        keys1.public_key(),
+        false,
+    );
+    purgatory.add_state(
+        state2.clone(),
+        "repo2".to_string(),
+        keys2.public_key(),
+        false,
+    );
 
     // Add PR event
     let tags = vec![Tag::custom(
@@ -2122,7 +2351,12 @@ async fn test_comprehensive_roundtrip() {
         .tags(tags)
         .sign_with_keys(&keys1)
         .unwrap();
-    purgatory.add_pr(pr_event.clone(), "pr-1".to_string(), "commit-1".to_string());
+    purgatory.add_pr(
+        pr_event.clone(),
+        "pr-1".to_string(),
+        "commit-1".to_string(),
+        false,
+    );
 
     // Add PR placeholder
     purgatory.add_pr_placeholder("pr-2".to_string(), "commit-2".to_string());
@@ -2132,7 +2366,12 @@ async fn test_comprehensive_roundtrip() {
         .sign_with_keys(&keys1)
         .unwrap();
     let expired_id = expired_event.id;
-    purgatory.add_state(expired_event, "repo3".to_string(), keys1.public_key());
+    purgatory.add_state(
+        expired_event,
+        "repo3".to_string(),
+        keys1.public_key(),
+        false,
+    );
     if let Some(mut entries) = purgatory.state_events.get_mut("repo3") {
         for entry in entries.iter_mut() {
             entry.expires_at = Instant::now() - Duration::from_secs(1);

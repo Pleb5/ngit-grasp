@@ -205,9 +205,12 @@ impl StatePolicy {
 
             // If no git data - add to purgatory
             // (add_state automatically enqueues for background sync)
-            self.ctx
-                .purgatory
-                .add_state(event.clone(), state.identifier.clone(), event.pubkey);
+            self.ctx.purgatory.add_state(
+                event.clone(),
+                state.identifier.clone(),
+                event.pubkey,
+                is_synced,
+            );
 
             tracing::info!(
                 "state event added to purgatory: eventid: {}, identifier: {}",

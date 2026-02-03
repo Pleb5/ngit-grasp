@@ -110,18 +110,6 @@ How-to guides are **recipes** that show you how to solve specific problems or ac
 
 ---
 
-### Migrate from ngit-relay
-**Status:** 🔜 Planned
-
-**Problem:** Switch from reference implementation  
-**You'll learn:**
-- Export data from ngit-relay
-- Import to ngit-grasp
-- Update repository URLs
-- Verify migration
-
----
-
 ## How to Use How-To Guides
 
 1. **Find your problem** - Browse or search for what you need

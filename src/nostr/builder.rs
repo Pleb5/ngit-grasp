@@ -98,6 +98,62 @@ impl Nip34WritePolicy {
         self.ctx.set_local_relay(relay);
     }
 
+    /// Extract repository identifier from event's 'd' tag.
+    ///
+    /// Used for structured logging when parsing fails - we try to extract
+    /// the identifier even if full parsing failed.
+    fn extract_identifier_from_event(event: &Event) -> String {
+        use nostr_relay_builder::prelude::TagKind;
+        event
+            .tags
+            .iter()
+            .find(|t| t.kind() == TagKind::d())
+            .and_then(|t| t.content())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    /// Extract ALL repository identifiers from PR event's 'a' tags.
+    ///
+    /// PR events can reference multiple repositories via multiple 'a' tags
+    /// (e.g., when there are multiple maintainers). Each tag has format
+    /// `30617:<owner_pubkey>:<identifier>`.
+    ///
+    /// Returns a vector of unique identifiers, or `["unknown"]` if none found.
+    fn extract_repos_from_pr_event(event: &Event) -> Vec<String> {
+        let repos: Vec<String> = event
+            .tags
+            .iter()
+            .filter_map(|tag| {
+                let tag_vec = tag.clone().to_vec();
+                if tag_vec.len() >= 2 && tag_vec[0] == "a" && tag_vec[1].starts_with("30617:") {
+                    // Format: 30617:<owner_pubkey>:<identifier>
+                    let parts: Vec<&str> = tag_vec[1].split(':').collect();
+                    if parts.len() >= 3 {
+                        Some(parts[2].to_string())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Deduplicate while preserving order
+        let mut seen = std::collections::HashSet::new();
+        let unique_repos: Vec<String> = repos
+            .into_iter()
+            .filter(|r| seen.insert(r.clone()))
+            .collect();
+
+        if unique_repos.is_empty() {
+            vec!["unknown".to_string()]
+        } else {
+            unique_repos
+        }
+    }
+
     /// Handle repository announcement event
     async fn handle_announcement(&self, event: &Event) -> WritePolicyResult {
         let event_id_str = event.id.to_bech32().unwrap_or_else(|_| event.id.to_hex());
@@ -129,10 +185,21 @@ impl Nip34WritePolicy {
                         WritePolicyResult::Accept
                     }
                     Err(e) => {
+                        let npub = event
+                            .pubkey
+                            .to_bech32()
+                            .unwrap_or_else(|_| event.pubkey.to_hex());
+                        let event_id_short = &event.id.to_hex()[..12];
+                        // Try to extract repo identifier from 'd' tag even if parsing failed
+                        let repo = Self::extract_identifier_from_event(event);
+                        // Structured log for migration scripts
                         tracing::warn!(
-                            "Failed to parse repository announcement {}: {}",
-                            event_id_str,
-                            e
+                            "[PARSE_FAIL] kind={} event_id={}... reason=\"{}\" repo={} npub={}",
+                            event.kind.as_u16(),
+                            event_id_short,
+                            e,
+                            repo,
+                            npub
                         );
                         WritePolicyResult::reject(format!("Failed to parse announcement: {}", e))
                     }
@@ -157,10 +224,21 @@ impl Nip34WritePolicy {
                         WritePolicyResult::Accept
                     }
                     Err(e) => {
+                        let npub = event
+                            .pubkey
+                            .to_bech32()
+                            .unwrap_or_else(|_| event.pubkey.to_hex());
+                        let event_id_short = &event.id.to_hex()[..12];
+                        // Try to extract repo identifier from 'd' tag even if parsing failed
+                        let repo = Self::extract_identifier_from_event(event);
+                        // Structured log for migration scripts
                         tracing::warn!(
-                            "Failed to parse maintainer announcement {}: {}",
-                            event_id_str,
-                            e
+                            "[PARSE_FAIL] kind={} event_id={}... reason=\"{}\" repo={} npub={}",
+                            event.kind.as_u16(),
+                            event_id_short,
+                            e,
+                            repo,
+                            npub
                         );
                         WritePolicyResult::reject(format!("Failed to parse announcement: {}", e))
                     }
@@ -183,8 +261,6 @@ impl Nip34WritePolicy {
     /// * `event` - The state event to validate
     /// * `is_synced` - True if this event came from proactive sync (vs user-submitted)
     async fn handle_state(&self, event: &Event, is_synced: bool) -> WritePolicyResult {
-        let event_id_str = event.id.to_bech32().unwrap_or_else(|_| event.id.to_hex());
-
         match self.state_policy.validate(event) {
             StateResult::Accept => {
                 // Process state alignment asynchronously
@@ -195,7 +271,22 @@ impl Nip34WritePolicy {
                 {
                     Ok(poilicy_result) => poilicy_result,
                     Err(e) => {
-                        tracing::warn!("Failed to process state event {}: {}", event_id_str, e);
+                        let npub = event
+                            .pubkey
+                            .to_bech32()
+                            .unwrap_or_else(|_| event.pubkey.to_hex());
+                        let event_id_short = &event.id.to_hex()[..12];
+                        // Try to extract repo identifier from 'd' tag even if parsing failed
+                        let repo = Self::extract_identifier_from_event(event);
+                        // Structured log for migration scripts
+                        tracing::warn!(
+                            "[PARSE_FAIL] kind={} event_id={}... reason=\"{}\" repo={} npub={}",
+                            event.kind.as_u16(),
+                            event_id_short,
+                            e,
+                            repo,
+                            npub
+                        );
                         // reject if processing failed
                         WritePolicyResult::Reject {
                             status: false,
@@ -205,7 +296,22 @@ impl Nip34WritePolicy {
                 }
             }
             StateResult::Reject(reason) => {
-                tracing::warn!("Rejected repository state {}: {}", event_id_str, reason);
+                let npub = event
+                    .pubkey
+                    .to_bech32()
+                    .unwrap_or_else(|_| event.pubkey.to_hex());
+                let event_id_short = &event.id.to_hex()[..12];
+                // Try to extract repo identifier from 'd' tag even if parsing failed
+                let repo = Self::extract_identifier_from_event(event);
+                // Structured log for migration scripts
+                tracing::warn!(
+                    "[PARSE_FAIL] kind={} event_id={}... reason=\"{}\" repo={} npub={}",
+                    event.kind.as_u16(),
+                    event_id_short,
+                    reason,
+                    repo,
+                    npub
+                );
                 WritePolicyResult::reject(reason)
             }
         }
@@ -303,9 +409,12 @@ impl Nip34WritePolicy {
                 );
 
                 // Add to purgatory
-                self.ctx
-                    .purgatory
-                    .add_pr(event.clone(), event.id.to_hex(), commit.clone());
+                self.ctx.purgatory.add_pr(
+                    event.clone(),
+                    event.id.to_hex(),
+                    commit.clone(),
+                    is_synced,
+                );
 
                 WritePolicyResult::Reject {
                     status: true, // Client sees OK
@@ -323,11 +432,25 @@ impl Nip34WritePolicy {
             }
             Err(e) => {
                 // Error checking git data - reject event
-                tracing::warn!(
-                    "Failed to check git data for PR event {}: {}",
-                    event_id_str,
-                    e
-                );
+                let npub = event
+                    .pubkey
+                    .to_bech32()
+                    .unwrap_or_else(|_| event.pubkey.to_hex());
+                let event_id_short = &event.id.to_hex()[..12];
+                // Extract ALL repo identifiers from 'a' tags for PR events
+                // (PR events can reference multiple repos when there are multiple maintainers)
+                let repos = Self::extract_repos_from_pr_event(event);
+                // Structured log for migration scripts - log once per repo
+                for repo in &repos {
+                    tracing::warn!(
+                        "[PARSE_FAIL] kind={} event_id={}... reason=\"git data check failed: {}\" repo={} npub={}",
+                        event.kind.as_u16(),
+                        event_id_short,
+                        e,
+                        repo,
+                        npub
+                    );
+                }
                 WritePolicyResult::reject(format!("Failed to check git data: {}", e))
             }
         }
