@@ -352,6 +352,10 @@ pub async fn authorize_push(
    - If no event found, create placeholder (git-data-first scenario)
    - Collect PR events from purgatory for post-push processing
 
+**No-Op Push Acceptance:** Pushes where all refs have `old_oid == new_oid` are accepted without requiring a purgatory state event, matching Git's "Everything up-to-date" behavior and avoiding race condition rejections.
+
+---
+
 ## State Event Authorization
 
 State events (kind 30618) undergo authorization checks at three points (defense-in-depth):

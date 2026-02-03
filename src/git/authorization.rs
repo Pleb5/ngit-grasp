@@ -575,6 +575,28 @@ pub async fn get_state_authorization_for_specific_owner_repo(
         owner_pubkey
     );
 
+    // Accept pushes where all refs are already at the desired state (old_oid == new_oid)
+    // This handles race conditions where state events are applied between fetch and push
+    if !pushed_refs.is_empty() {
+        let all_refs_unchanged = pushed_refs
+            .iter()
+            .all(|(old_oid, new_oid, _)| old_oid == new_oid);
+
+        if all_refs_unchanged {
+            debug!(
+                "All pushed refs unchanged (old_oid == new_oid) for {} owned by {}, accepting without purgatory check",
+                identifier, owner_pubkey
+            );
+            return Ok(AuthorizationResult {
+                authorized: true,
+                reason: "Push accepted: all refs already at desired state (no-op)".to_string(),
+                state: None,
+                maintainers: authorized.into_iter().collect(),
+                purgatory_events: vec![],
+            });
+        }
+    }
+
     // Check purgatory for matching state events
     // Convert pushed refs to RefUpdate (filter out refs/nostr/* refs)
     let pushed_updates: Vec<RefUpdate> = pushed_refs
