@@ -16,7 +16,7 @@ pub mod persistence;
 pub mod sync;
 mod types;
 
-pub use helpers::{can_apply_state, can_satisfy_state, extract_refs_from_state, get_unpushed_refs};
+pub use helpers::{can_apply_state, can_satisfy_state, diagnose_state_mismatch, extract_refs_from_state, get_unpushed_refs};
 pub use types::{EventSource, PrPurgatoryEntry, RefPair, RefUpdate, StatePurgatoryEntry};
 
 use dashmap::DashMap;

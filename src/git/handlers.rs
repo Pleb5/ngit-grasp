@@ -254,7 +254,7 @@ pub async fn handle_receive_pack(
     }
 
     // GRASP Authorization Check
-    info!(
+    debug!(
         "Authorizing push for {} owned by {} via database query",
         identifier, owner_pubkey
     );
