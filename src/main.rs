@@ -207,18 +207,45 @@ async fn main() -> Result<()> {
         info!("Starting HTTP server on {}", config.bind_address);
 
         // Run server until shutdown signal, then cleanup
-        tokio::select! {
-            result = http::run_server(
-                config,
-                relay_with_db.relay,
-                relay_with_db.database,
-                metrics,
-                purgatory,
-            ) => {
-                result?
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = signal(SignalKind::terminate())?;
+            
+            tokio::select! {
+                result = http::run_server(
+                    config,
+                    relay_with_db.relay,
+                    relay_with_db.database,
+                    metrics,
+                    purgatory,
+                ) => {
+                    result?
+                }
+                _ = signal::ctrl_c() => {
+                    info!("Received SIGINT (Ctrl+C), cleaning up...");
+                }
+                _ = sigterm.recv() => {
+                    info!("Received SIGTERM, cleaning up...");
+                }
             }
-            _ = signal::ctrl_c() => {
-                info!("Received shutdown signal, cleaning up...");
+        }
+        
+        #[cfg(not(unix))]
+        {
+            tokio::select! {
+                result = http::run_server(
+                    config,
+                    relay_with_db.relay,
+                    relay_with_db.database,
+                    metrics,
+                    purgatory,
+                ) => {
+                    result?
+                }
+                _ = signal::ctrl_c() => {
+                    info!("Received SIGINT (Ctrl+C), cleaning up...");
+                }
             }
         }
 
