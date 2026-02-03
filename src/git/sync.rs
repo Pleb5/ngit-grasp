@@ -667,7 +667,7 @@ pub fn align_repository_with_state(repo_path: &Path, state: &RepositoryState) ->
         match git::update_ref(repo_path, ref_name, expected_commit) {
             Ok(()) => {
                 if current_commit.is_some() {
-                    info!(
+                    debug!(
                         "Updated {} to {} in {}",
                         ref_name,
                         expected_commit,
@@ -675,7 +675,7 @@ pub fn align_repository_with_state(repo_path: &Path, state: &RepositoryState) ->
                     );
                     result.refs_updated += 1;
                 } else {
-                    info!(
+                    debug!(
                         "Created {} at {} in {}",
                         ref_name,
                         expected_commit,
@@ -701,7 +701,7 @@ pub fn align_repository_with_state(repo_path: &Path, state: &RepositoryState) ->
             if let Some(head_commit) = state.get_branch_commit(branch_name) {
                 match git::try_set_head_if_available(repo_path, head_ref, head_commit) {
                     Ok(true) => {
-                        info!("Set HEAD to {} in {}", head_ref, repo_path.display());
+                        debug!("Set HEAD to {} in {}", head_ref, repo_path.display());
                         result.head_set = true;
                     }
                     Ok(false) => {

@@ -253,7 +253,7 @@ pub fn update_ref(repo_path: &Path, ref_name: &str, commit_hash: &str) -> Result
         return Err(format!("git update-ref failed: {}", stderr));
     }
 
-    info!(
+    debug!(
         "Updated ref {} to {} in {}",
         ref_name,
         commit_hash,
