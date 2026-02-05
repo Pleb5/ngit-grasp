@@ -2,7 +2,7 @@
 
 ## Problem Statement
 
-**Primary problem:** Empty bare git repos mislead clients into thinking we host content.
+**Primary problem:** serving an announcement event and also an empty bare git repos mislead clients into thinking we host content.
 
 When an announcement arrives, we must create the bare repo immediately (so git pushes can succeed). But if no git data ever arrives, we serve an empty repo and its announcement indefinitely. Clients see the announcement, try to clone, and get nothing. This is misleading.
 
@@ -50,10 +50,10 @@ This ensures we only serve announcements for repos that actually have content.
 
 **Decision:** Extend purgatory announcement expiry in two scenarios:
 
-| Trigger | Location | Why |
-|---------|----------|-----|
-| State event arrives | `StatePolicy::process_state_event()` | Repo is actively receiving metadata |
-| Git auth extends state event | `src/git/auth.rs` | Repo is actively receiving git data |
+| Trigger                      | Location                             | Why                                 |
+| ---------------------------- | ------------------------------------ | ----------------------------------- |
+| State event arrives          | `StatePolicy::process_state_event()` | Repo is actively receiving metadata |
+| Git auth extends state event | `src/git/auth.rs`                    | Repo is actively receiving git data |
 
 **Why:** Prevents premature expiry during slow sync operations or multi-step pushes.
 
@@ -62,6 +62,10 @@ This ensures we only serve announcements for repos that actually have content.
 **Decision:** When validating state events, check purgatory announcements for authorization.
 
 **Why:** State events may arrive before git data promotes the announcement. They still need authorization from the announcement's maintainer set.
+
+### 6. We need to request State Events in sysc for announcement in purgatory but not other l2 or l3 events because they will be rejected.
+
+### 7. When creating the authorised maintainers for a repositoriy we need to also get relivant announcement events from purgatory as well as db.
 
 ## Data Structure
 
@@ -80,6 +84,7 @@ pub struct AnnouncementPurgatoryEntry {
 ```
 
 **Indexed by `(pubkey, identifier)`** because identifier is not unique across different owners.
+question: would it be more efficent to index by repo_path? this contains the pubkey and identifier data?
 
 ## Flows
 
@@ -133,38 +138,38 @@ Is there an active announcement?
 
 ## Edge Cases
 
-| Scenario | Behavior |
-|----------|----------|
-| Git data before announcement | Push fails (no repo exists) |
-| Announcement expires, no git data | Delete bare repo, discard announcement |
-| State expires, announcement in purgatory | Announcement keeps its own expiry |
-| Multiple owners, same identifier | Each tracked separately by `(pubkey, identifier)` |
-| **Newer announcement replaces older (same pubkey)** | Replace purgatory entry, extend expiry |
-| **Newer announcement changes services (unacceptable)** | Clear older announcement from purgatory for that `(pubkey, identifier)` |
-| Deletion event for purgatory announcement | Remove from purgatory, delete bare repo |
+| Scenario                                               | Behavior                                                                                                                               |
+| ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Git data before announcement                           | Push fails (no repo exists)                                                                                                            |
+| Announcement expires, no git data                      | Delete bare repo, discard announcement                                                                                                 |
+| State expires, announcement in purgatory               | Announcement keeps its own expiry                                                                                                      |
+| Multiple owners, same identifier                       | Each tracked separately by `(pubkey, identifier)`                                                                                      |
+| **Newer announcement replaces older (same pubkey)**    | Replace purgatory entry, extend expiry, and state event expiry                                                                         |
+| **Newer announcement changes services (unacceptable)** | Clear older announcement from purgatory for that `(pubkey, identifier)`, delete bare repo, remove state event for puragatory if exists |
+| Deletion event for purgatory announcement              | Remove from purgatory, delete bare repo                                                                                                |
 
 ## Purgatory Exit Conditions
 
 An announcement leaves purgatory via:
 
-| Exit | Trigger | Action |
-|------|---------|--------|
-| **Promotion** | Git data arrives | Move to database, serve to clients |
-| **Expiry** | Timeout | Delete bare repo, discard |
-| **Deletion** | Kind 5 event | Delete bare repo, discard |
-| **Replacement** | Newer announcement (same pubkey, identifier) | Replace entry |
-| **Service change** | Newer announcement no longer lists our service | Discard old entry |
+| Exit               | Trigger                                        | Action                             |
+| ------------------ | ---------------------------------------------- | ---------------------------------- |
+| **Promotion**      | Git data arrives                               | Move to database, serve to clients |
+| **Expiry**         | Timeout                                        | Delete bare repo, discard          |
+| **Deletion**       | Kind 5 event                                   | Delete bare repo, discard          |
+| **Replacement**    | Newer announcement (same pubkey, identifier)   | Replace entry                      |
+| **Service change** | Newer announcement no longer lists our service | Discard old entry                  |
 
 ## Integration Points
 
-| File | Change |
-|------|--------|
-| `src/purgatory/mod.rs` | Add `announcement_purgatory` store |
-| `src/purgatory/types.rs` | Add `AnnouncementPurgatoryEntry` |
-| `src/nostr/policy/announcement.rs` | Route new announcements to purgatory |
-| `src/git/receive.rs` | Promote on git data arrival |
-| `src/git/auth.rs` | Extend purgatory expiry when extending state event expiry |
-| `src/nostr/policy/state.rs` | Check purgatory for authorization |
+| File                               | Change                                                    |
+| ---------------------------------- | --------------------------------------------------------- |
+| `src/purgatory/mod.rs`             | Add `announcement_purgatory` store                        |
+| `src/purgatory/types.rs`           | Add `AnnouncementPurgatoryEntry`                          |
+| `src/nostr/policy/announcement.rs` | Route new announcements to purgatory                      |
+| `src/git/receive.rs`               | Promote on git data arrival                               |
+| `src/git/auth.rs`                  | Extend purgatory expiry when extending state event expiry |
+| `src/nostr/policy/state.rs`        | Check purgatory for authorization                         |
 
 ## Testing
 
@@ -178,8 +183,10 @@ An announcement leaves purgatory via:
 
 ## Risks
 
-| Risk | Mitigation |
-|------|------------|
+| Risk                                 | Mitigation                           |
+| ------------------------------------ | ------------------------------------ |
 | Disk exhaustion from purgatory repos | Short expiry, monitor purgatory size |
-| Race between promotion and expiry | Atomic operations |
-| Sync re-fetching expired events | Track expired event IDs |
+| Race between promotion and expiry    | Atomic operations                    |
+| Sync re-fetching expired events      | Track expired event IDs              |
+
+question: do expired annoucements go on failed_events list? what if a new state event comes in for it? surely then we want it again? but if not we dont want to keep donwloading it and havea a repo made for it. Should we have a longer period were we keep the event just in case, but delete the bare repo and only remake it when the state event arrives?
