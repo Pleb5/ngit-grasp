@@ -1701,16 +1701,16 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
 
-        // Configure git user - use PR Test Author identity
+        // Configure git user - use same identity as clone_repo in fixtures.rs
         let output = Command::new("git")
-            .args(["config", "user.email", "pr-test@example.com"])
+            .args(["config", "user.email", "test@grasp-audit.local"])
             .current_dir(path)
             .output()
             .expect("git config email failed");
         assert!(output.status.success(), "git config email failed");
 
         let output = Command::new("git")
-            .args(["config", "user.name", "PR Test Author"])
+            .args(["config", "user.name", "GRASP Audit Test"])
             .current_dir(path)
             .output()
             .expect("git config name failed");
