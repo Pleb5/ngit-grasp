@@ -109,7 +109,7 @@ impl WhitelistEntry {
 }
 
 /// GRASP-05 Archive mode configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ArchiveConfig {
     /// Accept all repository announcements (no filtering)
     ///
@@ -146,6 +146,7 @@ impl ArchiveConfig {
     /// Returns true if:
     /// - archive_all is true, OR
     /// - announcement matches any whitelist entry
+    ///
     /// Note: grasp_services matching is handled via matches_grasp_services()
     pub fn matches(&self, npub: &str, identifier: &str) -> bool {
         if self.archive_all {
@@ -171,19 +172,8 @@ impl ArchiveConfig {
     }
 }
 
-impl Default for ArchiveConfig {
-    fn default() -> Self {
-        Self {
-            archive_all: false,
-            whitelist: Vec::new(),
-            grasp_services: Vec::new(),
-            read_only: false,
-        }
-    }
-}
-
 /// Repository whitelist configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RepositoryConfig {
     /// Whitelist entries for selective repository acceptance
     ///
@@ -207,16 +197,8 @@ impl RepositoryConfig {
     }
 }
 
-impl Default for RepositoryConfig {
-    fn default() -> Self {
-        Self {
-            whitelist: Vec::new(),
-        }
-    }
-}
-
 /// Repository blacklist configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BlacklistConfig {
     /// Blacklist entries for blocking specific repositories
     ///
@@ -256,16 +238,8 @@ impl BlacklistConfig {
     }
 }
 
-impl Default for BlacklistConfig {
-    fn default() -> Self {
-        Self {
-            blacklist: Vec::new(),
-        }
-    }
-}
-
 /// Event blacklist configuration for blocking events by author npub
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EventBlacklistConfig {
     /// Blacklisted npubs - events from these authors are rejected
     ///
@@ -288,14 +262,6 @@ impl EventBlacklistConfig {
             Some(format!("Event author {} is blacklisted", npub))
         } else {
             None
-        }
-    }
-}
-
-impl Default for EventBlacklistConfig {
-    fn default() -> Self {
-        Self {
-            blacklisted_npubs: Vec::new(),
         }
     }
 }

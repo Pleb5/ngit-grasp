@@ -584,6 +584,7 @@ impl SyncManager {
     /// * `config` - Configuration for sync settings
     /// * `data_path` - Path to git data directory (for persistence)
     /// * `sync_metrics` - Optional pre-registered SyncMetrics (passed from Metrics if metrics are enabled)
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         bootstrap_relay_url: Option<String>,
         service_domain: String,
