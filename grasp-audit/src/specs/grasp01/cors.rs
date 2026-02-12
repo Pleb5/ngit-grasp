@@ -14,6 +14,7 @@
 //! cd grasp-audit && nix develop -c bash test-ngit-relay.sh --mode test
 //! ```
 
+use crate::specs::grasp01::SpecRef;
 use crate::{AuditClient, AuditResult, FixtureKind, TestContext, TestResult};
 use nostr_sdk::prelude::*;
 
@@ -44,7 +45,7 @@ impl CorsTests {
     pub async fn test_cors_allow_origin(_client: &AuditClient, relay_domain: &str) -> TestResult {
         TestResult::new(
             "cors_allow_origin",
-            "GRASP-01:git-http:cors:50",
+            SpecRef::CorsAllowOrigin,
             "Access-Control-Allow-Origin: * on all responses",
         )
         .run(|| {
@@ -90,7 +91,7 @@ impl CorsTests {
     pub async fn test_cors_allow_methods(_client: &AuditClient, relay_domain: &str) -> TestResult {
         TestResult::new(
             "cors_allow_methods",
-            "GRASP-01:git-http:cors:51",
+            SpecRef::CorsAllowMethods,
             "Access-Control-Allow-Methods: GET, POST on all responses",
         )
         .run(|| {
@@ -134,7 +135,7 @@ impl CorsTests {
     pub async fn test_cors_allow_headers(_client: &AuditClient, relay_domain: &str) -> TestResult {
         TestResult::new(
             "cors_allow_headers",
-            "GRASP-01:git-http:cors:52",
+            SpecRef::CorsAllowHeaders,
             "Access-Control-Allow-Headers: Content-Type on all responses",
         )
         .run(|| {
@@ -181,8 +182,8 @@ impl CorsTests {
     ) -> TestResult {
         TestResult::new(
             "cors_options_preflight",
-            "GRASP-01:git-http:cors:53",
-            "OPTIONS requests return 204 No Content",
+            SpecRef::CorsOptionsResponse,
+            "OPTIONS requests return 204 No Content with CORS headers",
         )
         .run(|| {
             let relay_domain = relay_domain.to_string();
@@ -250,8 +251,8 @@ impl CorsTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01",
-                    "CORS headers on real repository endpoint",
+                    SpecRef::CorsAllowOrigin,
+                    "CORS headers on real repository endpoints",
                 )
                 .fail(format!("Failed to create repo fixture: {}", e))
             }
@@ -271,8 +272,8 @@ impl CorsTests {
             None => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01",
-                    "CORS headers on real repository endpoint",
+                    SpecRef::CorsAllowOrigin,
+                    "CORS headers on real repository endpoints",
                 )
                 .fail("Repository announcement missing d tag")
             }
@@ -283,8 +284,8 @@ impl CorsTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01",
-                    "CORS headers on real repository endpoint",
+                    SpecRef::CorsAllowOrigin,
+                    "CORS headers on real repository endpoints",
                 )
                 .fail(format!("Failed to convert pubkey to npub: {}", e))
             }
@@ -302,8 +303,8 @@ impl CorsTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01",
-                    "CORS headers on real repository endpoint",
+                    SpecRef::CorsAllowOrigin,
+                    "CORS headers on real repository endpoints",
                 )
                 .fail(format!("Failed to GET info/refs: {}", e))
             }
@@ -313,8 +314,8 @@ impl CorsTests {
         if let Err(e) = check_cors_allow_origin(&response, "info/refs") {
             return TestResult::new(
                 test_name,
-                "GRASP-01",
-                "CORS headers on real repository endpoint",
+                SpecRef::CorsAllowOrigin,
+                "CORS headers on real repository endpoints",
             )
             .fail(&e);
         }
@@ -322,8 +323,8 @@ impl CorsTests {
         if let Err(e) = check_cors_allow_methods(&response, "info/refs") {
             return TestResult::new(
                 test_name,
-                "GRASP-01",
-                "CORS headers on real repository endpoint",
+                SpecRef::CorsAllowMethods,
+                "CORS headers on real repository endpoints",
             )
             .fail(&e);
         }
@@ -331,16 +332,16 @@ impl CorsTests {
         if let Err(e) = check_cors_allow_headers(&response, "info/refs") {
             return TestResult::new(
                 test_name,
-                "GRASP-01",
-                "CORS headers on real repository endpoint",
+                SpecRef::CorsAllowHeaders,
+                "CORS headers on real repository endpoints",
             )
             .fail(&e);
         }
 
         TestResult::new(
             test_name,
-            "GRASP-01",
-            "CORS headers on real repository endpoint",
+            SpecRef::CorsAllowOrigin,
+            "CORS headers on real repository endpoints",
         )
         .pass()
     }

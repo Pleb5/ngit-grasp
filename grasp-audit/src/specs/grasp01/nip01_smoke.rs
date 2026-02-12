@@ -4,6 +4,7 @@
 //! We don't comprehensively test NIP-01 because rust-nostr already has 1000+ tests.
 //! These are just smoke tests to ensure the relay is working at all.
 
+use crate::specs::grasp01::SpecRef;
 use crate::{AuditClient, AuditResult, FixtureKind, TestContext, TestResult};
 use nostr_sdk::prelude::*;
 
@@ -32,8 +33,8 @@ impl Nip01SmokeTests {
     pub async fn test_websocket_connection(client: &AuditClient) -> TestResult {
         TestResult::new(
             "websocket_connection",
-            "GRASP-01:nostr-relay:7",
-            "Can establish WebSocket connection to /",
+            SpecRef::NostrRelayNip01Compliant,
+            "MUST serve a relay at / via WebSocket",
         )
         .run(|| async {
             if !client.is_connected().await {
@@ -61,8 +62,8 @@ impl Nip01SmokeTests {
     pub async fn test_send_receive_event(client: &AuditClient) -> TestResult {
         TestResult::new(
             "send_receive_event",
-            "GRASP-01:nostr-relay:7",
-            "Can send EVENT and receive OK response",
+            SpecRef::NostrRelayNip01Compliant,
+            "MUST accept valid EVENT messages",
         )
         .run(|| async {
             // Step 1: GENERATE - Create TestContext and get ValidRepo fixture
@@ -127,8 +128,8 @@ impl Nip01SmokeTests {
     pub async fn test_create_subscription(client: &AuditClient) -> TestResult {
         TestResult::new(
             "create_subscription",
-            "GRASP-01:nostr-relay:7",
-            "Can create subscription with REQ and receive EOSE",
+            SpecRef::NostrRelayNip01Compliant,
+            "MUST support REQ subscriptions",
         )
         .run(|| async {
             // Step 1: GENERATE - Create TestContext and get ValidRepo fixture
@@ -165,8 +166,8 @@ impl Nip01SmokeTests {
     pub async fn test_close_subscription(client: &AuditClient) -> TestResult {
         TestResult::new(
             "close_subscription",
-            "GRASP-01:nostr-relay:7",
-            "Can close subscriptions",
+            SpecRef::NostrRelayNip01Compliant,
+            "MUST support CLOSE to end subscriptions",
         )
         .run(|| async {
             // For now, we just verify we can query events
@@ -193,8 +194,8 @@ impl Nip01SmokeTests {
     pub async fn test_reject_invalid_signature(client: &AuditClient) -> TestResult {
         TestResult::new(
             "reject_invalid_signature",
-            "GRASP-01:nostr-relay:7",
-            "Rejects events with invalid signatures",
+            SpecRef::NostrRelayNip01Compliant,
+            "MUST reject events with invalid signatures",
         )
         .run(|| async {
             // Create a valid event
@@ -247,8 +248,8 @@ impl Nip01SmokeTests {
     pub async fn test_reject_invalid_event_id(client: &AuditClient) -> TestResult {
         TestResult::new(
             "reject_invalid_event_id",
-            "GRASP-01:nostr-relay:7",
-            "Rejects events with invalid event IDs",
+            SpecRef::NostrRelayNip01Compliant,
+            "MUST reject events where ID doesn't match hash",
         )
         .run(|| async {
             // Create a valid event

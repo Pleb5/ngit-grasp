@@ -1,6 +1,6 @@
 //! Test result types
 
-use crate::specs::grasp01::{get_sections, GRASP_01_REQUIREMENTS, GRASP_COMMIT_ID};
+use crate::specs::grasp01::{get_sections, SpecRef, GRASP_01_REQUIREMENTS, GRASP_COMMIT_ID};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -68,10 +68,16 @@ pub struct TestResult {
 
 impl TestResult {
     /// Create a new test result
-    pub fn new(name: &str, spec_ref: &str, requirement: &str) -> Self {
+    ///
+    /// # Arguments
+    /// * `name` - Test name identifier
+    /// * `spec_ref` - Reference to the spec requirement being tested
+    /// * `requirement` - Human-readable description of what this test validates
+    ///   (can be more specific than the general spec text)
+    pub fn new(name: &str, spec_ref: SpecRef, requirement: &str) -> Self {
         TestResult {
             name: name.to_string(),
-            spec_ref: spec_ref.to_string(),
+            spec_ref: spec_ref.spec_ref_string().to_string(),
             requirement: requirement.to_string(),
             passed: false,
             error: None,
@@ -293,9 +299,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_result_pass() {
-        let result = TestResult::new("test", "SPEC:1", "Must work")
-            .run(|| async { Ok(()) })
-            .await;
+        let result = TestResult::new(
+            "test",
+            SpecRef::NostrRelayNip01Compliant,
+            "Test requirement",
+        )
+        .run(|| async { Ok(()) })
+        .await;
 
         assert!(result.passed);
         assert!(result.error.is_none());
@@ -303,9 +313,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_result_fail() {
-        let result = TestResult::new("test", "SPEC:1", "Must work")
-            .run(|| async { Err("Failed".to_string()) })
-            .await;
+        let result = TestResult::new(
+            "test",
+            SpecRef::NostrRelayNip01Compliant,
+            "Test requirement",
+        )
+        .run(|| async { Err("Failed".to_string()) })
+        .await;
 
         assert!(!result.passed);
         assert_eq!(result.error, Some("Failed".to_string()));
@@ -315,8 +329,15 @@ mod tests {
     fn test_audit_result() {
         let mut audit = AuditResult::new("Test Spec");
 
-        audit.add(TestResult::new("test1", "SPEC:1", "Req1").pass());
-        audit.add(TestResult::new("test2", "SPEC:2", "Req2").fail("Error"));
+        audit.add(TestResult::new("test1", SpecRef::NostrRelayNip01Compliant, "Test 1").pass());
+        audit.add(
+            TestResult::new(
+                "test2",
+                SpecRef::NostrRelayRejectMissingCloneRelays,
+                "Test 2",
+            )
+            .fail("Error"),
+        );
 
         assert_eq!(audit.total_count(), 2);
         assert_eq!(audit.passed_count(), 1);
