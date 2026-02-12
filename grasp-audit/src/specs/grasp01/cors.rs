@@ -246,7 +246,7 @@ impl CorsTests {
         let ctx = TestContext::new(client);
 
         // Create repository announcement to get a real repo path
-        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepoSent).await {
             Ok(r) => r,
             Err(e) => {
                 return TestResult::new(

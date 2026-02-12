@@ -62,7 +62,7 @@ impl GitFilterTests {
         let ctx = TestContext::new(client);
 
         // Create repository announcement
-        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepoSent).await {
             Ok(r) => r,
             Err(e) => {
                 return TestResult::new(
@@ -185,7 +185,7 @@ impl GitFilterTests {
         let ctx = TestContext::new(client);
 
         // Create repository announcement
-        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepoSent).await {
             Ok(r) => r,
             Err(e) => {
                 return TestResult::new(
@@ -296,7 +296,7 @@ impl GitFilterTests {
         let ctx = TestContext::new(client);
 
         // Create repository announcement
-        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepoSent).await {
             Ok(r) => r,
             Err(e) => {
                 return TestResult::new(

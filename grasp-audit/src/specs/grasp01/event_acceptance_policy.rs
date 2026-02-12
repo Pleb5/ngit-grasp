@@ -157,12 +157,15 @@ impl EventAcceptancePolicyTests {
             let ctx = TestContext::new(client);
 
             // Request repository fixture - behavior depends on mode
-            let event = ctx.get_fixture(FixtureKind::ValidRepo).await.map_err(|e| {
-                format!(
-                    "Test setup failed: could not get valid repository fixture: {}",
-                    e
-                )
-            })?;
+            let event = ctx
+                .get_fixture(FixtureKind::ValidRepoServed)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Test setup failed: could not get valid repository fixture: {}",
+                        e
+                    )
+                })?;
 
             // Get relay URL for validation
             let relay_url = client
@@ -602,12 +605,15 @@ impl EventAcceptancePolicyTests {
             let ctx = TestContext::new(client);
 
             // NEW: Get repository fixture (mode-aware)
-            let repo = ctx.get_fixture(FixtureKind::ValidRepo).await.map_err(|e| {
-                format!(
-                    "Test setup failed: could not get valid repository fixture: {}",
-                    e
-                )
-            })?;
+            let repo = ctx
+                .get_fixture(FixtureKind::ValidRepoServed)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Test setup failed: could not get valid repository fixture: {}",
+                        e
+                    )
+                })?;
 
             // 2. Create issue that references the repo
             let issue = Self::create_issue_for_repo(client, &repo, "Test Issue 1")?;
@@ -637,12 +643,15 @@ impl EventAcceptancePolicyTests {
             let ctx = TestContext::new(client);
 
             // Get repository fixture (mode-aware)
-            let repo = ctx.get_fixture(FixtureKind::ValidRepo).await.map_err(|e| {
-                format!(
-                    "Test setup failed: could not get valid repository fixture: {}",
-                    e
-                )
-            })?;
+            let repo = ctx
+                .get_fixture(FixtureKind::ValidRepoServed)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Test setup failed: could not get valid repository fixture: {}",
+                        e
+                    )
+                })?;
 
             // Extract repo_id and create `A` tag manually
             let repo_id =
@@ -690,12 +699,15 @@ impl EventAcceptancePolicyTests {
             let ctx = TestContext::new(client);
 
             // Get repository fixture (mode-aware)
-            let repo = ctx.get_fixture(FixtureKind::ValidRepo).await.map_err(|e| {
-                format!(
-                    "Test setup failed: could not get valid repository fixture: {}",
-                    e
-                )
-            })?;
+            let repo = ctx
+                .get_fixture(FixtureKind::ValidRepoServed)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Test setup failed: could not get valid repository fixture: {}",
+                        e
+                    )
+                })?;
 
             // Extract repo_id and create `q` tag
             let repo_id =
@@ -825,12 +837,15 @@ impl EventAcceptancePolicyTests {
             let ctx = TestContext::new(client);
 
             // Get repository fixture (mode-aware)
-            let repo = ctx.get_fixture(FixtureKind::ValidRepo).await.map_err(|e| {
-                format!(
-                    "Test setup failed: could not get valid repository fixture: {}",
-                    e
-                )
-            })?;
+            let repo = ctx
+                .get_fixture(FixtureKind::ValidRepoServed)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Test setup failed: could not get valid repository fixture: {}",
+                        e
+                    )
+                })?;
 
             // Create Kind 1 A that quotes the repo (makes it accepted)
             let repo_id = Self::extract_d_tag(&repo).ok_or("Failed to extract repo_id")?;
@@ -881,12 +896,15 @@ impl EventAcceptancePolicyTests {
             let ctx = TestContext::new(client);
 
             // Get repository fixture (mode-aware)
-            let repo = ctx.get_fixture(FixtureKind::ValidRepo).await.map_err(|e| {
-                format!(
-                    "Test setup failed: could not get valid repository fixture: {}",
-                    e
-                )
-            })?;
+            let repo = ctx
+                .get_fixture(FixtureKind::ValidRepoServed)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Test setup failed: could not get valid repository fixture: {}",
+                        e
+                    )
+                })?;
 
             // Verify repo is queryable (ensures it's fully indexed before we reference it)
             let repo_id = Self::extract_d_tag(&repo).ok_or("Failed to extract repo_id")?;
@@ -1034,12 +1052,15 @@ impl EventAcceptancePolicyTests {
             let ctx = TestContext::new(client);
 
             // Get repository fixture (mode-aware)
-            let repo = ctx.get_fixture(FixtureKind::ValidRepo).await.map_err(|e| {
-                format!(
-                    "Test setup failed: could not get valid repository fixture: {}",
-                    e
-                )
-            })?;
+            let repo = ctx
+                .get_fixture(FixtureKind::ValidRepoServed)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Test setup failed: could not get valid repository fixture: {}",
+                        e
+                    )
+                })?;
 
             // Create Kind 1 A locally but DON'T send it yet
             let kind1_a = client
@@ -1148,12 +1169,15 @@ impl EventAcceptancePolicyTests {
             let ctx = TestContext::new(client);
 
             // Get accepted repo A fixture (mode-aware)
-            let _repo_a = ctx.get_fixture(FixtureKind::ValidRepo).await.map_err(|e| {
-                format!(
-                    "Test setup failed: could not get valid repository fixture: {}",
-                    e
-                )
-            })?;
+            let _repo_a = ctx
+                .get_fixture(FixtureKind::ValidRepoServed)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Test setup failed: could not get valid repository fixture: {}",
+                        e
+                    )
+                })?;
 
             // Create Repo B but DON'T send it (unaccepted)
             let repo_b = Self::create_test_repo(client, "unaccepted-repo-b").await?;

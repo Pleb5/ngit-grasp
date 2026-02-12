@@ -208,7 +208,7 @@ async fn setup_pr_test_repo(
 ) -> Result<(PathBuf, String, String, String), String> {
     // Get fixtures
     let repo_event = ctx
-        .get_fixture(FixtureKind::ValidRepo)
+        .get_fixture(FixtureKind::ValidRepoSent)
         .await
         .map_err(|e| format!("Failed to get repo announcement: {}", e))?;
 
@@ -407,7 +407,7 @@ impl PushAuthorizationTests {
         let ctx = TestContext::new(client);
 
         // Create repository (no state event)
-        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepoSent).await {
             Ok(r) => r,
             Err(e) => {
                 return TestResult::new(
@@ -956,7 +956,7 @@ impl PushAuthorizationTests {
         // ============================================================
         let ctx = TestContext::new(client);
 
-        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepoSent).await {
             Ok(r) => r,
             Err(e) => {
                 return TestResult::new(
@@ -1110,7 +1110,7 @@ impl PushAuthorizationTests {
         let pr_event_id = pr_event.id.to_hex();
 
         // Get repo info for cloning (fresh clone for verification)
-        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepoSent).await {
             Ok(r) => r,
             Err(e) => {
                 return TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc)
@@ -1198,7 +1198,7 @@ impl PushAuthorizationTests {
         let pr_event_id = pr_event.id.to_hex();
 
         // Get repo info for cloning (fresh clone for this test)
-        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepoSent).await {
             Ok(r) => r,
             Err(e) => {
                 return TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc)
@@ -1289,7 +1289,7 @@ impl PushAuthorizationTests {
         let pr_event_id = pr_event.id.to_hex();
 
         // Get repo info for cloning (fresh clone for this test)
-        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepoSent).await {
             Ok(r) => r,
             Err(e) => {
                 return TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc)
@@ -1425,7 +1425,7 @@ impl PushAuthorizationTests {
         // ============================================================
         // Step 2: Extract repo_id and owner npub from ValidRepo (cached by fixture)
         // ============================================================
-        let valid_repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+        let valid_repo = match ctx.get_fixture(FixtureKind::ValidRepoSent).await {
             Ok(e) => e,
             Err(e) => {
                 return TestResult::new(test_name, SpecRef::GitSetHeadOnReceive, desc)
@@ -1528,7 +1528,7 @@ impl PushAuthorizationTests {
         // ============================================================
         // Step 2: Extract repo_id and owner npub from ValidRepo (cached by fixture)
         // ============================================================
-        let valid_repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+        let valid_repo = match ctx.get_fixture(FixtureKind::ValidRepoSent).await {
             Ok(e) => e,
             Err(e) => {
                 return TestResult::new(test_name, SpecRef::GitSetHeadOnReceive, desc)

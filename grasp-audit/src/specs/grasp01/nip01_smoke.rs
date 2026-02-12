@@ -69,7 +69,7 @@ impl Nip01SmokeTests {
             // Step 1: GENERATE - Create TestContext and get ValidRepo fixture
             let ctx = TestContext::new(client);
             let event = ctx
-                .get_fixture(FixtureKind::ValidRepo)
+                .get_fixture(FixtureKind::ValidRepoSent)
                 .await
                 .map_err(|e| format!("Failed to create ValidRepo fixture: {}", e))?;
 
@@ -135,7 +135,7 @@ impl Nip01SmokeTests {
             // Step 1: GENERATE - Create TestContext and get ValidRepo fixture
             let ctx = TestContext::new(client);
             let _event = ctx
-                .get_fixture(FixtureKind::ValidRepo)
+                .get_fixture(FixtureKind::ValidRepoSent)
                 .await
                 .map_err(|e| format!("Failed to create ValidRepo fixture: {}", e))?;
 

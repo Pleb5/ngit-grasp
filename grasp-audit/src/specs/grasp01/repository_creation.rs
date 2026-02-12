@@ -51,7 +51,7 @@ impl RepositoryCreationTests {
         let ctx = TestContext::new(client);
 
         // Use TestContext to create and send repository announcement
-        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepoSent).await {
             Ok(r) => r,
             Err(e) => {
                 return TestResult::new(
@@ -131,7 +131,7 @@ impl RepositoryCreationTests {
         let ctx = TestContext::new(client);
 
         // Create a repository announcement
-        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepoSent).await {
             Ok(r) => r,
             Err(e) => {
                 return TestResult::new(
@@ -210,7 +210,7 @@ impl RepositoryCreationTests {
 
         let ctx = TestContext::new(client);
 
-        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepoSent).await {
             Ok(r) => r,
             Err(e) => {
                 return TestResult::new(

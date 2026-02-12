@@ -245,7 +245,7 @@ pub async fn test_something(client: &AuditClient) -> TestResult {
             let ctx = TestContext::new(client);
 
             // 2. Prerequisites (cached per-TestContext)
-            let repo = ctx.get_fixture(FixtureKind::ValidRepo).await?;
+            let repo = ctx.get_fixture(FixtureKind::ValidRepoSent).await?;
 
             // 3. Test-specific event
             let my_event = client.create_issue(&repo, "Title", "Content", vec![])?;

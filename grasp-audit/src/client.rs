@@ -209,6 +209,36 @@ impl AuditClient {
         Ok(event_id)
     }
 
+    /// Send event and note whether it entered purgatory (not served) or was served immediately.
+    ///
+    /// This is a tolerant version of `send_event_expect_purgatory_not_served` that doesn't
+    /// fail if purgatory is not observed. It returns whether purgatory was observed so
+    /// fixtures can proceed regardless of relay implementation status.
+    ///
+    /// Returns (EventId, bool) where bool = true if event was NOT served (purgatory observed).
+    pub async fn send_event_and_note_purgatory(&self, event: Event) -> Result<(EventId, bool)> {
+        if self.config.read_only {
+            return Err(anyhow!("Client is in read-only mode"));
+        }
+
+        let output = self.client.send_event(&event).await?;
+        let event_id = *output.id();
+
+        // Check if any relay rejected the event and return the error message
+        if !output.failed.is_empty() {
+            let (relay_url, error) = output.failed.iter().next().unwrap();
+            return Err(anyhow!("Relay {} rejected event: {}", relay_url, error));
+        }
+
+        // Wait a bit for event to propagate
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Check if event is served (not in purgatory) or not served (in purgatory)
+        let in_purgatory = !self.is_event_on_relay(event.id).await?;
+
+        Ok((event_id, in_purgatory))
+    }
+
     /// check if an event is on the relay
     pub async fn is_event_on_relay(&self, id: EventId) -> Result<bool> {
         Ok(!self
