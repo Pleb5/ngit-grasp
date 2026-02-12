@@ -204,21 +204,22 @@ impl Purgatory {
             .collect()
     }
     
-    /// Transition to soft-expired state
+    /// Transition to soft-expired state (protocol's 30min expiry reached)
     pub fn soft_expire_announcement(
         &self,
         key: &(PublicKey, String),
     ) -> Option<PathBuf> {
         if let Some(mut entry) = self.announcement_purgatory.get_mut(key) {
             entry.soft_expired = true;
-            entry.expires_at = Instant::now() + SOFT_EXPIRY_DURATION; // e.g., 24h
+            entry.expires_at = Instant::now() + SOFT_EXPIRY_DURATION; // e.g., 24h extended retention
             Some(entry.repo_path.clone()) // Return path for bare repo deletion
         } else {
             None
         }
     }
     
-    /// Revive soft-expired announcement (caller must recreate bare repo)
+    /// Revive soft-expired announcement when state event arrives
+    /// (caller must recreate bare repo)
     pub fn revive_announcement(
         &self,
         key: &(PublicKey, String),
@@ -226,7 +227,7 @@ impl Purgatory {
         if let Some(mut entry) = self.announcement_purgatory.get_mut(key) {
             if entry.soft_expired {
                 entry.soft_expired = false;
-                entry.expires_at = Instant::now() + ACTIVE_EXPIRY_DURATION;
+                entry.expires_at = Instant::now() + ACTIVE_EXPIRY_DURATION; // Reset 30min protocol timer
                 return Some(entry.repo_path.clone()); // Caller recreates bare repo
             }
         }
@@ -270,8 +271,10 @@ When a state event arrives for a soft-expired announcement, the state policy mus
 1. Check purgatory for a matching announcement (in addition to DB)
 2. Validate authorization against the purgatory announcement
 3. If soft-expired, call `revive_announcement()` and recreate the bare repo
-4. Extend the announcement's expiry
+4. Extend the announcement's expiry (reset the 30-minute protocol timer)
 5. Route the state event to state purgatory
+
+**Why revival is necessary:** Without soft expiry + revival, late-arriving state events would either be permanently rejected (if we added the announcement to `failed_events`) or cause constant re-syncing of the announcement event. Revival allows us to respect the protocol's 30-minute expiry while still handling delayed state events gracefully.
 
 The exact integration will depend on the current structure of `StatePolicy::process_state_event()` - see implementation phase for details.
 
