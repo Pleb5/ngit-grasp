@@ -517,8 +517,8 @@ impl<'a> TestContext<'a> {
     /// ```no_run
     /// # use grasp_audit::*;
     /// # async fn example(ctx: &TestContext<'_>) -> anyhow::Result<()> {
-    /// // This ensures ValidRepo exists first, then creates MaintainerState
-    /// let state = ctx.ensure_fixture(FixtureKind::MaintainerState).await?;
+    /// // This ensures ValidRepo exists first, then creates RepoState
+    /// let state = ctx.ensure_fixture(FixtureKind::RepoState).await?;
     /// # Ok(())
     /// # }
     /// ```
