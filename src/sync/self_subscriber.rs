@@ -16,7 +16,7 @@ use nostr_sdk::Timestamp;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc};
 
-use super::{AddFilters, RepoSyncIndex, RepoSyncNeeds};
+use super::{AddFilters, RepoSyncIndex, RepoSyncNeeds, SyncLevel};
 
 // =============================================================================
 // LoopControl - Result of notification processing
@@ -58,6 +58,7 @@ impl PendingUpdates {
         let entry = self.repos.entry(repo_id).or_insert_with(|| RepoSyncNeeds {
             relays: HashSet::new(),
             root_events: HashSet::new(),
+            sync_level: SyncLevel::Full,
         });
         entry.relays.extend(relays);
         entry.root_events.extend(root_events);
@@ -475,6 +476,7 @@ impl SelfSubscriber {
                 .or_insert_with(|| RepoSyncNeeds {
                     relays: HashSet::new(),
                     root_events: HashSet::new(),
+                    sync_level: SyncLevel::Full,
                 });
             entry.relays.extend(needs.relays);
             entry.root_events.extend(needs.root_events);
@@ -499,21 +501,26 @@ impl SelfSubscriber {
                 continue;
             }
 
-            // Build filters for these repos
-            let filters = crate::sync::filters::build_layer2_and_layer3_filters(
+            // Build filters for these repos (sync-level-aware)
+            let filters = crate::sync::filters::build_sync_level_aware_filters(
                 &needs.repos,
+                &needs.state_only_repos,
                 &needs.root_events,
                 None,
             );
 
             // Log before moving values
-            let repo_count = needs.repos.len();
+            let repo_count = needs.repos.len() + needs.state_only_repos.len();
             let event_count = needs.root_events.len();
+
+            // Combine all repos into pending items
+            let mut all_repos = needs.repos;
+            all_repos.extend(needs.state_only_repos);
 
             let action = AddFilters {
                 relay_url: relay_url.clone(),
                 items: crate::sync::PendingItems {
-                    repos: needs.repos,
+                    repos: all_repos,
                     root_events: needs.root_events,
                 },
                 filters,

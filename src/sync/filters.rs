@@ -245,6 +245,37 @@ pub fn build_layer2_and_layer3_filters(
     filters
 }
 
+/// Builds filters respecting SyncLevel for each repo
+///
+/// StateOnly repos only get state event filters (kind 30618).
+/// Full repos get all L2/L3 filters (state + repo-tagging + root event).
+///
+/// # Arguments
+/// * `full_repos` - Repos needing full L2+L3 sync
+/// * `state_only_repos` - Repos needing only state event sync (purgatory)
+/// * `root_events` - Root event IDs (only used for Full repos)
+/// * `since` - Optional timestamp for incremental sync
+pub fn build_sync_level_aware_filters(
+    full_repos: &HashSet<String>,
+    state_only_repos: &HashSet<String>,
+    root_events: &HashSet<EventId>,
+    since: Option<Timestamp>,
+) -> Vec<Filter> {
+    let mut filters = Vec::new();
+
+    // All repos (both Full and StateOnly) need state event filters
+    let all_repos: HashSet<String> = full_repos.union(state_only_repos).cloned().collect();
+    filters.extend(state_event_filters_for_our_repos(&all_repos, since));
+
+    // Only Full repos get repo-tagging and root event filters
+    if !full_repos.is_empty() {
+        filters.extend(tagged_one_of_our_repo_event_filters(full_repos, since));
+    }
+    filters.extend(tagged_one_of_our_root_event_filters(root_events, since));
+
+    filters
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

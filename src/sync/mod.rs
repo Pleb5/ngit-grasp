@@ -85,6 +85,19 @@ use rejected_index::RejectedEventsIndex;
 // Supporting Data Structures
 // =============================================================================
 
+/// Level of sync needed for a repository
+///
+/// Purgatory announcements only need state events synced (to validate git data).
+/// Promoted repos need full L2/L3 sync (patches, issues, PRs, etc.).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SyncLevel {
+    /// Full L2 + L3 sync (promoted repos with git data)
+    #[default]
+    Full,
+    /// Only state events (kind 30618) - for purgatory announcements
+    StateOnly,
+}
+
 /// What repos and root events need to be synced
 #[derive(Debug, Clone, Default)]
 pub struct RepoSyncNeeds {
@@ -92,6 +105,8 @@ pub struct RepoSyncNeeds {
     pub relays: HashSet<String>,
     /// Root event IDs - 1617/1618/1621 - that reference this repo
     pub root_events: HashSet<EventId>,
+    /// Sync level - StateOnly for purgatory, Full for promoted repos
+    pub sync_level: SyncLevel,
 }
 
 /// Connection status for a relay
@@ -1677,6 +1692,7 @@ impl SyncManager {
         let eose_tx = self.eose_tx.as_ref().unwrap().clone();
         let metrics_clone = self.metrics.clone();
         let pending_sync_index = Arc::clone(&self.pending_sync_index);
+        let repo_sync_index = Arc::clone(&self.repo_sync_index);
         let health_tracker = Arc::clone(&self.health_tracker);
         let rejected_events_index = Arc::clone(&self.rejected_events_index);
 
@@ -1719,8 +1735,49 @@ impl SyncManager {
                         // For sync-triggered events that go to purgatory, trigger immediate sync
                         // (instead of the default 3-minute delay for user-submitted events)
                         if result == ProcessResult::Purgatory {
+                            // Announcement events (kind 30617) - register in RepoSyncIndex with StateOnly
+                            // so that state events (kind 30618) are synced for this purgatory announcement
+                            if event.kind == Kind::GitRepoAnnouncement {
+                                if let Some(identifier) = event.tags.iter().find_map(|tag| {
+                                    let tag_vec = tag.as_slice();
+                                    if tag_vec.len() >= 2 && tag_vec[0] == "d" {
+                                        Some(tag_vec[1].to_string())
+                                    } else {
+                                        None
+                                    }
+                                }) {
+                                    let repo_id = format!("30617:{}:{}", event.pubkey, identifier);
+
+                                    // Extract relay URLs from the purgatory entry
+                                    let relays = write_policy
+                                        .purgatory()
+                                        .find_announcement(&event.pubkey, &identifier)
+                                        .map(|entry| entry.relays)
+                                        .unwrap_or_default();
+
+                                    tracing::info!(
+                                        event_id = %event.id,
+                                        repo_id = %repo_id,
+                                        relay_count = relays.len(),
+                                        "Registering purgatory announcement in RepoSyncIndex with StateOnly level"
+                                    );
+
+                                    // Register in RepoSyncIndex with StateOnly level
+                                    let mut index = repo_sync_index.write().await;
+                                    let entry = index
+                                        .entry(repo_id)
+                                        .or_insert_with(|| RepoSyncNeeds {
+                                            relays: HashSet::new(),
+                                            root_events: HashSet::new(),
+                                            sync_level: SyncLevel::StateOnly,
+                                        });
+                                    entry.relays.extend(relays);
+                                    // Don't upgrade sync_level if already Full
+                                    // (e.g., if announcement was promoted before this runs)
+                                }
+                            }
                             // State events (kind 30618) - extract identifier and trigger immediate sync
-                            if event.kind.as_u16() == 30618 {
+                            else if event.kind.as_u16() == 30618 {
                                 if let Some(identifier) = event.tags.iter().find_map(|tag| {
                                     let tag_vec = tag.clone().to_vec();
                                     if tag_vec.len() >= 2 && tag_vec[0] == "d" {

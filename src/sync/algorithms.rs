@@ -25,8 +25,10 @@ use super::{ConnectionStatus, PendingBatch, RelayState};
 /// this repo need to sync from", it's "what repos does this relay need to sync".
 #[derive(Debug, Clone, Default)]
 pub struct RelaySyncNeeds {
-    /// Repos that need to be synced from this relay
+    /// Repos that need full L2+L3 sync from this relay
     pub repos: HashSet<String>,
+    /// Repos that only need state event sync (purgatory announcements)
+    pub state_only_repos: HashSet<String>,
     /// Root events that need to be tracked from this relay
     pub root_events: HashSet<EventId>,
 }
@@ -67,8 +69,15 @@ pub fn derive_relay_targets(
         for relay_url in &needs.relays {
             let entry = relay_targets.entry(relay_url.clone()).or_default();
 
-            entry.repos.insert(repo_id.clone());
-            entry.root_events.extend(needs.root_events.iter().cloned());
+            match needs.sync_level {
+                super::SyncLevel::Full => {
+                    entry.repos.insert(repo_id.clone());
+                    entry.root_events.extend(needs.root_events.iter().cloned());
+                }
+                super::SyncLevel::StateOnly => {
+                    entry.state_only_repos.insert(repo_id.clone());
+                }
+            }
         }
     }
 
@@ -96,7 +105,7 @@ pub fn compute_actions(
     pending: &HashMap<String, Vec<PendingBatch>>,
     confirmed: &HashMap<String, RelayState>,
 ) -> Vec<AddFilters> {
-    use crate::sync::filters::build_layer2_and_layer3_filters;
+    use crate::sync::filters::build_sync_level_aware_filters;
 
     let mut actions = Vec::new();
 
@@ -140,9 +149,17 @@ pub fn compute_actions(
             .map(|state| state.root_events.clone())
             .unwrap_or_default();
 
-        // Calculate what's NEW (not in pending, not in confirmed)
-        let new_repos: HashSet<String> = target_needs
+        // Calculate what's NEW for full repos (not in pending, not in confirmed)
+        let new_full_repos: HashSet<String> = target_needs
             .repos
+            .difference(&pending_repos)
+            .filter(|repo| !confirmed_repos.contains(*repo))
+            .cloned()
+            .collect();
+
+        // Calculate what's NEW for state-only repos
+        let new_state_only_repos: HashSet<String> = target_needs
+            .state_only_repos
             .difference(&pending_repos)
             .filter(|repo| !confirmed_repos.contains(*repo))
             .cloned()
@@ -156,13 +173,23 @@ pub fn compute_actions(
             .collect();
 
         // If there's anything new, create an AddFilters action
-        if !new_repos.is_empty() || !new_events.is_empty() {
-            let filters = build_layer2_and_layer3_filters(&new_repos, &new_events, None);
+        if !new_full_repos.is_empty() || !new_state_only_repos.is_empty() || !new_events.is_empty()
+        {
+            let filters = build_sync_level_aware_filters(
+                &new_full_repos,
+                &new_state_only_repos,
+                &new_events,
+                None,
+            );
+
+            // Combine all repos into pending items (pending tracking doesn't need sync level)
+            let mut all_new_repos = new_full_repos;
+            all_new_repos.extend(new_state_only_repos);
 
             actions.push(AddFilters {
                 relay_url: relay_url.clone(),
                 items: PendingItems {
-                    repos: new_repos,
+                    repos: all_new_repos,
                     root_events: new_events,
                 },
                 filters,
@@ -204,6 +231,7 @@ mod tests {
             ModRepoSyncNeeds {
                 relays,
                 root_events,
+                sync_level: Default::default(),
             },
         );
 
@@ -229,6 +257,7 @@ mod tests {
                 ModRepoSyncNeeds {
                     relays,
                     root_events: HashSet::new(),
+                    sync_level: Default::default(),
                 },
             );
         }
@@ -252,6 +281,7 @@ mod tests {
             ModRepoSyncNeeds {
                 relays,
                 root_events: HashSet::new(),
+                sync_level: Default::default(),
             },
         );
 
@@ -285,6 +315,7 @@ mod tests {
             ModRepoSyncNeeds {
                 relays: relays1,
                 root_events: root_events1,
+                sync_level: Default::default(),
             },
         );
 
@@ -299,6 +330,7 @@ mod tests {
             ModRepoSyncNeeds {
                 relays: relays2,
                 root_events: root_events2,
+                sync_level: Default::default(),
             },
         );
 
@@ -332,6 +364,7 @@ mod tests {
             "wss://relay1.com".to_string(),
             RelaySyncNeeds {
                 repos: vec!["repo1".to_string()].into_iter().collect(),
+                state_only_repos: HashSet::new(),
                 root_events: HashSet::new(),
             },
         );
@@ -366,6 +399,7 @@ mod tests {
             "wss://relay1.com".to_string(),
             RelaySyncNeeds {
                 repos: vec!["repo1".to_string()].into_iter().collect(),
+                state_only_repos: HashSet::new(),
                 root_events: HashSet::new(),
             },
         );
@@ -389,6 +423,7 @@ mod tests {
             "wss://relay1.com".to_string(),
             RelaySyncNeeds {
                 repos: vec!["repo1".to_string()].into_iter().collect(),
+                state_only_repos: HashSet::new(),
                 root_events: HashSet::new(),
             },
         );
@@ -428,6 +463,7 @@ mod tests {
             "wss://relay1.com".to_string(),
             RelaySyncNeeds {
                 repos: vec!["repo1".to_string()].into_iter().collect(),
+                state_only_repos: HashSet::new(),
                 root_events: HashSet::new(),
             },
         );
@@ -465,6 +501,7 @@ mod tests {
             "wss://relay1.com".to_string(),
             RelaySyncNeeds {
                 repos: vec!["repo1".to_string()].into_iter().collect(),
+                state_only_repos: HashSet::new(),
                 root_events: HashSet::new(),
             },
         );
@@ -510,6 +547,7 @@ mod tests {
                 ]
                 .into_iter()
                 .collect(),
+                state_only_repos: HashSet::new(),
                 root_events: HashSet::new(),
             },
         );
@@ -572,6 +610,7 @@ mod tests {
             "wss://relay1.com".to_string(),
             RelaySyncNeeds {
                 repos: HashSet::new(),
+                state_only_repos: HashSet::new(),
                 root_events: vec![event_id].into_iter().collect(),
             },
         );
@@ -599,6 +638,7 @@ mod tests {
             "wss://new-relay.com".to_string(),
             RelaySyncNeeds {
                 repos: vec!["repo1".to_string()].into_iter().collect(),
+                state_only_repos: HashSet::new(),
                 root_events: HashSet::new(),
             },
         );
