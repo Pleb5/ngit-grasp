@@ -287,6 +287,39 @@ pub async fn fetch_repository_data(
     })
 }
 
+/// Fetch repository data including announcements from purgatory
+///
+/// This combines database announcements with purgatory announcements,
+/// which is needed for authorization when the announcement hasn't been
+/// promoted yet (no git data has arrived).
+pub async fn fetch_repository_data_with_purgatory(
+    database: &SharedDatabase,
+    purgatory: &crate::purgatory::Purgatory,
+    identifier: &str,
+) -> Result<RepositoryData> {
+    // First, fetch from database
+    let mut repo_data = fetch_repository_data(database, identifier).await?;
+
+    // Then, add announcements from purgatory
+    let purgatory_announcements = purgatory.get_announcements_by_identifier(identifier);
+    let purgatory_count = purgatory_announcements.len();
+
+    for entry in purgatory_announcements {
+        if let Ok(announcement) = RepositoryAnnouncement::from_event(entry.event) {
+            repo_data.announcements.push(announcement);
+        }
+    }
+
+    debug!(
+        "Fetched repository data with purgatory: {} announcements ({} from purgatory), {} states",
+        repo_data.announcements.len(),
+        purgatory_count,
+        repo_data.states.len()
+    );
+
+    Ok(repo_data)
+}
+
 pub fn pubkey_authorised_for_repo_owners(
     pubkey: &PublicKey,
     db_repo_data: &RepositoryData,
@@ -539,8 +572,9 @@ pub async fn get_state_authorization_for_specific_owner_repo(
     use crate::git::list_refs;
     use crate::purgatory::RefUpdate;
 
-    // Fetch announcements only - we don't need database states
-    let repo_data = fetch_repository_data(database, identifier).await?;
+    // Fetch announcements from database AND purgatory - needed for authorization
+    // when the announcement hasn't been promoted yet (no git data has arrived)
+    let repo_data = fetch_repository_data_with_purgatory(database, purgatory, identifier).await?;
 
     if repo_data.announcements.is_empty() {
         return Ok(AuthorizationResult::denied(

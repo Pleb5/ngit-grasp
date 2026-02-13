@@ -142,11 +142,11 @@ async fn main() -> Result<()> {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
             loop {
                 interval.tick().await;
-                let (state_removed, pr_removed) = cleanup_purgatory.cleanup();
-                if state_removed > 0 || pr_removed > 0 {
+                let (announcement_removed, state_removed, pr_removed) = cleanup_purgatory.cleanup();
+                if announcement_removed > 0 || state_removed > 0 || pr_removed > 0 {
                     info!(
-                        "Purgatory cleanup: removed {} state events, {} PR events",
-                        state_removed, pr_removed
+                        "Purgatory cleanup: removed {} announcements, {} state events, {} PR events",
+                        announcement_removed, state_removed, pr_removed
                     );
                 }
             }

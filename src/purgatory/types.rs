@@ -6,6 +6,8 @@
 
 use nostr_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::time::Instant;
 
 /// Default value for Instant fields during deserialization
@@ -112,4 +114,41 @@ pub struct PrPurgatoryEntry {
     /// Expiry deadline (30 min from creation, may be extended)
     #[serde(skip, default = "instant_now")]
     pub expires_at: Instant,
+}
+
+/// Entry for a repository announcement (kind 30617) waiting in purgatory.
+///
+/// Announcements are held in purgatory until git data arrives, proving
+/// the repository has actual content. This prevents serving announcements
+/// for empty repositories.
+///
+/// Note: `Instant` fields cannot be serialized directly. Use the `persistence`
+/// module to convert to/from serializable wrapper types.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnnouncementPurgatoryEntry {
+    /// The nostr announcement event (kind 30617)
+    pub event: Event,
+
+    /// The repository identifier from the event's 'd' tag
+    pub identifier: String,
+
+    /// The owner pubkey (event author)
+    pub owner: PublicKey,
+
+    /// Path to the bare git repository
+    pub repo_path: PathBuf,
+
+    /// Relay URLs from the announcement (for sync registration)
+    pub relays: HashSet<String>,
+
+    /// When this entry was added to purgatory
+    #[serde(skip, default = "instant_now")]
+    pub created_at: Instant,
+
+    /// Expiry deadline (30 min from creation, may be extended)
+    #[serde(skip, default = "instant_now")]
+    pub expires_at: Instant,
+
+    /// Whether the bare repo has been deleted (soft expiry)
+    pub soft_expired: bool,
 }

@@ -120,7 +120,8 @@ async fn test_full_purgatory_save_restore_cycle() {
     // so we'll focus on testing state and PR events persistence
 
     // Verify initial counts
-    let (state_count, pr_count) = purgatory.count();
+    let (announcement_count, state_count, pr_count) = purgatory.count();
+    assert_eq!(announcement_count, 0, "Should have 0 announcements");
     assert_eq!(state_count, 2, "Should have 2 state events");
     assert_eq!(
         pr_count, 3,
@@ -142,7 +143,8 @@ async fn test_full_purgatory_save_restore_cycle() {
     );
 
     // Verify all data was restored
-    let (state_count2, pr_count2) = purgatory2.count();
+    let (announcement_count2, state_count2, pr_count2) = purgatory2.count();
+    assert_eq!(announcement_count2, 0, "Should have 0 announcements after restore");
     assert_eq!(state_count2, 2, "Should have 2 state events after restore");
     assert_eq!(
         pr_count2, 3,
@@ -275,7 +277,7 @@ async fn test_purgatory_downtime_adjustment() {
     purgatory2.restore_from_disk(&state_path).unwrap();
 
     // Verify event is still there (downtime was accounted for)
-    let (state_count, _) = purgatory2.count();
+    let (_, state_count, _) = purgatory2.count();
     assert_eq!(state_count, 1);
 
     let repo1_states = purgatory2.find_state("repo1");
@@ -401,7 +403,7 @@ async fn test_purgatory_restore_missing_file() {
     assert!(result.is_err(), "Should error on missing file");
 
     // Purgatory should still be usable (empty state)
-    let (state_count, pr_count) = purgatory.count();
+    let (_, state_count, pr_count) = purgatory.count();
     assert_eq!(state_count, 0);
     assert_eq!(pr_count, 0);
 
@@ -410,7 +412,7 @@ async fn test_purgatory_restore_missing_file() {
     let event = create_test_event(&keys, "test").await;
     purgatory.add_state(event, "repo1".to_string(), keys.public_key());
 
-    let (state_count, _) = purgatory.count();
+    let (_, state_count, _) = purgatory.count();
     assert_eq!(state_count, 1);
 }
 
@@ -461,7 +463,7 @@ async fn test_purgatory_restore_corrupted_file() {
     assert!(result.is_err(), "Should error on corrupted file");
 
     // Purgatory should still be usable
-    let (state_count, pr_count) = purgatory.count();
+    let (_, state_count, pr_count) = purgatory.count();
     assert_eq!(state_count, 0);
     assert_eq!(pr_count, 0);
 }
@@ -504,7 +506,7 @@ async fn test_empty_purgatory_save_restore() {
     purgatory2.restore_from_disk(&state_path).unwrap();
 
     // Verify empty state
-    let (state_count, pr_count) = purgatory2.count();
+    let (_, state_count, pr_count) = purgatory2.count();
     assert_eq!(state_count, 0);
     assert_eq!(pr_count, 0);
     assert_eq!(purgatory2.expired_count(), 0);
@@ -591,7 +593,7 @@ async fn test_purgatory_continues_working_after_restore() {
     purgatory2.add_state(event2.clone(), "repo2".to_string(), keys.public_key());
 
     // Verify both old and new events work
-    let (state_count, _) = purgatory2.count();
+    let (_, state_count, _) = purgatory2.count();
     assert_eq!(state_count, 2);
 
     let repo1_states = purgatory2.find_state("repo1");
@@ -603,7 +605,7 @@ async fn test_purgatory_continues_working_after_restore() {
     assert_eq!(repo2_states[0].event.id, event2.id);
 
     // Verify cleanup still works
-    let (state_removed, pr_removed) = purgatory2.cleanup();
+    let (_, state_removed, pr_removed) = purgatory2.cleanup();
     // Nothing should be expired yet
     assert_eq!(state_removed, 0);
     assert_eq!(pr_removed, 0);
@@ -684,15 +686,15 @@ async fn test_purgatory_entries_expired_during_downtime() {
     purgatory2.restore_from_disk(&state_path).unwrap();
 
     // Event should be restored
-    let (state_count, _) = purgatory2.count();
+    let (_, state_count, _) = purgatory2.count();
     assert_eq!(state_count, 1);
 
     // Cleanup should work (even if nothing is expired yet)
-    let (state_removed, _) = purgatory2.cleanup();
+    let (_, state_removed, _) = purgatory2.cleanup();
     // Nothing expired yet since we didn't wait 30 minutes
     assert_eq!(state_removed, 0);
 
-    let (state_count, _) = purgatory2.count();
+    let (_, state_count, _) = purgatory2.count();
     assert_eq!(state_count, 1);
 }
 

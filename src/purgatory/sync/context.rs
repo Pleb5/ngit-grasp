@@ -279,7 +279,12 @@ impl SyncContext for RealSyncContext {
     }
 
     async fn fetch_repository_data(&self, identifier: &str) -> Result<RepositoryData> {
-        crate::git::authorization::fetch_repository_data(&self.database, identifier).await
+        crate::git::authorization::fetch_repository_data_with_purgatory(
+            &self.database,
+            &self.purgatory,
+            identifier,
+        )
+        .await
     }
 
     fn collect_needed_oids(&self, identifier: &str) -> HashSet<String> {

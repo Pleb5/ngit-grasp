@@ -1719,8 +1719,50 @@ impl SyncManager {
                         // For sync-triggered events that go to purgatory, trigger immediate sync
                         // (instead of the default 3-minute delay for user-submitted events)
                         if result == ProcessResult::Purgatory {
+                            // Announcements (kind 30617) - re-process rejected state events
+                            // When an announcement goes to purgatory, state events that were
+                            // previously rejected ("no announcement exists") can now be authorized
+                            // via fetch_repository_data_with_purgatory.
+                            if event.kind == Kind::GitRepoAnnouncement {
+                                use crate::nostr::events::RepositoryAnnouncement;
+
+                                if let Ok(announcement) = RepositoryAnnouncement::from_event((*event).clone()) {
+                                    // Re-process rejected state events for this announcement
+                                    let (removed, hot_events) = rejected_events_index.invalidate_and_get(
+                                        &event.pubkey,
+                                        &announcement.identifier,
+                                        Some(rejected_index::EventType::State),
+                                    );
+
+                                    if removed > 0 {
+                                        tracing::info!(
+                                            pubkey = %event.pubkey,
+                                            identifier = %announcement.identifier,
+                                            removed_from_cold_index = removed,
+                                            hot_cache_events = hot_events.len(),
+                                            "Invalidated rejected state events (announcement now in purgatory)"
+                                        );
+                                    }
+
+                                    // Re-process state events from hot cache immediately
+                                    if !hot_events.is_empty() {
+                                        let _stats = Self::reprocess_events_from_hot_cache(
+                                            hot_events,
+                                            "state event (announcement in purgatory)",
+                                            &event.pubkey,
+                                            &announcement.identifier,
+                                            &relay_url_clone,
+                                            &database,
+                                            &write_policy,
+                                            &local_relay,
+                                            &rejected_events_index,
+                                        )
+                                        .await;
+                                    }
+                                }
+                            }
                             // State events (kind 30618) - extract identifier and trigger immediate sync
-                            if event.kind.as_u16() == 30618 {
+                            else if event.kind.as_u16() == 30618 {
                                 if let Some(identifier) = event.tags.iter().find_map(|tag| {
                                     let tag_vec = tag.clone().to_vec();
                                     if tag_vec.len() >= 2 && tag_vec[0] == "d" {
@@ -1754,7 +1796,9 @@ impl SyncManager {
 
                         // Track pagination state for this subscription (REQ+EOSE)
                         // and received event IDs for negentropy batches
-                        if result == ProcessResult::Saved || result == ProcessResult::Duplicate {
+                        // Include Purgatory results so announcements in purgatory still trigger
+                        // per-repo sync (state events, PR events) from the source relay.
+                        if result == ProcessResult::Saved || result == ProcessResult::Duplicate || result == ProcessResult::Purgatory {
                             let mut pending = pending_sync_index.write().await;
                             if let Some(batches) = pending.get_mut(&relay_url_clone) {
                                 for batch in batches.iter_mut() {
@@ -2506,6 +2550,26 @@ impl SyncManager {
                         "{} added to purgatory (waiting for git data)",
                         context
                     );
+                    // Trigger immediate sync for re-processed events that go to purgatory
+                    // (same as sync-triggered events in the main event loop)
+                    if event.kind.as_u16() == 30618 {
+                        // State event - extract identifier from 'd' tag
+                        if let Some(id) = event.tags.iter().find_map(|tag| {
+                            let tag_vec = tag.clone().to_vec();
+                            if tag_vec.len() >= 2 && tag_vec[0] == "d" {
+                                Some(tag_vec[1].clone())
+                            } else {
+                                None
+                            }
+                        }) {
+                            write_policy.purgatory().enqueue_sync_immediate(&id);
+                        }
+                    } else if event.kind.as_u16() == 1617 || event.kind.as_u16() == 1618 {
+                        // PR event - extract identifier from 'a' tag
+                        if let Some(id) = crate::git::sync::extract_identifier_from_pr_event(&event) {
+                            write_policy.purgatory().enqueue_sync_immediate(&id);
+                        }
+                    }
                 }
                 ProcessResult::Rejected => {
                     stats.rejected += 1;

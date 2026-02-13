@@ -51,6 +51,8 @@ use crate::purgatory::{can_apply_state, Purgatory};
 /// or from purgatory sync fetching OIDs from remote servers).
 #[derive(Debug, Default, Clone)]
 pub struct ProcessResult {
+    /// Number of announcements released from purgatory
+    pub announcements_released: usize,
     /// Number of state events released from purgatory
     pub states_released: usize,
     /// Number of PR events released from purgatory
@@ -70,11 +72,12 @@ pub struct ProcessResult {
 impl ProcessResult {
     /// Check if any events were released
     pub fn released_any(&self) -> bool {
-        self.states_released > 0 || self.prs_released > 0
+        self.announcements_released > 0 || self.states_released > 0 || self.prs_released > 0
     }
 
     /// Merge another ProcessResult into this one
     pub fn merge(&mut self, other: ProcessResult) {
+        self.announcements_released += other.announcements_released;
         self.states_released += other.states_released;
         self.prs_released += other.prs_released;
         self.repos_synced += other.repos_synced;
@@ -836,6 +839,18 @@ pub async fn process_newly_available_git_data(
         "Processing newly available git data"
     );
 
+    // Process announcements from purgatory
+    let announcement_result = process_purgatory_announcements(
+        &identifier,
+        source_repo_path,
+        database,
+        local_relay,
+        purgatory,
+        git_data_path,
+    )
+    .await;
+    result.merge(announcement_result);
+
     // Process state events from purgatory
     let state_result = process_purgatory_state_events(
         &identifier,
@@ -863,6 +878,7 @@ pub async fn process_newly_available_git_data(
     if result.released_any() {
         info!(
             identifier = %identifier,
+            announcements_released = result.announcements_released,
             states_released = result.states_released,
             prs_released = result.prs_released,
             repos_synced = result.repos_synced,
@@ -1250,6 +1266,90 @@ async fn process_purgatory_pr_events(
     result
 }
 
+/// Process announcements from purgatory that can now be promoted.
+///
+/// When git data arrives for a repository, any announcements in purgatory
+/// for that repository should be promoted to the database and served to clients.
+async fn process_purgatory_announcements(
+    identifier: &str,
+    source_repo_path: &Path,
+    database: &SharedDatabase,
+    local_relay: Option<&nostr_relay_builder::LocalRelay>,
+    purgatory: &Purgatory,
+    git_data_path: &Path,
+) -> ProcessResult {
+    let mut result = ProcessResult::default();
+
+    // Extract owner pubkey from the source repo path
+    let owner_pubkey = match extract_owner_from_repo_path(source_repo_path, git_data_path) {
+        Some(npub) => npub,
+        None => {
+            debug!(
+                identifier = %identifier,
+                "Could not extract owner from repo path"
+            );
+            return result;
+        }
+    };
+
+    // Parse the npub back to PublicKey
+    let owner = match nostr_sdk::PublicKey::parse(&owner_pubkey) {
+        Ok(pk) => pk,
+        Err(e) => {
+            warn!(
+                identifier = %identifier,
+                owner_pubkey = %owner_pubkey,
+                error = %e,
+                "Failed to parse owner pubkey"
+            );
+            result.errors.push(format!("Failed to parse owner pubkey: {}", e));
+            return result;
+        }
+    };
+
+    // Check if there's an announcement in purgatory for this owner and identifier
+    let announcement_event = purgatory.promote_announcement(&owner, identifier);
+
+    if let Some(event) = announcement_event {
+        // Save to database
+        match database.save_event(&event).await {
+            Ok(_) => {
+                info!(
+                    identifier = %identifier,
+                    event_id = %event.id,
+                    "Promoted announcement from purgatory to database"
+                );
+
+                // Notify WebSocket subscribers
+                if let Some(relay) = local_relay {
+                    if relay.notify_event(event.clone()) {
+                        debug!(
+                            identifier = %identifier,
+                            event_id = %event.id,
+                            "Broadcast announcement event to WebSocket listeners"
+                        );
+                    }
+                }
+
+                result.announcements_released += 1;
+            }
+            Err(e) => {
+                warn!(
+                    identifier = %identifier,
+                    event_id = %event.id,
+                    error = %e,
+                    "Failed to save announcement to database"
+                );
+                result
+                    .errors
+                    .push(format!("Failed to save announcement: {}", e));
+            }
+        }
+    }
+
+    result
+}
+
 /// Extract owner pubkey from a repository path.
 ///
 /// Given a path like `{git_data_path}/{npub}/{identifier}.git`, extracts the npub.
@@ -1271,6 +1371,7 @@ mod tests {
     #[test]
     fn test_process_result_default() {
         let result = ProcessResult::default();
+        assert_eq!(result.announcements_released, 0);
         assert_eq!(result.states_released, 0);
         assert_eq!(result.prs_released, 0);
         assert_eq!(result.repos_synced, 0);
@@ -1282,6 +1383,10 @@ mod tests {
         let mut result = ProcessResult::default();
         assert!(!result.released_any());
 
+        result.announcements_released = 1;
+        assert!(result.released_any());
+
+        result.announcements_released = 0;
         result.states_released = 1;
         assert!(result.released_any());
 
@@ -1293,6 +1398,7 @@ mod tests {
     #[test]
     fn test_process_result_merge() {
         let mut result1 = ProcessResult {
+            announcements_released: 0,
             states_released: 1,
             prs_released: 2,
             repos_synced: 3,
@@ -1303,6 +1409,7 @@ mod tests {
         };
 
         let result2 = ProcessResult {
+            announcements_released: 5,
             states_released: 10,
             prs_released: 20,
             repos_synced: 30,
@@ -1314,6 +1421,7 @@ mod tests {
 
         result1.merge(result2);
 
+        assert_eq!(result1.announcements_released, 5);
         assert_eq!(result1.states_released, 11);
         assert_eq!(result1.prs_released, 22);
         assert_eq!(result1.repos_synced, 33);

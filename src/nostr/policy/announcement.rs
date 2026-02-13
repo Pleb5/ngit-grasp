@@ -3,6 +3,7 @@
 /// Handles validation of NIP-34 repository announcements (kind 30617)
 /// according to GRASP-01 specification.
 use nostr_relay_builder::prelude::{Alphabet, Event, Filter, Kind, PublicKey, SingleLetterTag};
+use std::collections::HashSet;
 
 use super::PolicyContext;
 use crate::config::Config;
@@ -11,12 +12,14 @@ use crate::nostr::events::{validate_announcement, RepositoryAnnouncement};
 /// Result of announcement policy evaluation
 #[derive(Debug, Clone, PartialEq)]
 pub enum AnnouncementResult {
-    /// Accept: Event lists our service (GRASP-01 compliant)
+    /// Accept: Event lists our service (GRASP-01 compliant) - replacement announcement
     Accept,
     /// Accept as maintainer: Event accepted via maintainer exception (multi-maintainer)
     AcceptMaintainer,
     /// Accept as archive: Event accepted via GRASP-05 archive whitelist (read-only)
     AcceptArchive,
+    /// Accept to purgatory: New announcement, waiting for git data
+    AcceptPurgatory,
     /// Reject: Event fails validation with reason
     Reject(String),
 }
@@ -35,10 +38,12 @@ impl AnnouncementPolicy {
 
     /// Validate a repository announcement event
     ///
-    /// Returns `Accept` if the announcement lists the service properly,
-    /// `AcceptMaintainer` if accepted via maintainer exception,
-    /// `AcceptArchive` if accepted via GRASP-05 archive config,
-    /// or `Reject` with reason.
+    /// Returns:
+    /// - `Accept` if this is a replacement announcement (active announcement exists)
+    /// - `AcceptPurgatory` if this is a new announcement (no active announcement exists)
+    /// - `AcceptMaintainer` if accepted via maintainer exception
+    /// - `AcceptArchive` if accepted via GRASP-05 archive config
+    /// - `Reject` with reason if validation fails
     pub async fn validate(&self, event: &Event) -> AnnouncementResult {
         // First, try validation (GRASP-01 + GRASP-05)
         let validation_result = validate_announcement(event, &self.config);
@@ -67,9 +72,109 @@ impl AnnouncementPolicy {
                     Err(_) => AnnouncementResult::Reject(reason),
                 }
             }
-            // Accept, AcceptArchive, or AcceptMaintainer - return as-is
+            AnnouncementResult::Accept | AnnouncementResult::AcceptArchive => {
+                // Parse announcement to check for existing active announcement
+                match RepositoryAnnouncement::from_event(event.clone()) {
+                    Ok(announcement) => {
+                        // Check if there's already an active announcement for this (pubkey, identifier)
+                        match self
+                            .has_active_announcement(&event.pubkey, &announcement.identifier)
+                            .await
+                        {
+                            Ok(true) => {
+                                // Replacement announcement - accept immediately
+                                tracing::debug!(
+                                    identifier = %announcement.identifier,
+                                    "Replacement announcement - accepting immediately"
+                                );
+                                validation_result
+                            }
+                            Ok(false) => {
+                                // New announcement - route to purgatory
+                                tracing::debug!(
+                                    identifier = %announcement.identifier,
+                                    "New announcement - routing to purgatory"
+                                );
+                                AnnouncementResult::AcceptPurgatory
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "Failed to check for existing announcement - rejecting"
+                                );
+                                AnnouncementResult::Reject(format!(
+                                    "Database error checking existing announcement: {}",
+                                    e
+                                ))
+                            }
+                        }
+                    }
+                    Err(e) => AnnouncementResult::Reject(format!(
+                        "Failed to parse announcement: {}",
+                        e
+                    )),
+                }
+            }
+            // AcceptPurgatory shouldn't come from validate_announcement, but handle it
             result => result,
         }
+    }
+
+    /// Check if there's an active announcement in the database for this (pubkey, identifier)
+    async fn has_active_announcement(
+        &self,
+        pubkey: &PublicKey,
+        identifier: &str,
+    ) -> Result<bool, String> {
+        let filter = Filter::new()
+            .kind(Kind::GitRepoAnnouncement)
+            .author(*pubkey)
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::D),
+                identifier.to_string(),
+            );
+
+        let events: Vec<Event> = match self.ctx.database.query(filter).await {
+            Ok(events) => events.into_iter().collect(),
+            Err(e) => return Err(format!("Database query failed: {}", e)),
+        };
+
+        Ok(!events.is_empty())
+    }
+
+    /// Add an announcement to purgatory
+    ///
+    /// Creates the bare repository and stores the announcement in purgatory
+    /// until git data arrives.
+    pub fn add_to_purgatory(&self, event: &Event) -> Result<(), String> {
+        let announcement = RepositoryAnnouncement::from_event(event.clone())
+            .map_err(|e| format!("Failed to parse announcement: {}", e))?;
+
+        // Create bare repository
+        self.ensure_bare_repository(&announcement)?;
+
+        // Build repo path
+        let repo_path = self.ctx.git_data_path.join(announcement.repo_path());
+
+        // Extract relays from announcement
+        let relays: HashSet<String> = announcement.relays.iter().cloned().collect();
+
+        // Add to purgatory
+        self.ctx.purgatory.add_announcement(
+            event.clone(),
+            announcement.identifier.clone(),
+            event.pubkey,
+            repo_path,
+            relays,
+        );
+
+        tracing::info!(
+            identifier = %announcement.identifier,
+            event_id = %event.id,
+            "Added announcement to purgatory"
+        );
+
+        Ok(())
     }
 
     /// Create a bare git repository if it doesn't exist

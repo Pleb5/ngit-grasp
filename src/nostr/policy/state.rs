@@ -10,7 +10,7 @@ use nostr_relay_builder::prelude::Event;
 
 use super::PolicyContext;
 use crate::git;
-use crate::git::authorization::fetch_repository_data;
+use crate::git::authorization::fetch_repository_data_with_purgatory;
 use crate::nostr::events::{validate_state, RepositoryAnnouncement, RepositoryState};
 
 /// Result of state policy evaluation
@@ -76,7 +76,13 @@ impl StatePolicy {
         }
 
         // Get all repositories and state events from db with identifier
-        let db_repo_data = fetch_repository_data(&self.ctx.database, &state.identifier).await?;
+        // Include purgatory announcements for authorization
+        let db_repo_data = fetch_repository_data_with_purgatory(
+            &self.ctx.database,
+            &self.ctx.purgatory,
+            &state.identifier,
+        )
+        .await?;
 
         // CRITICAL: Check if author is authorized via maintainer set
         // State events MUST be rejected if author is not in maintainer set of any accepted announcement

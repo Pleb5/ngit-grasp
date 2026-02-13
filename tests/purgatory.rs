@@ -58,10 +58,10 @@ macro_rules! isolated_purgatory_test {
 }
 
 // ============================================================
-// Announcement Purgatory Tests (commented out - feature not yet implemented)
+// Announcement Purgatory Tests
 // ============================================================
 
-// isolated_purgatory_test!(test_announcement_not_served_before_git_data);
+isolated_purgatory_test!(test_announcement_not_served_before_git_data);
 isolated_purgatory_test!(test_announcement_served_after_git_push);
 isolated_purgatory_test!(test_bare_repo_exists_for_purgatory_announcement);
 isolated_purgatory_test!(test_state_event_accepted_for_purgatory_announcement);

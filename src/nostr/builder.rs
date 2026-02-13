@@ -138,6 +138,29 @@ impl Nip34WritePolicy {
                     }
                 }
             }
+            AnnouncementResult::AcceptPurgatory => {
+                // New announcement - add to purgatory
+                match self.announcement_policy.add_to_purgatory(event) {
+                    Ok(()) => {
+                        tracing::info!(
+                            "Accepted announcement to purgatory: {} (waiting for git data)",
+                            event_id_str
+                        );
+                        WritePolicyResult::Reject {
+                            status: true, // Client sees OK
+                            message: "purgatory: won't be served until git data arrives".into(),
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to add announcement to purgatory {}: {}",
+                            event_id_str,
+                            e
+                        );
+                        WritePolicyResult::reject(e)
+                    }
+                }
+            }
             AnnouncementResult::AcceptMaintainer => {
                 // Parse announcement to get details for logging
                 match RepositoryAnnouncement::from_event(event.clone()) {
