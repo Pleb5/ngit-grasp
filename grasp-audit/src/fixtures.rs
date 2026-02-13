@@ -140,7 +140,7 @@ pub enum FixtureKind {
     ValidRepoServed,
 
     /// Repository with one issue (kind 1621)
-    /// - Requires ValidRepoSent (reuses same repo_id)
+    /// - Requires ValidRepoServed (needs queryable repo for issue to reference)
     RepoWithIssue,
 
     /// Repository with issue and comment (kind 1111)
@@ -154,8 +154,8 @@ pub enum FixtureKind {
     /// - Timestamp: 10 seconds in the past
     RepoState,
 
-    /// PR (Pull Request) event for the SAME repo_id as ValidRepoSent
-    /// - Requires ValidRepoSent (uses same repo_id)
+    /// PR (Pull Request) event for the SAME repo_id as ValidRepoServed
+    /// - Requires ValidRepoServed (uses same repo_id, needs queryable repo)
     /// - Signed by `client.pr_author_keys()`
     /// - Kind 1618 (NIP-34 PR)
     /// - Includes `a` tag referencing the repo
@@ -168,7 +168,7 @@ pub enum FixtureKind {
     /// This is a "Generated" stage fixture - the event is created but not published.
     /// Useful for tests that need the PR event ID before the event exists on the relay.
     ///
-    /// - Requires ValidRepoSent (uses same repo_id)
+    /// - Requires ValidRepoServed (uses same repo_id, needs queryable repo)
     /// - Signed by `client.pr_author_keys()`
     /// - Kind 1618 (NIP-34 PR)
     /// - Includes `c` tag pointing to PR_TEST_COMMIT_HASH
@@ -202,7 +202,7 @@ pub enum FixtureKind {
     /// (the "wrong" commit), but no PR event exists yet on the relay.
     ///
     /// Server state after this fixture:
-    /// - ValidRepoSent announcement on relay
+    /// - ValidRepoServed announcement on relay (repo is queryable)
     /// - refs/nostr/<pr-event-id> exists on git server with wrong commit
     /// - PR event is NOT on relay (but returned for tests to publish later)
     ///
@@ -218,7 +218,7 @@ pub enum FixtureKind {
     /// then the PR event was published (which may trigger cleanup).
     ///
     /// Server state after this fixture:
-    /// - ValidRepoSent announcement on relay
+    /// - ValidRepoServed announcement on relay
     /// - PR event is on relay
     /// - refs/nostr/<pr-event-id> may have been cleaned up (that's what tests verify)
     ///
@@ -343,8 +343,8 @@ impl FixtureKind {
             // Fixtures that depend on ValidRepoServed (need queryable announcement)
             Self::RepoWithIssue => vec![Self::ValidRepoServed],
             Self::RepoState => vec![Self::ValidRepoSent],
-            Self::PREvent => vec![Self::ValidRepoSent],
-            Self::PREventGenerated => vec![Self::ValidRepoSent],
+            Self::PREvent => vec![Self::ValidRepoServed],
+            Self::PREventGenerated => vec![Self::ValidRepoServed],
             Self::PRWrongCommitPushedBeforeEvent => vec![Self::PREventGenerated],
             Self::PREventSentAfterWrongPush => vec![Self::PRWrongCommitPushedBeforeEvent],
 
@@ -777,15 +777,15 @@ impl<'a> TestContext<'a> {
             FixtureKind::PREvent => {
                 use nostr_sdk::prelude::*;
 
-                // ValidRepoSent is ensured by ensure_fixture before this is called
-                let repo = self.get_cached_dependency(FixtureKind::ValidRepoSent)?;
+                // ValidRepoServed is ensured by ensure_fixture before this is called
+                let repo = self.get_cached_dependency(FixtureKind::ValidRepoServed)?;
 
                 let repo_id = repo
                     .tags
                     .iter()
                     .find(|t| t.kind() == TagKind::d())
                     .and_then(|t| t.content())
-                    .ok_or_else(|| anyhow::anyhow!("Missing repo_id in ValidRepoSent fixture"))?
+                    .ok_or_else(|| anyhow::anyhow!("Missing repo_id in ValidRepoServed fixture"))?
                     .to_string();
 
                 // Create PR event 1 second in the past
@@ -820,15 +820,15 @@ impl<'a> TestContext<'a> {
                 // This fixture is for "Generated" stage only
                 use nostr_sdk::prelude::*;
 
-                // ValidRepoSent is ensured by ensure_fixture before this is called
-                let repo = self.get_cached_dependency(FixtureKind::ValidRepoSent)?;
+                // ValidRepoServed is ensured by ensure_fixture before this is called
+                let repo = self.get_cached_dependency(FixtureKind::ValidRepoServed)?;
 
                 let repo_id = repo
                     .tags
                     .iter()
                     .find(|t| t.kind() == TagKind::d())
                     .and_then(|t| t.content())
-                    .ok_or_else(|| anyhow::anyhow!("Missing repo_id in ValidRepoSent fixture"))?
+                    .ok_or_else(|| anyhow::anyhow!("Missing repo_id in ValidRepoServed fixture"))?
                     .to_string();
 
                 // Create PR event 1 second in the past
@@ -1533,8 +1533,8 @@ impl<'a> TestContext<'a> {
         let pr_event = self.get_cached_dependency(FixtureKind::PREventGenerated)?;
         let pr_event_id = pr_event.id.to_hex();
 
-        // Get the ValidRepoSent to extract repo info
-        let repo = self.get_cached_dependency(FixtureKind::ValidRepoSent)?;
+        // Get the ValidRepoServed to extract repo info
+        let repo = self.get_cached_dependency(FixtureKind::ValidRepoServed)?;
         let repo_id = self.extract_repo_id(&repo)?;
 
         // Get relay domain for cloning
@@ -1613,7 +1613,7 @@ impl<'a> TestContext<'a> {
     ///
     /// This fixture builds on PRWrongCommitPushedBeforeEvent by sending the PR event.
     /// After this fixture, the relay has:
-    /// - ValidRepoSent announcement
+    /// - ValidRepoServed announcement
     /// - PR event
     /// - refs/nostr/<pr-event-id> may have been cleaned up (that's what tests verify)
     ///

@@ -66,12 +66,12 @@ impl Nip01SmokeTests {
             "MUST accept valid EVENT messages",
         )
         .run(|| async {
-            // Step 1: GENERATE - Create TestContext and get ValidRepo fixture
+            // Step 1: GENERATE - Create TestContext and get ValidRepoServed fixture
             let ctx = TestContext::new(client);
             let event = ctx
-                .get_fixture(FixtureKind::ValidRepoSent)
+                .get_fixture(FixtureKind::ValidRepoServed)
                 .await
-                .map_err(|e| format!("Failed to create ValidRepo fixture: {}", e))?;
+                .map_err(|e| format!("Failed to create ValidRepoServed fixture: {}", e))?;
 
             let event_id = event.id;
 
@@ -122,7 +122,7 @@ impl Nip01SmokeTests {
     ///
     /// ## Fixture-First Pattern
     ///
-    /// 1. **Generate**: Create TestContext and get ValidRepo fixture
+    /// 1. **Generate**: Create TestContext and get ValidRepoServed fixture
     /// 2. **Send**: Fixture already sends the event to relay
     /// 3. **Verify**: Subscribe and verify we receive the event
     pub async fn test_create_subscription(client: &AuditClient) -> TestResult {
@@ -132,12 +132,12 @@ impl Nip01SmokeTests {
             "MUST support REQ subscriptions",
         )
         .run(|| async {
-            // Step 1: GENERATE - Create TestContext and get ValidRepo fixture
+            // Step 1: GENERATE - Create TestContext and get ValidRepoServed fixture
             let ctx = TestContext::new(client);
             let _event = ctx
-                .get_fixture(FixtureKind::ValidRepoSent)
+                .get_fixture(FixtureKind::ValidRepoServed)
                 .await
-                .map_err(|e| format!("Failed to create ValidRepo fixture: {}", e))?;
+                .map_err(|e| format!("Failed to create ValidRepoServed fixture: {}", e))?;
 
             // Step 2: VERIFY - Subscribe to NIP-34 announcements from this author
             let filter = Filter::new()
