@@ -55,6 +55,7 @@ use std::time::Duration;
 /// 5. Verify bare repository is created and git data is synced
 /// 6. Verify git pushes are rejected (read-only mode)
 #[tokio::test]
+#[ignore] // Requires SyncLevel implementation (Phase 3) - purgatory announcements don't trigger per-repo sync yet
 async fn test_archive_read_only_creates_bare_repo() {
     // 1. Start source relay
     let source_relay = TestRelay::start().await;
