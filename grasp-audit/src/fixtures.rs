@@ -103,6 +103,17 @@ pub const RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH: &str =
 /// - Parent: none (root commit)
 pub const PR_TEST_COMMIT_HASH: &str = "5a51b30e4615b572dcd5b9e487861b58605a5c21";
 
+/// Deterministic commit hash for second PR test fixtures (PRTestCommit2 variant)
+/// This is the hash produced by creating a commit with:
+/// - Message: "PR test deterministic commit 2"
+/// - File: test.txt containing "PR test deterministic commit 2\n" (with trailing newline)
+/// - Author date: 2024-01-01T00:00:00Z
+/// - Committer date: 2024-01-01T00:00:00Z
+/// - GPG signing: disabled
+/// - User: "GRASP Audit Test <test@grasp-audit.local>"
+/// - Parent: none (root commit)
+pub const PR_TEST_COMMIT_HASH_2: &str = "99420bc57835f5bc8ca20ab21a8d12850043920e";
+
 /// Types of test fixtures available
 ///
 /// ## Fixture Dependencies
@@ -216,6 +227,50 @@ pub enum FixtureKind {
     /// - Returns: the sent PR event
     PREventSentAfterWrongPush,
 
+    /// Second PR event generated (built) but NOT sent to relay
+    ///
+    /// Uses PR_TEST_COMMIT_HASH_2 (different from PR_TEST_COMMIT_HASH).
+    /// This allows testing purgatory mechanism with a separate PR event
+    /// that doesn't conflict with existing PR fixtures.
+    ///
+    /// - Requires ValidRepoServed (uses same repo_id, needs git data to exist)
+    /// - Signed by `client.pr_author_keys()`
+    /// - Kind 1618 (NIP-34 PR)
+    /// - Includes `c` tag pointing to PR_TEST_COMMIT_HASH_2
+    /// - NOT sent to relay
+    PREvent2Generated,
+
+    /// Second PR event sent to relay (enters purgatory)
+    ///
+    /// After this fixture:
+    /// - PR event is on relay but NOT served (in purgatory)
+    /// - No git data at refs/nostr/<pr-event-id>
+    ///
+    /// - Requires PREvent2Generated
+    /// - Sends the PR event to relay
+    /// - Returns: the sent PR event (in purgatory)
+    PREvent2Sent,
+
+    /// Git data pushed for second PR event AFTER event was sent
+    ///
+    /// After this fixture:
+    /// - PR event was in purgatory
+    /// - Correct commit pushed to refs/nostr/<pr-event-id>
+    /// - PR event should be released from purgatory
+    ///
+    /// - Requires PREvent2Sent
+    /// - Pushes correct commit (PR_TEST_COMMIT_HASH_2) to refs/nostr/<pr-event-id>
+    /// - Returns: the PR event (should now be served)
+    PREvent2GitDataPushed,
+
+    /// Full fixture: second PR event sent, git pushed, event served
+    ///
+    /// Combines PREvent2Sent + PREvent2GitDataPushed for convenience.
+    ///
+    /// - Requires PREvent2GitDataPushed
+    /// - Returns: the served PR event
+    PREvent2Served,
+
     /// Owner's state event with git data successfully pushed (full 4-stage fixture)
     ///
     /// This fixture represents the complete flow for testing state push authorization:
@@ -293,6 +348,12 @@ impl FixtureKind {
             Self::PRWrongCommitPushedBeforeEvent => vec![Self::PREventGenerated],
             Self::PREventSentAfterWrongPush => vec![Self::PRWrongCommitPushedBeforeEvent],
 
+            // Second PR event fixtures (for purgatory testing)
+            Self::PREvent2Generated => vec![Self::ValidRepoServed],
+            Self::PREvent2Sent => vec![Self::PREvent2Generated],
+            Self::PREvent2GitDataPushed => vec![Self::PREvent2Sent],
+            Self::PREvent2Served => vec![Self::PREvent2GitDataPushed],
+
             Self::OwnerStateDataPushed => vec![Self::ValidRepoSent],
 
             // Fixtures that depend on RepoWithIssue
@@ -329,6 +390,11 @@ impl FixtureKind {
             Self::PRWrongCommitPushedBeforeEvent => true,
             // PREventSentAfterWrongPush sends the PR event internally
             Self::PREventSentAfterWrongPush => true,
+            // Second PR event fixtures handle their own events/git data
+            Self::PREvent2Generated => true,
+            Self::PREvent2Sent => true,
+            Self::PREvent2GitDataPushed => true,
+            Self::PREvent2Served => true,
             // HeadSetToDevelopBranch sends its state event internally
             Self::HeadSetToDevelopBranch => true,
             // ValidRepoServed doesn't send anything itself, just returns cached event
@@ -799,6 +865,11 @@ impl<'a> TestContext<'a> {
             FixtureKind::PREventSentAfterWrongPush => {
                 self.build_pr_event_sent_after_wrong_push().await
             }
+
+            FixtureKind::PREvent2Generated => self.build_pr_event_2_generated().await,
+            FixtureKind::PREvent2Sent => self.build_pr_event_2_sent().await,
+            FixtureKind::PREvent2GitDataPushed => self.build_pr_event_2_git_data_pushed().await,
+            FixtureKind::PREvent2Served => self.build_pr_event_2_served().await,
 
             FixtureKind::OwnerStateDataPushed => self.build_owner_state_data_pushed().await,
 
@@ -1561,6 +1632,173 @@ impl<'a> TestContext<'a> {
         Ok(pr_event)
     }
 
+    /// Build PREvent2Generated fixture
+    ///
+    /// Creates a PR event with `c` tag pointing to PR_TEST_COMMIT_HASH_2.
+    /// The event is NOT sent to the relay.
+    async fn build_pr_event_2_generated(&self) -> Result<Event> {
+        use nostr_sdk::prelude::*;
+
+        let repo = self.get_cached_dependency(FixtureKind::ValidRepoServed)?;
+        let repo_id = self.extract_repo_id(&repo)?;
+
+        let base_time = Timestamp::now().as_secs();
+        let pr_timestamp = Timestamp::from(base_time - 1);
+
+        self.client
+            .event_builder(Kind::GitPullRequest, "Test PR 2 for GRASP validation")
+            .tag(Tag::custom(
+                TagKind::custom("a"),
+                vec![format!(
+                    "30617:{}:{}",
+                    self.client.public_key().to_hex(),
+                    repo_id
+                )],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("c"),
+                vec![PR_TEST_COMMIT_HASH_2.to_string()],
+            ))
+            .custom_time(pr_timestamp)
+            .build(self.client.pr_author_keys())
+            .map_err(|e| anyhow::anyhow!("Failed to build PR event 2: {}", e))
+    }
+
+    /// Build PREvent2Sent fixture
+    ///
+    /// Sends the PR event to relay. Event should enter purgatory.
+    async fn build_pr_event_2_sent(&self) -> Result<Event> {
+        let pr_event = self.get_cached_dependency(FixtureKind::PREvent2Generated)?;
+
+        let (_, in_purgatory) = self
+            .client
+            .send_event_and_note_purgatory(pr_event.clone())
+            .await?;
+
+        if !in_purgatory {
+            return Err(anyhow::anyhow!(
+                "PR event 2 was served immediately - purgatory not implemented"
+            ));
+        }
+
+        Ok(pr_event)
+    }
+
+    /// Build PREvent2GitDataPushed fixture
+    ///
+    /// Pushes correct commit to refs/nostr/<pr-event-id> after event was sent.
+    async fn build_pr_event_2_git_data_pushed(&self) -> Result<Event> {
+        use nostr_sdk::prelude::*;
+
+        let pr_event = self.get_cached_dependency(FixtureKind::PREvent2Sent)?;
+        let pr_event_id = pr_event.id.to_hex();
+
+        let repo = self.get_cached_dependency(FixtureKind::ValidRepoServed)?;
+        let repo_id = self.extract_repo_id(&repo)?;
+
+        let relay_domain = self.get_relay_domain().await?;
+
+        let npub = repo
+            .pubkey
+            .to_bech32()
+            .map_err(|e| anyhow::anyhow!("Failed to convert pubkey: {}", e))?;
+
+        let clone_path = clone_repo(&relay_domain, &npub, &repo_id)
+            .map_err(|e| anyhow::anyhow!("Failed to clone repo: {}", e))?;
+
+        let cleanup = |path: &PathBuf| {
+            let _ = fs::remove_dir_all(path);
+        };
+
+        // Reset to orphan state and create deterministic root commit
+        // Step 1: Create orphan branch (removes all history)
+        let _ = Command::new("git")
+            .args(["checkout", "--orphan", "pr-branch"])
+            .current_dir(&clone_path)
+            .output();
+
+        // Step 2: Clear staged files (orphan keeps files staged from previous branch)
+        let _ = Command::new("git")
+            .args(["rm", "-rf", "--cached", "."])
+            .current_dir(&clone_path)
+            .output();
+
+        // Step 3: Remove all working directory files for clean state (except .git)
+        for entry in
+            fs::read_dir(&clone_path).map_err(|e| anyhow::anyhow!("Failed to read dir: {}", e))?
+        {
+            if let Ok(entry) = entry {
+                let path = entry.path();
+                if path.file_name() != Some(std::ffi::OsStr::new(".git")) {
+                    let _ = fs::remove_file(&path).or_else(|_| fs::remove_dir_all(&path));
+                }
+            }
+        }
+
+        let commit_hash = match create_deterministic_commit_with_variant(
+            &clone_path,
+            CommitVariant::PRTestCommit2,
+        ) {
+            Ok(h) => h,
+            Err(e) => {
+                cleanup(&clone_path);
+                return Err(anyhow::anyhow!("Failed to create PR test commit 2: {}", e));
+            }
+        };
+
+        if commit_hash != PR_TEST_COMMIT_HASH_2 {
+            cleanup(&clone_path);
+            return Err(anyhow::anyhow!(
+                "PR test commit 2 hash mismatch: got {}, expected {}",
+                commit_hash,
+                PR_TEST_COMMIT_HASH_2
+            ));
+        }
+
+        let push_output = Command::new("git")
+            .args([
+                "push",
+                "origin",
+                &format!("pr-branch:refs/nostr/{}", pr_event_id),
+            ])
+            .current_dir(&clone_path)
+            .output()
+            .map_err(|e| {
+                cleanup(&clone_path);
+                anyhow::anyhow!("Failed to execute git push: {}", e)
+            })?;
+
+        cleanup(&clone_path);
+
+        if !push_output.status.success() {
+            let stderr = String::from_utf8_lossy(&push_output.stderr);
+            return Err(anyhow::anyhow!(
+                "Push to refs/nostr/{} failed: {}",
+                pr_event_id,
+                stderr
+            ));
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        Ok(pr_event)
+    }
+
+    /// Build PREvent2Served fixture
+    ///
+    /// Full fixture: event sent, git pushed, event now served.
+    async fn build_pr_event_2_served(&self) -> Result<Event> {
+        let pr_event = self.get_cached_dependency(FixtureKind::PREvent2GitDataPushed)?;
+
+        if !self.client.is_event_on_relay(pr_event.id).await? {
+            return Err(anyhow::anyhow!(
+                "PR event 2 not released from purgatory after git push"
+            ));
+        }
+
+        Ok(pr_event)
+    }
+
     /// Get relay domain (host:port) from the connected relay
     ///
     /// Extracts the domain from the relay URL for git HTTP operations.
@@ -1867,6 +2105,8 @@ pub enum CommitVariant {
     RecursiveMaintainer,
     /// PR test commit variant - for PR event tests
     PRTestCommit,
+    /// Second PR test commit variant - for second PR event tests
+    PRTestCommit2,
 }
 
 impl CommitVariant {
@@ -1877,6 +2117,7 @@ impl CommitVariant {
             CommitVariant::Maintainer => "Maintainer initial commit\n",
             CommitVariant::RecursiveMaintainer => "Recursive maintainer initial commit\n",
             CommitVariant::PRTestCommit => "PR test deterministic commit\n",
+            CommitVariant::PRTestCommit2 => "PR test deterministic commit 2\n",
         }
     }
 
@@ -1887,6 +2128,7 @@ impl CommitVariant {
             CommitVariant::Maintainer => "Maintainer initial commit",
             CommitVariant::RecursiveMaintainer => "Recursive maintainer initial commit",
             CommitVariant::PRTestCommit => "PR test deterministic commit",
+            CommitVariant::PRTestCommit2 => "PR test deterministic commit 2",
         }
     }
 }

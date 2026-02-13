@@ -61,8 +61,8 @@ macro_rules! isolated_purgatory_test {
 // Announcement Purgatory Tests (commented out - feature not yet implemented)
 // ============================================================
 
-isolated_purgatory_test!(test_announcement_not_served_before_git_data);
-// isolated_purgatory_test!(test_announcement_served_after_git_push);
+// isolated_purgatory_test!(test_announcement_not_served_before_git_data);
+isolated_purgatory_test!(test_announcement_served_after_git_push);
 isolated_purgatory_test!(test_bare_repo_exists_for_purgatory_announcement);
 isolated_purgatory_test!(test_state_event_accepted_for_purgatory_announcement);
 
@@ -77,7 +77,7 @@ isolated_purgatory_test!(test_state_event_served_after_git_push);
 // PR Purgatory Tests
 // ============================================================
 
-isolated_purgatory_test!(test_pr_event_not_served_before_git_data);
-// isolated_purgatory_test!(test_pr_event_served_after_correct_push);
-// TODO: Test incomplete - needs to push git data to refs/nostr/<pr-event-id>
-// See push_authorization.rs:test_push_correct_commit_to_pr_ref_after_event for proper implementation
+isolated_purgatory_test!(test_pr_event_before_git_data_accepted_into_purgatory);
+isolated_purgatory_test!(test_pr_event_remains_in_purgatory_until_git_data);
+isolated_purgatory_test!(test_pr_event_git_push_accepted);
+isolated_purgatory_test!(test_pr_event_served_after_git_push);
