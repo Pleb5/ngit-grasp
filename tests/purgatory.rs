@@ -77,7 +77,6 @@ isolated_purgatory_test!(test_state_event_served_after_git_push);
 // PR Purgatory Tests
 // ============================================================
 
-isolated_purgatory_test!(test_pr_event_before_git_data_accepted_into_purgatory);
-isolated_purgatory_test!(test_pr_event_remains_in_purgatory_until_git_data);
-isolated_purgatory_test!(test_pr_event_git_push_accepted);
+isolated_purgatory_test!(test_pr_event_accepted_into_purgatory_and_isnt_served);
+isolated_purgatory_test!(test_pr_event_in_purgatory_git_push_accepted);
 isolated_purgatory_test!(test_pr_event_served_after_git_push);

@@ -23,8 +23,9 @@
 //! - `test_state_event_served_after_git_push`
 //!
 //! ### PR Purgatory (already implemented)
-//! - `test_pr_event_not_served_before_git_data`
-//! - `test_pr_event_served_after_correct_push`
+//! - `test_pr_event_accepted_into_purgatory` - Event accepted, not queryable
+//! - `test_pr_event_in_purgatory_git_push_accepted` - Git push to refs/nostr/<event-id> succeeds
+//! - `test_pr_event_served_after_git_push` - Event becomes queryable after git data
 
 use crate::specs::grasp01::SpecRef;
 use crate::{AuditClient, AuditResult, FixtureKind, TestContext, TestResult};
@@ -50,9 +51,8 @@ impl PurgatoryTests {
         results.add(Self::test_state_event_served_after_git_push(client).await);
 
         // PR purgatory tests
-        results.add(Self::test_pr_event_before_git_data_accepted_into_purgatory(client).await);
-        results.add(Self::test_pr_event_remains_in_purgatory_until_git_data(client).await);
-        results.add(Self::test_pr_event_git_push_accepted(client).await);
+        results.add(Self::test_pr_event_accepted_into_purgatory_and_isnt_served(client).await);
+        results.add(Self::test_pr_event_in_purgatory_git_push_accepted(client).await);
         results.add(Self::test_pr_event_served_after_git_push(client).await);
 
         results
@@ -507,32 +507,44 @@ impl PurgatoryTests {
     // PR Purgatory Tests
     // ============================================================
 
-    /// Test: PR event not served before git data arrives
+    /// Test: PR event accepted into purgatory (not served before git data)
     ///
     /// Spec: GRASP-01 Line 22
     /// "PRs and PR Updates SHOULD be accepted with message
     /// 'purgatory: won't be served until git data arrives'"
     ///
     /// This test verifies:
-    /// 1. Send PR event for a repo
-    /// 2. PR event is NOT queryable (in purgatory)
-    /// 3. No git data exists at refs/nostr/<pr-event-id>
-    pub async fn test_pr_event_before_git_data_accepted_into_purgatory(
+    /// 1. PR event is sent and relay responds OK (accepted)
+    /// 2. PR event is NOT queryable (in purgatory, not served)
+    ///
+    /// PASS means: Relay accepted the event and is holding it in purgatory
+    /// FAIL means: Either event was rejected, or served immediately (purgatory not implemented)
+    ///
+    /// Note: This test cannot distinguish between "event in purgatory" and
+    /// "event accepted but never stored" - both result in event not being queryable.
+    /// The fixture verifies the relay responded OK, which is the best we can do
+    /// with black-box testing.
+    pub async fn test_pr_event_accepted_into_purgatory_and_isnt_served(
         client: &AuditClient,
     ) -> TestResult {
         TestResult::new(
-            "pr_event_before_git_data_accepted_into_purgatory",
+            "pr_event_accepted_into_purgatory",
             SpecRef::PurgatoryAcceptUntilGitData,
-            "PR event SHOULD be accepted into purgatory when git data doesn't exist",
+            "PR event SHOULD be accepted but not served until git data arrives",
         )
         .run(|| async {
             let ctx = TestContext::new(client);
 
+            // PREvent2Sent fixture:
+            // 1. Sends PR event
+            // 2. Verifies relay responded OK (not rejected)
+            // 3. Verifies event is NOT queryable (in purgatory)
             let pr_event = ctx
                 .get_fixture(FixtureKind::PREvent2Sent)
                 .await
                 .map_err(|e| format!("Failed to send PR event: {}", e))?;
 
+            // Double-check: event should not be queryable
             let filter = Filter::new()
                 .kind(Kind::GitPullRequest)
                 .author(client.pr_author_keys().public_key())
@@ -547,7 +559,7 @@ impl PurgatoryTests {
 
             if !events.is_empty() {
                 return Err(format!(
-                    "PR event was served immediately - should be in purgatory. Event ID: {}",
+                    "PR event was served immediately - purgatory not implemented. Event ID: {}",
                     pr_event.id
                 ));
             }
@@ -557,62 +569,26 @@ impl PurgatoryTests {
         .await
     }
 
-    /// Test: PR event remains in purgatory until git data arrives
+    /// Test: Git push to refs/nostr/<pr-event-id> is accepted
     ///
-    /// Verifies the event stays in purgatory until matching git data is pushed.
-    pub async fn test_pr_event_remains_in_purgatory_until_git_data(
-        client: &AuditClient,
-    ) -> TestResult {
-        TestResult::new(
-            "pr_event_remains_in_purgatory_until_git_data",
-            SpecRef::PurgatoryAcceptUntilGitData,
-            "PR event SHOULD remain in purgatory until git data arrives",
-        )
-        .run(|| async {
-            let ctx = TestContext::new(client);
-
-            let pr_event = ctx
-                .get_fixture(FixtureKind::PREvent2Sent)
-                .await
-                .map_err(|e| format!("Failed to get PR event: {}", e))?;
-
-            tokio::time::sleep(Duration::from_millis(500)).await;
-
-            let filter = Filter::new()
-                .kind(Kind::GitPullRequest)
-                .author(client.pr_author_keys().public_key())
-                .id(pr_event.id);
-
-            let events = client
-                .query(filter)
-                .await
-                .map_err(|e| format!("Failed to query PR events: {}", e))?;
-
-            if !events.is_empty() {
-                return Err(format!(
-                    "PR event was served without git data - purgatory not working. Event ID: {}",
-                    pr_event.id
-                ));
-            }
-
-            Ok(())
-        })
-        .await
-    }
-
-    /// Test: Git push accepted for PR event in purgatory
+    /// This test verifies that pushing git data for a PR event in purgatory
+    /// is accepted by the relay.
     ///
-    /// Verifies that pushing the correct commit to refs/nostr/<pr-event-id>
-    /// is accepted.
-    pub async fn test_pr_event_git_push_accepted(client: &AuditClient) -> TestResult {
+    /// PASS means: Git push succeeded, relay accepted the git data
+    /// FAIL means: Git push was rejected (wrong ref, permissions, etc.)
+    pub async fn test_pr_event_in_purgatory_git_push_accepted(client: &AuditClient) -> TestResult {
         TestResult::new(
-            "pr_event_git_push_accepted",
+            "pr_event_in_purgatory_git_push_accepted",
             SpecRef::PurgatoryAcceptUntilGitData,
             "Git push for PR event SHOULD be accepted",
         )
         .run(|| async {
             let ctx = TestContext::new(client);
 
+            // PREvent2GitDataPushed fixture:
+            // 1. Gets PR event in purgatory (PREvent2Sent)
+            // 2. Pushes commit to refs/nostr/<pr-event-id>
+            // 3. Verifies push succeeded
             let _pr_event = ctx
                 .get_fixture(FixtureKind::PREvent2GitDataPushed)
                 .await
@@ -623,9 +599,14 @@ impl PurgatoryTests {
         .await
     }
 
-    /// Test: PR event served after git push
+    /// Test: PR event served after git data arrives
     ///
-    /// Verifies the full purgatory release mechanism.
+    /// This test verifies the full purgatory release mechanism:
+    /// after git data is pushed to refs/nostr/<pr-event-id>, the event
+    /// becomes queryable.
+    ///
+    /// PASS means: Event was released from purgatory and is now served
+    /// FAIL means: Event still not queryable after git push (purgatory release broken)
     pub async fn test_pr_event_served_after_git_push(client: &AuditClient) -> TestResult {
         TestResult::new(
             "pr_event_served_after_git_push",
@@ -635,11 +616,15 @@ impl PurgatoryTests {
         .run(|| async {
             let ctx = TestContext::new(client);
 
+            // PREvent2Served fixture:
+            // 1. Gets PR event with git data pushed (PREvent2GitDataPushed)
+            // 2. Verifies event is now queryable
             let pr_event = ctx
                 .get_fixture(FixtureKind::PREvent2Served)
                 .await
                 .map_err(|e| format!("Failed to complete purgatory release: {}", e))?;
 
+            // Double-check: event should be queryable now
             let filter = Filter::new()
                 .kind(Kind::GitPullRequest)
                 .author(client.pr_author_keys().public_key())
