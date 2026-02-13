@@ -61,49 +61,47 @@ use std::sync::{Arc, Mutex};
 /// Deterministic commit hash used in RepoState fixtures (Owner variant)
 /// This is the hash produced by creating a commit with:
 /// - Message: "Initial commit"
-/// - File: test.txt containing "Initial commit"
+/// - File: test.txt containing "Initial commit\n" (with trailing newline)
 /// - Author date: 2024-01-01T00:00:00Z
 /// - Committer date: 2024-01-01T00:00:00Z
 /// - GPG signing: disabled
 /// - User: "GRASP Audit Test <test@grasp-audit.local>"
-/// - Parent: Initial empty commit (09cc37de80f3434fa98864a86730b8d7777bd6ae)
-pub const DETERMINISTIC_COMMIT_HASH: &str = "64ea71d79a57a7acb334cd9651f8aec067c0ce5d";
+/// - Parent: none (root commit)
+pub const DETERMINISTIC_COMMIT_HASH: &str = "d6e4b26ccf9c268d18d60e6d09804313cc850821";
 
 /// Deterministic commit hash for maintainer fixtures (Maintainer variant)
 /// This is the hash produced by creating a commit with:
 /// - Message: "Maintainer initial commit"
-/// - File: test.txt containing "Maintainer initial commit"
+/// - File: test.txt containing "Maintainer initial commit\n" (with trailing newline)
 /// - Author date: 2024-01-01T00:00:00Z
 /// - Committer date: 2024-01-01T00:00:00Z
 /// - GPG signing: disabled
 /// - User: "GRASP Audit Test <test@grasp-audit.local>"
 /// - Parent: none (root commit)
-///   NOTE: This value is different from DETERMINISTIC_COMMIT_HASH due to different content
-pub const MAINTAINER_DETERMINISTIC_COMMIT_HASH: &str = "1c2d472c9b71ed51968a66500281a3c4a6840464";
+pub const MAINTAINER_DETERMINISTIC_COMMIT_HASH: &str = "d26703c007eff6d17fee3bb70ce8be5d1427d0e7";
 
 /// Deterministic commit hash for recursive maintainer fixtures (RecursiveMaintainer variant)
 /// This is the hash produced by creating a commit with:
 /// - Message: "Recursive maintainer initial commit"
-/// - File: test.txt containing "Recursive maintainer initial commit"
+/// - File: test.txt containing "Recursive maintainer initial commit\n" (with trailing newline)
 /// - Author date: 2024-01-01T00:00:00Z
 /// - Committer date: 2024-01-01T00:00:00Z
 /// - GPG signing: disabled
 /// - User: "GRASP Audit Test <test@grasp-audit.local>"
 /// - Parent: none (root commit)
-///   NOTE: This value is different from DETERMINISTIC_COMMIT_HASH due to different content
 pub const RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH: &str =
-    "05939b82de66fbdb9c077d0a64fc68522f3cb8e0";
+    "54a2b4b3cbc3373ad1438b8ffad1681d12bc6c4a";
 
 /// Deterministic commit hash for PR test fixtures (PRTestCommit variant)
 /// This is the hash produced by creating a commit with:
 /// - Message: "PR test deterministic commit"
-/// - File: test.txt containing "PR test deterministic commit"
+/// - File: test.txt containing "PR test deterministic commit\n" (with trailing newline)
 /// - Author date: 2024-01-01T00:00:00Z
 /// - Committer date: 2024-01-01T00:00:00Z
 /// - GPG signing: disabled
 /// - User: "GRASP Audit Test <test@grasp-audit.local>"
 /// - Parent: none (root commit)
-pub const PR_TEST_COMMIT_HASH: &str = "5d40fb1555a0c28bf4d650515a73aaa54d4d9bfb";
+pub const PR_TEST_COMMIT_HASH: &str = "5a51b30e4615b572dcd5b9e487861b58605a5c21";
 
 /// Types of test fixtures available
 ///
@@ -294,6 +292,7 @@ impl FixtureKind {
             Self::PREventGenerated => vec![Self::ValidRepoSent],
             Self::PRWrongCommitPushedBeforeEvent => vec![Self::PREventGenerated],
             Self::PREventSentAfterWrongPush => vec![Self::PRWrongCommitPushedBeforeEvent],
+
             Self::OwnerStateDataPushed => vec![Self::ValidRepoSent],
 
             // Fixtures that depend on RepoWithIssue
@@ -1874,10 +1873,10 @@ impl CommitVariant {
     /// Get the file content for this variant
     pub fn file_content(&self) -> &'static str {
         match self {
-            CommitVariant::Owner => "Initial commit",
-            CommitVariant::Maintainer => "Maintainer initial commit",
-            CommitVariant::RecursiveMaintainer => "Recursive maintainer initial commit",
-            CommitVariant::PRTestCommit => "PR test deterministic commit",
+            CommitVariant::Owner => "Initial commit\n",
+            CommitVariant::Maintainer => "Maintainer initial commit\n",
+            CommitVariant::RecursiveMaintainer => "Recursive maintainer initial commit\n",
+            CommitVariant::PRTestCommit => "PR test deterministic commit\n",
         }
     }
 

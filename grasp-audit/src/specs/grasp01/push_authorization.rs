@@ -19,7 +19,7 @@
 /// Expected hash for PR test deterministic commit
 ///
 /// This hash is produced by creating a commit with:
-/// - File: test.txt containing "PR test deterministic commit"
+/// - File: test.txt containing "PR test deterministic commit\n" (with trailing newline)
 /// - Message: "PR test deterministic commit"
 /// - Author: "GRASP Audit Test <test@grasp-audit.local>"
 /// - Author date: 2024-01-01T00:00:00Z
@@ -29,7 +29,7 @@
 ///
 /// Run `test_pr_test_commit_hash_discovery` to discover/verify this value.
 #[allow(dead_code)]
-const PR_TEST_COMMIT_HASH: &str = "5d40fb1555a0c28bf4d650515a73aaa54d4d9bfb";
+const PR_TEST_COMMIT_HASH: &str = "5a51b30e4615b572dcd5b9e487861b58605a5c21";
 
 use crate::specs::grasp01::SpecRef;
 use crate::{
@@ -1722,9 +1722,9 @@ mod tests {
             .expect("git config name failed");
         assert!(output.status.success(), "git config name failed");
 
-        // Create the deterministic file content
+        // Create the deterministic file content (must match CommitVariant::PRTestCommit exactly)
         let test_file = path.join("test.txt");
-        fs::write(&test_file, "PR test deterministic commit").expect("Failed to write test file");
+        fs::write(&test_file, "PR test deterministic commit\n").expect("Failed to write test file");
 
         // Add the file
         let output = Command::new("git")
