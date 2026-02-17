@@ -37,7 +37,8 @@ use tracing::{debug, info, warn};
 use nostr_sdk::Event;
 
 use crate::git::authorization::{
-    collect_authorized_maintainers, fetch_repository_data, RepositoryData,
+    collect_authorized_maintainers, fetch_repository_data, fetch_repository_data_with_purgatory,
+    RepositoryData,
 };
 use crate::git::{self, oid_exists};
 use crate::nostr::builder::SharedDatabase;
@@ -923,7 +924,10 @@ async fn process_purgatory_state_events(
     );
 
     // Fetch repository data once for all state events
-    let mut db_repo_data = match fetch_repository_data(database, identifier).await {
+    // IMPORTANT: Use fetch_repository_data_with_purgatory to include announcements
+    // that may still be in purgatory (not yet promoted). This ensures authorization
+    // works correctly even if the announcement promotion happens in the same batch.
+    let mut db_repo_data = match fetch_repository_data_with_purgatory(database, purgatory, identifier).await {
         Ok(data) => data,
         Err(e) => {
             warn!(
