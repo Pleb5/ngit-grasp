@@ -1171,6 +1171,9 @@ async fn process_purgatory_pr_events(
     );
 
     // Fetch repository data for syncing
+    // NOTE: Only fetch from database, NOT purgatory. PR events should only be
+    // released from purgatory when the announcement has been promoted (validated).
+    // This ensures we don't accept PR events for announcements that fail validation.
     let db_repo_data = match fetch_repository_data(database, identifier).await {
         Ok(data) => data,
         Err(e) => {
