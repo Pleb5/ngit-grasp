@@ -154,6 +154,22 @@ pub enum FixtureKind {
     /// - Timestamp: 10 seconds in the past
     RepoState,
 
+    /// Owner's repository state announcement (kind 30618) sent to relay and accepted into purgatory
+    ///
+    /// This is the "sent" stage: the state event has been published to the relay and
+    /// accepted (OK response), but no git data has been pushed yet so it remains in
+    /// purgatory and is not served to clients.
+    ///
+    /// Use this when you need the state event to exist on the relay but do not need
+    /// the full push/serve cycle. For the complete cycle (git pushed + verified served),
+    /// use `OwnerStateDataPushed`.
+    ///
+    /// - Requires ValidRepoSent (uses same repo_id)
+    /// - Signed by owner keys (`client.keys()`)
+    /// - Points to DETERMINISTIC_COMMIT_HASH
+    /// - Timestamp: 10 seconds in the past
+    OwnerRepoStateSent,
+
     /// PR (Pull Request) event for the SAME repo_id as ValidRepoServed
     /// - Requires ValidRepoServed (uses same repo_id, needs queryable repo)
     /// - Signed by `client.pr_author_keys()`
@@ -343,6 +359,8 @@ impl FixtureKind {
             // Fixtures that depend on ValidRepoServed (need queryable announcement)
             Self::RepoWithIssue => vec![Self::ValidRepoServed],
             Self::RepoState => vec![Self::ValidRepoSent],
+            // OwnerRepoStateSent depends on ValidRepoSent: state event sent, sitting in purgatory
+            Self::OwnerRepoStateSent => vec![Self::ValidRepoSent],
             Self::PREvent => vec![Self::ValidRepoServed],
             Self::PREventGenerated => vec![Self::ValidRepoServed],
             Self::PRWrongCommitPushedBeforeEvent => vec![Self::PREventGenerated],
@@ -354,7 +372,8 @@ impl FixtureKind {
             Self::PREvent2GitDataPushed => vec![Self::PREvent2Sent],
             Self::PREvent2Served => vec![Self::PREvent2GitDataPushed],
 
-            Self::OwnerStateDataPushed => vec![Self::ValidRepoSent],
+            // OwnerStateDataPushed depends on OwnerRepoStateSent (git push + purgatory release)
+            Self::OwnerStateDataPushed => vec![Self::OwnerRepoStateSent],
 
             // Fixtures that depend on RepoWithIssue
             Self::RepoWithComment => vec![Self::RepoWithIssue],
@@ -399,6 +418,8 @@ impl FixtureKind {
             Self::HeadSetToDevelopBranch => true,
             // ValidRepoServed doesn't send anything itself, just returns cached event
             Self::ValidRepoServed => true,
+            // OwnerRepoStateSent sends its state event and notes purgatory internally
+            Self::OwnerRepoStateSent => true,
             // All other fixtures return a single event for the caller to send
             _ => false,
         }
@@ -774,6 +795,40 @@ impl<'a> TestContext<'a> {
                     .map_err(|e| anyhow::anyhow!("Failed to build state announcement: {}", e))
             }
 
+            FixtureKind::OwnerRepoStateSent => {
+                use nostr_sdk::prelude::*;
+
+                // ValidRepoSent is ensured by ensure_fixture before this is called
+                let repo = self.get_cached_dependency(FixtureKind::ValidRepoSent)?;
+                let repo_id = self.extract_repo_id(&repo)?;
+
+                let base_time = Timestamp::now().as_secs();
+                let older_timestamp = Timestamp::from(base_time - 10);
+
+                let state_event = self
+                    .client
+                    .event_builder(Kind::RepoState, "")
+                    .tag(Tag::identifier(&repo_id))
+                    .tag(Tag::custom(
+                        TagKind::custom("refs/heads/main"),
+                        vec![DETERMINISTIC_COMMIT_HASH.to_string()],
+                    ))
+                    .tag(Tag::custom(
+                        TagKind::custom("HEAD"),
+                        vec!["ref: refs/heads/main".to_string()],
+                    ))
+                    .custom_time(older_timestamp)
+                    .build(self.client.keys())
+                    .map_err(|e| anyhow::anyhow!("Failed to build state announcement: {}", e))?;
+
+                // Send to relay - event will be accepted but held in purgatory (no git data yet)
+                self.client
+                    .send_event_and_note_purgatory(state_event.clone())
+                    .await?;
+
+                Ok(state_event)
+            }
+
             FixtureKind::PREvent => {
                 use nostr_sdk::prelude::*;
 
@@ -945,57 +1000,26 @@ impl<'a> TestContext<'a> {
             .ok_or_else(|| anyhow::anyhow!("Missing d tag in repo announcement"))
     }
 
-    /// Build OwnerStateDataPushed fixture: full 4-stage fixture for push authorization
+    /// Build OwnerStateDataPushed fixture: git push + purgatory release for owner's state event
     ///
-    /// This handles all stages of the fixture:
-    /// 1. **Generated**: Creates RepoState (repo announcement + state event)
-    /// 2. **Sent**: Sends events to relay (returns OK, accepted but 'purgatory:...' message)
-    /// 3. **Verify Not Served**: Confirms event is not served by relays
-    /// 4. **DataPushed**: Clones repo, creates deterministic commit, pushes to relay
-    /// 5. **Verified**: Confirms event is served by relay
+    /// `OwnerRepoStateSent` is ensured as a dependency before this is called — the state event
+    /// is already on the relay in purgatory. This fixture completes the cycle:
+    /// 1. **DataPushed**: Clones repo, creates deterministic commit, pushes to relay
+    /// 2. **Verified**: Confirms state event is released from purgatory and served
     ///
     /// # Returns
-    /// The state event (kind 30618) after all stages complete successfully
+    /// The state event (kind 30618) after git data is pushed and purgatory is released
     async fn build_owner_state_data_pushed(&self) -> Result<Event> {
         use nostr_sdk::prelude::*;
 
-        // ============================================================
-        // Stage 1: ValidRepoSent is ensured by ensure_fixture before this is called
-        // ============================================================
+        // OwnerRepoStateSent is ensured by ensure_fixture before this is called.
+        // The state event is already on the relay in purgatory - retrieve it from cache.
+        let state_event = self.get_cached_dependency(FixtureKind::OwnerRepoStateSent)?;
         let repo = self.get_cached_dependency(FixtureKind::ValidRepoSent)?;
         let repo_id = self.extract_repo_id(&repo)?;
 
-        // Build state event
-        let base_time = Timestamp::now().as_secs();
-        let older_timestamp = Timestamp::from(base_time - 10); // 10 seconds ago
-
-        let state_event = self
-            .client
-            .event_builder(Kind::RepoState, "")
-            .tag(Tag::identifier(&repo_id))
-            .tag(Tag::custom(
-                TagKind::custom("refs/heads/main"),
-                vec![DETERMINISTIC_COMMIT_HASH.to_string()],
-            ))
-            .tag(Tag::custom(
-                TagKind::custom("HEAD"),
-                vec!["ref: refs/heads/main".to_string()],
-            ))
-            .custom_time(older_timestamp)
-            .build(self.client.keys())
-            .map_err(|e| anyhow::anyhow!("Failed to build state announcement: {}", e))?;
-
         // ============================================================
-        // Stage 2 & 3: Send to Relay, get Accepted response and Verify its Not Served
-        // ============================================================
-        let (_, _in_purgatory) = self
-            .client
-            .send_event_and_note_purgatory(state_event.clone())
-            .await?;
-        // Note: We don't fail if purgatory wasn't observed - the fixture proceeds regardless
-
-        // ============================================================
-        // Stage 4: DataPushed - Clone repo, create commit, push
+        // Stage 1: DataPushed - Clone repo, create commit, push
         // ============================================================
 
         // Get relay domain from connected relay
@@ -1097,7 +1121,7 @@ impl<'a> TestContext<'a> {
         }
 
         // ============================================================
-        // Stage 5: Verify state event is on relay
+        // Stage 2: Verify state event is released from purgatory
         // ============================================================
 
         tokio::time::sleep(Duration::from_millis(200)).await;
