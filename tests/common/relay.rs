@@ -213,8 +213,15 @@ impl TestRelay {
                 "RUST_LOG",
                 std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
             ) // Use RUST_LOG from environment or default to info
-            .stdout(Stdio::null()) // Suppress stdout for cleaner test output
-            .stderr(Stdio::null()); // Suppress stderr for cleaner test output
+            .stdout(
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(format!("/tmp/relay-{}.log", port))
+                    .map(Stdio::from)
+                    .unwrap_or(Stdio::null()),
+            )
+            .stderr(Stdio::inherit()); // Inherit stderr for test output
 
         // Add bootstrap relay URL if provided
         if let Some(ref bootstrap_url) = bootstrap_relay_url {
