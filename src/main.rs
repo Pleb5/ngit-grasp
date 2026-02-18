@@ -132,6 +132,24 @@ async fn main() -> Result<()> {
         // Get a reference to the rejected events index for shutdown persistence
         let shutdown_rejected_index = sync_manager.rejected_events_index();
 
+        // Get a reference to the repo sync index for upgrading sync levels on promotion
+        let repo_sync_index = sync_manager.repo_sync_index();
+
+        // Set the repo sync index on the write policy so user-submitted purgatory
+        // announcements can trigger relay discovery (connect to relays in announcement tags)
+        relay_with_db
+            .write_policy
+            .set_repo_sync_index(repo_sync_index.clone());
+
+        // Get the action sender BEFORE consuming sync_manager with spawn
+        let action_tx = sync_manager.action_tx();
+
+        // Set the sync action sender so the write policy can trigger relay connections
+        // when user-submitted purgatory announcements are registered with StateOnly level
+        if let Some(tx) = action_tx.clone() {
+            relay_with_db.write_policy.set_sync_action_tx(tx);
+        }
+
         tokio::spawn(async move {
             sync_manager.run().await;
         });
@@ -184,6 +202,8 @@ async fn main() -> Result<()> {
             Some(config.domain.clone()),
             Some(relay_with_db.relay.clone()),
             git_naughty_list.clone(),
+            Some(repo_sync_index),
+            action_tx,
         ));
 
         // Create throttle manager for rate limiting remote git servers
