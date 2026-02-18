@@ -139,6 +139,11 @@ impl RelatedEventPolicy {
                 .push((addr, pubkey, identifier));
         }
 
+        // NOTE: Intentionally only checks the database (promoted announcements), not purgatory.
+        // Related events should only be accepted once the repository announcement has been
+        // validated (promoted via git data). Events referencing purgatory-only repositories
+        // are correctly rejected as orphans and can be re-submitted after promotion.
+
         // Query each kind group
         for (kind, refs) in by_kind {
             let authors: Vec<PublicKey> = refs.iter().map(|(_, pk, _)| *pk).collect();

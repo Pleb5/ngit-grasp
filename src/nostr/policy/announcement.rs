@@ -4,6 +4,7 @@
 /// according to GRASP-01 specification.
 use nostr_relay_builder::prelude::{Alphabet, Event, Filter, Kind, PublicKey, SingleLetterTag};
 use std::collections::HashSet;
+use std::time::Duration;
 
 use super::PolicyContext;
 use crate::config::Config;
@@ -39,7 +40,8 @@ impl AnnouncementPolicy {
     /// Validate a repository announcement event
     ///
     /// Returns:
-    /// - `Accept` if this is a replacement announcement (active announcement exists)
+    /// - `Accept` if this is a replacement announcement (active announcement exists in DB or
+    ///   purgatory)
     /// - `AcceptPurgatory` if this is a new announcement (no active announcement exists)
     /// - `AcceptMaintainer` if accepted via maintainer exception
     /// - `AcceptArchive` if accepted via GRASP-05 archive config
@@ -54,6 +56,17 @@ impl AnnouncementPolicy {
                 // GRASP-01 Exception: Accept announcements from recursive maintainers
                 match RepositoryAnnouncement::from_event(event.clone()) {
                     Ok(announcement) => {
+                        // If this pubkey+identifier had a purgatory entry, the owner may be
+                        // sending a new announcement that removes our service. Clear the
+                        // purgatory entry and its bare repo so we don't hold stale data.
+                        if self
+                            .ctx
+                            .purgatory
+                            .has_purgatory_announcement(&event.pubkey, &announcement.identifier)
+                        {
+                            self.remove_purgatory_announcement(&event.pubkey, &announcement.identifier);
+                        }
+
                         match self
                             .is_maintainer_in_any_announcement(
                                 &announcement.identifier,
@@ -76,38 +89,55 @@ impl AnnouncementPolicy {
                 // Parse announcement to check for existing active announcement
                 match RepositoryAnnouncement::from_event(event.clone()) {
                     Ok(announcement) => {
-                        // Check if there's already an active announcement for this (pubkey, identifier)
-                        match self
-                            .has_active_announcement(&event.pubkey, &announcement.identifier)
+                        let in_db = match self
+                            .has_db_announcement(&event.pubkey, &announcement.identifier)
                             .await
                         {
-                            Ok(true) => {
-                                // Replacement announcement - accept immediately
-                                tracing::debug!(
-                                    identifier = %announcement.identifier,
-                                    "Replacement announcement - accepting immediately"
-                                );
-                                validation_result
-                            }
-                            Ok(false) => {
-                                // New announcement - route to purgatory
-                                tracing::debug!(
-                                    identifier = %announcement.identifier,
-                                    "New announcement - routing to purgatory"
-                                );
-                                AnnouncementResult::AcceptPurgatory
-                            }
+                            Ok(v) => v,
                             Err(e) => {
                                 tracing::warn!(
                                     error = %e,
-                                    "Failed to check for existing announcement - rejecting"
+                                    "Failed to check for existing DB announcement - rejecting"
                                 );
-                                AnnouncementResult::Reject(format!(
+                                return AnnouncementResult::Reject(format!(
                                     "Database error checking existing announcement: {}",
                                     e
-                                ))
+                                ));
                             }
+                        };
+
+                        if in_db {
+                            // Replacement announcement with DB entry - accept immediately
+                            tracing::debug!(
+                                identifier = %announcement.identifier,
+                                "Replacement announcement (DB) - accepting immediately"
+                            );
+                            return validation_result;
                         }
+
+                        let in_purgatory = self
+                            .ctx
+                            .purgatory
+                            .has_purgatory_announcement(&event.pubkey, &announcement.identifier);
+
+                        if in_purgatory {
+                            // Replacement announcement with purgatory entry - replace it and
+                            // extend expiry so the new announcement gets a fresh 30-minute window.
+                            tracing::debug!(
+                                identifier = %announcement.identifier,
+                                "Replacement announcement (purgatory) - replacing purgatory entry"
+                            );
+                            self.replace_purgatory_announcement(event, &announcement);
+                            // Return Accept (not AcceptPurgatory) - this is a replacement, not new
+                            return validation_result;
+                        }
+
+                        // No existing announcement - route to purgatory
+                        tracing::debug!(
+                            identifier = %announcement.identifier,
+                            "New announcement - routing to purgatory"
+                        );
+                        AnnouncementResult::AcceptPurgatory
                     }
                     Err(e) => AnnouncementResult::Reject(format!(
                         "Failed to parse announcement: {}",
@@ -120,8 +150,89 @@ impl AnnouncementPolicy {
         }
     }
 
-    /// Check if there's an active announcement in the database for this (pubkey, identifier)
-    async fn has_active_announcement(
+    /// Replace a purgatory announcement entry with a newer event.
+    ///
+    /// Called when a replacement announcement arrives for a (pubkey, identifier) pair
+    /// that is currently in purgatory. Updates the purgatory entry and extends the
+    /// expiry so the new announcement has a fresh waiting window.
+    fn replace_purgatory_announcement(
+        &self,
+        event: &Event,
+        announcement: &RepositoryAnnouncement,
+    ) {
+        let repo_path = self.ctx.git_data_path.join(announcement.repo_path());
+        let relays: HashSet<String> = announcement.relays.iter().cloned().collect();
+
+        // add_announcement uses the (owner, identifier) key so it overwrites the old entry
+        self.ctx.purgatory.add_announcement(
+            event.clone(),
+            announcement.identifier.clone(),
+            event.pubkey,
+            repo_path,
+            relays,
+        );
+
+        // Extend the announcement's expiry (reset to full 30 min window)
+        self.ctx.purgatory.extend_announcement_expiry(
+            &event.pubkey,
+            &announcement.identifier,
+            Duration::from_secs(1800),
+        );
+
+        // Also extend any state events waiting for this identifier
+        let state_entries = self.ctx.purgatory.find_state(&announcement.identifier);
+        if !state_entries.is_empty() {
+            let state_ids: Vec<_> = state_entries.iter().map(|e| e.event.id).collect();
+            self.ctx.purgatory.extend_expiry(
+                &announcement.identifier,
+                &state_ids,
+                Duration::from_secs(1800),
+            );
+        }
+    }
+
+    /// Remove a purgatory announcement and clean up associated resources.
+    ///
+    /// Called when a replacement announcement is rejected (owner removed our service).
+    /// Deletes the bare repository from disk and removes any state events waiting for
+    /// this identifier.
+    fn remove_purgatory_announcement(&self, pubkey: &PublicKey, identifier: &str) {
+        // Get the repo path before removing from purgatory
+        if let Some(entry) = self.ctx.purgatory.find_announcement(pubkey, identifier) {
+            // Delete the bare repository from disk
+            if entry.repo_path.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&entry.repo_path) {
+                    tracing::warn!(
+                        path = %entry.repo_path.display(),
+                        error = %e,
+                        "Failed to delete bare repository during purgatory cleanup"
+                    );
+                } else {
+                    tracing::info!(
+                        path = %entry.repo_path.display(),
+                        "Deleted bare repository for rejected purgatory announcement"
+                    );
+                }
+            }
+        }
+
+        // Remove the announcement from purgatory
+        self.ctx.purgatory.remove_announcement(pubkey, identifier);
+
+        // Remove any state events waiting for this identifier
+        self.ctx.purgatory.remove_state(identifier);
+
+        tracing::info!(
+            identifier = %identifier,
+            "Cleared purgatory entry: owner removed our service from announcement"
+        );
+    }
+
+    /// Check if there's an announcement in the database for this (pubkey, identifier).
+    ///
+    /// Only checks the database (promoted announcements). For purgatory checks use
+    /// `purgatory.has_purgatory_announcement()` directly.
+    async fn has_db_announcement(
         &self,
         pubkey: &PublicKey,
         identifier: &str,
