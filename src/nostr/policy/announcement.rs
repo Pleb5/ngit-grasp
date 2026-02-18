@@ -222,6 +222,11 @@ impl AnnouncementPolicy {
     ///
     /// This enables accepting announcements from maintainers even when they don't list
     /// this GRASP server, for maintainer chain discovery and GRASP-02 sync.
+    ///
+    /// Checks both the database (promoted announcements) and purgatory (announcements
+    /// waiting for git data). This is necessary because a maintainer's announcement
+    /// (which lists the recursive maintainer) may still be in purgatory when the
+    /// recursive maintainer's announcement arrives.
     async fn is_maintainer_in_any_announcement(
         &self,
         identifier: &str,
@@ -233,12 +238,26 @@ impl AnnouncementPolicy {
             identifier.to_string(),
         );
 
-        let announcements: Vec<Event> = match self.ctx.database.query(filter).await {
+        let db_announcements: Vec<Event> = match self.ctx.database.query(filter).await {
             Ok(events) => events.into_iter().collect(),
             Err(e) => return Err(format!("Database query failed: {}", e)),
         };
 
-        if announcements.is_empty() {
+        // Also collect purgatory announcements for this identifier
+        let purgatory_announcements: Vec<Event> = self
+            .ctx
+            .purgatory
+            .get_announcements_by_identifier(identifier)
+            .into_iter()
+            .map(|entry| entry.event)
+            .collect();
+
+        let all_announcements: Vec<&Event> = db_announcements
+            .iter()
+            .chain(purgatory_announcements.iter())
+            .collect();
+
+        if all_announcements.is_empty() {
             // No existing announcements for this identifier - author cannot be a maintainer
             return Ok(false);
         }
@@ -246,14 +265,14 @@ impl AnnouncementPolicy {
         let author_hex = author.to_hex();
 
         // Check each announcement to see if author is listed as a maintainer
-        for event in &announcements {
+        for event in &all_announcements {
             // Check if author is the owner of this announcement
             if event.pubkey == *author {
                 return Ok(true);
             }
 
             // Check if author is listed in the maintainers tag
-            if let Ok(announcement) = RepositoryAnnouncement::from_event(event.clone()) {
+            if let Ok(announcement) = RepositoryAnnouncement::from_event((*event).clone()) {
                 if announcement.maintainers.contains(&author_hex) {
                     return Ok(true);
                 }
