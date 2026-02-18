@@ -56,14 +56,20 @@ impl AnnouncementPolicy {
                 // GRASP-01 Exception: Accept announcements from recursive maintainers
                 match RepositoryAnnouncement::from_event(event.clone()) {
                     Ok(announcement) => {
-                        // If this pubkey+identifier had a purgatory entry, the owner may be
-                        // sending a new announcement that removes our service. Clear the
-                        // purgatory entry and its bare repo so we don't hold stale data.
-                        if self
+                        // If this pubkey+identifier has a purgatory entry AND the incoming
+                        // event is strictly newer, the owner is sending a replacement that
+                        // removes our service. Clear the purgatory entry and its bare repo.
+                        //
+                        // If the incoming event is older than the purgatory entry (e.g. a
+                        // relay replay of a superseded announcement), ignore it — the newer
+                        // purgatory entry takes precedence and must not be evicted.
+                        let should_evict = self
                             .ctx
                             .purgatory
-                            .has_purgatory_announcement(&event.pubkey, &announcement.identifier)
-                        {
+                            .find_announcement(&event.pubkey, &announcement.identifier)
+                            .is_some_and(|entry| event.created_at > entry.event.created_at);
+
+                        if should_evict {
                             self.remove_purgatory_announcement(&event.pubkey, &announcement.identifier);
                         }
 
