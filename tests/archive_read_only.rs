@@ -55,7 +55,6 @@ use std::time::Duration;
 /// 5. Verify bare repository is created and git data is synced
 /// 6. Verify git pushes are rejected (read-only mode)
 #[tokio::test]
-#[ignore] // Requires SyncLevel implementation (Phase 3) - purgatory announcements don't trigger per-repo sync yet
 async fn test_archive_read_only_creates_bare_repo() {
     // 1. Start source relay
     let source_relay = TestRelay::start().await;
@@ -264,24 +263,24 @@ async fn test_archive_read_only_creates_bare_repo() {
     source_relay.stop().await;
 }
 
-/// Test that archive mode without state events does NOT sync git data.
+/// Test that archive mode proactively syncs state events and git data
+/// when the source relay has state events available.
 ///
-/// This verifies the security model: archive mode only syncs git data
-/// when there are state events to validate against.
+/// With StateOnly sync now implemented, purgatory announcements subscribe
+/// to state events from the relays listed in the announcement. This means
+/// the archive relay will:
+/// 1. Sync the announcement → purgatory → register as StateOnly in repo_sync_index
+/// 2. Subscribe to state events (kind 30618) on source relay
+/// 3. Receive the state event → purgatory sync triggered
+/// 4. Fetch git data from source relay's clone URL
 ///
-/// With announcement purgatory, the flow is:
-/// 1. Send announcement to source relay (goes to purgatory)
-/// 2. Send state event to source relay (goes to purgatory)
-/// 3. Push git data to source relay (promotes announcement and state event)
-/// 4. Start archive relay with sync from source
-/// 5. Archive relay syncs the promoted announcement
-/// 6. Verify git data is NOT synced (archive has no state event to authorize git fetch)
+/// This test verifies the full sync chain works end-to-end for archive mode.
 #[tokio::test]
-async fn test_archive_without_state_events_does_not_sync_git() {
+async fn test_archive_syncs_state_events_and_git_data_via_state_only_subscription() {
     // 1. Start source relay
     let source_relay = TestRelay::start().await;
     let keys = Keys::generate();
-    let identifier = "archive-no-state-repo";
+    let identifier = "archive-state-only-sync-repo";
 
     // Pre-allocate archive relay port
     let archive_port = TestRelay::find_free_port();
@@ -295,6 +294,7 @@ async fn test_archive_without_state_events_does_not_sync_git() {
     let npub = keys.public_key().to_bech32().expect("Failed to get npub");
 
     // 3. Create and send announcement listing BOTH relays
+    // The archive relay will subscribe to state events on BOTH listed relays
     let announcement = create_repo_announcement(
         &keys,
         &[&source_relay.domain(), &archive_domain],
@@ -337,6 +337,8 @@ async fn test_archive_without_state_events_does_not_sync_git() {
     )
     .expect("Failed to create state event");
 
+    let state_event_id = state_event.id;
+
     source_client
         .send_event(&state_event)
         .await
@@ -348,9 +350,12 @@ async fn test_archive_without_state_events_does_not_sync_git() {
     push_to_relay(temp_dir.path(), &source_relay.domain(), &npub, identifier)
         .expect("Push to source should succeed");
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Wait for state event to be promoted on source relay
+    wait_for_event_served(source_relay.url(), &state_event_id, Duration::from_secs(5))
+        .await
+        .expect("State event should be served on source relay after push");
 
-    // 6. Start archive relay (without state event - we don't send state event to archive)
+    // 6. Start archive relay - StateOnly subscription will proactively fetch state events
     let archive_relay = TestRelay::start_with_archive_and_sync(
         archive_port,
         Some(source_relay.url().to_string()),
@@ -360,15 +365,28 @@ async fn test_archive_without_state_events_does_not_sync_git() {
     )
     .await;
 
-    // Wait for sync
+    // Wait for sync connection
     wait_for_sync_connection(archive_relay.url(), 1, Duration::from_secs(5))
         .await
         .expect("Sync connection should establish");
 
-    // Give time for sync to fetch announcement
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // 7. Wait for state event to be served on archive relay
+    // The StateOnly subscription fetches the state event from source relay,
+    // which then triggers purgatory sync and git data fetch.
+    let found = wait_for_event_served(
+        archive_relay.url(),
+        &state_event_id,
+        Duration::from_secs(30), // Allow time for sync + git fetch
+    )
+    .await;
 
-    // 7. Verify bare repository was created (announcement was synced and accepted to purgatory)
+    assert!(
+        found.is_ok(),
+        "State event should be served on archive after StateOnly subscription fetches it: {:?}",
+        found.err()
+    );
+
+    // 8. Verify bare repository was created
     let repo_path = archive_relay
         .git_data_path()
         .join(format!("{}/{}.git", npub, identifier));
@@ -378,8 +396,7 @@ async fn test_archive_without_state_events_does_not_sync_git() {
         "Bare repository should be created for archive announcement"
     );
 
-    // 8. Verify git data was NOT synced (no state events on archive to trigger git fetch)
-    // Check that the commit does NOT exist in the archive relay's repo
+    // 9. Verify git data was synced via the state event chain
     let output = tokio::process::Command::new("git")
         .args(["cat-file", "-t", &commit_hash])
         .current_dir(&repo_path)
@@ -389,8 +406,8 @@ async fn test_archive_without_state_events_does_not_sync_git() {
     let commit_exists = output.map(|o| o.status.success()).unwrap_or(false);
 
     assert!(
-        !commit_exists,
-        "Git data should NOT be synced without state events (security: validates against Nostr state)"
+        commit_exists,
+        "Git data should be synced via StateOnly subscription → state event → git fetch chain"
     );
 
     // Cleanup

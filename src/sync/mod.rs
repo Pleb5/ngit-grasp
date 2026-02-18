@@ -700,6 +700,14 @@ impl SyncManager {
         self.rejected_events_index.save_to_disk(path)
     }
 
+    /// Get a clone of the repo sync index Arc.
+    ///
+    /// This allows the write policy to register user-submitted purgatory announcements
+    /// in the sync index so that state event sync starts promptly.
+    pub fn repo_sync_index(&self) -> RepoSyncIndex {
+        self.repo_sync_index.clone()
+    }
+
     /// Handle EOSE (End Of Stored Events) for a subscription
     ///
     /// This method:
@@ -951,9 +959,29 @@ impl SyncManager {
 
                         // Create REQ+EOSE subscriptions using original semantic filters
                         // This queries by kind/author/tags instead of by ID, which may
-                        // succeed even when ID-based queries fail
-                        let fallback_filters = filters::build_layer2_and_layer3_filters(
-                            &batch_repos,
+                        // succeed even when ID-based queries fail.
+                        // Split batch_repos by SyncLevel to avoid sending Layer 2 filters
+                        // (#a/#A/#q) for StateOnly (purgatory) repos - those PRs would be
+                        // rejected as orphan and then silently dropped by nostr-sdk deduplication.
+                        let (full_repos, state_only_repos) = {
+                            let repo_index = self.repo_sync_index.read().await;
+                            let mut full = HashSet::new();
+                            let mut state_only = HashSet::new();
+                            for repo_ref in &batch_repos {
+                                match repo_index.get(repo_ref).map(|n| n.sync_level) {
+                                    Some(SyncLevel::StateOnly) => {
+                                        state_only.insert(repo_ref.clone());
+                                    }
+                                    _ => {
+                                        full.insert(repo_ref.clone());
+                                    }
+                                }
+                            }
+                            (full, state_only)
+                        };
+                        let fallback_filters = filters::build_sync_level_aware_filters(
+                            &full_repos,
+                            &state_only_repos,
                             &batch_root_events,
                             None,
                         );
@@ -1033,12 +1061,24 @@ impl SyncManager {
                                 {
                                     let mut completed_batch = batches.remove(idx);
                                     completed_batch.failed = true; // Mark as failed
+                                    let is_generic =
+                                        completed_batch.items.repos.is_empty()
+                                            && completed_batch.items.root_events.is_empty();
                                     if batches.is_empty() {
                                         pending.remove(&relay_url_for_fallback);
                                     }
                                     drop(pending);
                                     self.confirm_batch(&relay_url_for_fallback, completed_batch)
                                         .await;
+                                    // For generic filter (announcement) batches, recompute filters
+                                    // so any purgatory repos registered during this batch get
+                                    // state-only subscriptions triggered.
+                                    if is_generic {
+                                        self.recompute_new_sync_filters_for_relay(
+                                            &relay_url_for_fallback,
+                                        )
+                                        .await;
+                                    }
                                 }
                             }
                             return;
@@ -1132,12 +1172,24 @@ impl SyncManager {
                         if let Some(batches) = pending.get_mut(&relay_url_for_retry) {
                             if let Some(idx) = batches.iter().position(|b| b.batch_id == batch_id) {
                                 let completed_batch = batches.remove(idx);
+                                let is_generic =
+                                    completed_batch.items.repos.is_empty()
+                                        && completed_batch.items.root_events.is_empty();
                                 if batches.is_empty() {
                                     pending.remove(&relay_url_for_retry);
                                 }
                                 drop(pending);
                                 self.confirm_batch(&relay_url_for_retry, completed_batch)
                                     .await;
+                                // For generic filter (announcement) batches, recompute filters
+                                // so any purgatory repos registered during this batch get
+                                // state-only subscriptions triggered.
+                                if is_generic {
+                                    self.recompute_new_sync_filters_for_relay(
+                                        &relay_url_for_retry,
+                                    )
+                                    .await;
+                                }
                             }
                         }
                         return;
@@ -1148,6 +1200,8 @@ impl SyncManager {
 
         // 3. Batch complete - extract and remove
         let completed_batch = batches.remove(batch_idx);
+        let is_generic = completed_batch.items.repos.is_empty()
+            && completed_batch.items.root_events.is_empty();
 
         // Clean up empty relay entry
         if batches.is_empty() {
@@ -1159,6 +1213,12 @@ impl SyncManager {
 
         // 4. Confirm the batch (moves items to RelayState)
         self.confirm_batch(relay_url, completed_batch).await;
+
+        // 5. For generic filter (announcement) batches, recompute sync filters so any
+        // purgatory repos registered during this batch get state-only subscriptions triggered.
+        if is_generic {
+            self.recompute_new_sync_filters_for_relay(relay_url).await;
+        }
     }
 
     /// Confirm a completed batch by moving items to RelayState

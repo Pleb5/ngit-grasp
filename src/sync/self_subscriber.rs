@@ -478,6 +478,10 @@ impl SelfSubscriber {
                     root_events: HashSet::new(),
                     sync_level: SyncLevel::Full,
                 });
+            // Upgrade sync_level to Full - this handles the case where the entry
+            // already exists as StateOnly (purgatory announcement) and is now being
+            // promoted (git data arrived and the event was broadcast via notify_event).
+            entry.sync_level = SyncLevel::Full;
             entry.relays.extend(needs.relays);
             entry.root_events.extend(needs.root_events);
 

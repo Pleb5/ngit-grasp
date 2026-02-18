@@ -17,6 +17,7 @@ use crate::nostr::policy::{
     AnnouncementPolicy, AnnouncementResult, PolicyContext, PrEventPolicy, ReferenceResult,
     RelatedEventPolicy, StatePolicy, StateResult,
 };
+use crate::sync::{RepoSyncIndex, RepoSyncNeeds, SyncLevel};
 
 /// Type alias for the shared database used by the relay
 pub type SharedDatabase = Arc<dyn NostrDatabase>;
@@ -98,6 +99,14 @@ impl Nip34WritePolicy {
         self.ctx.set_local_relay(relay);
     }
 
+    /// Set the repo sync index so that user-submitted purgatory announcements can
+    /// be registered for state event sync immediately.
+    ///
+    /// This must be called after SyncManager is created.
+    pub fn set_repo_sync_index(&self, index: RepoSyncIndex) {
+        self.ctx.set_repo_sync_index(index);
+    }
+
     /// Handle repository announcement event
     async fn handle_announcement(&self, event: &Event) -> WritePolicyResult {
         let event_id_str = event.id.to_bech32().unwrap_or_else(|_| event.id.to_hex());
@@ -146,6 +155,51 @@ impl Nip34WritePolicy {
                             "Accepted announcement to purgatory: {} (waiting for git data)",
                             event_id_str
                         );
+
+                        // Register repo in repo_sync_index with StateOnly level so that
+                        // state event sync starts promptly via the next batch EOSE recompute.
+                        // This handles user-submitted purgatory announcements - the SelfSubscriber
+                        // only sees DB events, so it won't pick these up automatically.
+                        if let Some(repo_sync_index) = self.ctx.get_repo_sync_index() {
+                            if let Ok(announcement) =
+                                RepositoryAnnouncement::from_event(event.clone())
+                            {
+                                use std::collections::HashSet;
+                                let repo_id = format!(
+                                    "30617:{}:{}",
+                                    event.pubkey,
+                                    announcement.identifier
+                                );
+
+                                // Extract relay URLs from the announcement event tags
+                                let relays: HashSet<String> = event
+                                    .tags
+                                    .iter()
+                                    .flat_map(|tag| {
+                                        let tag_vec = tag.as_slice();
+                                        if !tag_vec.is_empty() && tag_vec[0] == "relays" {
+                                            tag_vec[1..].iter().map(|s| s.to_string()).collect::<Vec<_>>()
+                                        } else {
+                                            vec![]
+                                        }
+                                    })
+                                    .collect();
+
+                                let mut index = repo_sync_index.write().await;
+                                index.entry(repo_id.clone()).or_insert_with(|| RepoSyncNeeds {
+                                    relays,
+                                    root_events: HashSet::new(),
+                                    sync_level: SyncLevel::StateOnly,
+                                });
+                                drop(index);
+
+                                tracing::debug!(
+                                    repo_id = %repo_id,
+                                    "Registered purgatory announcement in repo_sync_index as StateOnly"
+                                );
+                            }
+                        }
+
                         WritePolicyResult::Reject {
                             status: true, // Client sees OK
                             message: "purgatory: won't be served until git data arrives".into(),
