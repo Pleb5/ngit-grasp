@@ -7,7 +7,10 @@ use std::time::Duration;
 
 use nostr_sdk::prelude::*;
 
-use crate::common::{sync_helpers::*, TestRelay};
+use crate::common::{
+    sync_helpers::*,
+    TestRelay,
+};
 
 /// Test that maintainer announcements are re-processed immediately when owner announcement accepted
 ///
@@ -37,10 +40,12 @@ async fn test_maintainer_announcement_reprocessed_immediately() {
 
     let start = std::time::Instant::now();
 
-    // Step 1: Send maintainer announcement to relay_a (will be rejected - doesn't list relay_b)
-    let client_a = TestClient::new(relay_a.url(), maintainer_keys.clone())
-        .await
-        .expect("Failed to connect to relay_a");
+    // Step 1: Send maintainer announcement to relay_a (will be rejected by relay_b - doesn't list relay_b)
+    // Use HTTP clone URL pointing to relay_a's git endpoint so it can be released from purgatory
+    let maintainer_npub = maintainer_keys
+        .public_key()
+        .to_bech32()
+        .expect("Failed to get npub");
 
     let maintainer_announcement =
         EventBuilder::new(Kind::GitRepoAnnouncement, "Maintainer's repository")
@@ -48,27 +53,50 @@ async fn test_maintainer_announcement_reprocessed_immediately() {
                 Tag::identifier(identifier),
                 Tag::custom(
                     TagKind::custom("clone"),
-                    vec![format!("https://{}/{}.git", relay_a.domain(), identifier)],
+                    vec![format!(
+                        "http://{}/{}/{}.git",
+                        relay_a.domain(),
+                        maintainer_npub,
+                        identifier
+                    )],
                 ),
                 Tag::custom(TagKind::custom("relays"), vec![relay_a.url().to_string()]),
             ])
             .sign_with_keys(&maintainer_keys)
             .unwrap();
 
-    client_a.send_event(&maintainer_announcement).await.unwrap();
+    send_to_relay(&relay_a, &maintainer_announcement)
+        .await
+        .unwrap();
     println!("✓ Maintainer announcement sent to relay_a");
 
-    // Step 2: Send owner announcement to relay_b (lists relay_a + maintainer)
-    let client_b = TestClient::new(relay_b.url(), owner_keys.clone())
-        .await
-        .expect("Failed to connect to relay_b");
+    // Push git data for maintainer's repo to relay_a → releases maintainer announcement from purgatory
+    let _git_dir_maintainer = push_git_data_to_relay(
+        &relay_a,
+        &maintainer_keys,
+        identifier,
+        &[&relay_a.domain()],
+    )
+    .await;
+    println!("✓ Maintainer git data pushed to relay_a (announcement released from purgatory)");
+
+    // Step 2: Set up owner announcement on relay_b (lists relay_a + maintainer) with git data
+    let owner_npub = owner_keys
+        .public_key()
+        .to_bech32()
+        .expect("Failed to get npub");
 
     let owner_announcement = EventBuilder::new(Kind::GitRepoAnnouncement, "Owner's repository")
         .tags(vec![
             Tag::identifier(identifier),
             Tag::custom(
                 TagKind::custom("clone"),
-                vec![format!("https://{}/{}.git", relay_b.domain(), identifier)],
+                vec![format!(
+                    "http://{}/{}/{}.git",
+                    relay_b.domain(),
+                    owner_npub,
+                    identifier
+                )],
             ),
             Tag::custom(
                 TagKind::custom("relays"),
@@ -82,8 +110,13 @@ async fn test_maintainer_announcement_reprocessed_immediately() {
         .sign_with_keys(&owner_keys)
         .unwrap();
 
-    client_b.send_event(&owner_announcement).await.unwrap();
+    send_to_relay(&relay_b, &owner_announcement).await.unwrap();
     println!("✓ Owner announcement sent to relay_b");
+
+    // Push git data for owner's repo to relay_b → releases owner announcement from purgatory
+    let _git_dir_owner =
+        push_git_data_to_relay(&relay_b, &owner_keys, identifier, &[&relay_b.domain()]).await;
+    println!("✓ Owner git data pushed to relay_b (announcement released from purgatory)");
 
     // Step 3: Wait for sync and re-processing (relay_b discovers relay_a, syncs, re-processes)
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -114,15 +147,13 @@ async fn test_maintainer_announcement_reprocessed_immediately() {
 
     // Step 5: Verify it happened quickly (not 24 hours!)
     assert!(
-        elapsed.as_secs() < 10,
-        "Re-processing should happen in <10 seconds, took {:?}",
+        elapsed.as_secs() < 15,
+        "Re-processing should happen in <15 seconds, took {:?}",
         elapsed
     );
 
     println!("✅ Maintainer announcement re-processed in {:?}", elapsed);
 
-    client_a.disconnect().await;
-    client_b.disconnect().await;
     relay_a.stop().await;
     relay_b.stop().await;
 }
@@ -253,15 +284,18 @@ async fn test_multiple_maintainers_all_reprocessed() {
 
     let identifier = "multi-maintainer-repo";
 
-    // Step 1: Send three maintainer announcements to relay_a
-    let client_a = TestClient::new(relay_a.url(), maintainer1_keys.clone())
-        .await
-        .expect("Failed to connect to relay_a");
-
+    // Step 1: Send three maintainer announcements to relay_a with git data
+    // (purgatory requires git data before announcements are accepted)
+    let mut git_dirs_maintainers = Vec::new();
     for (idx, maintainer_keys) in [&maintainer1_keys, &maintainer2_keys, &maintainer3_keys]
         .iter()
         .enumerate()
     {
+        let m_npub = maintainer_keys
+            .public_key()
+            .to_bech32()
+            .expect("Failed to get npub");
+
         let announcement = EventBuilder::new(
             Kind::GitRepoAnnouncement,
             format!("Maintainer {} repository", idx + 1),
@@ -270,28 +304,45 @@ async fn test_multiple_maintainers_all_reprocessed() {
             Tag::identifier(identifier),
             Tag::custom(
                 TagKind::custom("clone"),
-                vec![format!("https://{}/{}.git", relay_a.domain(), identifier)],
+                vec![format!(
+                    "http://{}/{}/{}.git",
+                    relay_a.domain(),
+                    m_npub,
+                    identifier
+                )],
             ),
             Tag::custom(TagKind::custom("relays"), vec![relay_a.url().to_string()]),
         ])
         .sign_with_keys(maintainer_keys)
         .unwrap();
 
-        client_a.send_event(&announcement).await.unwrap();
+        send_to_relay(&relay_a, &announcement).await.unwrap();
+
+        // Push git data to release each maintainer's announcement from purgatory
+        let git_dir =
+            push_git_data_to_relay(&relay_a, maintainer_keys, identifier, &[&relay_a.domain()])
+                .await;
+        git_dirs_maintainers.push(git_dir);
     }
-    println!("✓ Three maintainer announcements sent to relay_a");
+    println!("✓ Three maintainer announcements sent to relay_a with git data");
 
     // Step 2: Send owner announcement to relay_b (lists relay_a + all three maintainers)
-    let client_b = TestClient::new(relay_b.url(), owner_keys.clone())
-        .await
-        .expect("Failed to connect to relay_b");
+    let owner_npub = owner_keys
+        .public_key()
+        .to_bech32()
+        .expect("Failed to get npub");
 
     let owner_announcement = EventBuilder::new(Kind::GitRepoAnnouncement, "Owner's repository")
         .tags(vec![
             Tag::identifier(identifier),
             Tag::custom(
                 TagKind::custom("clone"),
-                vec![format!("https://{}/{}.git", relay_b.domain(), identifier)],
+                vec![format!(
+                    "http://{}/{}/{}.git",
+                    relay_b.domain(),
+                    owner_npub,
+                    identifier
+                )],
             ),
             Tag::custom(
                 TagKind::custom("relays"),
@@ -309,8 +360,13 @@ async fn test_multiple_maintainers_all_reprocessed() {
         .sign_with_keys(&owner_keys)
         .unwrap();
 
-    client_b.send_event(&owner_announcement).await.unwrap();
+    send_to_relay(&relay_b, &owner_announcement).await.unwrap();
     println!("✓ Owner announcement sent to relay_b");
+
+    // Push git data for owner to relay_b → releases owner announcement from purgatory
+    let _git_dir_owner =
+        push_git_data_to_relay(&relay_b, &owner_keys, identifier, &[&relay_b.domain()]).await;
+    println!("✓ Owner git data pushed to relay_b (announcement released from purgatory)");
 
     // Step 3: Wait for sync and re-processing
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -333,8 +389,6 @@ async fn test_multiple_maintainers_all_reprocessed() {
 
     println!("✅ All three maintainer announcements re-processed successfully");
 
-    client_a.disconnect().await;
-    client_b.disconnect().await;
     relay_a.stop().await;
     relay_b.stop().await;
 }
@@ -356,12 +410,8 @@ async fn test_invalid_maintainer_pubkey_handled_gracefully() {
 
     let identifier = "invalid-maintainer-repo";
 
-    // Create client using TestClient helper
-    let client = TestClient::new(relay.url(), owner_keys.clone())
-        .await
-        .expect("Failed to connect to relay");
-
     // Step 1: Send maintainer announcement (will be rejected - doesn't list our relay)
+    // This one uses example.com clone URL - it goes to purgatory on relay, never promoted
     let maintainer_announcement =
         EventBuilder::new(Kind::GitRepoAnnouncement, "Maintainer's repository")
             .tags(vec![
@@ -378,17 +428,28 @@ async fn test_invalid_maintainer_pubkey_handled_gracefully() {
             .sign_with_keys(&maintainer_keys)
             .unwrap();
 
-    // Send maintainer announcement - expect it to be rejected
-    let _ = client.send_event(&maintainer_announcement).await;
+    // Send maintainer announcement - expect it to be rejected (purgatory / policy)
+    send_to_relay(&relay, &maintainer_announcement).await.ok();
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Step 2: Send owner announcement with INVALID maintainer hex
+    // Step 2: Set up owner announcement with INVALID maintainer hex and git data
+    // Use HTTP clone URL to relay's git endpoint so it can be released from purgatory
+    let owner_npub = owner_keys
+        .public_key()
+        .to_bech32()
+        .expect("Failed to get npub");
+
     let owner_announcement = EventBuilder::new(Kind::GitRepoAnnouncement, "Owner's repository")
         .tags(vec![
             Tag::identifier(identifier),
             Tag::custom(
                 TagKind::custom("clone"),
-                vec![format!("https://{}/{}.git", relay.domain(), identifier)],
+                vec![format!(
+                    "http://{}/{}/{}.git",
+                    relay.domain(),
+                    owner_npub,
+                    identifier
+                )],
             ),
             Tag::custom(TagKind::custom("relays"), vec![relay.url().to_string()]),
             Tag::custom(
@@ -399,7 +460,14 @@ async fn test_invalid_maintainer_pubkey_handled_gracefully() {
         .sign_with_keys(&owner_keys)
         .unwrap();
 
-    client.send_event(&owner_announcement).await.unwrap();
+    send_to_relay(&relay, &owner_announcement).await.unwrap();
+
+    // Push git data to relay → releases owner announcement from purgatory
+    let _git_dir =
+        push_git_data_to_relay(&relay, &owner_keys, identifier, &[&relay.domain()]).await;
+    println!("✓ Owner git data pushed to relay (announcement released from purgatory)");
+
+    // Wait for processing
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Step 3: Verify owner announcement accepted, maintainer not re-processed
@@ -429,6 +497,5 @@ async fn test_invalid_maintainer_pubkey_handled_gracefully() {
 
     println!("✅ Invalid maintainer pubkey handled gracefully without panic");
 
-    client.disconnect().await;
     relay.stop().await;
 }
