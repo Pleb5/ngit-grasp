@@ -132,13 +132,6 @@ async fn main() -> Result<()> {
         // Get a reference to the rejected events index for shutdown persistence
         let shutdown_rejected_index = sync_manager.rejected_events_index();
 
-        // Wire repo_sync_index into write policy so user-submitted purgatory announcements
-        // get registered for state event sync immediately (Fix 3).
-        let repo_sync_index = sync_manager.repo_sync_index();
-        relay_with_db
-            .write_policy
-            .set_repo_sync_index(repo_sync_index);
-
         tokio::spawn(async move {
             sync_manager.run().await;
         });

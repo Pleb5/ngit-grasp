@@ -680,6 +680,23 @@ impl Purgatory {
         self.announcement_purgatory.len()
     }
 
+    /// Collect (repo_id, relay_urls) for all announcements currently in purgatory.
+    ///
+    /// Returns a vec of `(repo_id, relay_urls)` where `repo_id` is the addressable
+    /// coordinate string `"30617:{pubkey_hex}:{identifier}"`. Used by the purgatory
+    /// announcement sync timer to register StateOnly entries in `repo_sync_index`.
+    pub fn announcements_for_sync(&self) -> Vec<(String, HashSet<String>)> {
+        self.announcement_purgatory
+            .iter()
+            .map(|entry| {
+                let (owner, identifier) = entry.key();
+                let repo_id = format!("30617:{}:{}", owner.to_hex(), identifier);
+                let relays = entry.value().relays.clone();
+                (repo_id, relays)
+            })
+            .collect()
+    }
+
     /// Get all event IDs currently stored in purgatory AND previously expired events.
     ///
     /// Returns a HashSet of all event IDs for:
