@@ -1231,9 +1231,9 @@ impl PushAuthorizationTests {
             }
         };
 
-        // Create a wrong commit (Owner variant, not PRTestCommit)
-        if let Err(e) = create_deterministic_commit_with_variant(&clone_path, CommitVariant::Owner)
-        {
+        // Create a wrong commit (unique, not PRTestCommit) - use create_commit so it always
+        // succeeds even when the clone already has the Owner deterministic content on disk.
+        if let Err(e) = create_commit(&clone_path, "wrong commit - not the PR test commit") {
             let _ = fs::remove_dir_all(&clone_path);
             return TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc).fail(&e);
         }

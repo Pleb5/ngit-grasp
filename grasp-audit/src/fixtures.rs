@@ -1579,10 +1579,14 @@ impl<'a> TestContext<'a> {
             let _ = fs::remove_dir_all(path);
         };
 
-        // Create a WRONG commit (Owner variant, not PRTestCommit)
-        // This commit hash will NOT match what's in the PR event's `c` tag
+        // Create a WRONG commit using a unique file (not PRTestCommit)
+        // We use create_commit (non-deterministic) so it always succeeds even if the
+        // repo already has a commit (e.g. from OwnerStateDataPushed) with the same
+        // deterministic content. The only requirement is that the hash differs from
+        // PR_TEST_COMMIT_HASH, which is guaranteed since PR_TEST_COMMIT_HASH is a
+        // deterministic root-commit with specific content and dates.
         let wrong_commit_hash =
-            match create_deterministic_commit_with_variant(&clone_path, CommitVariant::Owner) {
+            match create_commit(&clone_path, "wrong commit - not the PR test commit") {
                 Ok(h) => h,
                 Err(e) => {
                     cleanup(&clone_path);
