@@ -44,7 +44,6 @@ use crate::git::{self, oid_exists};
 use crate::nostr::builder::SharedDatabase;
 use crate::nostr::events::RepositoryState;
 use crate::purgatory::{can_apply_state, Purgatory};
-use crate::sync::{RepoSyncIndex, SyncLevel};
 
 /// Result of processing newly available git data.
 ///
@@ -810,7 +809,6 @@ pub fn extract_identifier_from_pr_event(event: &Event) -> Option<String> {
 /// * `local_relay` - Local relay for notifying WebSocket subscribers (optional)
 /// * `purgatory` - Purgatory instance to check for satisfiable events
 /// * `git_data_path` - Base path for git repositories
-/// * `repo_sync_index` - Optional repo sync index for upgrading sync level on promotion
 ///
 /// # Returns
 /// A `ProcessResult` describing what was processed
@@ -821,7 +819,6 @@ pub async fn process_newly_available_git_data(
     local_relay: Option<&nostr_relay_builder::LocalRelay>,
     purgatory: &Purgatory,
     git_data_path: &Path,
-    repo_sync_index: Option<RepoSyncIndex>,
 ) -> anyhow::Result<ProcessResult> {
     let mut result = ProcessResult::default();
 
@@ -851,7 +848,6 @@ pub async fn process_newly_available_git_data(
         local_relay,
         purgatory,
         git_data_path,
-        repo_sync_index.as_ref(),
     )
     .await;
     result.merge(announcement_result);
@@ -1288,7 +1284,6 @@ async fn process_purgatory_announcements(
     local_relay: Option<&nostr_relay_builder::LocalRelay>,
     purgatory: &Purgatory,
     git_data_path: &Path,
-    repo_sync_index: Option<&RepoSyncIndex>,
 ) -> ProcessResult {
     let mut result = ProcessResult::default();
 
@@ -1339,22 +1334,6 @@ async fn process_purgatory_announcements(
                             identifier = %identifier,
                             event_id = %event.id,
                             "Broadcast announcement event to WebSocket listeners"
-                        );
-                    }
-                }
-
-                // Upgrade sync level to Full in repo_sync_index
-                if let Some(index) = repo_sync_index {
-                    let mut index = index.write().await;
-                    // Use hex pubkey format to match how repo_sync_index keys are built
-                    // (sync/mod.rs uses event.pubkey which is hex, not bech32)
-                    let repo_id = format!("30617:{}:{}", owner.to_hex(), identifier);
-                    if let Some(entry) = index.get_mut(&repo_id) {
-                        entry.sync_level = SyncLevel::Full;
-                        debug!(
-                            identifier = %identifier,
-                            repo_id = %repo_id,
-                            "Upgraded sync level to Full after announcement promotion"
                         );
                     }
                 }

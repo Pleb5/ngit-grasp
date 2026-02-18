@@ -307,7 +307,6 @@ pub async fn handle_receive_pack(
         Some(&relay),
         &purgatory,
         git_data_path_buf,
-        None,
     )
     .await
     {

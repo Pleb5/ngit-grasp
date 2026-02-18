@@ -193,7 +193,6 @@ use crate::nostr::builder::SharedDatabase;
 use crate::nostr::events::RepositoryState;
 use crate::purgatory::Purgatory;
 use crate::sync::naughty_list::NaughtyListTracker;
-use crate::sync::RepoSyncIndex;
 
 use super::functions::extract_domain;
 
@@ -222,13 +221,6 @@ pub struct RealSyncContext {
 
     /// Naughty list tracker for git remote domains with persistent errors
     git_naughty_list: Arc<NaughtyListTracker>,
-
-    /// Optional repo sync index for upgrading sync level on promotion
-    repo_sync_index: Option<RepoSyncIndex>,
-
-    /// Optional sender for AddFilters actions to SyncManager.
-    /// Used after announcement promotion to trigger PR event subscription on connected relays.
-    sync_action_tx: Option<tokio::sync::mpsc::Sender<crate::sync::AddFilters>>,
 }
 
 impl RealSyncContext {
@@ -241,9 +233,6 @@ impl RealSyncContext {
     /// * `our_domain` - Our domain to exclude from clone URLs
     /// * `local_relay` - Local relay for WebSocket notifications
     /// * `git_naughty_list` - Naughty list tracker for git remote domains
-    /// * `repo_sync_index` - Optional repo sync index for upgrading sync level on promotion
-    /// * `sync_action_tx` - Optional sender for triggering filter recomputation after promotion
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         purgatory: Arc<Purgatory>,
         database: SharedDatabase,
@@ -251,8 +240,6 @@ impl RealSyncContext {
         our_domain: Option<String>,
         local_relay: Option<LocalRelay>,
         git_naughty_list: Arc<NaughtyListTracker>,
-        repo_sync_index: Option<RepoSyncIndex>,
-        sync_action_tx: Option<tokio::sync::mpsc::Sender<crate::sync::AddFilters>>,
     ) -> Self {
         Self {
             purgatory,
@@ -261,21 +248,7 @@ impl RealSyncContext {
             our_domain_value: our_domain,
             local_relay,
             git_naughty_list,
-            repo_sync_index,
-            sync_action_tx,
         }
-    }
-
-    /// Set the sync action sender for triggering filter recomputation after announcement promotion.
-    ///
-    /// When an announcement is promoted from purgatory to Full sync level, the SyncManager
-    /// needs to subscribe to PR events for that repo on all connected relays. This sender
-    /// is used to trigger that subscription.
-    pub fn set_sync_action_tx(
-        &mut self,
-        tx: tokio::sync::mpsc::Sender<crate::sync::AddFilters>,
-    ) {
-        self.sync_action_tx = Some(tx);
     }
 
     /// Get reference to the git naughty list tracker
@@ -509,97 +482,8 @@ impl SyncContext for RealSyncContext {
             self.local_relay.as_ref(),
             &self.purgatory,
             &self.git_data_path,
-            self.repo_sync_index.clone(),
         )
         .await?;
-
-        // If announcements were promoted (now Full sync level), notify SyncManager to
-        // recompute filters so PR event subscriptions are created on connected relays.
-        if result.announcements_released > 0 {
-            if let (Some(ref tx), Some(ref repo_sync_index)) =
-                (&self.sync_action_tx, &self.repo_sync_index)
-            {
-                let index = repo_sync_index.read().await;
-                for (repo_id, needs) in index.iter() {
-                    if needs.sync_level == crate::sync::SyncLevel::Full
-                        && !needs.root_events.is_empty()
-                    {
-                        // Send AddFilters for Full repos with root events
-                        for relay_url in &needs.relays {
-                            if let Some(ref domain) = self.our_domain_value {
-                                if relay_url.contains(domain.as_str()) {
-                                    continue;
-                                }
-                            }
-                            let full_repos: std::collections::HashSet<String> =
-                                std::iter::once(repo_id.clone()).collect();
-                            let filters =
-                                crate::sync::filters::build_sync_level_aware_filters(
-                                    &full_repos,
-                                    &std::collections::HashSet::new(),
-                                    &needs.root_events,
-                                    None,
-                                );
-                            let action = crate::sync::AddFilters {
-                                relay_url: relay_url.clone(),
-                                items: crate::sync::PendingItems {
-                                    repos: full_repos.clone(),
-                                    root_events: needs.root_events.clone(),
-                                },
-                                filters,
-                            };
-                            if let Err(e) = tx.send(action).await {
-                                debug!(
-                                    relay = %relay_url,
-                                    error = %e,
-                                    "Failed to send AddFilters after announcement promotion"
-                                );
-                            } else {
-                                debug!(
-                                    relay = %relay_url,
-                                    repo_id = %repo_id,
-                                    "Sent AddFilters to SyncManager after announcement promotion"
-                                );
-                            }
-                        }
-                    } else if needs.sync_level == crate::sync::SyncLevel::Full {
-                        // Even without root_events, send empty repo filter to ensure
-                        // Layer 2 subscriptions (PR events) are set up
-                        for relay_url in &needs.relays {
-                            if let Some(ref domain) = self.our_domain_value {
-                                if relay_url.contains(domain.as_str()) {
-                                    continue;
-                                }
-                            }
-                            let full_repos: std::collections::HashSet<String> =
-                                std::iter::once(repo_id.clone()).collect();
-                            let filters =
-                                crate::sync::filters::build_sync_level_aware_filters(
-                                    &full_repos,
-                                    &std::collections::HashSet::new(),
-                                    &std::collections::HashSet::new(),
-                                    None,
-                                );
-                            let action = crate::sync::AddFilters {
-                                relay_url: relay_url.clone(),
-                                items: crate::sync::PendingItems {
-                                    repos: full_repos.clone(),
-                                    root_events: std::collections::HashSet::new(),
-                                },
-                                filters,
-                            };
-                            if let Err(e) = tx.send(action).await {
-                                debug!(
-                                    relay = %relay_url,
-                                    error = %e,
-                                    "Failed to send AddFilters (no root_events) after announcement promotion"
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
 
         // Convert from git::sync::ProcessResult to our ProcessResult
         Ok(ProcessResult {
