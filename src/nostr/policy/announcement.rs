@@ -225,11 +225,23 @@ impl AnnouncementPolicy {
         // Remove the announcement from purgatory
         self.ctx.purgatory.remove_announcement(pubkey, identifier);
 
-        // Remove any state events waiting for this identifier
-        self.ctx.purgatory.remove_state(identifier);
+        // Only remove state events if no other owner still has an announcement in purgatory
+        // for this identifier. State events are keyed by identifier alone, so blindly removing
+        // them would also discard state events legitimately belonging to a different owner's
+        // repository that happens to share the same identifier string.
+        let other_owners_remain = !self
+            .ctx
+            .purgatory
+            .get_announcements_by_identifier(identifier)
+            .is_empty();
+
+        if !other_owners_remain {
+            self.ctx.purgatory.remove_state(identifier);
+        }
 
         tracing::info!(
             identifier = %identifier,
+            other_owners_remain = %other_owners_remain,
             "Cleared purgatory entry: owner removed our service from announcement"
         );
     }
