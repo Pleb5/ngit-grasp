@@ -980,162 +980,43 @@ async fn test_pr_event_clone_tag_sync_with_partial_oid_aggregation_from_multiple
         .expect("PR event should be served on mock_relay immediately");
 
     // ========================================================================
-    // Step 5: Start syncing_relay WITHOUT bootstrap and publish announcement directly
+    // Step 5: Start syncing_relay with source_grasp as bootstrap
     // ========================================================================
 
-    // Start syncing_relay with sync enabled but NO bootstrap relay
-    // This tests relay discovery from announcement's `relays` tag
-    // Note: We disable negentropy because MockRelay doesn't support NIP-77,
-    // and the sync system doesn't properly fall back to REQ+EOSE when negentropy fails.
+    // Start syncing_relay with source_grasp as bootstrap relay.
+    // Negentropy is disabled because MockRelay doesn't support NIP-77, and the
+    // sync system doesn't properly fall back to REQ+EOSE when negentropy fails.
+    //
+    // We do NOT publish the announcement directly to syncing_relay. Instead,
+    // syncing_relay discovers it via the bootstrap connection to source_grasp,
+    // which has the promoted announcement in its database.
     let syncing_relay = TestRelay::start_on_port_with_options(
         syncing_port,
-        None, // NO bootstrap - relay discovery via announcement tags
-        true, // Disable negentropy - MockRelay doesn't support NIP-77
+        Some(source_grasp.url().to_string()), // Bootstrap from source_grasp
+        true,                                  // Disable negentropy - MockRelay doesn't support NIP-77
     )
     .await;
 
-    // Publish announcement DIRECTLY to syncing_relay
-    // This triggers relay discovery from the announcement's `relays` tag
-    let syncing_client = Client::new(owner_keys.clone());
-    syncing_client
-        .add_relay(syncing_relay.url())
-        .await
-        .expect("Failed to add syncing_relay");
-    syncing_client.connect().await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    syncing_client
-        .send_event(&announcement)
-        .await
-        .expect("Failed to send announcement to syncing_relay");
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // Wait for relay discovery and sync connections to establish
-    // syncing_relay should discover source_grasp and mock_relay from announcement's relays tag
-    println!("=== Waiting for sync connections ===");
-    println!("syncing_relay URL: {}", syncing_relay.url());
-    println!("source_grasp URL: {}", source_grasp.url());
-    println!("mock_relay URL: {}", mock_relay.url());
-    println!("git_server URL: {}", git_server.url());
-
-    wait_for_sync_connection(syncing_relay.url(), 2, Duration::from_secs(10))
-        .await
-        .expect(
-            "Sync connections should establish to discovered relays (source_grasp + mock_relay)",
-        );
-    println!("Sync connections established!");
-
-    // Debug: Check metrics to see what relays are connected
-    let metrics_url = syncing_relay
-        .url()
-        .replace("ws://", "http://")
-        .replace("/", "")
-        + "/metrics";
-    println!("Checking metrics at: {}", metrics_url);
-    if let Ok(response) = reqwest::get(&metrics_url).await {
-        if let Ok(metrics) = response.text().await {
-            // Print sync-related metrics
-            for line in metrics.lines() {
-                if line.contains("sync") && !line.starts_with('#') {
-                    println!("  {}", line);
-                }
-            }
-        }
-    }
-
-    // Give some time for sync to happen
-    println!("Waiting 10s for events to sync...");
-    tokio::time::sleep(Duration::from_secs(10)).await;
-
-    // Check metrics again after waiting
-    println!("=== Checking metrics after sync wait ===");
-    if let Ok(response) = reqwest::get(&metrics_url).await {
-        if let Ok(metrics) = response.text().await {
-            for line in metrics.lines() {
-                if line.contains("sync") && !line.starts_with('#') {
-                    println!("  {}", line);
-                }
-            }
-        }
-    }
-
-    // Debug: Check if PR event is still on mock_relay
-    println!("=== Debug: Checking PR event on mock_relay ===");
-    let pr_on_mock =
-        wait_for_event_served(mock_relay.url(), &pr_event_id, Duration::from_secs(2)).await;
-    println!("PR event on mock_relay: {:?}", pr_on_mock.is_ok());
-    if let Ok(ref pr) = pr_on_mock {
-        println!("PR event tags:");
-        for tag in pr.tags.iter() {
-            println!("  {:?}", tag.as_slice());
-        }
-    }
-
-    // Debug: Check repo coordinate
-    let repo_coord = build_repo_coord(&owner_keys, identifier);
-    println!("Expected repo coordinate: {}", repo_coord);
-
-    // Debug: Test if mock_relay responds to tag-based filter (Layer 2 style)
-    println!("=== Debug: Testing mock_relay tag filter response ===");
-    let test_client = Client::new(Keys::generate());
-    test_client
-        .add_relay(mock_relay.url())
-        .await
-        .expect("Failed to add mock_relay");
-    test_client.connect().await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // Build a Layer 2 style filter (by 'a' tag)
-    let tag_filter =
-        Filter::new().custom_tag(SingleLetterTag::lowercase(Alphabet::A), repo_coord.as_str());
-    println!("Tag filter: {:?}", tag_filter);
-
-    let tag_results = test_client
-        .fetch_events(tag_filter, Duration::from_secs(5))
-        .await;
-    match tag_results {
-        Ok(events) => {
-            println!("Tag filter returned {} events", events.len());
-            for event in events.iter() {
-                println!("  Event ID: {}, Kind: {}", event.id, event.kind.as_u16());
-            }
-        }
-        Err(e) => {
-            println!("Tag filter query failed: {:?}", e);
-        }
-    }
-    test_client.disconnect().await;
-
     // The syncing relay will:
-    // 1. Receive announcement directly (creates bare repo)
-    // 2. Discover source_grasp and mock_relay from announcement's `relays` tag
-    // 3. Connect to discovered relays
-    // 4. Sync state event from source_grasp → purgatory (no commit_a locally)
-    // 5. Sync PR event from mock_relay → purgatory (no commit_b locally)
-    // 6. Purgatory sync triggers
-    // 7. Fetches commit_a from source_grasp clone URL (from announcement clone tag)
-    // 8. Fetches commit_b from git_server (from PR event's clone tag)
-    // 9. Both events released when all OIDs available
+    // 1. Sync promoted announcement from source_grasp via bootstrap connection → purgatory (no local git data)
+    // 2. EOSE triggers StateOnly subscription → syncs state event from source_grasp → purgatory sync
+    // 3. Purgatory sync fetches commit_a from source_grasp clone URL → announcement + state promoted
+    // 4. SelfSubscriber sees promoted announcement → upgrades to Full → connects to mock_relay
+    // 5. Syncs PR event from mock_relay → purgatory (no commit_b locally)
+    // 6. Purgatory sync fetches commit_b from git_server via PR clone tag
+    // 7. PR event promoted → served
 
     // ========================================================================
     // Step 6: Verify Results
     // ========================================================================
 
-    println!("=== Step 6: Verify Results ===");
-    println!("State event ID: {}", state_event_id);
-    println!("PR event ID: {}", pr_event_id);
-    println!("commit_a: {}", commit_a);
-    println!("commit_b: {}", commit_b);
-
     // Wait for state event to be served on syncing_relay
-    println!("Waiting for state event on syncing_relay...");
     let state_found = wait_for_event_served(
         syncing_relay.url(),
         &state_event_id,
         Duration::from_secs(30),
     )
     .await;
-    println!("State event result: {:?}", state_found);
     assert!(
         state_found.is_ok(),
         "State event should be served on syncing_relay: {:?}",
@@ -1143,10 +1024,8 @@ async fn test_pr_event_clone_tag_sync_with_partial_oid_aggregation_from_multiple
     );
 
     // Wait for PR event to be served on syncing_relay
-    println!("Waiting for PR event on syncing_relay...");
     let pr_found =
         wait_for_event_served(syncing_relay.url(), &pr_event_id, Duration::from_secs(30)).await;
-    println!("PR event result: {:?}", pr_found);
     assert!(
         pr_found.is_ok(),
         "PR event should be served on syncing_relay (fetched commit_b from git_server via PR clone tag): {:?}",
@@ -1187,7 +1066,6 @@ async fn test_pr_event_clone_tag_sync_with_partial_oid_aggregation_from_multiple
     source_client.disconnect().await;
     mock_client.disconnect().await;
     pr_client.disconnect().await;
-    syncing_client.disconnect().await;
     git_server.stop().await;
     mock_relay.stop().await;
     syncing_relay.stop().await;
