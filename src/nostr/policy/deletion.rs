@@ -1,7 +1,7 @@
 /// Deletion Policy - NIP-09 event deletion request handling
 ///
-/// Handles kind 5 (EventDeletion) events that request removal of repository
-/// announcements (kind 30617) from purgatory.
+/// Handles kind 5 (EventDeletion) events that request removal of purgatory entries
+/// for repository announcements (kind 30617) and state events (kind 30618).
 ///
 /// ## NIP-09 Rules Enforced
 ///
@@ -13,9 +13,9 @@
 ///
 /// ## Purgatory Interaction
 ///
-/// When a valid deletion request targets a kind 30617 announcement that is currently
-/// in purgatory (not yet promoted to the database), the purgatory entry is removed
-/// and the bare repository is deleted from disk.
+/// - Kind 30617 (announcement) in purgatory: entry removed, bare repo deleted from disk
+/// - Kind 30618 (state event) in purgatory: matching state event(s) removed by event ID
+///   or by (author, identifier) coordinate
 use nostr_relay_builder::prelude::{Event, WritePolicyResult};
 
 use super::PolicyContext;
@@ -48,13 +48,13 @@ impl DeletionPolicy {
         WritePolicyResult::Accept
     }
 
-    /// Remove any purgatory announcements targeted by this deletion event.
+    /// Remove any purgatory entries targeted by this deletion event.
     ///
     /// Handles both reference styles from NIP-09:
-    /// - `e` tags: event ID references — match against purgatory entry event IDs
-    /// - `a` tags: addressable coordinate references — `30617:<pubkey>:<identifier>`
+    /// - `e` tags: event ID references — match against announcement or state event IDs
+    /// - `a` tags: addressable coordinate references — `30617:…` or `30618:…`
     ///
-    /// Only removes entries where the purgatory entry's owner matches the deletion
+    /// Only removes entries where the purgatory entry's author matches the deletion
     /// event's pubkey (enforces author-only deletion).
     fn remove_purgatory_targets(&self, event: &Event) {
         let author = &event.pubkey;
@@ -81,17 +81,19 @@ impl DeletionPolicy {
         }
     }
 
-    /// Remove a purgatory announcement matched by event ID.
+    /// Remove a purgatory entry (announcement or state event) matched by event ID.
     ///
-    /// Scans all purgatory announcements owned by `author` and removes the one
-    /// whose event ID hex matches `target_id_hex`.
-    fn remove_by_event_id(&self, author: &nostr_relay_builder::prelude::PublicKey, target_id_hex: &str, _deletion_created_at: u64) {
-        // Scan announcements owned by this author for a matching event ID
-        // We use get_announcements_by_identifier would require knowing the identifier,
-        // so instead we iterate via find_announcement after collecting all entries.
+    /// Checks announcements first (kind 30617), then state events (kind 30618).
+    /// Only removes entries whose author matches `author`.
+    fn remove_by_event_id(
+        &self,
+        author: &nostr_relay_builder::prelude::PublicKey,
+        target_id_hex: &str,
+        _deletion_created_at: u64,
+    ) {
+        // --- Check announcements (kind 30617) ---
         // The DashMap doesn't expose a direct "find by event ID" method, so we use
-        // the announcements_for_sync snapshot to get all (repo_id, _) pairs and then
-        // look up each one.
+        // the announcements_for_sync snapshot to enumerate all (repo_id, _) pairs.
         let all = self.ctx.purgatory.announcements_for_sync();
         for (repo_id, _) in all {
             // repo_id format: "30617:{pubkey_hex}:{identifier}"
@@ -102,7 +104,6 @@ impl DeletionPolicy {
             let entry_pubkey_hex = parts[1];
             let identifier = parts[2];
 
-            // Only check entries owned by the deletion event author
             if entry_pubkey_hex != author.to_hex() {
                 continue;
             }
@@ -116,18 +117,37 @@ impl DeletionPolicy {
                         "Deletion request: removing purgatory announcement by event ID"
                     );
                     self.evict_purgatory_entry(author, identifier);
-                    return; // event IDs are unique, no need to continue
+                    return; // event IDs are unique
+                }
+            }
+        }
+
+        // --- Check state events (kind 30618) ---
+        // State events are keyed by identifier; scan all identifiers for a match.
+        let state_identifiers = self.ctx.purgatory.get_all_identifiers();
+        for identifier in state_identifiers {
+            let entries = self.ctx.purgatory.find_state(&identifier);
+            for entry in entries {
+                if entry.author == *author && entry.event.id.to_hex() == target_id_hex {
+                    tracing::info!(
+                        event_id = %target_id_hex,
+                        identifier = %identifier,
+                        author = %author.to_hex(),
+                        "Deletion request: removing purgatory state event by event ID"
+                    );
+                    self.ctx.purgatory.remove_state_event(&identifier, &entry.event.id);
+                    return; // event IDs are unique
                 }
             }
         }
     }
 
-    /// Remove a purgatory announcement matched by addressable coordinate.
+    /// Remove a purgatory entry matched by addressable coordinate.
     ///
-    /// The coordinate format is `<kind>:<pubkey>:<d-identifier>`. Only kind 30617
-    /// coordinates are relevant here. Per NIP-09, all versions up to `deletion_created_at`
-    /// are considered deleted — since purgatory entries are always a single event per
-    /// (owner, identifier), we delete if the entry's `created_at` ≤ `deletion_created_at`.
+    /// The coordinate format is `<kind>:<pubkey>:<d-identifier>`.
+    /// Handles kind 30617 (announcements) and kind 30618 (state events).
+    ///
+    /// Per NIP-09, all versions up to `deletion_created_at` are considered deleted.
     fn remove_by_coordinate(
         &self,
         author: &nostr_relay_builder::prelude::PublicKey,
@@ -144,11 +164,6 @@ impl DeletionPolicy {
         let coord_pubkey_hex = parts[1];
         let identifier = parts[2];
 
-        // Only handle kind 30617 (GitRepoAnnouncement)
-        if kind_str != "30617" {
-            return;
-        }
-
         // The coordinate pubkey must match the deletion event author
         if coord_pubkey_hex != author.to_hex() {
             tracing::debug!(
@@ -159,25 +174,50 @@ impl DeletionPolicy {
             return;
         }
 
-        if let Some(entry) = self.ctx.purgatory.find_announcement(author, identifier) {
-            // Per NIP-09: delete all versions up to deletion_created_at
-            if entry.event.created_at.as_secs() <= deletion_created_at {
-                tracing::info!(
-                    identifier = %identifier,
-                    author = %author.to_hex(),
-                    entry_created_at = entry.event.created_at.as_secs(),
-                    deletion_created_at = %deletion_created_at,
-                    "Deletion request: removing purgatory announcement by coordinate"
-                );
-                self.evict_purgatory_entry(author, identifier);
-            } else {
-                tracing::debug!(
-                    identifier = %identifier,
-                    author = %author.to_hex(),
-                    entry_created_at = entry.event.created_at.as_secs(),
-                    deletion_created_at = %deletion_created_at,
-                    "Ignoring deletion: purgatory entry is newer than deletion request"
-                );
+        match kind_str {
+            "30617" => {
+                // Announcement purgatory entry
+                if let Some(entry) = self.ctx.purgatory.find_announcement(author, identifier) {
+                    if entry.event.created_at.as_secs() <= deletion_created_at {
+                        tracing::info!(
+                            identifier = %identifier,
+                            author = %author.to_hex(),
+                            "Deletion request: removing purgatory announcement by coordinate"
+                        );
+                        self.evict_purgatory_entry(author, identifier);
+                    } else {
+                        tracing::debug!(
+                            identifier = %identifier,
+                            author = %author.to_hex(),
+                            "Ignoring deletion: purgatory announcement is newer than deletion request"
+                        );
+                    }
+                }
+            }
+            "30618" => {
+                // State event purgatory entries for this (author, identifier).
+                // Remove all entries authored by `author` with created_at ≤ deletion_created_at.
+                let entries = self.ctx.purgatory.find_state(identifier);
+                let mut removed = 0usize;
+                for entry in entries {
+                    if entry.author == *author
+                        && entry.event.created_at.as_secs() <= deletion_created_at
+                    {
+                        self.ctx.purgatory.remove_state_event(identifier, &entry.event.id);
+                        removed += 1;
+                    }
+                }
+                if removed > 0 {
+                    tracing::info!(
+                        identifier = %identifier,
+                        author = %author.to_hex(),
+                        removed = %removed,
+                        "Deletion request: removed purgatory state event(s) by coordinate"
+                    );
+                }
+            }
+            _ => {
+                // Other kinds not handled
             }
         }
     }

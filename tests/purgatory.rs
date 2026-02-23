@@ -70,8 +70,8 @@ isolated_purgatory_test!(test_state_event_accepted_for_purgatory_announcement);
 // Deletion Event Tests (NIP-09)
 // ============================================================
 
-isolated_purgatory_test!(test_deletion_by_event_id_removes_purgatory_announcement);
-isolated_purgatory_test!(test_deletion_by_coordinate_removes_purgatory_announcement);
+isolated_purgatory_test!(test_deletion_by_event_id_removes_purgatory_state_event);
+isolated_purgatory_test!(test_deletion_by_coordinate_removes_purgatory_state_event);
 
 // ============================================================
 // State Event Purgatory Tests (already implemented)

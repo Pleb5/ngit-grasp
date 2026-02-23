@@ -27,9 +27,11 @@
 //! - `test_pr_event_in_purgatory_git_push_accepted` - Git push to refs/nostr/<event-id> succeeds
 //! - `test_pr_event_served_after_git_push` - Event becomes queryable after git data
 
+use crate::fixtures::{clone_repo, create_commit, try_push};
 use crate::specs::grasp01::SpecRef;
 use crate::{AuditClient, AuditResult, FixtureKind, TestContext, TestResult};
 use nostr_sdk::prelude::*;
+use std::fs;
 use std::time::Duration;
 
 /// Test suite for GRASP-01 purgatory behavior
@@ -47,9 +49,9 @@ impl PurgatoryTests {
         results.add(Self::test_state_event_accepted_for_purgatory_announcement(client).await);
 
         // Deletion event tests (NIP-09)
-        results.add(Self::test_deletion_by_event_id_removes_purgatory_announcement(client).await);
+        results.add(Self::test_deletion_by_event_id_removes_purgatory_state_event(client).await);
         results.add(
-            Self::test_deletion_by_coordinate_removes_purgatory_announcement(client).await,
+            Self::test_deletion_by_coordinate_removes_purgatory_state_event(client).await,
         );
 
         // State event purgatory tests (already implemented)
@@ -656,192 +658,293 @@ impl PurgatoryTests {
     // Deletion Event Tests (NIP-09)
     // ============================================================
 
-    /// Test: Kind 5 deletion event by event ID removes purgatory announcement
+    /// Test: Kind 5 deletion event by event ID removes a purgatory state event
     ///
     /// Spec: NIP-09
     /// "A special event with kind 5... having a list of one or more `e` or `a` tags,
     /// each referencing an event the author is requesting to be deleted."
     ///
     /// This test verifies:
-    /// 1. Send a valid repository announcement (enters purgatory)
-    /// 2. Send a kind 5 deletion event referencing the announcement by event ID
-    /// 3. The announcement is no longer in purgatory (git push would fail)
-    /// 4. The deletion event itself is accepted by the relay
-    pub async fn test_deletion_by_event_id_removes_purgatory_announcement(
+    /// 1. Get a promoted repo (OwnerStateDataPushed) so git pushes are possible
+    /// 2. Clone the repo and create a unique commit (not yet pushed)
+    /// 3. Submit a state event pointing to that unique commit (enters purgatory)
+    /// 4. Send a kind 5 deletion event referencing the state event by event ID
+    /// 5. Attempt to push the unique commit — MUST be rejected (no authorized state event)
+    pub async fn test_deletion_by_event_id_removes_purgatory_state_event(
         client: &AuditClient,
     ) -> TestResult {
         TestResult::new(
-            "deletion_by_event_id_removes_purgatory_announcement",
+            "deletion_by_event_id_removes_purgatory_state_event",
             SpecRef::PurgatoryAcceptUntilGitData,
-            "Kind 5 deletion by event ID SHOULD remove a purgatory announcement",
+            "Kind 5 deletion by event ID SHOULD remove a purgatory state event, causing push rejection",
         )
         .run(|| async {
             let ctx = TestContext::new(client);
 
-            // Send announcement to purgatory
-            let repo = ctx
-                .get_fixture(FixtureKind::ValidRepoSent)
+            // Stage 1: get a promoted repo with git data already on the relay
+            let existing_state = ctx
+                .get_fixture(FixtureKind::OwnerStateDataPushed)
                 .await
-                .map_err(|e| format!("Failed to create repo announcement: {}", e))?;
+                .map_err(|e| format!("Failed to get promoted repo: {}", e))?;
 
-            let repo_id = repo
+            let repo_id = existing_state
                 .tags
                 .iter()
                 .find(|t| t.kind() == TagKind::d())
                 .and_then(|t| t.content())
-                .ok_or("Missing d tag in repo announcement")?
+                .ok_or("Missing d tag in state event")?
                 .to_string();
 
-            // Verify it's in purgatory (not served)
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            if client.is_event_on_relay(repo.id).await.map_err(|e| e.to_string())? {
-                return Err(
-                    "Announcement was served immediately - purgatory not working".to_string(),
-                );
-            }
+            let relay_domain = client
+                .relay_url()
+                .await
+                .map_err(|e| e.to_string())?
+                .trim_start_matches("ws://")
+                .trim_start_matches("wss://")
+                .to_string();
 
-            // Build and send kind 5 deletion event referencing the announcement by event ID
-            let deletion = client
-                .event_builder(Kind::EventDeletion, "")
-                .tag(Tag::event(repo.id))
+            let npub = client
+                .public_key()
+                .to_bech32()
+                .map_err(|e| e.to_string())?;
+
+            // Stage 2: clone the repo and create a unique commit (not pushed yet)
+            let clone_path = clone_repo(&relay_domain, &npub, &repo_id)
+                .map_err(|e| format!("Failed to clone repo: {}", e))?;
+
+            let cleanup = || { let _ = fs::remove_dir_all(&clone_path); };
+
+            let unique_commit = match create_commit(&clone_path, "deletion test unique commit") {
+                Ok(h) => h,
+                Err(e) => { cleanup(); return Err(format!("Failed to create commit: {}", e)); }
+            };
+
+            // Stage 3: submit a state event pointing to the unique commit (enters purgatory)
+            let state_event = client
+                .event_builder(Kind::RepoState, "")
+                .tag(Tag::identifier(&repo_id))
                 .tag(Tag::custom(
-                    TagKind::custom("k"),
-                    vec!["30617"],
+                    TagKind::custom("refs/heads/main"),
+                    vec![unique_commit.clone()],
+                ))
+                .tag(Tag::custom(
+                    TagKind::custom("HEAD"),
+                    vec!["ref: refs/heads/main".to_string()],
                 ))
                 .build(client.keys())
-                .map_err(|e| format!("Failed to build deletion event: {}", e))?;
+                .map_err(|e| { cleanup(); format!("Failed to build state event: {}", e) })?;
+
+            let (_, in_purgatory) = client
+                .send_event_and_note_purgatory(state_event.clone())
+                .await
+                .map_err(|e| { cleanup(); format!("Failed to send state event: {}", e) })?;
+
+            if !in_purgatory {
+                cleanup();
+                return Err(format!(
+                    "State event was served immediately (not in purgatory). \
+                     Commit {} may already exist on relay.",
+                    unique_commit
+                ));
+            }
+
+            // Stage 4: send kind 5 deletion event referencing the state event by event ID
+            let deletion = client
+                .event_builder(Kind::EventDeletion, "")
+                .tag(Tag::event(state_event.id))
+                .tag(Tag::custom(TagKind::custom("k"), vec!["30618"]))
+                .build(client.keys())
+                .map_err(|e| { cleanup(); format!("Failed to build deletion event: {}", e) })?;
 
             client
                 .send_event(deletion)
                 .await
-                .map_err(|e| format!("Relay rejected deletion event: {}", e))?;
+                .map_err(|e| { cleanup(); format!("Relay rejected deletion event: {}", e) })?;
 
             tokio::time::sleep(Duration::from_millis(300)).await;
 
-            // Verify the announcement can no longer be promoted by attempting a git push.
-            // We check this indirectly: if the purgatory entry was removed, a subsequent
-            // git push to the repo path should fail (no bare repo).
-            // For the integration test we verify the announcement is still not served
-            // (it was never promoted) and that the deletion event was accepted.
-            // The bare-repo deletion is verified by attempting a git clone.
-            let http_url = AuditClient::ws_to_http_url(&client.relay_url().await.map_err(|e| e.to_string())?)
-                .map_err(|e| e.to_string())?;
-            let clone_url = format!(
-                "{}/{}/{}.git",
-                http_url,
-                client.public_key().to_bech32().map_err(|e| e.to_string())?,
-                repo_id
-            );
+            // Stage 5: attempt to push the unique commit — must be rejected
+            let push_result = try_push(&clone_path);
+            cleanup();
 
-            // git ls-remote should fail (bare repo deleted)
-            let output = std::process::Command::new("git")
-                .args(["ls-remote", &clone_url])
-                .output()
-                .map_err(|e| format!("Failed to run git ls-remote: {}", e))?;
-
-            if output.status.success() {
-                return Err(format!(
-                    "Bare repo still exists after deletion event. \
-                     Expected git ls-remote to fail for {}",
-                    clone_url
-                ));
+            match push_result {
+                Ok(false) => Ok(()), // push rejected as expected
+                Ok(true) => Err(format!(
+                    "Push was accepted but should have been rejected. \
+                     The state event (id={}) was deleted, so commit {} \
+                     should not be authorized.",
+                    state_event.id, unique_commit
+                )),
+                Err(e) => Err(format!("Git push error: {}", e)),
             }
-
-            Ok(())
         })
         .await
     }
 
-    /// Test: Kind 5 deletion event by `a` tag coordinate removes purgatory announcement
+    /// Test: Kind 5 deletion event by `a` tag coordinate removes a purgatory state event
     ///
     /// Spec: NIP-09
     /// "When an `a` tag is used, relays SHOULD delete all versions of the replaceable
     /// event up to the `created_at` timestamp of the deletion request event."
     ///
     /// This test verifies:
-    /// 1. Send a valid repository announcement (enters purgatory)
-    /// 2. Send a kind 5 deletion event referencing the announcement by coordinate
-    ///    (`30617:<pubkey>:<identifier>`)
-    /// 3. The announcement is no longer in purgatory
-    pub async fn test_deletion_by_coordinate_removes_purgatory_announcement(
+    /// 1. Get a promoted repo (OwnerStateDataPushed) so git pushes are possible
+    /// 2. Generate a fresh keypair for a new maintainer
+    /// 3. Send a replacement owner announcement adding the new maintainer (goes to DB)
+    /// 4. Send a state event signed by the new maintainer pointing to a unique commit
+    ///    (enters purgatory — maintainer is authorized but commit doesn't exist yet)
+    /// 5. Delete by coordinate `30618:<new_maintainer_pubkey>:<identifier>`
+    /// 6. Clone repo, create that unique commit, attempt to push — MUST be rejected
+    ///    (the state event was deleted, so the commit is no longer authorized)
+    pub async fn test_deletion_by_coordinate_removes_purgatory_state_event(
         client: &AuditClient,
     ) -> TestResult {
         TestResult::new(
-            "deletion_by_coordinate_removes_purgatory_announcement",
+            "deletion_by_coordinate_removes_purgatory_state_event",
             SpecRef::PurgatoryAcceptUntilGitData,
-            "Kind 5 deletion by `a` coordinate SHOULD remove a purgatory announcement",
+            "Kind 5 deletion by `a` coordinate SHOULD remove a purgatory state event, causing push rejection",
         )
         .run(|| async {
             let ctx = TestContext::new(client);
 
-            // Send announcement to purgatory
-            let repo = ctx
-                .get_fixture(FixtureKind::ValidRepoSent)
+            // Stage 1: get a promoted repo with git data already on the relay
+            let existing_state = ctx
+                .get_fixture(FixtureKind::OwnerStateDataPushed)
                 .await
-                .map_err(|e| format!("Failed to create repo announcement: {}", e))?;
+                .map_err(|e| format!("Failed to get promoted repo: {}", e))?;
 
-            let repo_id = repo
+            let repo_id = existing_state
                 .tags
                 .iter()
                 .find(|t| t.kind() == TagKind::d())
                 .and_then(|t| t.content())
-                .ok_or("Missing d tag in repo announcement")?
+                .ok_or("Missing d tag in state event")?
                 .to_string();
 
-            // Verify it's in purgatory (not served)
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            if client.is_event_on_relay(repo.id).await.map_err(|e| e.to_string())? {
-                return Err(
-                    "Announcement was served immediately - purgatory not working".to_string(),
-                );
+            // Stage 2: generate a fresh keypair for a new maintainer
+            let new_maintainer_keys = Keys::generate();
+            let new_maintainer_hex = new_maintainer_keys.public_key().to_hex();
+
+            // Stage 3: send a replacement owner announcement that adds the new maintainer.
+            // This is a replacement (same pubkey + identifier already in DB) so it goes
+            // straight to the database without entering purgatory.
+            let relay_url = client
+                .relay_url()
+                .await
+                .map_err(|e| e.to_string())?;
+            let http_url = relay_url
+                .replace("ws://", "http://")
+                .replace("wss://", "https://");
+            let npub = client
+                .public_key()
+                .to_bech32()
+                .map_err(|e| e.to_string())?;
+
+            let replacement_announcement = client
+                .event_builder(Kind::GitRepoAnnouncement, "")
+                .tag(Tag::identifier(&repo_id))
+                .tag(Tag::custom(
+                    TagKind::custom("clone"),
+                    vec![format!("{}/{}/{}.git", http_url, npub, repo_id)],
+                ))
+                .tag(Tag::custom(
+                    TagKind::custom("relays"),
+                    vec![relay_url.clone()],
+                ))
+                .tag(Tag::custom(
+                    TagKind::custom("maintainers"),
+                    vec![new_maintainer_hex.clone()],
+                ))
+                .build(client.keys())
+                .map_err(|e| format!("Failed to build replacement announcement: {}", e))?;
+
+            client
+                .send_event(replacement_announcement)
+                .await
+                .map_err(|e| format!("Relay rejected replacement announcement: {}", e))?;
+
+            tokio::time::sleep(Duration::from_millis(200)).await;
+
+            // Stage 4: clone the repo and create a unique commit (not pushed yet)
+            let relay_domain = relay_url
+                .trim_start_matches("ws://")
+                .trim_start_matches("wss://")
+                .to_string();
+
+            let clone_path = clone_repo(&relay_domain, &npub, &repo_id)
+                .map_err(|e| format!("Failed to clone repo: {}", e))?;
+
+            let cleanup = || { let _ = fs::remove_dir_all(&clone_path); };
+
+            let unique_commit = match create_commit(&clone_path, "deletion coordinate test unique commit") {
+                Ok(h) => h,
+                Err(e) => { cleanup(); return Err(format!("Failed to create commit: {}", e)); }
+            };
+
+            // Stage 5: submit a state event signed by the new maintainer pointing to the
+            // unique commit. The new maintainer is now authorized (listed in the replacement
+            // announcement), so the state event should enter purgatory (commit doesn't exist).
+            let state_event = client
+                .event_builder(Kind::RepoState, "")
+                .tag(Tag::identifier(&repo_id))
+                .tag(Tag::custom(
+                    TagKind::custom("refs/heads/main"),
+                    vec![unique_commit.clone()],
+                ))
+                .tag(Tag::custom(
+                    TagKind::custom("HEAD"),
+                    vec!["ref: refs/heads/main".to_string()],
+                ))
+                .build(&new_maintainer_keys)
+                .map_err(|e| { cleanup(); format!("Failed to build state event: {}", e) })?;
+
+            let (_, in_purgatory) = client
+                .send_event_and_note_purgatory(state_event.clone())
+                .await
+                .map_err(|e| { cleanup(); format!("Failed to send state event: {}", e) })?;
+
+            if !in_purgatory {
+                cleanup();
+                return Err(format!(
+                    "State event was served immediately (not in purgatory). \
+                     Commit {} may already exist on relay.",
+                    unique_commit
+                ));
             }
 
-            // Build coordinate: `30617:<pubkey_hex>:<identifier>`
-            let coord = format!(
-                "30617:{}:{}",
-                client.public_key().to_hex(),
-                repo_id
-            );
+            // Stage 6: send kind 5 deletion event signed by the new maintainer,
+            // referencing their state event by coordinate `30618:<pubkey>:<identifier>`
+            let coord = format!("30618:{}:{}", new_maintainer_hex, repo_id);
 
-            // Build and send kind 5 deletion event referencing by coordinate
             let deletion = client
                 .event_builder(Kind::EventDeletion, "")
                 .tag(Tag::custom(TagKind::custom("a"), vec![coord]))
-                .tag(Tag::custom(TagKind::custom("k"), vec!["30617"]))
-                .build(client.keys())
-                .map_err(|e| format!("Failed to build deletion event: {}", e))?;
+                .tag(Tag::custom(TagKind::custom("k"), vec!["30618"]))
+                .build(&new_maintainer_keys)
+                .map_err(|e| { cleanup(); format!("Failed to build deletion event: {}", e) })?;
 
             client
                 .send_event(deletion)
                 .await
-                .map_err(|e| format!("Relay rejected deletion event: {}", e))?;
+                .map_err(|e| { cleanup(); format!("Relay rejected deletion event: {}", e) })?;
 
             tokio::time::sleep(Duration::from_millis(300)).await;
 
-            // Verify bare repo was deleted
-            let http_url = AuditClient::ws_to_http_url(&client.relay_url().await.map_err(|e| e.to_string())?)
-                .map_err(|e| e.to_string())?;
-            let clone_url = format!(
-                "{}/{}/{}.git",
-                http_url,
-                client.public_key().to_bech32().map_err(|e| e.to_string())?,
-                repo_id
-            );
+            // Stage 7: attempt to push the unique commit — must be rejected because
+            // the new maintainer's state event was deleted from purgatory
+            let push_result = try_push(&clone_path);
+            cleanup();
 
-            let output = std::process::Command::new("git")
-                .args(["ls-remote", &clone_url])
-                .output()
-                .map_err(|e| format!("Failed to run git ls-remote: {}", e))?;
-
-            if output.status.success() {
-                return Err(format!(
-                    "Bare repo still exists after deletion event. \
-                     Expected git ls-remote to fail for {}",
-                    clone_url
-                ));
+            match push_result {
+                Ok(false) => Ok(()), // push rejected as expected
+                Ok(true) => Err(format!(
+                    "Push was accepted but should have been rejected. \
+                     The new maintainer's state event (id={}) was deleted by coordinate, \
+                     so commit {} should not be authorized.",
+                    state_event.id, unique_commit
+                )),
+                Err(e) => Err(format!("Git push error: {}", e)),
             }
-
-            Ok(())
         })
         .await
     }
