@@ -8,7 +8,11 @@
 
 ## Overview
 
-Purgatory is an in-memory holding area that solves the **"which arrives first?"** problem in GRASP. Either nostr events or git pushes can arrive in any order:
+Purgatory is an in-memory holding area that solves two related problems in GRASP:
+
+### Problem 1: "Which arrives first?" (State and PR events)
+
+Either nostr events or git pushes can arrive in any order:
 
 - **Event first**: Event waits in purgatory until git data arrives
 - **Git first**: Placeholder waits in purgatory until event arrives
@@ -18,6 +22,18 @@ When both halves arrive, they are processed together and saved to the database.
 **Spec Reference**: [GRASP-01 Purgatory Section](https://github.com/DanConwayDev/grasp/blob/main/01.md#purgatory)
 
 > Accepted repo state announcements, PRs and PR Updates SHOULD be accepted with message "purgatory: won't be served until git data arrives" and kept in purgatory (not served) until the related git data arrives and otherwise discarded after 30 minutes.
+
+### Problem 2: Misleading empty repository announcements
+
+When a repository announcement arrives, we must create the bare git repo immediately so pushes can succeed. But if no git data ever arrives, we would serve an empty repo and its announcement indefinitely—clients see the announcement, try to clone, and get nothing.
+
+**Solution**: New announcements go to **announcement purgatory** instead of being immediately accepted:
+
+1. **Announcement arrives** → Create bare repo immediately, add announcement to purgatory
+2. **Git data arrives** → Promote announcement from purgatory to active (now served to clients)
+3. **No git data before expiry** → Delete bare repo, discard announcement (never served)
+
+This ensures we only serve announcements for repos that actually have content.
 
 ---
 
@@ -31,16 +47,15 @@ Purgatory data is **not persisted** to disk. On restart, all purgatory entries a
 - Git data can be re-pushed
 - 30-minute expiry means data is transient anyway
 
-### 2. Separate Storage for State vs PR Events
+### 2. Separate Storage for Each Event Type
 
-State events (kind 30618) and PR events (kind 1617/1618) have fundamentally different matching patterns:
+| Store | Index | Purpose |
+|-------|-------|---------|
+| `announcement_purgatory` | `(PublicKey, String)` — `(owner, identifier)` | Announcements awaiting git data |
+| `state_events` | `identifier` (d tag) | State events awaiting git data |
+| `pr_events` | `event_id` (hex string) | PR events awaiting git data |
 
-| Event Type | Index | Matching Strategy |
-|------------|-------|-------------------|
-| **State Events** | `identifier` (d tag) | Compare refs at push time |
-| **PR Events** | `event_id` (hex string) | Direct match via `refs/nostr/<event-id>` |
-
-They use **separate DashMap stores** for efficient concurrent access.
+Announcement purgatory uses `(pubkey, identifier)` because identifier alone is not unique across different owners.
 
 ### 3. Late Binding for State Events
 
@@ -78,7 +93,23 @@ With purgatory checking during authorization:
 2. Git push arrives → Checks **database + purgatory** → State found → **AUTHORIZED** ✅
 3. After push succeeds → Save event to database → Remove from purgatory
 
-See [`src/git/authorization.rs:51-162`](../../src/git/authorization.rs) for implementation.
+See [`src/git/authorization.rs`](../../src/git/authorization.rs) for implementation.
+
+### 6. Announcement Purgatory: Bare Repo Created Immediately
+
+**Decision:** Create the bare git repo when announcement enters purgatory.
+
+**Why:** Git pushes may arrive at any time. Without a repo, pushes fail.
+
+**Consequence:** We allocate disk space for repos that may expire unused. Must delete repos on expiry.
+
+### 7. Replacement Announcements Skip Purgatory
+
+**Decision:** Announcements replacing an existing active (database) announcement are accepted immediately.
+
+**Why:** The repository is already proven active with content.
+
+**How:** Check if active announcement exists for `(pubkey, identifier)` before routing to purgatory.
 
 ---
 
@@ -103,22 +134,54 @@ pub struct RefUpdate {
 }
 ```
 
+### Announcement Purgatory Entry
+
+```rust
+pub struct AnnouncementPurgatoryEntry {
+    /// The kind 30617 announcement event
+    pub event: Event,
+
+    /// Repository identifier from 'd' tag
+    pub identifier: String,
+
+    /// Event author pubkey
+    pub owner: PublicKey,
+
+    /// Path to the bare git repo on disk (created immediately on entry)
+    pub repo_path: PathBuf,
+
+    /// Relay URLs from 'relays'/'clone' tags — for sync registration
+    pub relays: HashSet<String>,
+
+    /// When added to purgatory
+    pub created_at: Instant,
+
+    /// Expiry deadline (30 min from creation, may be extended)
+    pub expires_at: Instant,
+
+    /// Whether the bare repo has been deleted (soft expiry phase)
+    pub soft_expired: bool,
+}
+```
+
+**Indexed by `(pubkey, identifier)`** because identifier is not unique across different owners.
+
 ### State Purgatory Entry
 
 ```rust
 pub struct StatePurgatoryEntry {
     /// The nostr state event (kind 30618) awaiting git data
     pub event: Event,
-    
+
     /// Repository identifier from 'd' tag
     pub identifier: String,
-    
+
     /// Event author pubkey
     pub author: PublicKey,
-    
+
     /// When added to purgatory
     pub created_at: Instant,
-    
+
     /// Expiry deadline (30 min from creation, may be extended)
     pub expires_at: Instant,
 }
@@ -132,14 +195,14 @@ pub struct StatePurgatoryEntry {
 pub struct PrPurgatoryEntry {
     /// The nostr PR event, if received (None = git data arrived first)
     pub event: Option<Event>,
-    
+
     /// Expected commit SHA from 'c' tag (if event exists)
     /// or actual commit pushed (if git arrived first)
     pub commit: String,
-    
+
     /// When added to purgatory
     pub created_at: Instant,
-    
+
     /// Expiry deadline (30 min from creation)
     pub expires_at: Instant,
 }
@@ -151,24 +214,155 @@ pub struct PrPurgatoryEntry {
 
 ```rust
 pub struct Purgatory {
+    /// Announcement events indexed by (owner, identifier)
+    announcement_purgatory: DashMap<(PublicKey, String), AnnouncementPurgatoryEntry>,
+
     /// State events indexed by identifier (d tag)
     /// Multiple state events per identifier allowed (different authors)
-    state_events: Arc<DashMap<String, Vec<StatePurgatoryEntry>>>,
-    
+    state_events: DashMap<String, Vec<StatePurgatoryEntry>>,
+
     /// PR events indexed by event_id (hex string)
     /// Single entry per event ID
-    pr_events: Arc<DashMap<String, PrPurgatoryEntry>>,
-    
+    pr_events: DashMap<String, PrPurgatoryEntry>,
+
     /// Sync queue for background git data fetching
-    sync_queue: Arc<DashMap<String, SyncQueueEntry>>,
-    
-    _git_data_path: PathBuf,
+    sync_queue: DashMap<String, SyncQueueEntry>,
+
+    /// Events that previously expired without git data (prevents re-sync loops)
+    expired_events: DashMap<EventId, Instant>,
 }
 ```
 
 ---
 
-## Event Flows
+## Announcement Purgatory Flows
+
+### New Announcement Flow
+
+```
+Announcement arrives
+    |
+    v
+Is there an active announcement for (pubkey, identifier) in DB?
+    |
+    +-- YES --> Accept immediately (replacement, repo already proven)
+    |
+    +-- NO --> Is there a purgatory entry for (pubkey, identifier)?
+                |
+                +-- YES --> Replace purgatory entry, extend expiry 30 min
+                |           Return OK to client (but don't serve)
+                |
+                +-- NO --> Create bare repo
+                           Add to purgatory
+                           Return OK to client (but don't serve)
+```
+
+### Git Data Arrival → Promotion
+
+```
+Git push/fetch completes with data
+    |
+    v
+process_purgatory_announcements() called
+    |
+    v
+Is there a purgatory announcement for (owner, identifier)?
+    |
+    +-- YES --> promote_announcement() removes from purgatory
+    |           Save event to database
+    |           Notify WebSocket clients
+    |           (Sync upgrades to Full automatically via SelfSubscriber)
+    |
+    +-- NO --> Normal processing
+```
+
+### State Event Arrival for Purgatory Announcement
+
+```
+State event arrives
+    |
+    v
+fetch_repository_data_with_purgatory() checks DB + purgatory
+    |
+    +-- Announcement found in purgatory -->
+    |       Validate authorization against purgatory announcement
+    |       Extend purgatory announcement expiry (reset 30-min timer)
+    |       If soft-expired: recreate bare repo, clear soft_expired flag
+    |       Route state event to state purgatory
+    |
+    +-- No announcement anywhere --> Reject
+```
+
+### Announcement Expiry (Two-Phase Soft Expiry)
+
+The protocol specifies 30-minute expiry for announcements. We implement a two-phase soft expiry:
+
+**Phase 1 — Initial 30-minute expiry (`soft_expired == false`):**
+- Delete the bare git repo (frees disk space, respects protocol expiry)
+- Set `soft_expired = true`
+- Extend `expires_at` by 24 hours (`SOFT_EXPIRY_EXTENDED`)
+- Continue syncing state events (same as active purgatory)
+
+**Phase 2 — 24-hour soft expiry (`soft_expired == true`):**
+- Add event ID to `expired_events` (prevents re-sync loops)
+- Remove entry completely from `announcement_purgatory`
+
+**Why soft expiry?** Without it, we'd face a dilemma:
+
+- Add expired announcements to `failed_events` → permanently reject future state events, losing potential revival when state events arrive late
+- Re-fetch the announcement event on every sync cycle → wasting bandwidth and creating unnecessary sync traffic
+
+Soft expiry retains the event for 24 hours so that late-arriving state events (e.g. from a slow sync) can revive the announcement without forcing a full re-announcement flow.
+
+**Revival:** If a state event arrives for a soft-expired announcement, `extend_announcement_expiry()` recreates the bare repo, clears `soft_expired`, and resets the 30-minute timer.
+
+### Expiry Extension Triggers
+
+The 30-minute purgatory timer is reset (extended) in three scenarios:
+
+| Trigger | Location | Why |
+|---------|----------|-----|
+| State event arrives | `StatePolicy::process_state_event()` | Repo is actively receiving metadata |
+| Git push authorized against purgatory state | `get_state_authorization_for_specific_owner_repo()` | Repo is actively receiving git data |
+| Replacement announcement arrives | `AnnouncementPolicy::validate()` | Announcement updated |
+
+All three call `purgatory.extend_announcement_expiry(owner, identifier, 1800s)`.
+
+### Purgatory Lifecycle
+
+```
+                    ┌─────────────────────────────────────┐
+                    │                                     │
+                    v                                     │
+Announcement ──> ACTIVE ──────────────────────────────────┤
+  arrives        (bare repo exists)                       │
+                    │                                     │
+                    ├── Git data ──> PROMOTED (exit)      │
+                    │                                     │
+                    ├── Deletion ──> REMOVED (exit)       │
+                    │                                     │
+                    v                                     │
+               SOFT_EXPIRED ──────────────────────────────┘
+               (bare repo deleted,        ^
+                event retained)           │
+                    │                     │
+                    ├── State event arrives (revival)
+                    │
+                    └── Extended expiry ──> REMOVED (exit)
+```
+
+| Exit | Trigger | Action |
+|------|---------|--------|
+| **Promotion** | Git data arrives | Move to database, sync upgrades to Full |
+| **Soft expiry** | Initial 30-min timeout | Delete bare repo, retain event, continue sync |
+| **Full expiry** | 24-hour soft expiry | Add to expired_events, remove from purgatory |
+| **Deletion** | Kind 5 event | Delete bare repo, remove from purgatory |
+| **Replacement** | Newer announcement (same pubkey, identifier) | Replace entry, extend expiry |
+| **Service change** | Newer announcement removes our service | Remove from purgatory |
+
+---
+
+## State and PR Event Flows
 
 ### State Event Arrival (Kind 30618)
 
@@ -377,11 +571,12 @@ Purgatory includes a background sync system that fetches git data from remote se
                          ▼
 ┌─────────────────────────────────────────────────────┐
 │   process_newly_available_git_data(repo, oids)      │
-│  1. Find satisfiable state events in purgatory      │
-│  2. Find satisfiable PR events in purgatory         │
-│  3. Save events to database                         │
-│  4. Sync git data to other owner repos              │
-│  5. Remove from purgatory                           │
+│  1. Find satisfiable announcement in purgatory      │
+│  2. Find satisfiable state events in purgatory      │
+│  3. Find satisfiable PR events in purgatory         │
+│  4. Save events to database                         │
+│  5. Sync git data to other owner repos              │
+│  6. Remove from purgatory                           │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -402,8 +597,8 @@ pub struct SyncQueueEntry {
 
 **Backoff strategy:**
 - First attempt: 20 seconds
-- Second attempt: 2 minutes
-- Subsequent attempts: 2 minutes
+- Second attempt: 40 seconds
+- Subsequent attempts: capped at 2 minutes
 
 ### Sync Delays
 
@@ -428,7 +623,7 @@ pub struct ThrottleManager {
 ```
 
 **Rate limiting:**
-- Default: 5 requests per domain per 30 seconds
+- Default: 5 concurrent requests per domain, 30 requests per minute
 - Tracks request timestamps in a sliding window
 - Queues identifiers when domain is throttled
 - Processes queue when capacity frees up
@@ -439,7 +634,47 @@ See [`src/purgatory/sync/throttle.rs`](../../src/purgatory/sync/throttle.rs) for
 
 ## Purgatory API
 
-### Adding Entries
+### Announcement Purgatory
+
+```rust
+impl Purgatory {
+    /// Add an announcement to purgatory (bare repo already created by caller)
+    pub fn add_announcement(
+        &self,
+        event: Event,
+        identifier: String,
+        owner: PublicKey,
+        repo_path: PathBuf,
+        relays: HashSet<String>,
+    );
+
+    /// Promote announcement: remove from purgatory, return event for DB save
+    pub fn promote_announcement(
+        &self,
+        owner: &PublicKey,
+        identifier: &str,
+    ) -> Option<Event>;
+
+    /// Get announcements by identifier (for authorization checks)
+    pub fn get_announcements_by_identifier(
+        &self,
+        identifier: &str,
+    ) -> Vec<AnnouncementPurgatoryEntry>;
+
+    /// Extend expiry (and revive soft-expired entries, recreating bare repo)
+    pub fn extend_announcement_expiry(
+        &self,
+        owner: &PublicKey,
+        identifier: &str,
+        duration: Duration,
+    );
+
+    /// Get all announcements for sync registration
+    pub fn announcements_for_sync(&self) -> Vec<AnnouncementPurgatoryEntry>;
+}
+```
+
+### State and PR Purgatory
 
 ```rust
 impl Purgatory {
@@ -453,13 +688,7 @@ impl Purgatory {
     
     /// Add a PR placeholder (git-data-first scenario)
     pub fn add_pr_placeholder(&self, event_id: String, commit: String);
-}
-```
 
-### Finding Entries
-
-```rust
-impl Purgatory {
     /// Find state events waiting for an identifier
     pub fn find_state(&self, identifier: &str) -> Vec<StatePurgatoryEntry>;
     
@@ -476,13 +705,7 @@ impl Purgatory {
     
     /// Find a PR placeholder specifically (git-data-first)
     pub fn find_pr_placeholder(&self, event_id: &str) -> Option<String>;
-}
-```
 
-### Removing Entries
-
-```rust
-impl Purgatory {
     /// Remove all state events for an identifier
     pub fn remove_state(&self, identifier: &str);
     
@@ -499,36 +722,14 @@ impl Purgatory {
 ```rust
 impl Purgatory {
     /// Remove expired entries (called every 60 seconds)
-    /// Returns (state_removed, pr_removed)
-    pub fn cleanup(&self) -> (usize, usize);
+    /// Handles two-phase soft expiry for announcements
+    pub fn cleanup(&self);
     
-    /// Extend expiry for entries about to be processed
-    /// Ensures at least `duration` remaining
+    /// Extend expiry for state/PR entries about to be processed
     pub fn extend_expiry(&self, identifier: &str, event_ids: &[EventId], duration: Duration);
     
-    /// Get current counts for metrics
-    pub fn count(&self) -> (usize, usize);
-}
-```
-
-### Sync Queue Management
-
-```rust
-impl Purgatory {
-    /// Enqueue identifier for sync with custom delay
-    pub fn enqueue_sync(&self, identifier: &str, delay: Duration);
-    
-    /// Enqueue with default delay (3 minutes)
-    pub fn enqueue_sync_default(&self, identifier: &str);
-    
-    /// Enqueue with immediate delay (500ms)
-    pub fn enqueue_sync_immediate(&self, identifier: &str);
-    
-    /// Check if identifier has pending events
-    pub fn has_pending_events(&self, identifier: &str) -> bool;
-    
-    /// Remove identifier from sync queue
-    pub fn remove_from_sync_queue(&self, identifier: &str);
+    /// Check if an event previously expired (prevents re-sync loops)
+    pub fn is_expired(&self, event_id: &EventId) -> bool;
 }
 ```
 
@@ -558,12 +759,6 @@ pub fn can_apply_state(
     event: &Event,
     repo_path: &Path,
 ) -> Result<bool>;
-
-/// Get refs from state that aren't being pushed
-pub fn get_unpushed_refs(
-    state_refs: &[RefPair],
-    pushed_refs: &[RefPair],
-) -> Vec<RefPair>;
 ```
 
 See [`src/purgatory/helpers.rs`](../../src/purgatory/helpers.rs) for implementation.
@@ -572,123 +767,37 @@ See [`src/purgatory/helpers.rs`](../../src/purgatory/helpers.rs) for implementat
 
 ## Integration Points
 
-### 1. Event Policy (Nip34WritePolicy)
+### 1. Announcement Policy (`src/nostr/policy/announcement.rs`)
 
-State and PR events are added to purgatory when git data doesn't exist:
+Routes new announcements to purgatory or accepts replacements:
 
-```rust
-// From src/nostr/policy/state.rs
-async fn handle_state(&self, event: &Event) -> WritePolicyResult {
-    let identifier = extract_identifier(event)?;
-    
-    // Check if we have matching git data
-    if self.has_matching_git_data(&identifier, event).await? {
-        return WritePolicyResult::Accept;
-    }
-    
-    // Add to purgatory
-    self.purgatory.add_state(
-        event.clone(),
-        identifier.clone(),
-        event.pubkey,
-    );
-    
-    WritePolicyResult::Reject {
-        status: true,  // Client sees OK
-        message: "purgatory: awaiting git data".into()
-    }
-}
-```
+- If active DB announcement exists for `(pubkey, identifier)` → `Accept` immediately
+- If purgatory entry exists → replace it, extend expiry, return `Accept`
+- Otherwise → return `AcceptPurgatory`, caller calls `add_to_purgatory()` which creates bare repo and adds to purgatory
 
-### 2. Git Push Authorization
+### 2. State Event Policy (`src/nostr/policy/state.rs`)
 
-Authorization checks both database and purgatory:
+Checks purgatory announcements for authorization and extends their expiry:
 
 ```rust
-// From src/git/authorization.rs
-pub async fn authorize_push(
-    database: &SharedDatabase,
-    identifier: &str,
-    owner_pubkey: &str,
-    request_body: &Bytes,
-    purgatory: &Arc<Purgatory>,  // Critical!
-    repo_path: &std::path::Path,
-) -> anyhow::Result<AuthorizationResult> {
-    // Parse pushed refs
-    let pushed_refs = parse_pushed_refs(request_body);
-    
-    // Check database for state events
-    let db_result = get_authorization_from_db(database, identifier).await?;
-    
-    if !db_result.authorized {
-        // No state in database - check purgatory
-        let purgatory_result = get_state_authorization_for_specific_owner_repo(
-            database,
-            identifier,
-            owner_pubkey,
-            purgatory,
-            &pushed_refs,
-            repo_path,
-        ).await?;
-        
-        return purgatory_result;
-    }
-    
-    db_result
-}
+// Fetch announcements from both DB and purgatory
+let repo_data = fetch_repository_data_with_purgatory(db, purgatory, identifier).await?;
+
+// For each authorized owner with a purgatory announcement, extend expiry
+purgatory.extend_announcement_expiry(&owner_pk, &identifier, Duration::from_secs(1800));
 ```
 
-### 3. Post-Push Processing
+### 3. Git Push Authorization (`src/git/authorization.rs`)
 
-After successful push, events from purgatory are saved to database:
+`fetch_repository_data_with_purgatory()` merges DB announcements with purgatory announcements for authorization. On successful authorization via purgatory state events, also extends announcement expiry.
 
-```rust
-// From src/git/handlers.rs
-if from_purgatory {
-    if let (Some(db), Some(purg)) = (&database, &purgatory) {
-        // Save state event to database
-        db.save_event(&state.event).await?;
-        
-        // Remove from purgatory
-        purg.remove_state_event(identifier, &state.event.id);
-    }
-}
-```
+### 4. Git Data Processing (`src/git/sync.rs`)
 
-### 4. Background Sync Loop
+`process_purgatory_announcements()` is called after any git push or background sync fetch. It promotes announcements from purgatory to the database and notifies WebSocket clients.
 
-Started during application initialization:
+### 5. Sync Registration (`src/sync/`)
 
-```rust
-// From src/main.rs
-let purgatory = Arc::new(Purgatory::new(git_data_path));
-let ctx = Arc::new(RealSyncContext::new(
-    database.clone(),
-    purgatory.clone(),
-    config.domain.clone(),
-    git_data_path.clone(),
-));
-let throttle_manager = Arc::new(ThrottleManager::new(5, 30));
-throttle_manager.set_context(ctx.clone());
-
-// Start sync loop
-let sync_handle = purgatory.clone().start_sync_loop(ctx, throttle_manager);
-
-// Start cleanup task
-let cleanup_handle = tokio::spawn(async move {
-    let mut interval = tokio::time::interval(Duration::from_secs(60));
-    loop {
-        interval.tick().await;
-        let (state_removed, pr_removed) = purgatory.cleanup();
-        if state_removed + pr_removed > 0 {
-            tracing::debug!(
-                "Purgatory cleanup removed {} state, {} PR entries",
-                state_removed, pr_removed
-            );
-        }
-    }
-});
-```
+A background timer (`run_purgatory_announcement_sync`, every 5 seconds) ensures purgatory announcements are registered in `RepoSyncIndex` with `SyncLevel::StateOnly`. When an announcement is promoted, the `SelfSubscriber` upgrades it to `SyncLevel::Full`.
 
 ---
 
@@ -698,7 +807,7 @@ let cleanup_handle = tokio::spawn(async move {
 src/
 ├── purgatory/
 │   ├── mod.rs              # Main Purgatory struct and API
-│   ├── types.rs            # RefPair, StatePurgatoryEntry, PrPurgatoryEntry
+│   ├── types.rs            # RefPair, AnnouncementPurgatoryEntry, StatePurgatoryEntry, PrPurgatoryEntry
 │   ├── helpers.rs          # Ref extraction and matching functions
 │   └── sync/
 │       ├── mod.rs          # Sync module exports
@@ -710,9 +819,10 @@ src/
 ├── git/
 │   ├── authorization.rs    # authorize_push with purgatory checking
 │   ├── handlers.rs         # handle_receive_pack with post-push processing
-│   └── sync.rs             # process_newly_available_git_data
+│   └── sync.rs             # process_newly_available_git_data, process_purgatory_announcements
 └── nostr/
     └── policy/
+        ├── announcement.rs # Route announcements to purgatory
         ├── state.rs        # State event policy with purgatory
         └── pr_event.rs     # PR event policy with purgatory
 ```
@@ -725,7 +835,7 @@ src/
 
 Located in each module:
 
-- **[`src/purgatory/mod.rs`](../../src/purgatory/mod.rs)** - Core purgatory operations
+- **[`src/purgatory/mod.rs`](../../src/purgatory/mod.rs)** - Core purgatory operations including announcement purgatory
 - **[`src/purgatory/helpers.rs`](../../src/purgatory/helpers.rs)** - Ref matching logic
 - **[`src/purgatory/sync/functions.rs`](../../src/purgatory/sync/functions.rs)** - Sync functions with MockSyncContext
 - **[`src/purgatory/sync/throttle.rs`](../../src/purgatory/sync/throttle.rs)** - Throttle manager
@@ -734,6 +844,9 @@ Located in each module:
 
 Located in [`tests/`](../../tests/):
 
+- **Announcement purgatory flow** - Announcement enters purgatory, git data promotes it
+- **Announcement soft expiry** - Bare repo deleted after 30 min, event retained 24h
+- **Announcement revival** - State event revives soft-expired announcement
 - **State event purgatory flow** - Event arrives, git push releases it
 - **PR event purgatory flow** - Event arrives, git push releases it
 - **Git-data-first flow** - Git push creates placeholder, event completes it
@@ -744,7 +857,19 @@ Located in [`tests/`](../../tests/):
 
 ## Key Learnings
 
-### 1. Purgatory Authorization is Critical
+### 1. Announcement Purgatory Prevents Misleading Empty Repos
+
+Without announcement purgatory, we'd serve announcements for repos with no content. Clients would see the announcement, try to clone, and get nothing.
+
+**Solution:** Announcements wait in purgatory until git data proves content exists.
+
+### 2. Soft Expiry Avoids Sync Loops
+
+The protocol's 30-minute expiry creates a problem: without soft expiry, we'd either permanently block repositories or constantly re-sync expired announcement events.
+
+**Solution:** Soft expiry retains the event for 24 hours after deleting the bare repo, allowing revival without re-fetching.
+
+### 3. Purgatory Authorization is Critical
 
 Without checking purgatory during authorization, we have a deadlock:
 - State event goes to purgatory (no git data)
@@ -753,7 +878,7 @@ Without checking purgatory during authorization, we have a deadlock:
 
 **Solution:** `authorize_push()` checks both database and purgatory.
 
-### 2. Late Binding for State Events
+### 4. Late Binding for State Events
 
 Extracting refs at event arrival time doesn't work when:
 - Multiple state events arrive for same identifier
@@ -761,7 +886,7 @@ Extracting refs at event arrival time doesn't work when:
 
 **Solution:** Extract and match refs at push time via `find_matching_states()`.
 
-### 3. Bidirectional Waiting for PR Events
+### 5. Bidirectional Waiting for PR Events
 
 PR events can arrive before or after git data:
 - Event first → Wait for git push
@@ -769,26 +894,13 @@ PR events can arrive before or after git data:
 
 **Solution:** `PrPurgatoryEntry.event: Option<Event>` with `None` = placeholder.
 
-### 4. Sync Queue Debouncing
-
-When events arrive in bursts (e.g., negentropy sync), we don't want to spawn a sync task for each event.
-
-**Solution:** `enqueue_sync()` resets `attempt_count` and updates `next_attempt` if already queued.
-
-### 5. Domain Throttling with Queues
-
-When a domain is throttled, we still want to eventually sync from it.
-
-**Solution:** `ThrottleManager` maintains per-domain queues and processes them when capacity frees.
-
 ---
 
 ## Related Documentation
 
-- [Inline Authorization](inline-authorization.md) - Why purgatory checking during authorization is essential
 - [Architecture Overview](architecture.md) - Full system design
-- [Background Sync](../how-to/purgatory-sync.md) - How to configure and monitor sync
-- [Test Strategy](../reference/test-strategy.md) - How we test purgatory
+- [GRASP-02 Proactive Sync](grasp-02-proactive-sync.md) - Relay-to-relay event sync with SyncLevel
+- [GRASP-02 Purgatory Git Data Fetching](grasp-02-proactive-sync-purgatory-git-data.md) - Background git data hunting
 
 ---
 
