@@ -115,16 +115,19 @@ pub struct ArchiveConfig {
     ///
     /// WARNING: Setting this to true allows anyone to mirror any repository
     /// to this relay, potentially causing storage/bandwidth exhaustion.
+    #[serde(default)]
     pub archive_all: bool,
 
     /// Whitelist entries for selective archiving
     ///
     /// If empty and archive_all is false, GRASP-05 is disabled (GRASP-01 strict mode).
+    #[serde(default)]
     pub whitelist: Vec<WhitelistEntry>,
 
     /// GRASP server domains to archive (archive all repositories from these domains)
     ///
     /// If non-empty, archives all repositories from the specified GRASP server domains.
+    #[serde(default)]
     pub grasp_services: Vec<String>,
 
     /// Read-only archive mode: relay is a read-only sync of archived repositories
@@ -132,6 +135,7 @@ pub struct ArchiveConfig {
     /// When true, the relay ONLY accepts announcements matching the archive whitelist/all.
     /// Announcements listing the relay but not in the whitelist are rejected.
     /// When false, the relay operates in GRASP-01 mode for unwhitelisted repos.
+    #[serde(default)]
     pub read_only: bool,
 }
 
@@ -178,6 +182,7 @@ pub struct RepositoryConfig {
     /// Whitelist entries for selective repository acceptance
     ///
     /// If empty, all repositories listing the service are accepted (GRASP-01 mode).
+    #[serde(default)]
     pub whitelist: Vec<WhitelistEntry>,
 }
 
@@ -204,6 +209,7 @@ pub struct BlacklistConfig {
     ///
     /// If empty, no repositories are blacklisted.
     /// Blacklist takes precedence over both archive and repository whitelists.
+    #[serde(default)]
     pub blacklist: Vec<WhitelistEntry>,
 }
 
@@ -245,6 +251,7 @@ pub struct EventBlacklistConfig {
     ///
     /// If empty, no events are blacklisted by author.
     /// Applies to ALL event types, preventing events from reaching both the relay and purgatory.
+    #[serde(default)]
     pub blacklisted_npubs: Vec<String>,
 }
 
@@ -466,6 +473,10 @@ pub struct Config {
     /// Prevents connection exhaustion DoS attacks
     #[arg(long, env = "NGIT_MAX_CONNECTIONS", default_value_t = 4096)]
     pub max_connections: usize,
+
+    /// Log level for application logging
+    #[arg(long, env = "NGIT_LOG_LEVEL", default_value = "info")]
+    pub log_level: String,
 }
 
 impl Config {
@@ -748,6 +759,7 @@ impl Config {
             repository_blacklist: String::new(),
             event_blacklist: String::new(),
             max_connections: 500,
+            log_level: "debug".to_string(),
         }
     }
 }
@@ -1069,14 +1081,14 @@ mod tests {
     fn test_archive_read_only_defaults() {
         // Default: false when no archive mode
         let config = Config::for_testing();
-        assert_eq!(config.archive_config().read_only, false);
+        assert!(!config.archive_config().read_only);
 
         // Default: true when archive_all is set
         let config = Config {
             archive_all: true,
             ..Config::for_testing()
         };
-        assert_eq!(config.archive_config().read_only, true);
+        assert!(config.archive_config().read_only);
 
         // Default: true when archive_whitelist is set
         let keys = Keys::generate();
@@ -1085,7 +1097,7 @@ mod tests {
             archive_whitelist: test_npub,
             ..Config::for_testing()
         };
-        assert_eq!(config.archive_config().read_only, true);
+        assert!(config.archive_config().read_only);
     }
 
     #[test]
@@ -1096,7 +1108,7 @@ mod tests {
             archive_read_only: Some(true),
             ..Config::for_testing()
         };
-        assert_eq!(config.archive_config().read_only, true);
+        assert!(config.archive_config().read_only);
 
         // Explicit false with archive_all (unusual but allowed)
         let config = Config {
@@ -1104,14 +1116,14 @@ mod tests {
             archive_read_only: Some(false),
             ..Config::for_testing()
         };
-        assert_eq!(config.archive_config().read_only, false);
+        assert!(!config.archive_config().read_only);
 
         // Explicit false without archive mode
         let config = Config {
             archive_read_only: Some(false),
             ..Config::for_testing()
         };
-        assert_eq!(config.archive_config().read_only, false);
+        assert!(!config.archive_config().read_only);
     }
 
     #[test]
@@ -1514,7 +1526,7 @@ mod tests {
         };
         let archive_config = config.archive_config();
         assert!(archive_config.enabled());
-        assert_eq!(archive_config.read_only, true); // Default to true
+        assert!(archive_config.read_only); // Default to true
     }
 
     #[test]
@@ -1524,7 +1536,7 @@ mod tests {
             archive_grasp_services: "git.example.com".to_string(),
             ..Config::for_testing()
         };
-        assert_eq!(config.archive_config().read_only, true);
+        assert!(config.archive_config().read_only);
     }
 
     #[test]
@@ -1535,7 +1547,7 @@ mod tests {
             archive_read_only: Some(false),
             ..Config::for_testing()
         };
-        assert_eq!(config.archive_config().read_only, false);
+        assert!(!config.archive_config().read_only);
     }
 
     #[test]

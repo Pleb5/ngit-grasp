@@ -345,7 +345,7 @@ impl Service<Request<Incoming>> for HttpService {
                             .unwrap())
                     }
                     Err(e) => {
-                        tracing::error!("Git handler error: {}", e);
+                        // Errors are already logged at their source with full context
                         let error_msg = format!("Git error: {}", e);
                         Ok(add_cors_headers(Response::builder())
                             .status(e.status_code())

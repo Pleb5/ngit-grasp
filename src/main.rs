@@ -3,8 +3,8 @@ use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use tokio::signal;
-use tracing::{error, info, warn, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing::{error, info, warn};
+use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 use ngit_grasp::{
     config::{Config, DatabaseBackend},
@@ -17,16 +17,16 @@ use ngit_grasp::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing
+    // Load configuration first (priority: CLI flags > env vars > .env file > defaults)
+    let config = Config::load()?;
+
+    // Initialize tracing with configured log level
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::DEBUG)
+        .with_env_filter(EnvFilter::new(&config.log_level))
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
-    info!("Starting ngit-grasp with nostr-relay-builder...");
-
-    // Load configuration (priority: CLI flags > env vars > .env file > defaults)
-    let config = Config::load()?;
+    info!("Starting ngit-grasp with log level: {}", config.log_level);
 
     // Validate configuration and fail fast on fatal errors
     // Recoverable issues (e.g., malformed whitelist entries) are logged as warnings
@@ -189,8 +189,8 @@ async fn main() -> Result<()> {
         ));
 
         // Create throttle manager for rate limiting remote git servers
-        // Default: 5 concurrent requests per domain, 30 requests per minute per domain
-        let throttle_manager = Arc::new(ThrottleManager::new(5, 30));
+        // Default: 5 concurrent requests per domain, 60 requests per minute per domain
+        let throttle_manager = Arc::new(ThrottleManager::new(5, 60));
         throttle_manager.set_context(sync_ctx.clone());
         throttle_manager.set_git_naughty_list(git_naughty_list.clone());
 
@@ -212,20 +212,49 @@ async fn main() -> Result<()> {
         let http_write_policy = Arc::new(relay_with_db.write_policy.clone());
 
         // Run server until shutdown signal, then cleanup
-        tokio::select! {
-            result = http::run_server(
-                config,
-                relay_with_db.relay,
-                relay_with_db.database,
-                metrics,
-                purgatory,
-                http_write_policy,
-                http_rejected_index,
-            ) => {
-                result?
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = signal(SignalKind::terminate())?;
+
+            tokio::select! {
+                result = http::run_server(
+                    config,
+                    relay_with_db.relay,
+                    relay_with_db.database,
+                    metrics,
+                    purgatory,
+                    http_write_policy,
+                    http_rejected_index,
+                ) => {
+                    result?
+                }
+                _ = signal::ctrl_c() => {
+                    info!("Received SIGINT (Ctrl+C), cleaning up...");
+                }
+                _ = sigterm.recv() => {
+                    info!("Received SIGTERM, cleaning up...");
+                }
             }
-            _ = signal::ctrl_c() => {
-                info!("Received shutdown signal, cleaning up...");
+        }
+
+        #[cfg(not(unix))]
+        {
+            tokio::select! {
+                result = http::run_server(
+                    config,
+                    relay_with_db.relay,
+                    relay_with_db.database,
+                    metrics,
+                    purgatory,
+                    http_write_policy,
+                    http_rejected_index,
+                ) => {
+                    result?
+                }
+                _ = signal::ctrl_c() => {
+                    info!("Received SIGINT (Ctrl+C), cleaning up...");
+                }
             }
         }
 

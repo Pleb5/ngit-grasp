@@ -100,6 +100,42 @@ pub async fn handle_info_refs(
         .unwrap())
 }
 
+/// Build an HTTP 200 OK response with an ERR pkt-line for git protocol errors.
+///
+/// Per the git smart HTTP protocol spec, protocol-level errors (like "not our ref")
+/// should be returned as HTTP 200 OK with the error message in pkt-line format:
+/// `PKT-LINE("ERR" SP explanation-text)`
+///
+/// This allows git clients to properly parse and display the error message.
+fn build_git_protocol_error_response(
+    service: GitService,
+    error_message: &str,
+) -> Response<Full<Bytes>> {
+    // Format: "ERR <message>\n"
+    let err_content = format!("ERR {}\n", error_message.trim());
+    let err_pktline = PktLine::data(err_content.as_bytes()).encode();
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", service.result_content_type())
+        .header("cache-control", "no-cache")
+        .body(Full::new(Bytes::from(err_pktline)))
+        .unwrap()
+}
+
+/// Check if a git process failure is a protocol error (vs transport error).
+///
+/// Protocol errors are communicated via stderr when git exits with code 128.
+/// These should be returned to the client as HTTP 200 with ERR pkt-line.
+///
+/// Transport errors (process spawn failures, I/O errors, signals) should
+/// remain as HTTP 500 errors.
+fn is_git_protocol_error(exit_code: Option<i32>, stderr: &[u8]) -> bool {
+    // Git uses exit code 128 for protocol/usage errors
+    // If there's stderr content, it's a protocol error message
+    exit_code == Some(128) && !stderr.is_empty()
+}
+
 /// Handle POST /git-upload-pack (clone/fetch)
 pub async fn handle_upload_pack(
     repo_path: PathBuf,
@@ -121,7 +157,10 @@ pub async fn handle_upload_pack(
         stdin
             .write_all(&request_body)
             .await
-            .map_err(GitError::IoError)?;
+            .map_err(|e| {
+                error!("Failed to write to git upload-pack stdin: {}", e);
+                GitError::IoError(e)
+            })?;
         // Close stdin to signal end of input
         drop(stdin);
     }
@@ -135,7 +174,10 @@ pub async fn handle_upload_pack(
         stdout
             .read_to_end(&mut output)
             .await
-            .map_err(GitError::IoError)?;
+            .map_err(|e| {
+                error!("Failed to read git upload-pack stdout: {}", e);
+                GitError::IoError(e)
+            })?;
     }
 
     if let Some(stderr) = git.take_stderr() {
@@ -143,14 +185,35 @@ pub async fn handle_upload_pack(
         stderr
             .read_to_end(&mut stderr_output)
             .await
-            .map_err(GitError::IoError)?;
+            .map_err(|e| {
+                error!("Failed to read git upload-pack stderr: {}", e);
+                GitError::IoError(e)
+            })?;
     }
 
     // Wait for process
-    let status = git.wait().await.map_err(GitError::IoError)?;
+    let status = git.wait().await.map_err(|e| {
+        error!("Failed to wait for git upload-pack process: {}", e);
+        GitError::IoError(e)
+    })?;
 
     if !status.success() {
         let stderr_str = String::from_utf8_lossy(&stderr_output);
+
+        // Check if this is a git protocol error (exit code 128 with stderr)
+        // Protocol errors should be returned as HTTP 200 with ERR pkt-line
+        if is_git_protocol_error(status.code(), &stderr_output) {
+            warn!(
+                "Git upload-pack protocol error (returning ERR pkt-line): {}",
+                stderr_str
+            );
+            return Ok(build_git_protocol_error_response(
+                GitService::UploadPack,
+                &stderr_str,
+            ));
+        }
+
+        // Transport errors (spawn failures, signals, etc.) remain as HTTP 500
         error!("Git upload-pack failed: {}", stderr_str);
         return Err(GitError::GitFailed(status.code()));
     }
@@ -206,7 +269,7 @@ pub async fn handle_receive_pack(
     }
 
     // GRASP Authorization Check
-    info!(
+    debug!(
         "Authorizing push for {} owned by {} via database query",
         identifier, owner_pubkey
     );
@@ -251,7 +314,10 @@ pub async fn handle_receive_pack(
         stdin
             .write_all(&request_body)
             .await
-            .map_err(GitError::IoError)?;
+            .map_err(|e| {
+                error!("Failed to write to git receive-pack stdin: {}", e);
+                GitError::IoError(e)
+            })?;
         drop(stdin);
     }
 
@@ -264,7 +330,10 @@ pub async fn handle_receive_pack(
         stdout
             .read_to_end(&mut output)
             .await
-            .map_err(GitError::IoError)?;
+            .map_err(|e| {
+                error!("Failed to read git receive-pack stdout: {}", e);
+                GitError::IoError(e)
+            })?;
     }
 
     if let Some(stderr) = git.take_stderr() {
@@ -272,14 +341,35 @@ pub async fn handle_receive_pack(
         stderr
             .read_to_end(&mut stderr_output)
             .await
-            .map_err(GitError::IoError)?;
+            .map_err(|e| {
+                error!("Failed to read git receive-pack stderr: {}", e);
+                GitError::IoError(e)
+            })?;
     }
 
     // Wait for process
-    let status = git.wait().await.map_err(GitError::IoError)?;
+    let status = git.wait().await.map_err(|e| {
+        error!("Failed to wait for git receive-pack process: {}", e);
+        GitError::IoError(e)
+    })?;
 
     if !status.success() {
         let stderr_str = String::from_utf8_lossy(&stderr_output);
+
+        // Check if this is a git protocol error (exit code 128 with stderr)
+        // Protocol errors should be returned as HTTP 200 with ERR pkt-line
+        if is_git_protocol_error(status.code(), &stderr_output) {
+            warn!(
+                "Git receive-pack protocol error (returning ERR pkt-line): {}",
+                stderr_str
+            );
+            return Ok(build_git_protocol_error_response(
+                GitService::ReceivePack,
+                &stderr_str,
+            ));
+        }
+
+        // Transport errors (spawn failures, signals, etc.) remain as HTTP 500
         error!("Git receive-pack failed: {}", stderr_str);
         return Err(GitError::GitFailed(status.code()));
     }

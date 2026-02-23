@@ -424,7 +424,7 @@ pub fn validate_announcement(
         {
             return AnnouncementResult::Reject(format!(
                 "Announcement lists service but does not match repository whitelist. \
-                     Repository {}/{} not in whitelist",
+                 Repository {}/{} not in whitelist",
                 npub, announcement.identifier
             ));
         }

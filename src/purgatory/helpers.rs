@@ -225,6 +225,117 @@ pub fn get_unpushed_refs(event: &Event, pushed_refs: &[RefPair]) -> Vec<RefPair>
         .collect()
 }
 
+/// Diagnose why a state event doesn't match the push.
+///
+/// Returns a human-readable explanation of the mismatch between the state event
+/// and what would result from applying the push to local refs.
+///
+/// # Arguments
+/// * `event` - The state event to check
+/// * `pushed_updates` - Ref updates in the current push operation
+/// * `local_refs` - Refs already existing locally (ref_name -> SHA)
+///
+/// # Returns
+/// String explaining why the state doesn't match, or None if it matches
+pub fn diagnose_state_mismatch(
+    event: &Event,
+    pushed_updates: &[RefUpdate],
+    local_refs: &HashMap<String, String>,
+) -> Option<String> {
+    let state_refs = extract_refs_from_state(event);
+
+    // Filter local_refs to only branches and tags
+    let mut would_be_state: HashMap<String, String> = local_refs
+        .iter()
+        .filter(|(ref_name, _)| {
+            ref_name.starts_with("refs/heads/") || ref_name.starts_with("refs/tags/")
+        })
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    // Apply all pushed updates to create the would-be state
+    for update in pushed_updates {
+        // Only process branches and tags
+        if !update.ref_name.starts_with("refs/heads/") && !update.ref_name.starts_with("refs/tags/")
+        {
+            continue;
+        }
+
+        if update.is_deletion() {
+            would_be_state.remove(&update.ref_name);
+        } else {
+            would_be_state.insert(update.ref_name.clone(), update.new_oid.clone());
+        }
+    }
+
+    // Convert event's state refs to a HashMap for comparison
+    let declared_state: HashMap<String, String> = state_refs
+        .into_iter()
+        .map(|r| (r.ref_name, r.object_sha))
+        .collect();
+
+    // Check if they match
+    if would_be_state == declared_state {
+        return None; // No mismatch
+    }
+
+    // Build diagnostic message
+    let mut reasons = Vec::new();
+
+    // Check for refs in declared state but not in would-be state
+    for (ref_name, declared_sha) in &declared_state {
+        if let Some(would_be_sha) = would_be_state.get(ref_name) {
+            if would_be_sha != declared_sha {
+                let would_be_short = if would_be_sha.len() >= 8 {
+                    &would_be_sha[..8]
+                } else {
+                    would_be_sha.as_str()
+                };
+                let declared_short = if declared_sha.len() >= 8 {
+                    &declared_sha[..8]
+                } else {
+                    declared_sha.as_str()
+                };
+                reasons.push(format!(
+                    "{} would be at {} but state declares {}",
+                    ref_name, would_be_short, declared_short
+                ));
+            }
+        } else {
+            let declared_short = if declared_sha.len() >= 8 {
+                &declared_sha[..8]
+            } else {
+                declared_sha.as_str()
+            };
+            reasons.push(format!(
+                "{} missing (state declares {})",
+                ref_name, declared_short
+            ));
+        }
+    }
+
+    // Check for refs in would-be state but not in declared state
+    for (ref_name, would_be_sha) in &would_be_state {
+        if !declared_state.contains_key(ref_name) {
+            let would_be_short = if would_be_sha.len() >= 8 {
+                &would_be_sha[..8]
+            } else {
+                would_be_sha.as_str()
+            };
+            reasons.push(format!(
+                "{} would exist at {} but state doesn't declare it",
+                ref_name, would_be_short
+            ));
+        }
+    }
+
+    if reasons.is_empty() {
+        Some("Unknown mismatch".to_string())
+    } else {
+        Some(reasons.join("; "))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -694,5 +805,98 @@ mod tests {
 
         // Should return true - real OID exists, symbolic ref skipped
         assert!(can_apply_state(&event, repo_path));
+    }
+
+    #[test]
+    fn test_diagnose_state_mismatch_missing_ref() {
+        // State declares both main and test branches
+        let event = create_test_state_event(
+            "test-repo",
+            vec![("refs/heads/main", "abc123"), ("refs/heads/test", "def456")],
+        );
+
+        // Push only creates test branch
+        let pushed_updates = vec![RefUpdate {
+            old_oid: "0000000000000000000000000000000000000000".to_string(),
+            new_oid: "def456".to_string(),
+            ref_name: "refs/heads/test".to_string(),
+        }];
+
+        // No local refs
+        let local_refs = HashMap::new();
+
+        let diagnosis = diagnose_state_mismatch(&event, &pushed_updates, &local_refs);
+        assert!(diagnosis.is_some());
+        let msg = diagnosis.unwrap();
+        assert!(msg.contains("refs/heads/main"));
+        assert!(msg.contains("missing"));
+    }
+
+    #[test]
+    fn test_diagnose_state_mismatch_wrong_sha() {
+        // State declares main at abc123
+        let event = create_test_state_event("test-repo", vec![("refs/heads/main", "abc123")]);
+
+        // Push updates main to different SHA
+        let pushed_updates = vec![RefUpdate {
+            old_oid: "0000000000000000000000000000000000000000".to_string(),
+            new_oid: "wrong123".to_string(),
+            ref_name: "refs/heads/main".to_string(),
+        }];
+
+        let local_refs = HashMap::new();
+
+        let diagnosis = diagnose_state_mismatch(&event, &pushed_updates, &local_refs);
+        assert!(diagnosis.is_some());
+        let msg = diagnosis.unwrap();
+        assert!(msg.contains("refs/heads/main"));
+        assert!(msg.contains("would be at"));
+        assert!(msg.contains("state declares"));
+    }
+
+    #[test]
+    fn test_diagnose_state_mismatch_extra_ref() {
+        // State declares only main
+        let event = create_test_state_event("test-repo", vec![("refs/heads/main", "abc123")]);
+
+        // Push creates both main and test
+        let pushed_updates = vec![
+            RefUpdate {
+                old_oid: "0000000000000000000000000000000000000000".to_string(),
+                new_oid: "abc123".to_string(),
+                ref_name: "refs/heads/main".to_string(),
+            },
+            RefUpdate {
+                old_oid: "0000000000000000000000000000000000000000".to_string(),
+                new_oid: "def456".to_string(),
+                ref_name: "refs/heads/test".to_string(),
+            },
+        ];
+
+        let local_refs = HashMap::new();
+
+        let diagnosis = diagnose_state_mismatch(&event, &pushed_updates, &local_refs);
+        assert!(diagnosis.is_some());
+        let msg = diagnosis.unwrap();
+        assert!(msg.contains("refs/heads/test"));
+        assert!(msg.contains("doesn't declare"));
+    }
+
+    #[test]
+    fn test_diagnose_state_mismatch_no_mismatch() {
+        // State declares main
+        let event = create_test_state_event("test-repo", vec![("refs/heads/main", "abc123")]);
+
+        // Push creates main at correct SHA
+        let pushed_updates = vec![RefUpdate {
+            old_oid: "0000000000000000000000000000000000000000".to_string(),
+            new_oid: "abc123".to_string(),
+            ref_name: "refs/heads/main".to_string(),
+        }];
+
+        let local_refs = HashMap::new();
+
+        let diagnosis = diagnose_state_mismatch(&event, &pushed_updates, &local_refs);
+        assert!(diagnosis.is_none()); // No mismatch
     }
 }

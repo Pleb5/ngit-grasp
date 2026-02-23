@@ -609,6 +609,28 @@ pub async fn get_state_authorization_for_specific_owner_repo(
         owner_pubkey
     );
 
+    // Accept pushes where all refs are already at the desired state (old_oid == new_oid)
+    // This handles race conditions where state events are applied between fetch and push
+    if !pushed_refs.is_empty() {
+        let all_refs_unchanged = pushed_refs
+            .iter()
+            .all(|(old_oid, new_oid, _)| old_oid == new_oid);
+
+        if all_refs_unchanged {
+            debug!(
+                "All pushed refs unchanged (old_oid == new_oid) for {} owned by {}, accepting without purgatory check",
+                identifier, owner_pubkey
+            );
+            return Ok(AuthorizationResult {
+                authorized: true,
+                reason: "Push accepted: all refs already at desired state (no-op)".to_string(),
+                state: None,
+                maintainers: authorized.into_iter().collect(),
+                purgatory_events: vec![],
+            });
+        }
+    }
+
     // Check purgatory for matching state events
     // Convert pushed refs to RefUpdate (filter out refs/nostr/* refs)
     let pushed_updates: Vec<RefUpdate> = pushed_refs
@@ -699,12 +721,88 @@ pub async fn get_state_authorization_for_specific_owner_repo(
             debug!("Purgatory events found but none from authorized authors");
         }
     } else {
-        debug!("No matching state events found in purgatory");
+        // Check if there are ANY state events in purgatory for this identifier
+        let all_purgatory_states = purgatory.find_state(identifier);
+
+        if !all_purgatory_states.is_empty() {
+            // There are state events but none match the push - diagnose why
+            debug!(
+                "Found {} state event(s) in purgatory for {} but none match the push",
+                all_purgatory_states.len(),
+                identifier
+            );
+
+            // Count authorized state events and collect diagnostic info
+            let mut authorized_count = 0;
+            let mut diagnostic_reasons = Vec::new();
+
+            // Diagnose why each authorized state event doesn't match
+            for entry in all_purgatory_states.iter() {
+                let author_hex = entry.event.pubkey.to_hex();
+                if authorized.contains(&author_hex) {
+                    authorized_count += 1;
+                    if let Some(reason) = crate::purgatory::diagnose_state_mismatch(
+                        &entry.event,
+                        &pushed_updates,
+                        &local_refs,
+                    ) {
+                        debug!(
+                            "State event {} from authorized author {} doesn't match push: {}",
+                            entry.event.id,
+                            entry
+                                .event
+                                .pubkey
+                                .to_bech32()
+                                .unwrap_or_else(|_| author_hex.clone()),
+                            reason
+                        );
+                        diagnostic_reasons.push(reason);
+                    }
+                }
+            }
+
+            // Create concise WARN message summarizing the rejection
+            let summary = if authorized_count > 0 {
+                let reason_summary = if !diagnostic_reasons.is_empty() {
+                    // Take the first diagnostic reason as representative
+                    format!(" ({})", diagnostic_reasons[0])
+                } else {
+                    String::new()
+                };
+                format!(
+                    "{} state event{} in purgatory from authorized publisher{} but doesn't match push{}",
+                    authorized_count,
+                    if authorized_count == 1 { "" } else { "s" },
+                    if authorized_count == 1 { "" } else { "s" },
+                    reason_summary
+                )
+            } else {
+                format!(
+                    "{} state event{} in purgatory but none from authorized publishers",
+                    all_purgatory_states.len(),
+                    if all_purgatory_states.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                )
+            };
+
+            warn!("Push rejected for {}: {}", identifier, summary);
+            return Ok(AuthorizationResult::denied(summary));
+        } else {
+            debug!("No state events found in purgatory for {}", identifier);
+            warn!(
+                "Push rejected for {}: No state events in purgatory",
+                identifier
+            );
+            return Ok(AuthorizationResult::denied("No state events in purgatory"));
+        }
     }
 
     // No matching state found in purgatory
     Ok(AuthorizationResult::denied(
-        "No state event found in purgatory from authorized publishers",
+        "No matching state event found in purgatory from authorized publishers",
     ))
 }
 
