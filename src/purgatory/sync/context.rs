@@ -474,7 +474,9 @@ impl SyncContext for RealSyncContext {
         source_repo_path: &Path,
         new_oids: &HashSet<String>,
     ) -> Result<ProcessResult> {
-        // Delegate to the unified function from git::sync
+        // Delegate to the unified function from git::sync.
+        // Pass None for write_policy and rejected_events_index: the purgatory sync path
+        // already handles hot-cache re-processing via SyncManager::process_event_static.
         let result = crate::git::sync::process_newly_available_git_data(
             source_repo_path,
             new_oids,
@@ -482,6 +484,8 @@ impl SyncContext for RealSyncContext {
             self.local_relay.as_ref(),
             &self.purgatory,
             &self.git_data_path,
+            None,
+            None,
         )
         .await?;
 

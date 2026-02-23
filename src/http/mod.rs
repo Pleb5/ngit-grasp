@@ -26,8 +26,9 @@ use tokio::net::TcpListener;
 use crate::config::Config;
 use crate::git;
 use crate::metrics::Metrics;
-use crate::nostr::builder::SharedDatabase;
+use crate::nostr::builder::{Nip34WritePolicy, SharedDatabase};
 use crate::purgatory::Purgatory;
+use crate::sync::rejected_index::RejectedEventsIndex;
 
 /// CORS headers required by GRASP-01 specification (lines 40-47)
 const CORS_ALLOW_ORIGIN: &str = "*";
@@ -97,6 +98,10 @@ struct HttpService {
     metrics: Option<Arc<Metrics>>,
     /// Purgatory for event/git coordination
     purgatory: Arc<Purgatory>,
+    /// Write policy for re-processing hot-cache events after git push promotion
+    write_policy: Arc<Nip34WritePolicy>,
+    /// Rejected events index for hot-cache re-processing after git push promotion
+    rejected_events_index: Arc<RejectedEventsIndex>,
 }
 
 impl HttpService {
@@ -107,6 +112,8 @@ impl HttpService {
         database: SharedDatabase,
         metrics: Option<Arc<Metrics>>,
         purgatory: Arc<Purgatory>,
+        write_policy: Arc<Nip34WritePolicy>,
+        rejected_events_index: Arc<RejectedEventsIndex>,
     ) -> Self {
         Self {
             relay,
@@ -115,6 +122,8 @@ impl HttpService {
             database,
             metrics,
             purgatory,
+            write_policy,
+            rejected_events_index,
         }
     }
 }
@@ -132,6 +141,8 @@ impl Service<Request<Incoming>> for HttpService {
         let git_data_path = self.config.effective_git_data_path();
         let database = self.database.clone();
         let purgatory = self.purgatory.clone();
+        let write_policy = self.write_policy.clone();
+        let rejected_events_index = self.rejected_events_index.clone();
 
         // Handle OPTIONS preflight requests (CORS)
         // GRASP-01 spec line 47: Respond to OPTIONS with 204 No Content
@@ -293,6 +304,8 @@ impl Service<Request<Incoming>> for HttpService {
                             purgatory.clone(),
                             &git_data_path,
                             git_protocol.as_deref(),
+                            write_policy.clone(),
+                            rejected_events_index.clone(),
                         )
                         .await;
 
@@ -557,12 +570,17 @@ fn derive_accept_key(request_key: &[u8]) -> String {
 /// * `relay` - The LocalRelay for WebSocket connections
 /// * `database` - The database for direct queries (e.g., push authorization)
 /// * `metrics` - Optional metrics for Prometheus endpoint
+/// * `purgatory` - Purgatory for event/git coordination
+/// * `write_policy` - Write policy for re-processing hot-cache events after git push promotion
+/// * `rejected_events_index` - Rejected events index for hot-cache re-processing
 pub async fn run_server(
     config: Config,
     relay: LocalRelay,
     database: SharedDatabase,
     metrics: Option<Arc<Metrics>>,
     purgatory: Arc<Purgatory>,
+    write_policy: Arc<Nip34WritePolicy>,
+    rejected_events_index: Arc<RejectedEventsIndex>,
 ) -> anyhow::Result<()> {
     let bind_addr: SocketAddr = config.bind_address.parse()?;
 
@@ -582,6 +600,8 @@ pub async fn run_server(
             database.clone(),
             metrics.clone(),
             purgatory.clone(),
+            write_policy.clone(),
+            rejected_events_index.clone(),
         );
 
         tokio::spawn(async move {

@@ -32,6 +32,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use nostr_sdk::Event;
@@ -41,9 +42,10 @@ use crate::git::authorization::{
     RepositoryData,
 };
 use crate::git::{self, oid_exists};
-use crate::nostr::builder::SharedDatabase;
+use crate::nostr::builder::{Nip34WritePolicy, SharedDatabase};
 use crate::nostr::events::RepositoryState;
 use crate::purgatory::{can_apply_state, Purgatory};
+use crate::sync::rejected_index::RejectedEventsIndex;
 
 /// Result of processing newly available git data.
 ///
@@ -819,6 +821,8 @@ pub async fn process_newly_available_git_data(
     local_relay: Option<&nostr_relay_builder::LocalRelay>,
     purgatory: &Purgatory,
     git_data_path: &Path,
+    write_policy: Option<&Nip34WritePolicy>,
+    rejected_events_index: Option<&Arc<RejectedEventsIndex>>,
 ) -> anyhow::Result<ProcessResult> {
     let mut result = ProcessResult::default();
 
@@ -848,6 +852,8 @@ pub async fn process_newly_available_git_data(
         local_relay,
         purgatory,
         git_data_path,
+        write_policy,
+        rejected_events_index,
     )
     .await;
     result.merge(announcement_result);
@@ -1277,6 +1283,10 @@ async fn process_purgatory_pr_events(
 ///
 /// When git data arrives for a repository, any announcements in purgatory
 /// for that repository should be promoted to the database and served to clients.
+///
+/// When `write_policy` and `rejected_events_index` are provided (git push path),
+/// any maintainer announcements sitting in the hot cache are re-processed immediately
+/// after the owner announcement is promoted, so they don't wait for the next sync cycle.
 async fn process_purgatory_announcements(
     identifier: &str,
     source_repo_path: &Path,
@@ -1284,6 +1294,8 @@ async fn process_purgatory_announcements(
     local_relay: Option<&nostr_relay_builder::LocalRelay>,
     purgatory: &Purgatory,
     git_data_path: &Path,
+    write_policy: Option<&Nip34WritePolicy>,
+    rejected_events_index: Option<&Arc<RejectedEventsIndex>>,
 ) -> ProcessResult {
     let mut result = ProcessResult::default();
 
@@ -1339,6 +1351,105 @@ async fn process_purgatory_announcements(
                 }
 
                 result.announcements_released += 1;
+
+                // Re-process any maintainer announcements sitting in the hot cache.
+                //
+                // When an owner announcement is promoted from purgatory via a git push,
+                // maintainer announcements that arrived earlier (via relay sync) may have
+                // been rejected and stored in the hot cache because the owner announcement
+                // didn't exist in the DB yet. Now that the owner announcement is saved,
+                // we must invalidate and re-process those cached events immediately.
+                //
+                // This only applies on the git push path (write_policy + rejected_events_index
+                // are Some). The purgatory sync path already handles this via
+                // SyncManager::process_event_static.
+                if let (Some(wp), Some(rei), Some(relay)) =
+                    (write_policy, rejected_events_index, local_relay)
+                {
+                    use crate::nostr::events::RepositoryAnnouncement;
+                    use nostr_relay_builder::prelude::{WritePolicy, WritePolicyResult};
+                    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+                    if let Ok(announcement) = RepositoryAnnouncement::from_event(event.clone()) {
+                        if !announcement.maintainers.is_empty() {
+                            debug!(
+                                identifier = %identifier,
+                                event_id = %event.id,
+                                maintainer_count = announcement.maintainers.len(),
+                                "Owner announcement promoted via git push, checking hot cache for rejected maintainer announcements"
+                            );
+
+                            for maintainer_hex in &announcement.maintainers {
+                                match nostr_sdk::PublicKey::from_hex(maintainer_hex) {
+                                    Ok(maintainer_pubkey) => {
+                                        let (removed, hot_events) = rei.invalidate_and_get(
+                                            &maintainer_pubkey,
+                                            &announcement.identifier,
+                                            Some(crate::sync::rejected_index::EventType::Announcement),
+                                        );
+
+                                        if removed > 0 {
+                                            info!(
+                                                maintainer = %maintainer_hex,
+                                                identifier = %announcement.identifier,
+                                                removed_from_cold_index = removed,
+                                                hot_cache_events = hot_events.len(),
+                                                "Invalidated rejected maintainer announcements after git push promotion"
+                                            );
+                                        }
+
+                                        // Re-process events from hot cache
+                                        let dummy_addr = SocketAddr::new(
+                                            IpAddr::V4(Ipv4Addr::LOCALHOST),
+                                            0,
+                                        );
+                                        for hot_event in hot_events {
+                                            info!(
+                                                event_id = %hot_event.id,
+                                                maintainer = %maintainer_hex,
+                                                identifier = %announcement.identifier,
+                                                "Re-processing maintainer announcement from hot cache after git push promotion"
+                                            );
+                                            match wp.admit_event(&hot_event, &dummy_addr).await {
+                                                WritePolicyResult::Accept => {
+                                                    match database.save_event(&hot_event).await {
+                                                        Ok(_) => {
+                                                            relay.notify_event(hot_event.clone());
+                                                            info!(
+                                                                event_id = %hot_event.id,
+                                                                "Maintainer announcement accepted and saved on re-processing"
+                                                            );
+                                                        }
+                                                        Err(e) => {
+                                                            warn!(
+                                                                event_id = %hot_event.id,
+                                                                error = %e,
+                                                                "Failed to save re-processed maintainer announcement"
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                _ => {
+                                                    warn!(
+                                                        event_id = %hot_event.id,
+                                                        "Maintainer announcement still rejected on re-processing"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            maintainer_hex = %maintainer_hex,
+                                            error = %e,
+                                            "Invalid maintainer public key in promoted announcement"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
             Err(e) => {
                 warn!(

@@ -130,7 +130,9 @@ async fn main() -> Result<()> {
         }
 
         // Get a reference to the rejected events index for shutdown persistence
+        // and for the HTTP server's git push path (hot-cache re-processing)
         let shutdown_rejected_index = sync_manager.rejected_events_index();
+        let http_rejected_index = shutdown_rejected_index.clone();
 
         tokio::spawn(async move {
             sync_manager.run().await;
@@ -206,6 +208,9 @@ async fn main() -> Result<()> {
         // Start HTTP server with integrated relay and database
         info!("Starting HTTP server on {}", config.bind_address);
 
+        // Wrap write_policy in Arc for sharing between HTTP server connections
+        let http_write_policy = Arc::new(relay_with_db.write_policy.clone());
+
         // Run server until shutdown signal, then cleanup
         tokio::select! {
             result = http::run_server(
@@ -214,6 +219,8 @@ async fn main() -> Result<()> {
                 relay_with_db.database,
                 metrics,
                 purgatory,
+                http_write_policy,
+                http_rejected_index,
             ) => {
                 result?
             }
