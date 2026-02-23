@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -189,6 +190,42 @@ impl StatePolicy {
                         error = %error,
                         "Error processing state event"
                     );
+                }
+            }
+
+            // After copying OIDs to other owner repos, promote any purgatory announcements
+            // for those repos. This handles the case where two maintainers push to the same
+            // identifier on the same relay with identical commit hashes: the second maintainer's
+            // announcement sits in purgatory, and when their state event arrives the relay copies
+            // commits from the first maintainer's repo — but without this call the announcement
+            // would stay in purgatory indefinitely.
+            let local_relay = self.ctx.get_local_relay();
+            let empty_oids: HashSet<String> = HashSet::new();
+            for announcement in &db_repo_data.announcements {
+                let target_repo_path = self.ctx.git_data_path.join(announcement.repo_path());
+                if target_repo_path != repo_with_git_data {
+                    // OIDs were copied to this repo by process_state_with_git_data;
+                    // check if there's a purgatory announcement waiting for it.
+                    if let Err(e) = crate::git::sync::process_newly_available_git_data(
+                        &target_repo_path,
+                        &empty_oids,
+                        &self.ctx.database,
+                        local_relay.as_ref(),
+                        &self.ctx.purgatory,
+                        &self.ctx.git_data_path,
+                        None,
+                        None,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            identifier = %state.identifier,
+                            event_id = %event.id,
+                            repo_path = %target_repo_path.display(),
+                            error = %e,
+                            "Failed to process purgatory announcements for target repo after git sync copy"
+                        );
+                    }
                 }
             }
 
