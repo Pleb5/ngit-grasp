@@ -81,9 +81,9 @@ impl DeletionPolicy {
         }
     }
 
-    /// Remove a purgatory entry (announcement or state event) matched by event ID.
+    /// Remove a purgatory entry (announcement, state event, or PR event) matched by event ID.
     ///
-    /// Checks announcements first (kind 30617), then state events (kind 30618).
+    /// Checks in order: announcements (30617), state events (30618), PR/PR-update events.
     /// Only removes entries whose author matches `author`.
     fn remove_by_event_id(
         &self,
@@ -91,6 +91,26 @@ impl DeletionPolicy {
         target_id_hex: &str,
         _deletion_created_at: u64,
     ) {
+        // --- Check PR events (kind 1617/1618) first — O(1) direct lookup ---
+        // PR purgatory is keyed by event ID hex, so this is the cheapest check.
+        // Only remove if the entry has an actual event (not a placeholder) and the
+        // event's author matches the deletion request author.
+        if let Some(entry) = self.ctx.purgatory.find_pr(target_id_hex) {
+            if let Some(ref event) = entry.event {
+                if event.pubkey == *author {
+                    tracing::info!(
+                        event_id = %target_id_hex,
+                        author = %author.to_hex(),
+                        "Deletion request: removing purgatory PR event by event ID"
+                    );
+                    self.ctx.purgatory.remove_pr(target_id_hex);
+                    return;
+                }
+            }
+            // Entry exists but is a placeholder or wrong author — don't remove
+            return;
+        }
+
         // --- Check announcements (kind 30617) ---
         // The DashMap doesn't expose a direct "find by event ID" method, so we use
         // the announcements_for_sync snapshot to enumerate all (repo_id, _) pairs.
