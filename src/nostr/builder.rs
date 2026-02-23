@@ -14,8 +14,8 @@ use nostr_relay_builder::prelude::*;
 use crate::config::{Config, DatabaseBackend};
 use crate::nostr::events::RepositoryAnnouncement;
 use crate::nostr::policy::{
-    AnnouncementPolicy, AnnouncementResult, PolicyContext, PrEventPolicy, ReferenceResult,
-    RelatedEventPolicy, StatePolicy, StateResult,
+    AnnouncementPolicy, AnnouncementResult, DeletionPolicy, PolicyContext, PrEventPolicy,
+    ReferenceResult, RelatedEventPolicy, StatePolicy, StateResult,
 };
 
 
@@ -29,6 +29,7 @@ pub type SharedDatabase = Arc<dyn NostrDatabase>;
 /// - `StatePolicy` - State event validation + ref alignment
 /// - `PrEventPolicy` - PR/PR Update validation
 /// - `RelatedEventPolicy` - Forward/backward reference checking
+/// - `DeletionPolicy` - NIP-09 event deletion request handling
 ///
 /// Uses stateful database queries to check event relationships.
 #[derive(Clone)]
@@ -38,6 +39,7 @@ pub struct Nip34WritePolicy {
     state_policy: StatePolicy,
     pr_event_policy: PrEventPolicy,
     related_event_policy: RelatedEventPolicy,
+    deletion_policy: DeletionPolicy,
 }
 
 impl std::fmt::Debug for Nip34WritePolicy {
@@ -69,6 +71,7 @@ impl Nip34WritePolicy {
             state_policy: StatePolicy::new(ctx.clone()),
             pr_event_policy: PrEventPolicy::new(ctx.clone()),
             related_event_policy: RelatedEventPolicy::new(ctx.clone()),
+            deletion_policy: DeletionPolicy::new(ctx.clone()),
             ctx,
         }
     }
@@ -521,6 +524,7 @@ impl WritePolicy for Nip34WritePolicy {
                     );
                     WritePolicyResult::Accept
                 }
+                Kind::EventDeletion => self.deletion_policy.handle(event).await,
                 _ => self.handle_related_event(event, "Event").await,
             }
         })

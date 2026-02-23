@@ -6,11 +6,13 @@
 /// - `PrEventPolicy` - PR/PR Update validation
 /// - `RelatedEventPolicy` - Forward/backward reference checking
 mod announcement;
+mod deletion;
 mod pr_event;
 mod related;
 mod state;
 
 pub use announcement::{AnnouncementPolicy, AnnouncementResult};
+pub use deletion::DeletionPolicy;
 pub use pr_event::PrEventPolicy;
 pub use related::{ReferenceResult, RelatedEventPolicy};
 pub use state::{StatePolicy, StateResult};

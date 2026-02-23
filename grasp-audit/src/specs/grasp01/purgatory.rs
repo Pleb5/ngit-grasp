@@ -46,6 +46,12 @@ impl PurgatoryTests {
         results.add(Self::test_bare_repo_exists_for_purgatory_announcement(client).await);
         results.add(Self::test_state_event_accepted_for_purgatory_announcement(client).await);
 
+        // Deletion event tests (NIP-09)
+        results.add(Self::test_deletion_by_event_id_removes_purgatory_announcement(client).await);
+        results.add(
+            Self::test_deletion_by_coordinate_removes_purgatory_announcement(client).await,
+        );
+
         // State event purgatory tests (already implemented)
         results.add(Self::test_state_event_not_served_before_git_data(client).await);
         results.add(Self::test_state_event_served_after_git_push(client).await);
@@ -639,6 +645,199 @@ impl PurgatoryTests {
                 return Err(format!(
                     "PR event not served after git push. Event ID: {} should be queryable",
                     pr_event.id
+                ));
+            }
+
+            Ok(())
+        })
+        .await
+    }
+    // ============================================================
+    // Deletion Event Tests (NIP-09)
+    // ============================================================
+
+    /// Test: Kind 5 deletion event by event ID removes purgatory announcement
+    ///
+    /// Spec: NIP-09
+    /// "A special event with kind 5... having a list of one or more `e` or `a` tags,
+    /// each referencing an event the author is requesting to be deleted."
+    ///
+    /// This test verifies:
+    /// 1. Send a valid repository announcement (enters purgatory)
+    /// 2. Send a kind 5 deletion event referencing the announcement by event ID
+    /// 3. The announcement is no longer in purgatory (git push would fail)
+    /// 4. The deletion event itself is accepted by the relay
+    pub async fn test_deletion_by_event_id_removes_purgatory_announcement(
+        client: &AuditClient,
+    ) -> TestResult {
+        TestResult::new(
+            "deletion_by_event_id_removes_purgatory_announcement",
+            SpecRef::PurgatoryAcceptUntilGitData,
+            "Kind 5 deletion by event ID SHOULD remove a purgatory announcement",
+        )
+        .run(|| async {
+            let ctx = TestContext::new(client);
+
+            // Send announcement to purgatory
+            let repo = ctx
+                .get_fixture(FixtureKind::ValidRepoSent)
+                .await
+                .map_err(|e| format!("Failed to create repo announcement: {}", e))?;
+
+            let repo_id = repo
+                .tags
+                .iter()
+                .find(|t| t.kind() == TagKind::d())
+                .and_then(|t| t.content())
+                .ok_or("Missing d tag in repo announcement")?
+                .to_string();
+
+            // Verify it's in purgatory (not served)
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            if client.is_event_on_relay(repo.id).await.map_err(|e| e.to_string())? {
+                return Err(
+                    "Announcement was served immediately - purgatory not working".to_string(),
+                );
+            }
+
+            // Build and send kind 5 deletion event referencing the announcement by event ID
+            let deletion = client
+                .event_builder(Kind::EventDeletion, "")
+                .tag(Tag::event(repo.id))
+                .tag(Tag::custom(
+                    TagKind::custom("k"),
+                    vec!["30617"],
+                ))
+                .build(client.keys())
+                .map_err(|e| format!("Failed to build deletion event: {}", e))?;
+
+            client
+                .send_event(deletion)
+                .await
+                .map_err(|e| format!("Relay rejected deletion event: {}", e))?;
+
+            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            // Verify the announcement can no longer be promoted by attempting a git push.
+            // We check this indirectly: if the purgatory entry was removed, a subsequent
+            // git push to the repo path should fail (no bare repo).
+            // For the integration test we verify the announcement is still not served
+            // (it was never promoted) and that the deletion event was accepted.
+            // The bare-repo deletion is verified by attempting a git clone.
+            let http_url = AuditClient::ws_to_http_url(&client.relay_url().await.map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+            let clone_url = format!(
+                "{}/{}/{}.git",
+                http_url,
+                client.public_key().to_bech32().map_err(|e| e.to_string())?,
+                repo_id
+            );
+
+            // git ls-remote should fail (bare repo deleted)
+            let output = std::process::Command::new("git")
+                .args(["ls-remote", &clone_url])
+                .output()
+                .map_err(|e| format!("Failed to run git ls-remote: {}", e))?;
+
+            if output.status.success() {
+                return Err(format!(
+                    "Bare repo still exists after deletion event. \
+                     Expected git ls-remote to fail for {}",
+                    clone_url
+                ));
+            }
+
+            Ok(())
+        })
+        .await
+    }
+
+    /// Test: Kind 5 deletion event by `a` tag coordinate removes purgatory announcement
+    ///
+    /// Spec: NIP-09
+    /// "When an `a` tag is used, relays SHOULD delete all versions of the replaceable
+    /// event up to the `created_at` timestamp of the deletion request event."
+    ///
+    /// This test verifies:
+    /// 1. Send a valid repository announcement (enters purgatory)
+    /// 2. Send a kind 5 deletion event referencing the announcement by coordinate
+    ///    (`30617:<pubkey>:<identifier>`)
+    /// 3. The announcement is no longer in purgatory
+    pub async fn test_deletion_by_coordinate_removes_purgatory_announcement(
+        client: &AuditClient,
+    ) -> TestResult {
+        TestResult::new(
+            "deletion_by_coordinate_removes_purgatory_announcement",
+            SpecRef::PurgatoryAcceptUntilGitData,
+            "Kind 5 deletion by `a` coordinate SHOULD remove a purgatory announcement",
+        )
+        .run(|| async {
+            let ctx = TestContext::new(client);
+
+            // Send announcement to purgatory
+            let repo = ctx
+                .get_fixture(FixtureKind::ValidRepoSent)
+                .await
+                .map_err(|e| format!("Failed to create repo announcement: {}", e))?;
+
+            let repo_id = repo
+                .tags
+                .iter()
+                .find(|t| t.kind() == TagKind::d())
+                .and_then(|t| t.content())
+                .ok_or("Missing d tag in repo announcement")?
+                .to_string();
+
+            // Verify it's in purgatory (not served)
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            if client.is_event_on_relay(repo.id).await.map_err(|e| e.to_string())? {
+                return Err(
+                    "Announcement was served immediately - purgatory not working".to_string(),
+                );
+            }
+
+            // Build coordinate: `30617:<pubkey_hex>:<identifier>`
+            let coord = format!(
+                "30617:{}:{}",
+                client.public_key().to_hex(),
+                repo_id
+            );
+
+            // Build and send kind 5 deletion event referencing by coordinate
+            let deletion = client
+                .event_builder(Kind::EventDeletion, "")
+                .tag(Tag::custom(TagKind::custom("a"), vec![coord]))
+                .tag(Tag::custom(TagKind::custom("k"), vec!["30617"]))
+                .build(client.keys())
+                .map_err(|e| format!("Failed to build deletion event: {}", e))?;
+
+            client
+                .send_event(deletion)
+                .await
+                .map_err(|e| format!("Relay rejected deletion event: {}", e))?;
+
+            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            // Verify bare repo was deleted
+            let http_url = AuditClient::ws_to_http_url(&client.relay_url().await.map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+            let clone_url = format!(
+                "{}/{}/{}.git",
+                http_url,
+                client.public_key().to_bech32().map_err(|e| e.to_string())?,
+                repo_id
+            );
+
+            let output = std::process::Command::new("git")
+                .args(["ls-remote", &clone_url])
+                .output()
+                .map_err(|e| format!("Failed to run git ls-remote: {}", e))?;
+
+            if output.status.success() {
+                return Err(format!(
+                    "Bare repo still exists after deletion event. \
+                     Expected git ls-remote to fail for {}",
+                    clone_url
                 ));
             }
 
