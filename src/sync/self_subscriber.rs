@@ -126,14 +126,14 @@ impl SelfSubscriber {
 
     /// Get batch window from environment or use default
     ///
-    /// Reads `NGIT_SYNC_BATCH_WINDOW_MS` environment variable.
+    /// When `NGIT_TEST=1` is set, uses 200ms for faster test execution.
     /// Default: 5000ms (5 seconds)
     fn get_batch_window() -> Duration {
-        std::env::var("NGIT_SYNC_BATCH_WINDOW_MS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .map(Duration::from_millis)
-            .unwrap_or(Duration::from_millis(5000))
+        if std::env::var("NGIT_TEST").as_deref() == Ok("1") {
+            Duration::from_millis(200)
+        } else {
+            Duration::from_millis(5000)
+        }
     }
 
     /// Process a relay pool notification

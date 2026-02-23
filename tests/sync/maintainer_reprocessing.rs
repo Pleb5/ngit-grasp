@@ -377,7 +377,7 @@ async fn test_multiple_maintainers_all_reprocessed() {
     println!("relay_b started at {}", relay_b.url());
 
     // Give relay_b's SyncManager time to complete the initial negentropy sync with relay_a.
-    // The negentropy sync completes within ~200ms (NGIT_SYNC_BATCH_WINDOW_MS=200), but we
+    // The negentropy sync completes within ~200ms (NGIT_TEST=1 sets batch window to 200ms), but we
     // allow extra time for slow CI environments.
     tokio::time::sleep(Duration::from_secs(3)).await;
     println!("✓ relay_b synced from relay_a (maintainer announcements should be in hot cache)");
