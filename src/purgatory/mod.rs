@@ -33,6 +33,13 @@ pub use sync::SyncQueueEntry;
 /// Default expiry duration for purgatory entries (30 minutes)
 const DEFAULT_EXPIRY: Duration = Duration::from_secs(1800);
 
+/// Extended expiry for soft-expired announcements (24 hours).
+///
+/// After the initial 30-minute expiry, the bare repo is deleted but the event is
+/// retained for this additional period. This allows revival if a state event arrives
+/// late (e.g. slow sync), without permanently blocking the repository.
+const SOFT_EXPIRY_EXTENDED: Duration = Duration::from_secs(86400);
+
 /// Default delay before syncing user-submitted events (3 minutes).
 /// This gives time for the git push to arrive after the nostr event.
 const DEFAULT_SYNC_DELAY: Duration = Duration::from_secs(180);
@@ -657,20 +664,77 @@ impl Purgatory {
     /// * `duration` - Minimum duration to guarantee from now
     pub fn extend_announcement_expiry(&self, owner: &PublicKey, identifier: &str, duration: Duration) {
         let key = (*owner, identifier.to_string());
+
+        // Collect revival info before taking a mutable borrow
+        let revival_info: Option<(PathBuf, bool)> = self
+            .announcement_purgatory
+            .get(&key)
+            .map(|entry| (entry.repo_path.clone(), entry.soft_expired));
+
         if let Some(mut entry) = self.announcement_purgatory.get_mut(&key) {
             let now = Instant::now();
             let new_expiry = now + duration;
             if entry.expires_at < new_expiry {
                 entry.expires_at = new_expiry;
-                // If soft-expired, revive it
-                if entry.soft_expired {
-                    entry.soft_expired = false;
-                    tracing::debug!(
-                        owner = %owner,
-                        identifier = %identifier,
-                        "Revived soft-expired announcement"
-                    );
+            }
+            // Always reset soft_expired when expiry is extended — the caller
+            // (state event or git auth) signals the repo is still active.
+            if entry.soft_expired {
+                entry.soft_expired = false;
+            }
+        }
+
+        // If the entry was soft-expired, recreate the bare repo outside the
+        // mutable borrow so we don't hold the DashMap lock during I/O.
+        if let Some((repo_path, was_soft_expired)) = revival_info {
+            if was_soft_expired {
+                if !repo_path.exists() {
+                    match std::fs::create_dir_all(&repo_path) {
+                        Ok(()) => {
+                            // Initialise as a bare git repository
+                            let status = std::process::Command::new("git")
+                                .args(["init", "--bare"])
+                                .arg(&repo_path)
+                                .status();
+                            match status {
+                                Ok(s) if s.success() => {
+                                    tracing::info!(
+                                        path = %repo_path.display(),
+                                        owner = %owner,
+                                        identifier = %identifier,
+                                        "Recreated bare repository for revived soft-expired announcement"
+                                    );
+                                }
+                                Ok(s) => {
+                                    tracing::warn!(
+                                        path = %repo_path.display(),
+                                        exit_code = ?s.code(),
+                                        "git init --bare failed when reviving soft-expired announcement"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        path = %repo_path.display(),
+                                        error = %e,
+                                        "Failed to run git init --bare when reviving soft-expired announcement"
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %repo_path.display(),
+                                error = %e,
+                                "Failed to create directory when reviving soft-expired announcement"
+                            );
+                        }
+                    }
                 }
+                tracing::info!(
+                    owner = %owner,
+                    identifier = %identifier,
+                    "Revived soft-expired announcement (bare repo recreated, expiry extended)"
+                );
             }
         }
     }
@@ -803,22 +867,65 @@ impl Purgatory {
     pub fn cleanup(&self) -> (usize, usize, usize) {
         let now = Instant::now();
 
-        // Remove expired announcements and mark them as expired
-        let expired_announcements: Vec<(PublicKey, String, EventId)> = self
+        // Process expired announcements with two-phase soft expiry:
+        //
+        // Phase 1 (initial expiry, !soft_expired): Delete bare repo, set soft_expired=true,
+        //   extend expiry by SOFT_EXPIRY_EXTENDED so the event is retained for revival.
+        // Phase 2 (extended expiry, soft_expired): Fully remove from purgatory.
+        //
+        // Collect entries that have passed their expires_at deadline.
+        let expired_announcements: Vec<(PublicKey, String, PathBuf, EventId, bool)> = self
             .announcement_purgatory
             .iter()
             .filter(|entry| entry.value().expires_at <= now)
             .map(|entry| {
                 let key = entry.key();
-                let event_id = entry.value().event.id;
-                (key.0.clone(), key.1.clone(), event_id)
+                let v = entry.value();
+                (key.0.clone(), key.1.clone(), v.repo_path.clone(), v.event.id, v.soft_expired)
             })
             .collect();
 
-        let announcement_removed = expired_announcements.len();
-        for (owner, identifier, event_id) in expired_announcements {
-            self.mark_expired(event_id);
-            self.announcement_purgatory.remove(&(owner, identifier));
+        let mut announcement_removed = 0;
+        for (owner, identifier, repo_path, event_id, already_soft_expired) in expired_announcements {
+            if already_soft_expired {
+                // Phase 2: fully remove
+                self.mark_expired(event_id);
+                self.announcement_purgatory.remove(&(owner.clone(), identifier.clone()));
+                announcement_removed += 1;
+                tracing::info!(
+                    owner = %owner,
+                    identifier = %identifier,
+                    "Announcement fully expired from purgatory (soft expiry period elapsed)"
+                );
+            } else {
+                // Phase 1: soft expiry — delete bare repo, retain event
+                if repo_path.exists() {
+                    if let Err(e) = std::fs::remove_dir_all(&repo_path) {
+                        tracing::warn!(
+                            path = %repo_path.display(),
+                            error = %e,
+                            "Failed to delete bare repository during soft expiry"
+                        );
+                    } else {
+                        tracing::info!(
+                            path = %repo_path.display(),
+                            owner = %owner,
+                            identifier = %identifier,
+                            "Deleted bare repository during soft expiry (event retained for revival)"
+                        );
+                    }
+                }
+                // Mark soft_expired and extend expiry
+                if let Some(mut entry) = self.announcement_purgatory.get_mut(&(owner.clone(), identifier.clone())) {
+                    entry.soft_expired = true;
+                    entry.expires_at = now + SOFT_EXPIRY_EXTENDED;
+                }
+                tracing::debug!(
+                    owner = %owner,
+                    identifier = %identifier,
+                    "Announcement soft-expired: bare repo deleted, event retained for 24h"
+                );
+            }
         }
 
         let mut state_removed = 0;
