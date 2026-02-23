@@ -224,33 +224,23 @@ async fn test_history_sync_without_negentropy() {
     // Create keys
     let keys = Keys::generate();
 
-    // Create announcement listing BOTH relay domains
-    // This event will exist on source BEFORE syncing relay ever connects
-    let announcement = create_repo_announcement(
+    // Set up announcement on source with git data
+    // (purgatory requires git data before announcements are accepted)
+    let domains = vec![source.domain(), syncing_domain.clone()];
+    let domain_refs: Vec<&str> = domains.iter().map(|s| s.as_str()).collect();
+    let (announcement, _git_dir) = setup_announcement_on_relay(
+        &source,
         &keys,
-        &[&source.domain(), &syncing_domain],
+        &domain_refs,
         "test-repo-history-no-negentropy",
-    );
+    )
+    .await;
     let announcement_id = announcement.id;
 
     println!(
-        "Created announcement {} (kind {})",
-        announcement_id,
-        announcement.kind.as_u16()
+        "Announcement {} set up on source with git data (event exists BEFORE syncing relay connects)",
+        announcement_id
     );
-
-    // Send announcement to source (event now exists BEFORE syncing relay connects)
-    let client = TestClient::new(source.url(), keys.clone())
-        .await
-        .expect("Failed to connect to source");
-
-    client
-        .send_event(&announcement)
-        .await
-        .expect("Failed to send announcement to source");
-    println!("Announcement sent to source (event exists BEFORE syncing relay connects)");
-
-    client.disconnect().await;
 
     // Wait to ensure event is stored
     tokio::time::sleep(Duration::from_millis(500)).await;

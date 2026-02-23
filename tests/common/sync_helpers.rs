@@ -507,41 +507,53 @@ fn check_sync_connections_in_metrics(metrics: &str, expected: usize) -> bool {
 /// assert!(found, "Expected event {} to sync to relay", event.id);
 /// ```
 pub async fn wait_for_event_on_relay(relay_url: &str, filter: Filter, timeout: Duration) -> bool {
-    // Create a temporary client for querying
-    let temp_keys = Keys::generate();
-    let client = Client::new(temp_keys);
+    let deadline = tokio::time::Instant::now() + timeout;
+    let poll_interval = Duration::from_millis(200);
 
-    // Try to connect
-    if client.add_relay(relay_url).await.is_err() {
-        return false;
-    }
+    loop {
+        // Create a fresh client for each poll attempt (avoids stale connection state)
+        let temp_keys = Keys::generate();
+        let client = Client::new(temp_keys);
 
-    client.connect().await;
-
-    // Wait for connection (brief timeout)
-    let mut connected = false;
-    for _ in 0..10 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let relays = client.relays().await;
-        if relays.values().any(|r| r.is_connected()) {
-            connected = true;
-            break;
+        if client.add_relay(relay_url).await.is_err() {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(poll_interval).await;
+            continue;
         }
-    }
 
-    if !connected {
-        client.disconnect().await;
-        return false;
-    }
+        client.connect().await;
 
-    // Fetch events with the provided timeout
-    let result = client.fetch_events(filter, timeout).await;
+        // Wait for connection
+        let mut connected = false;
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let relays = client.relays().await;
+            if relays.values().any(|r| r.is_connected()) {
+                connected = true;
+                break;
+            }
+        }
 
-    client.disconnect().await;
+        if connected {
+            // Use a short fetch window — if the event is there, EOSE comes back quickly
+            let fetch_timeout = Duration::from_millis(500);
+            let result = client.fetch_events(filter.clone(), fetch_timeout).await;
+            client.disconnect().await;
 
-    match result {
-        Ok(events) => !events.is_empty(),
-        Err(_) => false,
+            match result {
+                Ok(events) if !events.is_empty() => return true,
+                _ => {}
+            }
+        } else {
+            client.disconnect().await;
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(poll_interval).await;
     }
 }
 
@@ -772,6 +784,11 @@ impl MetricsTestHarness {
     /// Get source relay domain (for announcement tags)
     pub fn source_domain(&self, idx: usize) -> String {
         self.source_relays[idx].domain()
+    }
+
+    /// Get a reference to a source relay (for advanced test operations)
+    pub fn source_relay(&self, idx: usize) -> &TestRelay {
+        &self.source_relays[idx]
     }
 
     /// Submit events to a specific source relay
@@ -1071,17 +1088,285 @@ pub struct SyncTestResult {
     pub syncing_relay: TestRelay,
     pub maintainer_keys: Keys,
     pub repo_coord: String,
+    // Keep SmartGitServer alive for the test duration
+    _git_server: Option<super::git_server::SmartGitServer>,
+    // Keep temp dir alive for the test duration
+    _git_temp_dir: Option<tempfile::TempDir>,
 }
 
 /// Helper to send an event to a relay
 ///
 /// Creates a temporary client, sends the event, and disconnects.
-async fn send_to_relay(relay: &TestRelay, event: &Event) -> Result<(), String> {
+pub async fn send_to_relay(relay: &TestRelay, event: &Event) -> Result<(), String> {
     let temp_keys = Keys::generate();
     let client = TestClient::new(relay.url(), temp_keys).await?;
     client.send_event(event).await?;
     client.disconnect().await;
     Ok(())
+}
+
+/// Helper to send an event to a relay by URL
+///
+/// Creates a temporary client, sends the event, and disconnects.
+pub async fn send_to_relay_url(relay_url: &str, event: &Event) -> Result<(), String> {
+    let temp_keys = Keys::generate();
+    let client = TestClient::new(relay_url, temp_keys).await?;
+    client.send_event(event).await?;
+    client.disconnect().await;
+    Ok(())
+}
+
+/// Push git repository data to a relay to release a purgatory-held announcement.
+///
+/// Creates a local git repo, sends a state event, and pushes to the relay.
+/// Use this when you need to build a custom announcement but still need the
+/// relay to accept it (i.e., release it from purgatory).
+///
+/// # Arguments
+/// * `relay` - The relay to push to
+/// * `keys` - Keys of the repository owner
+/// * `identifier` - Repository identifier
+/// * `domains` - All domains in the announcement (for state event URLs)
+///
+/// # Returns
+/// `tempfile::TempDir` - Keep alive for test duration
+pub async fn push_git_data_to_relay(
+    relay: &TestRelay,
+    keys: &Keys,
+    identifier: &str,
+    domains: &[&str],
+) -> tempfile::TempDir {
+    use super::purgatory_helpers::{
+        create_state_event, create_test_repo_with_commit, push_to_relay, CommitVariant,
+    };
+
+    let npub = keys
+        .public_key()
+        .to_bech32()
+        .expect("Failed to convert public key to npub");
+
+    // Create local git repo
+    let git_temp_dir = tempfile::tempdir().expect("Failed to create temp dir for git repo");
+    let commit_hash = create_test_repo_with_commit(git_temp_dir.path(), CommitVariant::StateTest)
+        .expect("Failed to create test git repo");
+
+    let clone_urls: Vec<String> = domains
+        .iter()
+        .map(|d| format!("http://{}/{}/{}.git", d, npub, identifier))
+        .collect();
+    let relay_urls: Vec<String> = domains.iter().map(|d| format!("ws://{}", d)).collect();
+
+    // Build and send state event with all domains' clone URLs
+    let state_event = create_state_event(
+        keys,
+        identifier,
+        &[("main", &commit_hash)],
+        &[],
+        &clone_urls.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        &relay_urls.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+    )
+    .expect("Failed to create state event");
+
+    send_to_relay(relay, &state_event)
+        .await
+        .expect("Failed to send state event");
+
+    // Git push to relay → releases state event from purgatory, authorizes push
+    push_to_relay(git_temp_dir.path(), &relay.domain(), &npub, identifier)
+        .expect("Failed to push git data to relay");
+
+    // Brief wait for push processing
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    git_temp_dir
+}
+
+/// Like `push_git_data_to_relay` but writes a unique marker file so each call
+/// produces a distinct commit hash.
+///
+/// Use this when multiple callers push to the same relay with the same identifier
+/// but different keys — identical commit hashes cause git to skip pack transfer,
+/// which can leave the announcement in purgatory.
+///
+/// # Arguments
+/// * `relay` - The relay to push to
+/// * `keys` - Keys of the repository owner
+/// * `identifier` - Repository identifier
+/// * `domains` - All domains in the announcement (for state event URLs)
+/// * `unique_seed` - A string written into a `.unique` file to differentiate commits
+///
+/// # Returns
+/// `tempfile::TempDir` - Keep alive for test duration
+pub async fn push_unique_git_data_to_relay(
+    relay: &TestRelay,
+    keys: &Keys,
+    identifier: &str,
+    domains: &[&str],
+    unique_seed: &str,
+) -> tempfile::TempDir {
+    use super::purgatory_helpers::{create_state_event, push_to_relay};
+
+    let npub = keys
+        .public_key()
+        .to_bech32()
+        .expect("Failed to convert public key to npub");
+
+    let git_temp_dir = tempfile::tempdir().expect("Failed to create temp dir for git repo");
+    let path = git_temp_dir.path();
+
+    fn git(path: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .env("GIT_AUTHOR_NAME", "Test User")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test User")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .env("GIT_AUTHOR_DATE", "2024-01-01T00:00:00+00:00")
+            .env("GIT_COMMITTER_DATE", "2024-01-01T00:00:00+00:00")
+            .output()
+            .unwrap_or_else(|e| panic!("git {:?} failed to spawn: {}", args, e));
+        assert!(
+            status.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&status.stderr)
+        );
+    }
+
+    git(path, &["init", "--initial-branch=main"]);
+    git(path, &["config", "user.email", "test@example.com"]);
+    git(path, &["config", "user.name", "Test User"]);
+    git(path, &["config", "commit.gpgsign", "false"]);
+
+    // Write a unique file so each maintainer gets a distinct commit hash
+    std::fs::write(path.join("state_test.txt"), "State test content for purgatory sync")
+        .expect("write state_test.txt");
+    std::fs::write(path.join(".unique"), unique_seed).expect("write .unique");
+    git(path, &["add", "."]);
+    git(path, &["commit", "-m", "State test commit"]);
+
+    let commit_hash = {
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(path)
+            .output()
+            .expect("git rev-parse");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    let clone_urls: Vec<String> = domains
+        .iter()
+        .map(|d| format!("http://{}/{}/{}.git", d, npub, identifier))
+        .collect();
+    let relay_urls: Vec<String> = domains.iter().map(|d| format!("ws://{}", d)).collect();
+
+    let state_event = create_state_event(
+        keys,
+        identifier,
+        &[("main", &commit_hash)],
+        &[],
+        &clone_urls.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        &relay_urls.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+    )
+    .expect("Failed to create state event");
+
+    send_to_relay(relay, &state_event)
+        .await
+        .expect("Failed to send state event");
+
+    push_to_relay(path, &relay.domain(), &npub, identifier)
+        .expect("Failed to push git data to relay");
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    git_temp_dir
+}
+
+/// Set up a repository announcement on a relay with git data so it passes purgatory.
+///
+/// With the announcement purgatory feature, announcements (kind 30617) require git
+/// data before they are promoted to the relay's main DB. This helper:
+///
+/// 1. Creates a local git repo with a commit
+/// 2. Builds an announcement and state event (kind 30618) pointing to the relay
+/// 3. Sends both to the relay (they go to purgatory)
+/// 4. Git pushes to the relay → releases both from purgatory immediately
+/// 5. Returns the announcement event and temp dir (keep alive for test duration)
+///
+/// # Arguments
+/// * `relay` - The relay to set up the announcement on
+/// * `keys` - Keys to sign the announcement with (repo owner)
+/// * `domains` - All domains that should be listed in the announcement (including relay.domain())
+/// * `identifier` - Repository identifier (d-tag)
+///
+/// # Returns
+/// `(Event, tempfile::TempDir)` - The announcement event and temp dir.
+/// The temp dir MUST be kept alive for the duration of the test.
+pub async fn setup_announcement_on_relay(
+    relay: &TestRelay,
+    keys: &Keys,
+    domains: &[&str],
+    identifier: &str,
+) -> (Event, tempfile::TempDir) {
+    use super::purgatory_helpers::{
+        create_state_event, create_test_repo_with_commit, push_to_relay, CommitVariant,
+    };
+
+    let npub = keys
+        .public_key()
+        .to_bech32()
+        .expect("Failed to convert public key to npub");
+
+    // Create local git repo with a commit
+    let git_temp_dir = tempfile::tempdir().expect("Failed to create temp dir for git repo");
+    let commit_hash = create_test_repo_with_commit(git_temp_dir.path(), CommitVariant::StateTest)
+        .expect("Failed to create test git repo");
+
+    // Build clone URLs and relay URLs from domains
+    let clone_urls: Vec<String> = domains
+        .iter()
+        .map(|d| format!("http://{}/{}/{}.git", d, npub, identifier))
+        .collect();
+    let relay_urls: Vec<String> = domains.iter().map(|d| format!("ws://{}", d)).collect();
+
+    // Build announcement event (lists ALL domains for relay discovery)
+    let announcement = EventBuilder::new(Kind::GitRepoAnnouncement, "Repository state")
+        .tags(vec![
+            Tag::identifier(identifier),
+            Tag::custom(TagKind::custom("clone"), clone_urls.clone()),
+            Tag::custom(TagKind::custom("relays"), relay_urls.clone()),
+        ])
+        .sign_with_keys(keys)
+        .expect("Failed to sign repo announcement");
+
+    // Build state event with all domains' clone URLs
+    let state_event = create_state_event(
+        keys,
+        identifier,
+        &[("main", &commit_hash)],
+        &[],
+        &clone_urls.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        &relay_urls.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+    )
+    .expect("Failed to create state event");
+
+    // Send announcement and state event to relay (both go to purgatory)
+    send_to_relay(relay, &announcement)
+        .await
+        .expect("Failed to send announcement");
+    send_to_relay(relay, &state_event)
+        .await
+        .expect("Failed to send state event");
+
+    // Git push to relay → releases both from purgatory
+    push_to_relay(git_temp_dir.path(), &relay.domain(), &npub, identifier)
+        .expect("Failed to push git data to relay");
+
+    // Brief wait for push processing
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    (announcement, git_temp_dir)
 }
 
 /// Unified sync test helper that automatically determines sync mode.
@@ -1119,6 +1404,10 @@ async fn send_to_relay(relay: &TestRelay, event: &Event) -> Result<(), String> {
 /// // Assert comment synced to result.syncing_relay
 /// ```
 pub async fn run_sync_test(historic_events: &[Event], live_events: &[Event]) -> SyncTestResult {
+    use super::purgatory_helpers::{
+        create_state_event, create_test_repo_with_commit, push_to_relay, CommitVariant,
+    };
+
     // Validate usage - cannot provide events in both slices
     let historic_mode = !historic_events.is_empty();
     let live_mode = !live_events.is_empty();
@@ -1137,39 +1426,93 @@ pub async fn run_sync_test(historic_events: &[Event], live_events: &[Event]) -> 
     // 2. Start source relay
     let source = TestRelay::start().await;
 
-    // 3. Create keys and announcement listing both relays
-    let keys = Keys::generate();
-    let announcement =
-        create_repo_announcement(&keys, &[&source.domain(), &syncing_domain], "test-repo");
+    // 3. Create local git repo with a commit
+    let git_temp_dir = tempfile::tempdir().expect("Failed to create temp dir for git repo");
+    let commit_hash = create_test_repo_with_commit(git_temp_dir.path(), CommitVariant::StateTest)
+        .expect("Failed to create test git repo");
 
-    // 4. Send announcement + historic events to source BEFORE syncing relay starts
+    // 4. Create keys and build URLs
+    let keys = Keys::generate();
+    let npub = keys
+        .public_key()
+        .to_bech32()
+        .expect("Failed to convert public key to npub");
+
+    // Clone URLs: source relay HTTP endpoint is where git data lives
+    // The syncing relay's purgatory will fetch from source's clone URL
+    let clone_url_source = format!("http://{}/{}/{}.git", source.domain(), npub, "test-repo");
+    let clone_url_syncing = format!("http://{}/{}/{}.git", syncing_domain, npub, "test-repo");
+
+    let clone_urls = vec![clone_url_source.clone(), clone_url_syncing.clone()];
+    let relay_urls = vec![
+        format!("ws://{}", source.domain()),
+        format!("ws://{}", syncing_domain),
+    ];
+
+    let announcement = EventBuilder::new(Kind::GitRepoAnnouncement, "Repository state")
+        .tags(vec![
+            Tag::identifier("test-repo"),
+            Tag::custom(TagKind::custom("clone"), clone_urls.clone()),
+            Tag::custom(TagKind::custom("relays"), relay_urls.clone()),
+        ])
+        .sign_with_keys(&keys)
+        .expect("Failed to sign repo announcement");
+
+    // 5. Create state event referencing the commit
+    let state_event = create_state_event(
+        &keys,
+        "test-repo",
+        &[("main", &commit_hash)],
+        &[],
+        &clone_urls.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        &relay_urls.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+    )
+    .expect("Failed to create state event");
+
+    // 6. Send announcement + state event to source (both go to purgatory)
     send_to_relay(&source, &announcement)
         .await
         .expect("Failed to send announcement");
+    send_to_relay(&source, &state_event)
+        .await
+        .expect("Failed to send state event");
+
+    // 7. Git push to source relay → releases both announcement and state event from purgatory
+    push_to_relay(git_temp_dir.path(), &source.domain(), &npub, "test-repo")
+        .expect("Failed to push git data to source relay");
+
+    // 8. Wait for source relay to process the push and release events from purgatory
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // 9. Send historic events to source BEFORE syncing relay starts
     for event in historic_events {
         send_to_relay(&source, event)
             .await
             .expect("Failed to send historic event");
     }
 
-    // 5. Start syncing relay (connects to source)
+    // 10. Start syncing relay (connects to source)
     let syncing =
         TestRelay::start_on_port_with_options(syncing_port, Some(source.url().into()), false).await;
 
-    // 6. Wait for sync connection to establish
+    // 11. Wait for sync connection to establish
     let _ = wait_for_sync_connection(syncing.url(), 1, Duration::from_secs(5)).await;
 
-    // 7. Send live events AFTER connection established
+    // 12. Send live events AFTER connection established
     for event in live_events {
         send_to_relay(&source, event)
             .await
             .expect("Failed to send live event");
     }
 
-    // 8. Allow sync to complete
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // 13. Allow sync + purgatory promotion to complete on the syncing relay.
+    // The syncing relay receives the announcement (goes to purgatory) and state event.
+    // The purgatory sync loop (1s interval) fetches git data from source's clone URL
+    // (http://source-domain/npub/test-repo.git) and releases the announcement.
+    // We wait up to 8s to allow time for this.
+    tokio::time::sleep(Duration::from_secs(8)).await;
 
-    // 9. Compute repo coordinate before moving keys
+    // 14. Compute repo coordinate before moving keys
     let coordinate = repo_coord(&keys, "test-repo");
 
     SyncTestResult {
@@ -1177,6 +1520,8 @@ pub async fn run_sync_test(historic_events: &[Event], live_events: &[Event]) -> 
         syncing_relay: syncing,
         maintainer_keys: keys,
         repo_coord: coordinate,
+        _git_server: None,
+        _git_temp_dir: Some(git_temp_dir),
     }
 }
 

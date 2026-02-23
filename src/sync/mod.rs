@@ -85,6 +85,19 @@ use rejected_index::RejectedEventsIndex;
 // Supporting Data Structures
 // =============================================================================
 
+/// Level of sync needed for a repository
+///
+/// Purgatory announcements only need state events synced (to validate git data).
+/// Promoted repos need full L2/L3 sync (patches, issues, PRs, etc.).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SyncLevel {
+    /// Full L2 + L3 sync (promoted repos with git data)
+    #[default]
+    Full,
+    /// Only state events (kind 30618) - for purgatory announcements
+    StateOnly,
+}
+
 /// What repos and root events need to be synced
 #[derive(Debug, Clone, Default)]
 pub struct RepoSyncNeeds {
@@ -92,6 +105,8 @@ pub struct RepoSyncNeeds {
     pub relays: HashSet<String>,
     /// Root event IDs - 1617/1618/1621 - that reference this repo
     pub root_events: HashSet<EventId>,
+    /// Sync level - StateOnly for purgatory, Full for promoted repos
+    pub sync_level: SyncLevel,
 }
 
 /// Connection status for a relay
@@ -376,6 +391,40 @@ async fn run_daily_timer(
             }
             _ = shutdown_rx.recv() => {
                 tracing::info!("Daily timer received shutdown signal");
+                break;
+            }
+        }
+    }
+}
+
+/// Background task that periodically syncs purgatory announcements into repo_sync_index.
+///
+/// Runs every 5 seconds by default (200ms when `NGIT_TEST=1`).
+/// For each announcement currently in purgatory, ensures there is a `StateOnly` entry in
+/// `repo_sync_index`. New entries trigger `handle_new_sync_filters` which connects to the
+/// relay URLs listed in the announcement and subscribes to state events (kind 30618).
+///
+/// This is the sole registration path for purgatory announcements:
+/// - Sync-path announcements: registered here within one interval of arriving.
+/// - User-submitted purgatory announcements: the SelfSubscriber never sees them
+///   (they're rejected from DB), so this timer is the only registration path.
+async fn run_purgatory_announcement_sync(
+    sync_manager: Arc<Mutex<SyncManager>>,
+    mut shutdown_rx: broadcast::Receiver<()>,
+) {
+    let interval = if std::env::var("NGIT_TEST").as_deref() == Ok("1") {
+        Duration::from_millis(200)
+    } else {
+        Duration::from_secs(5)
+    };
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(interval) => {
+                let mut manager = sync_manager.lock().await;
+                manager.sync_purgatory_announcements_to_index().await;
+            }
+            _ = shutdown_rx.recv() => {
+                tracing::debug!("Purgatory announcement sync timer received shutdown signal");
                 break;
             }
         }
@@ -936,9 +985,29 @@ impl SyncManager {
 
                         // Create REQ+EOSE subscriptions using original semantic filters
                         // This queries by kind/author/tags instead of by ID, which may
-                        // succeed even when ID-based queries fail
-                        let fallback_filters = filters::build_layer2_and_layer3_filters(
-                            &batch_repos,
+                        // succeed even when ID-based queries fail.
+                        // Split batch_repos by SyncLevel to avoid sending Layer 2 filters
+                        // (#a/#A/#q) for StateOnly (purgatory) repos - those PRs would be
+                        // rejected as orphan and then silently dropped by nostr-sdk deduplication.
+                        let (full_repos, state_only_repos) = {
+                            let repo_index = self.repo_sync_index.read().await;
+                            let mut full = HashSet::new();
+                            let mut state_only = HashSet::new();
+                            for repo_ref in &batch_repos {
+                                match repo_index.get(repo_ref).map(|n| n.sync_level) {
+                                    Some(SyncLevel::StateOnly) => {
+                                        state_only.insert(repo_ref.clone());
+                                    }
+                                    _ => {
+                                        full.insert(repo_ref.clone());
+                                    }
+                                }
+                            }
+                            (full, state_only)
+                        };
+                        let fallback_filters = filters::build_sync_level_aware_filters(
+                            &full_repos,
+                            &state_only_repos,
                             &batch_root_events,
                             None,
                         );
@@ -1272,7 +1341,7 @@ impl SyncManager {
     /// to be batched and create Layer 2/3 filters before we mark sync complete.
     ///
     /// The 6-second delay is based on:
-    /// - Self-subscriber batch window: 5 seconds (configurable via NGIT_SYNC_BATCH_WINDOW_MS)
+    /// - Self-subscriber batch window: 5 seconds (200ms when `NGIT_TEST=1`)
     /// - Buffer for processing: 1 second
     ///
     /// Called after each batch is confirmed to detect completion.
@@ -1486,7 +1555,17 @@ impl SyncManager {
             run_rejected_index_cleanup(cleanup_manager, cleanup_shutdown).await;
         });
 
-        // 11. Main loop - handle actions from self-subscriber, disconnect, EOSE, and connect notifications
+        // 11. Spawn purgatory announcement sync timer (every 5s)
+        // Ensures purgatory announcements (including user-submitted ones that never
+        // touch the DB) are registered in repo_sync_index as StateOnly so that
+        // state event subscriptions are established on their listed relay URLs.
+        let purgatory_sync_manager = Arc::clone(&sync_manager);
+        let purgatory_sync_shutdown = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            run_purgatory_announcement_sync(purgatory_sync_manager, purgatory_sync_shutdown).await;
+        });
+
+        // 12. Main loop - handle actions from self-subscriber, disconnect, EOSE, and connect notifications
         loop {
             // Wait for an event without holding the lock
             tokio::select! {
@@ -1719,6 +1798,10 @@ impl SyncManager {
 
                         // For sync-triggered events that go to purgatory, trigger immediate sync
                         // (instead of the default 3-minute delay for user-submitted events)
+                        //
+                        // Note: announcement events (kind 30617) are registered in repo_sync_index
+                        // by the purgatory announcement sync timer (run_purgatory_announcement_sync)
+                        // rather than inline here.
                         if result == ProcessResult::Purgatory {
                             // State events (kind 30618) - extract identifier and trigger immediate sync
                             if event.kind.as_u16() == 30618 {
@@ -2300,6 +2383,80 @@ impl SyncManager {
                 "Processing AddFilters for new items"
             );
             self.handle_new_sync_filters(action).await;
+        }
+    }
+
+    /// Sync purgatory announcements into repo_sync_index as StateOnly entries.
+    ///
+    /// Called periodically by the purgatory announcement sync timer (every 5s).
+    /// For each announcement currently in purgatory, ensures a `StateOnly` entry
+    /// exists in `repo_sync_index`. New entries are then picked up by
+    /// `handle_new_sync_filters` which connects to listed relay URLs and subscribes
+    /// to state events for that repo.
+    ///
+    /// Idempotent: existing entries are not downgraded (a promoted Full entry stays Full).
+    async fn sync_purgatory_announcements_to_index(&mut self) {
+        use crate::sync::algorithms::{compute_actions, derive_relay_targets};
+
+        // Collect all purgatory announcements (snapshot - no async holds)
+        let announcements = self.purgatory.announcements_for_sync();
+
+        if announcements.is_empty() {
+            return;
+        }
+
+        // Register any new entries in repo_sync_index as StateOnly
+        let mut new_relay_urls: std::collections::HashSet<String> = std::collections::HashSet::new();
+        {
+            let mut index = self.repo_sync_index.write().await;
+            for (repo_id, relays) in &announcements {
+                let entry = index.entry(repo_id.clone()).or_insert_with(|| {
+                    tracing::debug!(
+                        repo_id = %repo_id,
+                        "Registering purgatory announcement in repo_sync_index as StateOnly"
+                    );
+                    RepoSyncNeeds {
+                        relays: std::collections::HashSet::new(),
+                        root_events: std::collections::HashSet::new(),
+                        sync_level: SyncLevel::StateOnly,
+                    }
+                });
+                // Don't downgrade an already-Full entry
+                // Add any new relay URLs
+                for relay in relays {
+                    if entry.relays.insert(relay.clone()) {
+                        new_relay_urls.insert(relay.clone());
+                    }
+                }
+            }
+        }
+
+        if new_relay_urls.is_empty() {
+            return;
+        }
+
+        // For any relay URLs that are new, compute and send AddFilters actions
+        let all_targets = {
+            let repo_index = self.repo_sync_index.read().await;
+            derive_relay_targets(&repo_index)
+        };
+
+        let actions = {
+            let pending_index = self.pending_sync_index.read().await;
+            let relay_index = self.relay_sync_index.read().await;
+            compute_actions(&all_targets, &pending_index, &relay_index)
+        };
+
+        for action in actions {
+            // Only act on relays that have new URLs (avoids redundant work)
+            if new_relay_urls.contains(&action.relay_url) {
+                tracing::info!(
+                    relay = %action.relay_url,
+                    repos = action.items.repos.len(),
+                    "Purgatory sync timer: connecting to new relay from purgatory announcement"
+                );
+                self.handle_new_sync_filters(action).await;
+            }
         }
     }
 

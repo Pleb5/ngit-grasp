@@ -19,6 +19,7 @@ pub mod git_clone;
 pub mod git_filter;
 pub mod nip01_smoke;
 pub mod nip11_document;
+pub mod purgatory;
 pub mod push_authorization;
 pub mod repository_creation;
 pub mod spec_requirements;
@@ -29,9 +30,10 @@ pub use git_clone::GitCloneTests;
 pub use git_filter::GitFilterTests;
 pub use nip01_smoke::Nip01SmokeTests;
 pub use nip11_document::Nip11DocumentTests;
+pub use purgatory::PurgatoryTests;
 pub use push_authorization::PushAuthorizationTests;
 pub use repository_creation::RepositoryCreationTests;
 pub use spec_requirements::{
-    get_requirement, get_requirements_for_section, get_sections, RequirementLevel, SpecRequirement,
-    GRASP_01_REQUIREMENTS, GRASP_COMMIT_ID,
+    get_requirement, get_requirement_by_ref, get_requirements_for_section, get_sections,
+    RequirementLevel, SpecRef, SpecRequirement, GRASP_01_REQUIREMENTS, GRASP_COMMIT_ID,
 };

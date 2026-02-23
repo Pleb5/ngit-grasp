@@ -245,7 +245,7 @@ pub async fn test_something(client: &AuditClient) -> TestResult {
             let ctx = TestContext::new(client);
 
             // 2. Prerequisites (cached per-TestContext)
-            let repo = ctx.get_fixture(FixtureKind::ValidRepo).await?;
+            let repo = ctx.get_fixture(FixtureKind::ValidRepoSent).await?;
 
             // 3. Test-specific event
             let my_event = client.create_issue(&repo, "Title", "Content", vec![])?;
@@ -298,10 +298,10 @@ Fixtures use deterministic commit hashes for reproducible testing:
 
 | Constant                                         | Hash                                       | Used By                                          |
 | ------------------------------------------------ | ------------------------------------------ | ------------------------------------------------ |
-| `DETERMINISTIC_COMMIT_HASH`                      | `64ea71d79a57a7acb334cd9651f8aec067c0ce5d` | Owner fixtures (RepoState, OwnerStateDataPushed) |
-| `MAINTAINER_DETERMINISTIC_COMMIT_HASH`           | `1c2d472c9b71ed51968a66500281a3c4a6840464` | MaintainerStateDataPushed                        |
-| `RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH` | `05939b82de66fbdb9c077d0a64fc68522f3cb8e0` | RecursiveMaintainerStateDataPushed               |
-| `PR_TEST_COMMIT_HASH`                            | `5d40fb1555a0c28bf4d650515a73aaa54d4d9bfb` | PR fixtures (PREvent, PREventGenerated)          |
+| `DETERMINISTIC_COMMIT_HASH`                      | `d6e4b26ccf9c268d18d60e6d09804313cc850821` | Owner fixtures (RepoState, OwnerStateDataPushed) |
+| `MAINTAINER_DETERMINISTIC_COMMIT_HASH`           | `d26703c007eff6d17fee3bb70ce8be5d1427d0e7` | MaintainerStateDataPushed                        |
+| `RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH` | `54a2b4b3cbc3373ad1438b8ffad1681d12bc6c4a` | RecursiveMaintainerStateDataPushed               |
+| `PR_TEST_COMMIT_HASH`                            | `5a51b30e4615b572dcd5b9e487861b58605a5c21` | PR fixtures (PREvent, PREventGenerated)          |
 
 #### Fixture Dependencies
 

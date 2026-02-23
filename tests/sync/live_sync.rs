@@ -56,43 +56,24 @@ async fn test_live_sync_layer2_events() {
     // 3. Create test keys
     let keys = Keys::generate();
 
-    // 4. Create a repository announcement that lists BOTH relays
+    // 4. Create a repository announcement on both relays with git data
+    // (purgatory requires git data before announcements are accepted)
     let repo_id = "test-repo-live-l2";
-    let announcement =
-        create_repo_announcement(&keys, &[&relay_a.domain(), &relay_b.domain()], repo_id);
+    let domains = vec![relay_a.domain(), relay_b.domain()];
+    let domain_refs: Vec<&str> = domains.iter().map(|s| s.as_str()).collect();
 
-    println!(
-        "Created announcement {} (kind {})",
-        announcement.id,
-        announcement.kind.as_u16()
-    );
+    let (_announcement, _git_dir_a) =
+        setup_announcement_on_relay(&relay_a, &keys, &domain_refs, repo_id).await;
+    println!("Announcement set up on relay_a with git data");
 
-    // 5. Send announcement to relay_a
-    let client_a = TestClient::new(relay_a.url(), keys.clone())
-        .await
-        .expect("Failed to connect to relay_a");
+    let (_announcement_b, _git_dir_b) =
+        setup_announcement_on_relay(&relay_b, &keys, &domain_refs, repo_id).await;
+    println!("Announcement set up on relay_b with git data (triggers discovery)");
 
-    client_a
-        .send_event(&announcement)
-        .await
-        .expect("Failed to send announcement to relay_a");
-    println!("Announcement sent to relay_a");
-
-    // 6. Send announcement to relay_b (triggers discovery of relay_a)
-    let client_b = TestClient::new(relay_b.url(), keys.clone())
-        .await
-        .expect("Failed to connect to relay_b");
-
-    client_b
-        .send_event(&announcement)
-        .await
-        .expect("Failed to send announcement to relay_b");
-    println!("Announcement sent to relay_b (triggers discovery)");
-
-    // 7. Wait for discovery to complete
+    // 5. Wait for discovery to complete
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    // 8. Create and send a Layer 2 issue event (using helper)
+    // 6. Create and send a Layer 2 issue event (using helper)
     let repo_coordinate = repo_coord(&keys, repo_id);
     let issue = build_layer2_issue_event(&keys, &repo_coordinate, "Test Issue for Live Sync")
         .expect("Failed to create issue event");
@@ -104,6 +85,10 @@ async fn test_live_sync_layer2_events() {
     }
 
     // Send issue to relay_a only
+    let client_a = TestClient::new(relay_a.url(), keys.clone())
+        .await
+        .expect("Failed to connect to relay_a");
+
     client_a
         .send_event(&issue)
         .await
@@ -111,7 +96,6 @@ async fn test_live_sync_layer2_events() {
     println!("Issue sent to relay_a");
 
     client_a.disconnect().await;
-    client_b.disconnect().await;
 
     // 9. Wait and verify event syncs to relay_b
     let filter = Filter::new()
@@ -166,30 +150,19 @@ async fn test_live_sync_layer3_events() {
 
     let keys = Keys::generate();
 
-    // 2. Create and send repository announcement to both relays
+    // 2. Create and send repository announcement to both relays with git data
+    // (purgatory requires git data before announcements are accepted)
     let repo_id = "test-repo-live-l3";
-    let announcement =
-        create_repo_announcement(&keys, &[&relay_a.domain(), &relay_b.domain()], repo_id);
+    let domains = vec![relay_a.domain(), relay_b.domain()];
+    let domain_refs: Vec<&str> = domains.iter().map(|s| s.as_str()).collect();
 
-    let client_a = TestClient::new(relay_a.url(), keys.clone())
-        .await
-        .expect("Failed to connect to relay_a");
+    let (_announcement, _git_dir_a) =
+        setup_announcement_on_relay(&relay_a, &keys, &domain_refs, repo_id).await;
+    println!("Announcement set up on relay_a with git data");
 
-    let client_b = TestClient::new(relay_b.url(), keys.clone())
-        .await
-        .expect("Failed to connect to relay_b");
-
-    client_a
-        .send_event(&announcement)
-        .await
-        .expect("Failed to send announcement to relay_a");
-    println!("Announcement sent to relay_a");
-
-    client_b
-        .send_event(&announcement)
-        .await
-        .expect("Failed to send announcement to relay_b");
-    println!("Announcement sent to relay_b (triggers discovery)");
+    let (_announcement_b, _git_dir_b) =
+        setup_announcement_on_relay(&relay_b, &keys, &domain_refs, repo_id).await;
+    println!("Announcement set up on relay_b with git data (triggers discovery)");
 
     // 3. Wait for discovery
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -199,6 +172,10 @@ async fn test_live_sync_layer3_events() {
     let issue = build_layer2_issue_event(&keys, &repo_coordinate, "Parent Issue for Comment Test")
         .expect("Failed to create issue");
     let issue_id = issue.id;
+
+    let client_a = TestClient::new(relay_a.url(), keys.clone())
+        .await
+        .expect("Failed to connect to relay_a");
 
     client_a
         .send_event(&issue)
@@ -243,7 +220,6 @@ async fn test_live_sync_layer3_events() {
     println!("Issue synced to relay_b: {}", issue_synced);
 
     client_a.disconnect().await;
-    client_b.disconnect().await;
 
     // 7. Wait and verify comment syncs to relay_b
     let comment_filter = Filter::new()
@@ -343,29 +319,17 @@ async fn test_live_sync_event_ordering() {
 
     let keys = Keys::generate();
 
-    // 2. Create and send repository announcement to both relays
+    // 2. Create and send repository announcement to both relays with git data
+    // (purgatory requires git data before announcements are accepted)
     let repo_id = "test-repo-ordering";
-    let announcement =
-        create_repo_announcement(&keys, &[&relay_a.domain(), &relay_b.domain()], repo_id);
+    let domains = vec![relay_a.domain(), relay_b.domain()];
+    let domain_refs: Vec<&str> = domains.iter().map(|s| s.as_str()).collect();
 
-    let client_a = TestClient::new(relay_a.url(), keys.clone())
-        .await
-        .expect("Failed to connect to relay_a");
-
-    let client_b = TestClient::new(relay_b.url(), keys.clone())
-        .await
-        .expect("Failed to connect to relay_b");
-
-    client_a
-        .send_event(&announcement)
-        .await
-        .expect("Failed to send announcement to relay_a");
-
-    client_b
-        .send_event(&announcement)
-        .await
-        .expect("Failed to send announcement to relay_b");
-    println!("Announcements sent to both relays");
+    let (_announcement, _git_dir_a) =
+        setup_announcement_on_relay(&relay_a, &keys, &domain_refs, repo_id).await;
+    let (_announcement_b, _git_dir_b) =
+        setup_announcement_on_relay(&relay_b, &keys, &domain_refs, repo_id).await;
+    println!("Announcements set up on both relays with git data");
 
     // 3. Wait for discovery
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -374,6 +338,10 @@ async fn test_live_sync_event_ordering() {
     let repo_coordinate = repo_coord(&keys, repo_id);
     let mut issue_ids = Vec::new();
     let mut expected_order_timestamps = Vec::new();
+
+    let client_a = TestClient::new(relay_a.url(), keys.clone())
+        .await
+        .expect("Failed to connect to relay_a");
 
     for i in 1..=3 {
         let issue = build_layer2_issue_event(
@@ -402,7 +370,6 @@ async fn test_live_sync_event_ordering() {
     }
 
     client_a.disconnect().await;
-    client_b.disconnect().await;
 
     // 5. Wait for all events to sync
     tokio::time::sleep(Duration::from_secs(3)).await;

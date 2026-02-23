@@ -19,7 +19,7 @@
 /// Expected hash for PR test deterministic commit
 ///
 /// This hash is produced by creating a commit with:
-/// - File: test.txt containing "PR test deterministic commit"
+/// - File: test.txt containing "PR test deterministic commit\n" (with trailing newline)
 /// - Message: "PR test deterministic commit"
 /// - Author: "GRASP Audit Test <test@grasp-audit.local>"
 /// - Author date: 2024-01-01T00:00:00Z
@@ -29,8 +29,9 @@
 ///
 /// Run `test_pr_test_commit_hash_discovery` to discover/verify this value.
 #[allow(dead_code)]
-const PR_TEST_COMMIT_HASH: &str = "5d40fb1555a0c28bf4d650515a73aaa54d4d9bfb";
+const PR_TEST_COMMIT_HASH: &str = "5a51b30e4615b572dcd5b9e487861b58605a5c21";
 
+use crate::specs::grasp01::SpecRef;
 use crate::{
     clone_repo, create_commit, create_deterministic_commit_with_variant, try_push, try_push_to_ref,
     AuditClient, CommitVariant, FixtureKind, TestContext, TestResult,
@@ -207,7 +208,7 @@ async fn setup_pr_test_repo(
 ) -> Result<(PathBuf, String, String, String), String> {
     // Get fixtures
     let repo_event = ctx
-        .get_fixture(FixtureKind::ValidRepo)
+        .get_fixture(FixtureKind::ValidRepoServed)
         .await
         .map_err(|e| format!("Failed to get repo announcement: {}", e))?;
 
@@ -406,12 +407,12 @@ impl PushAuthorizationTests {
         let ctx = TestContext::new(client);
 
         // Create repository (no state event)
-        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepoSent).await {
             Ok(r) => r,
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:36",
+                    SpecRef::GitAcceptPushesAlignState,
                     "Push rejected without state event",
                 )
                 .fail(format!("Failed to create repo: {}", e))
@@ -435,7 +436,7 @@ impl PushAuthorizationTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:36",
+                    SpecRef::GitAcceptPushesAlignState,
                     "Push rejected without state event",
                 )
                 .fail(&e)
@@ -449,7 +450,7 @@ impl PushAuthorizationTests {
             cleanup();
             return TestResult::new(
                 test_name,
-                "GRASP-01:git-http:36",
+                SpecRef::GitAcceptPushesAlignState,
                 "Push rejected without state event",
             )
             .fail(&e);
@@ -462,19 +463,19 @@ impl PushAuthorizationTests {
         match push_result {
             Ok(false) => TestResult::new(
                 test_name,
-                "GRASP-01:git-http:36",
+                SpecRef::GitAcceptPushesAlignState,
                 "Push rejected without state event",
             )
             .pass(),
             Ok(true) => TestResult::new(
                 test_name,
-                "GRASP-01:git-http:36",
+                SpecRef::GitAcceptPushesAlignState,
                 "Push rejected without state event",
             )
             .fail("Push accepted but should be rejected"),
             Err(e) => TestResult::new(
                 test_name,
-                "GRASP-01:git-http:36",
+                SpecRef::GitAcceptPushesAlignState,
                 "Push rejected without state event",
             )
             .fail(&e),
@@ -507,13 +508,13 @@ impl PushAuthorizationTests {
         match ctx.get_fixture(FixtureKind::OwnerStateDataPushed).await {
             Ok(_state_event) => TestResult::new(
                 test_name,
-                "GRASP-01:git-http:36", // TODO do we add purgatory line here?
+                SpecRef::GitAcceptPushesAlignState,
                 "Push authorized with matching state",
             )
             .pass(),
             Err(e) => TestResult::new(
                 test_name,
-                "GRASP-01:git-http:36",
+                SpecRef::GitAcceptPushesAlignState,
                 "Push authorized with matching state",
             )
             .fail(format!("{}", e)),
@@ -555,7 +556,7 @@ impl PushAuthorizationTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:36",
+                    SpecRef::GitAcceptPushesAlignState,
                     "Push rejected when commit not in state event",
                 )
                 .fail(format!("Failed to create RepoState fixture: {}", e));
@@ -575,7 +576,7 @@ impl PushAuthorizationTests {
             None => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:36",
+                    SpecRef::GitAcceptPushesAlignState,
                     "Push rejected when commit not in state event",
                 )
                 .fail("Missing repo_id in state event");
@@ -587,7 +588,7 @@ impl PushAuthorizationTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:36",
+                    SpecRef::GitAcceptPushesAlignState,
                     "Push rejected when commit not in state event",
                 )
                 .fail(format!("Failed to convert pubkey to bech32: {}", e));
@@ -603,7 +604,7 @@ impl PushAuthorizationTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:36",
+                    SpecRef::GitAcceptPushesAlignState,
                     "Push rejected when commit not in state event",
                 )
                 .fail(format!("Failed to clone repo: {}", e));
@@ -626,7 +627,7 @@ impl PushAuthorizationTests {
                 cleanup();
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:36",
+                    SpecRef::GitAcceptPushesAlignState,
                     "Push rejected when commit not in state event",
                 )
                 .fail(format!("Failed to create/checkout main branch: {}", e));
@@ -635,7 +636,7 @@ impl PushAuthorizationTests {
                 cleanup();
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:36",
+                    SpecRef::GitAcceptPushesAlignState,
                     "Push rejected when commit not in state event",
                 )
                 .fail(format!(
@@ -652,7 +653,7 @@ impl PushAuthorizationTests {
             cleanup();
             return TestResult::new(
                 test_name,
-                "GRASP-01:git-http:36",
+                SpecRef::GitAcceptPushesAlignState,
                 "Push rejected when commit not in state event",
             )
             .fail(format!("Failed to create wrong commit: {}", e));
@@ -666,10 +667,10 @@ impl PushAuthorizationTests {
         cleanup();
 
         match push_result {
-            Ok(false) => TestResult::new(test_name, "GRASP-01:git-http:36", "Push rejected when commit not in state event").pass(),
-            Ok(true) => TestResult::new(test_name, "GRASP-01:git-http:36", "Push rejected when commit not in state event")
+            Ok(false) => TestResult::new(test_name, SpecRef::GitAcceptPushesAlignState, "Push rejected when commit not in state event").pass(),
+            Ok(true) => TestResult::new(test_name, SpecRef::GitAcceptPushesAlignState, "Push rejected when commit not in state event")
                 .fail("Push accepted but should be rejected. The pushed commit is not in the state event."),
-            Err(e) => TestResult::new(test_name, "GRASP-01:git-http:36", "Push rejected when commit not in state event").fail(&e),
+            Err(e) => TestResult::new(test_name, SpecRef::GitAcceptPushesAlignState, "Push rejected when commit not in state event").fail(&e),
         }
     }
 
@@ -704,13 +705,13 @@ impl PushAuthorizationTests {
         {
             Ok(_maintainer_state_event) => TestResult::new(
                 test_name,
-                "GRASP-01:git-http:36",
+                SpecRef::GitAcceptPushesAlignState,
                 "Push authorized by maintainer state event only (no announcement)",
             )
             .pass(),
             Err(e) => TestResult::new(
                 test_name,
-                "GRASP-01:git-http:36",
+                SpecRef::GitAcceptPushesAlignState,
                 "Push authorized by maintainer state event only (no announcement)",
             )
             .fail(format!("{}", e)),
@@ -747,13 +748,13 @@ impl PushAuthorizationTests {
         {
             Ok(_recursive_maintainer_state_event) => TestResult::new(
                 test_name,
-                "GRASP-01:git-http:36",
+                SpecRef::GitAcceptPushesAlignState,
                 "Push authorized by recursive maintainer state event",
             )
             .pass(),
             Err(e) => TestResult::new(
                 test_name,
-                "GRASP-01:git-http:36",
+                SpecRef::GitAcceptPushesAlignState,
                 "Push authorized by recursive maintainer state event",
             )
             .fail(format!("{}", e)),
@@ -797,7 +798,7 @@ impl PushAuthorizationTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:36",
+                    SpecRef::GitAcceptPushesAlignState,
                     "Non-maintainer state events ignored",
                 )
                 .fail(format!("Failed to get OwnerStateDataPushed fixture: {}", e));
@@ -815,7 +816,7 @@ impl PushAuthorizationTests {
             None => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:36",
+                    SpecRef::GitAcceptPushesAlignState,
                     "Non-maintainer state events ignored",
                 )
                 .fail("Missing repo_id in state event");
@@ -827,7 +828,7 @@ impl PushAuthorizationTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:36",
+                    SpecRef::GitAcceptPushesAlignState,
                     "Non-maintainer state events ignored",
                 )
                 .fail(format!("Failed to convert pubkey to bech32: {}", e));
@@ -842,7 +843,7 @@ impl PushAuthorizationTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:36",
+                    SpecRef::GitAcceptPushesAlignState,
                     "Non-maintainer state events ignored",
                 )
                 .fail(format!("Failed to clone repo: {}", e));
@@ -864,7 +865,7 @@ impl PushAuthorizationTests {
                 cleanup();
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:36",
+                    SpecRef::GitAcceptPushesAlignState,
                     "Non-maintainer state events ignored",
                 )
                 .fail(format!("Failed to create commit: {}", e));
@@ -890,7 +891,7 @@ impl PushAuthorizationTests {
                 cleanup();
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:36",
+                    SpecRef::GitAcceptPushesAlignState,
                     "Non-maintainer state events ignored",
                 )
                 .fail(format!("Failed to build rogue state event: {}", e));
@@ -902,7 +903,7 @@ impl PushAuthorizationTests {
             cleanup();
             return TestResult::new(
                 test_name,
-                "GRASP-01:git-http:36",
+                SpecRef::GitAcceptPushesAlignState,
                 "Non-maintainer state events ignored",
             )
             .fail(format!("Failed to send rogue state event: {}", e));
@@ -919,8 +920,8 @@ impl PushAuthorizationTests {
         cleanup();
 
         match push_result {
-            Ok(false) => TestResult::new(test_name, "GRASP-01:git-http:36", "Non-maintainer state events ignored").pass(),
-            Ok(true) => TestResult::new(test_name, "GRASP-01:git-http:36", "Non-maintainer state events ignored")
+            Ok(false) => TestResult::new(test_name, SpecRef::GitAcceptPushesAlignState, "Non-maintainer state events ignored").pass(),
+            Ok(true) => TestResult::new(test_name, SpecRef::GitAcceptPushesAlignState, "Non-maintainer state events ignored")
                 .fail(format!(
                     "Push accepted but should be rejected. A non-maintainer (pubkey: {}) published \
                     a state event announcing commit {}, but the push was accepted. The relay should \
@@ -929,7 +930,7 @@ impl PushAuthorizationTests {
                     new_commit,
                     client.public_key()
                 )),
-            Err(e) => TestResult::new(test_name, "GRASP-01:git-http:36", "Non-maintainer state events ignored").fail(&e),
+            Err(e) => TestResult::new(test_name, SpecRef::GitAcceptPushesAlignState, "Non-maintainer state events ignored").fail(&e),
         }
     }
 
@@ -955,12 +956,12 @@ impl PushAuthorizationTests {
         // ============================================================
         let ctx = TestContext::new(client);
 
-        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepoSent).await {
             Ok(r) => r,
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:40",
+                    SpecRef::GitAcceptRefsNostrEventId,
                     "Push to refs/nostr/<invalid-event-id> rejected",
                 )
                 .fail(format!("Failed to create repo: {}", e));
@@ -986,7 +987,7 @@ impl PushAuthorizationTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:40",
+                    SpecRef::GitAcceptRefsNostrEventId,
                     "Push to refs/nostr/<invalid-event-id> rejected",
                 )
                 .fail(&e);
@@ -1001,7 +1002,7 @@ impl PushAuthorizationTests {
             cleanup();
             return TestResult::new(
                 test_name,
-                "GRASP-01:git-http:40",
+                SpecRef::GitAcceptRefsNostrEventId,
                 "Push to refs/nostr/<invalid-event-id> rejected",
             )
             .fail(&e);
@@ -1020,13 +1021,13 @@ impl PushAuthorizationTests {
         match push_result {
             Ok(false) => TestResult::new(
                 test_name,
-                "GRASP-01:git-http:40",
+                SpecRef::GitAcceptRefsNostrEventId,
                 "Push to refs/nostr/<invalid-event-id> rejected",
             )
             .pass(),
             Ok(true) => TestResult::new(
                 test_name,
-                "GRASP-01:git-http:40",
+                SpecRef::GitAcceptRefsNostrEventId,
                 "Push to refs/nostr/<invalid-event-id> rejected",
             )
             .fail(format!(
@@ -1037,7 +1038,7 @@ impl PushAuthorizationTests {
             )),
             Err(e) => TestResult::new(
                 test_name,
-                "GRASP-01:git-http:40",
+                SpecRef::GitAcceptRefsNostrEventId,
                 "Push to refs/nostr/<invalid-event-id> rejected",
             )
             .fail(format!("Push error: {}", e)),
@@ -1071,10 +1072,11 @@ impl PushAuthorizationTests {
             .get_fixture(FixtureKind::PRWrongCommitPushedBeforeEvent)
             .await
         {
-            Ok(_pr_event) => TestResult::new(test_name, "GRASP-01:git-http:40", desc).pass(),
-            Err(e) => {
-                TestResult::new(test_name, "GRASP-01:git-http:40", desc).fail(format!("{}", e))
+            Ok(_pr_event) => {
+                TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc).pass()
             }
+            Err(e) => TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc)
+                .fail(format!("{}", e)),
         }
     }
 
@@ -1100,7 +1102,7 @@ impl PushAuthorizationTests {
         {
             Ok(e) => e,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:40", desc)
+                return TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc)
                     .fail(format!("{}", e));
             }
         };
@@ -1108,10 +1110,10 @@ impl PushAuthorizationTests {
         let pr_event_id = pr_event.id.to_hex();
 
         // Get repo info for cloning (fresh clone for verification)
-        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepoServed).await {
             Ok(r) => r,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:40", desc)
+                return TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc)
                     .fail(format!("{}", e));
             }
         };
@@ -1127,7 +1129,7 @@ impl PushAuthorizationTests {
         let owner_npub = match repo.pubkey.to_bech32() {
             Ok(n) => n,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:40", desc)
+                return TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc)
                     .fail(format!("Failed to get owner npub: {}", e));
             }
         };
@@ -1136,7 +1138,8 @@ impl PushAuthorizationTests {
         let clone_path = match clone_repo(relay_domain, &owner_npub, &repo_id) {
             Ok(p) => p,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:40", desc).fail(&e);
+                return TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc)
+                    .fail(&e);
             }
         };
 
@@ -1146,7 +1149,8 @@ impl PushAuthorizationTests {
             Ok(exists) => exists,
             Err(e) => {
                 let _ = fs::remove_dir_all(&clone_path);
-                return TestResult::new(test_name, "GRASP-01:git-http:40", desc).fail(&e);
+                return TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc)
+                    .fail(&e);
             }
         };
 
@@ -1154,13 +1158,13 @@ impl PushAuthorizationTests {
 
         // Ref should be deleted since the pushed commit doesn't match the PR event's `c` tag
         if refs_exist {
-            TestResult::new(test_name, "GRASP-01:git-http:40", desc).fail(format!(
+            TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc).fail(format!(
                 "Expected refs/nostr/{} to be deleted when PR event published with non-matching commit, \
                  but the ref still exists. The relay should delete refs that don't match the event's `c` tag.",
                 pr_event_id
             ))
         } else {
-            TestResult::new(test_name, "GRASP-01:git-http:40", desc).pass()
+            TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc).pass()
         }
     }
 
@@ -1186,7 +1190,7 @@ impl PushAuthorizationTests {
         {
             Ok(e) => e,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:40", desc)
+                return TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc)
                     .fail(format!("{}", e));
             }
         };
@@ -1194,10 +1198,10 @@ impl PushAuthorizationTests {
         let pr_event_id = pr_event.id.to_hex();
 
         // Get repo info for cloning (fresh clone for this test)
-        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepoServed).await {
             Ok(r) => r,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:40", desc)
+                return TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc)
                     .fail(format!("{}", e));
             }
         };
@@ -1213,7 +1217,7 @@ impl PushAuthorizationTests {
         let owner_npub = match repo.pubkey.to_bech32() {
             Ok(n) => n,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:40", desc)
+                return TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc)
                     .fail(format!("Failed to get owner npub: {}", e));
             }
         };
@@ -1222,15 +1226,16 @@ impl PushAuthorizationTests {
         let clone_path = match clone_repo(relay_domain, &owner_npub, &repo_id) {
             Ok(p) => p,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:40", desc).fail(&e);
+                return TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc)
+                    .fail(&e);
             }
         };
 
-        // Create a wrong commit (Owner variant, not PRTestCommit)
-        if let Err(e) = create_deterministic_commit_with_variant(&clone_path, CommitVariant::Owner)
-        {
+        // Create a wrong commit (unique, not PRTestCommit) - use create_commit so it always
+        // succeeds even when the clone already has the Owner deterministic content on disk.
+        if let Err(e) = create_commit(&clone_path, "wrong commit - not the PR test commit") {
             let _ = fs::remove_dir_all(&clone_path);
-            return TestResult::new(test_name, "GRASP-01:git-http:40", desc).fail(&e);
+            return TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc).fail(&e);
         }
 
         // Try to push with wrong commit (should be rejected since PR event exists)
@@ -1238,7 +1243,8 @@ impl PushAuthorizationTests {
             Ok(success) => success,
             Err(e) => {
                 let _ = fs::remove_dir_all(&clone_path);
-                return TestResult::new(test_name, "GRASP-01:git-http:40", desc).fail(&e);
+                return TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc)
+                    .fail(&e);
             }
         };
 
@@ -1246,11 +1252,11 @@ impl PushAuthorizationTests {
 
         // Should REJECT - PR event exists with different commit hash
         if push_succeeded {
-            return TestResult::new(test_name, "GRASP-01:git-http:40", desc)
+            return TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc)
                 .fail("Push accepted (expected rejection due to commit hash mismatch)");
         }
 
-        TestResult::new(test_name, "GRASP-01:git-http:40", desc).pass()
+        TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc).pass()
     }
 
     /// Test 4: Push correct commit to refs/nostr/<pr-event-id> AFTER PR event exists
@@ -1275,7 +1281,7 @@ impl PushAuthorizationTests {
         {
             Ok(e) => e,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:40", desc)
+                return TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc)
                     .fail(format!("{}", e));
             }
         };
@@ -1283,10 +1289,10 @@ impl PushAuthorizationTests {
         let pr_event_id = pr_event.id.to_hex();
 
         // Get repo info for cloning (fresh clone for this test)
-        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepoServed).await {
             Ok(r) => r,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:40", desc)
+                return TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc)
                     .fail(format!("{}", e));
             }
         };
@@ -1302,7 +1308,7 @@ impl PushAuthorizationTests {
         let owner_npub = match repo.pubkey.to_bech32() {
             Ok(n) => n,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:40", desc)
+                return TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc)
                     .fail(format!("Failed to get owner npub: {}", e));
             }
         };
@@ -1311,26 +1317,27 @@ impl PushAuthorizationTests {
         let clone_path = match clone_repo(relay_domain, &owner_npub, &repo_id) {
             Ok(p) => p,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:40", desc).fail(&e);
+                return TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc)
+                    .fail(&e);
             }
         };
 
         // Create the CORRECT PR test commit (the one expected by PR event)
         if let Err(e) = reset_to_correct_pr_commit(&clone_path) {
             let _ = fs::remove_dir_all(&clone_path);
-            return TestResult::new(test_name, "GRASP-01:git-http:40", desc).fail(&e);
+            return TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc).fail(&e);
         }
 
         // Check event is not yet served by relay (still in purgatory)
         match client.is_event_on_relay(pr_event.id).await {
             Ok(on_relay) => {
                 if on_relay {
-                    return TestResult::new(test_name, "GRASP-01:git-http:40", desc)
+                    return TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc)
                         .fail("PR event not in purgatory before correct commit pushed to refs/nostr/<event-id> (the relay serve the PR event)");
                 }
             }
             Err(_) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:40", desc)
+                return TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc)
                     .fail("failed to query relay");
             }
         }
@@ -1340,7 +1347,8 @@ impl PushAuthorizationTests {
             Ok(success) => success,
             Err(e) => {
                 let _ = fs::remove_dir_all(&clone_path);
-                return TestResult::new(test_name, "GRASP-01:git-http:40", desc).fail(&e);
+                return TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc)
+                    .fail(&e);
             }
         };
 
@@ -1348,7 +1356,7 @@ impl PushAuthorizationTests {
 
         // Should ACCEPT - commit matches PR event's c tag
         if !push_succeeded {
-            return TestResult::new(test_name, "GRASP-01:git-http:40", desc)
+            return TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc)
                 .fail("Push rejected (expected acceptance since commit matches PR event)");
         }
 
@@ -1361,17 +1369,17 @@ impl PushAuthorizationTests {
         match client.is_event_on_relay(pr_event.id).await {
             Ok(on_relay) => {
                 if !on_relay {
-                    return TestResult::new(test_name, "GRASP-01:git-http:40", desc)
+                    return TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc)
                         .fail("PR event not served after correct commit at refs/nostr/<event-id>");
                 }
             }
             Err(_) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:40", desc)
+                return TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc)
                     .fail("failed to query relay");
             }
         }
 
-        TestResult::new(test_name, "GRASP-01:git-http:40", desc).pass()
+        TestResult::new(test_name, SpecRef::GitAcceptRefsNostrEventId, desc).pass()
     }
 
     /// Test that HEAD is set after a state event is published with an existing commit
@@ -1408,20 +1416,19 @@ impl PushAuthorizationTests {
         {
             Ok(e) => e,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:38", desc).fail(format!(
-                    "Failed to create HeadSetToDevelopBranch fixture: {}",
-                    e
-                ));
+                return TestResult::new(test_name, SpecRef::GitSetHeadOnReceive, desc).fail(
+                    format!("Failed to create HeadSetToDevelopBranch fixture: {}", e),
+                );
             }
         };
 
         // ============================================================
         // Step 2: Extract repo_id and owner npub from ValidRepo (cached by fixture)
         // ============================================================
-        let valid_repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+        let valid_repo = match ctx.get_fixture(FixtureKind::ValidRepoSent).await {
             Ok(e) => e,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:38", desc)
+                return TestResult::new(test_name, SpecRef::GitSetHeadOnReceive, desc)
                     .fail(format!("Failed to get ValidRepo fixture: {}", e));
             }
         };
@@ -1434,7 +1441,7 @@ impl PushAuthorizationTests {
         {
             Some(id) => id.to_string(),
             None => {
-                return TestResult::new(test_name, "GRASP-01:git-http:38", desc)
+                return TestResult::new(test_name, SpecRef::GitSetHeadOnReceive, desc)
                     .fail("Missing repo_id in ValidRepo");
             }
         };
@@ -1442,7 +1449,7 @@ impl PushAuthorizationTests {
         let npub = match valid_repo.pubkey.to_bech32() {
             Ok(n) => n,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:38", desc)
+                return TestResult::new(test_name, SpecRef::GitSetHeadOnReceive, desc)
                     .fail(format!("Failed to convert pubkey to bech32: {}", e));
             }
         };
@@ -1454,16 +1461,16 @@ impl PushAuthorizationTests {
             match get_default_branch_from_info_refs(relay_domain, &npub, &repo_id).await {
                 Ok(branch) => branch,
                 Err(e) => {
-                    return TestResult::new(test_name, "GRASP-01:git-http:38", desc)
+                    return TestResult::new(test_name, SpecRef::GitSetHeadOnReceive, desc)
                         .fail(format!("Failed to get default branch: {}", e));
                 }
             };
 
         // Verify HEAD points to refs/heads/develop
         if default_branch == "refs/heads/develop" {
-            TestResult::new(test_name, "GRASP-01:git-http:38", desc).pass()
+            TestResult::new(test_name, SpecRef::GitSetHeadOnReceive, desc).pass()
         } else {
-            TestResult::new(test_name, "GRASP-01:git-http:38", desc).fail(format!(
+            TestResult::new(test_name, SpecRef::GitSetHeadOnReceive, desc).fail(format!(
                 "Expected HEAD to point to 'refs/heads/develop' but got '{}'. \
                 GRASP-01 requires: 'MUST set repository HEAD per repository state announcement \
                 as soon as the git data related to that branch has been received.'",
@@ -1512,20 +1519,19 @@ impl PushAuthorizationTests {
         let _develop_state = match ctx.get_fixture(FixtureKind::HeadSetToDevelopBranch).await {
             Ok(e) => e,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:38", desc).fail(format!(
-                    "Failed to create HeadSetToDevelopBranch fixture: {}",
-                    e
-                ));
+                return TestResult::new(test_name, SpecRef::GitSetHeadOnReceive, desc).fail(
+                    format!("Failed to create HeadSetToDevelopBranch fixture: {}", e),
+                );
             }
         };
 
         // ============================================================
         // Step 2: Extract repo_id and owner npub from ValidRepo (cached by fixture)
         // ============================================================
-        let valid_repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+        let valid_repo = match ctx.get_fixture(FixtureKind::ValidRepoSent).await {
             Ok(e) => e,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:38", desc)
+                return TestResult::new(test_name, SpecRef::GitSetHeadOnReceive, desc)
                     .fail(format!("Failed to get ValidRepo fixture: {}", e));
             }
         };
@@ -1538,7 +1544,7 @@ impl PushAuthorizationTests {
         {
             Some(id) => id.to_string(),
             None => {
-                return TestResult::new(test_name, "GRASP-01:git-http:38", desc)
+                return TestResult::new(test_name, SpecRef::GitSetHeadOnReceive, desc)
                     .fail("Missing repo_id in ValidRepo");
             }
         };
@@ -1546,7 +1552,7 @@ impl PushAuthorizationTests {
         let npub = match valid_repo.pubkey.to_bech32() {
             Ok(n) => n,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:38", desc)
+                return TestResult::new(test_name, SpecRef::GitSetHeadOnReceive, desc)
                     .fail(format!("Failed to convert pubkey to bech32: {}", e));
             }
         };
@@ -1557,7 +1563,7 @@ impl PushAuthorizationTests {
         let clone_path = match clone_repo(relay_domain, &npub, &repo_id) {
             Ok(path) => path,
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:38", desc)
+                return TestResult::new(test_name, SpecRef::GitSetHeadOnReceive, desc)
                     .fail(format!("Failed to clone repo: {}", e));
             }
         };
@@ -1572,7 +1578,7 @@ impl PushAuthorizationTests {
 
         if let Err(e) = output {
             let _ = fs::remove_dir_all(&clone_path);
-            return TestResult::new(test_name, "GRASP-01:git-http:38", desc)
+            return TestResult::new(test_name, SpecRef::GitSetHeadOnReceive, desc)
                 .fail(format!("Failed to create develop1 branch: {}", e));
         }
 
@@ -1581,7 +1587,7 @@ impl PushAuthorizationTests {
             Ok(hash) => hash,
             Err(e) => {
                 let _ = fs::remove_dir_all(&clone_path);
-                return TestResult::new(test_name, "GRASP-01:git-http:38", desc)
+                return TestResult::new(test_name, SpecRef::GitSetHeadOnReceive, desc)
                     .fail(format!("Failed to create commit: {}", e));
             }
         };
@@ -1610,7 +1616,7 @@ impl PushAuthorizationTests {
             Ok(e) => e,
             Err(e) => {
                 let _ = fs::remove_dir_all(&clone_path);
-                return TestResult::new(test_name, "GRASP-01:git-http:38", desc)
+                return TestResult::new(test_name, SpecRef::GitSetHeadOnReceive, desc)
                     .fail(format!("Failed to build state event: {}", e));
             }
         };
@@ -1621,7 +1627,7 @@ impl PushAuthorizationTests {
             .await
         {
             let _ = fs::remove_dir_all(&clone_path);
-            return TestResult::new(test_name, "GRASP-01:git-http:38", desc)
+            return TestResult::new(test_name, SpecRef::GitSetHeadOnReceive, desc)
                 .fail(format!("Failed to send state event: {}", e));
         }
 
@@ -1634,11 +1640,11 @@ impl PushAuthorizationTests {
         match push_result {
             Ok(true) => { /* Push succeeded, continue to verify */ }
             Ok(false) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:38", desc)
+                return TestResult::new(test_name, SpecRef::GitSetHeadOnReceive, desc)
                     .fail("Push to refs/heads/develop1 was rejected");
             }
             Err(e) => {
-                return TestResult::new(test_name, "GRASP-01:git-http:38", desc)
+                return TestResult::new(test_name, SpecRef::GitSetHeadOnReceive, desc)
                     .fail(format!("Failed to push develop1 branch: {}", e));
             }
         }
@@ -1651,16 +1657,16 @@ impl PushAuthorizationTests {
             match get_default_branch_from_info_refs(relay_domain, &npub, &repo_id).await {
                 Ok(branch) => branch,
                 Err(e) => {
-                    return TestResult::new(test_name, "GRASP-01:git-http:38", desc)
+                    return TestResult::new(test_name, SpecRef::GitSetHeadOnReceive, desc)
                         .fail(format!("Failed to get default branch: {}", e));
                 }
             };
 
         // Verify HEAD points to refs/heads/develop1
         if default_branch == "refs/heads/develop1" {
-            TestResult::new(test_name, "GRASP-01:git-http:38", desc).pass()
+            TestResult::new(test_name, SpecRef::GitSetHeadOnReceive, desc).pass()
         } else {
-            TestResult::new(test_name, "GRASP-01:git-http:38", desc).fail(format!(
+            TestResult::new(test_name, SpecRef::GitSetHeadOnReceive, desc).fail(format!(
                 "Expected HEAD to point to 'refs/heads/develop1' but got '{}'. \
                 GRASP-01 requires: 'MUST set repository HEAD per repository state announcement \
                 as soon as the git data related to that branch has been received.'",
@@ -1701,24 +1707,24 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
 
-        // Configure git user - use PR Test Author identity
+        // Configure git user - use same identity as clone_repo in fixtures.rs
         let output = Command::new("git")
-            .args(["config", "user.email", "pr-test@example.com"])
+            .args(["config", "user.email", "test@grasp-audit.local"])
             .current_dir(path)
             .output()
             .expect("git config email failed");
         assert!(output.status.success(), "git config email failed");
 
         let output = Command::new("git")
-            .args(["config", "user.name", "PR Test Author"])
+            .args(["config", "user.name", "GRASP Audit Test"])
             .current_dir(path)
             .output()
             .expect("git config name failed");
         assert!(output.status.success(), "git config name failed");
 
-        // Create the deterministic file content
+        // Create the deterministic file content (must match CommitVariant::PRTestCommit exactly)
         let test_file = path.join("test.txt");
-        fs::write(&test_file, "PR test deterministic commit").expect("Failed to write test file");
+        fs::write(&test_file, "PR test deterministic commit\n").expect("Failed to write test file");
 
         // Add the file
         let output = Command::new("git")

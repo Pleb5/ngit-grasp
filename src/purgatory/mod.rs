@@ -17,7 +17,7 @@ pub mod sync;
 mod types;
 
 pub use helpers::{can_apply_state, can_satisfy_state, diagnose_state_mismatch, extract_refs_from_state, get_unpushed_refs};
-pub use types::{EventSource, PrPurgatoryEntry, RefPair, RefUpdate, StatePurgatoryEntry};
+pub use types::{AnnouncementPurgatoryEntry, EventSource, PrPurgatoryEntry, RefPair, RefUpdate, StatePurgatoryEntry};
 
 use dashmap::DashMap;
 use nostr_sdk::prelude::*;
@@ -33,6 +33,13 @@ pub use sync::SyncQueueEntry;
 
 /// Default expiry duration for purgatory entries (30 minutes)
 const DEFAULT_EXPIRY: Duration = Duration::from_secs(1800);
+
+/// Extended expiry for soft-expired announcements (24 hours).
+///
+/// After the initial 30-minute expiry, the bare repo is deleted but the event is
+/// retained for this additional period. This allows revival if a state event arrives
+/// late (e.g. slow sync), without permanently blocking the repository.
+const SOFT_EXPIRY_EXTENDED: Duration = Duration::from_secs(86400);
 
 /// Default delay before syncing user-submitted events (3 minutes).
 /// This gives time for the git push to arrive after the nostr event.
@@ -83,9 +90,35 @@ struct SerializablePrPurgatoryEntry {
     source: types::EventSource,
 }
 
+/// Serializable wrapper for `AnnouncementPurgatoryEntry` with time offsets.
+///
+/// Stores `Instant` fields as `Duration` offsets from the `saved_at` timestamp
+/// in `PurgatoryState`, allowing state to be persisted and restored across restarts.
+///
+/// Note: soft-expired entries (bare repo deleted) are NOT persisted — they have
+/// no git repo on disk and would be immediately cleaned up on restore anyway.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SerializableAnnouncementPurgatoryEntry {
+    /// The nostr announcement event (kind 30617)
+    event: Event,
+    /// The repository identifier from the event's 'd' tag
+    identifier: String,
+    /// The owner pubkey (event author)
+    owner: PublicKey,
+    /// Path to the bare git repository (must exist on disk)
+    repo_path: PathBuf,
+    /// Relay URLs from the announcement (for sync registration)
+    relays: HashSet<String>,
+    /// Duration offset from saved_at for created_at
+    created_at_offset_secs: u64,
+    /// Duration offset from saved_at for expires_at
+    expires_at_offset_secs: u64,
+}
+
 /// Serializable purgatory state for disk persistence.
 ///
 /// Contains all purgatory data needed to restore state across restarts:
+/// - Announcement events (indexed by (owner, identifier)) — non-soft-expired only
 /// - State events (indexed by identifier)
 /// - PR events (indexed by event ID)
 /// - Expired events (to prevent re-sync loops)
@@ -97,6 +130,10 @@ struct PurgatoryState {
     version: u32,
     /// When this state was saved to disk
     saved_at: SystemTime,
+    /// Announcement events indexed by "owner_hex:identifier"
+    /// Only non-soft-expired entries are persisted (bare repo must exist).
+    #[serde(default)]
+    announcement_purgatory: HashMap<String, SerializableAnnouncementPurgatoryEntry>,
     /// State events indexed by repository identifier
     state_events: HashMap<String, Vec<SerializableStatePurgatoryEntry>>,
     /// PR events indexed by event ID (hex string)
@@ -107,7 +144,8 @@ struct PurgatoryState {
 
 /// Main purgatory structure holding events awaiting git data.
 ///
-/// Provides thread-safe concurrent access to two separate stores:
+/// Provides thread-safe concurrent access to three separate stores:
+/// - Announcements indexed by (pubkey, identifier)
 /// - State events indexed by repository identifier
 /// - PR events indexed by event ID
 ///
@@ -128,6 +166,10 @@ struct PurgatoryState {
 /// that we've already determined have no git data available.
 #[derive(Clone)]
 pub struct Purgatory {
+    /// Repository announcements (kind 30617) indexed by (owner pubkey, identifier).
+    /// Key: (PublicKey, String) where String is the repository identifier.
+    announcement_purgatory: Arc<DashMap<(PublicKey, String), AnnouncementPurgatoryEntry>>,
+
     /// State events (kind 30618) indexed by repository identifier.
     /// Multiple state events can wait for the same identifier (different maintainers).
     state_events: Arc<DashMap<String, Vec<StatePurgatoryEntry>>>,
@@ -152,6 +194,7 @@ impl Purgatory {
     /// Create a new empty purgatory.
     pub fn new(git_data_path: impl Into<PathBuf>) -> Self {
         Self {
+            announcement_purgatory: Arc::new(DashMap::new()),
             state_events: Arc::new(DashMap::new()),
             pr_events: Arc::new(DashMap::new()),
             sync_queue: Arc::new(DashMap::new()),
@@ -576,9 +619,245 @@ impl Purgatory {
         self.pr_events.remove(event_id);
     }
 
+    // =========================================================================
+    // Announcement Purgatory Methods
+    // =========================================================================
+
+    /// Add a repository announcement to purgatory.
+    ///
+    /// The announcement will be held until git data arrives, at which point
+    /// it will be promoted to the database and served to clients.
+    ///
+    /// # Arguments
+    /// * `event` - The announcement event (kind 30617)
+    /// * `identifier` - The repository identifier from the 'd' tag
+    /// * `owner` - The owner pubkey (event author)
+    /// * `repo_path` - Path to the bare git repository
+    /// * `relays` - Relay URLs from the announcement (for sync registration)
+    pub fn add_announcement(
+        &self,
+        event: Event,
+        identifier: String,
+        owner: PublicKey,
+        repo_path: PathBuf,
+        relays: HashSet<String>,
+    ) {
+        let now = Instant::now();
+        let entry = AnnouncementPurgatoryEntry {
+            event,
+            identifier: identifier.clone(),
+            owner,
+            repo_path,
+            relays,
+            created_at: now,
+            expires_at: now + DEFAULT_EXPIRY,
+            soft_expired: false,
+        };
+
+        let key = (owner, identifier);
+        self.announcement_purgatory.insert(key.clone(), entry);
+
+        tracing::debug!(
+            owner = %key.0,
+            identifier = %key.1,
+            "Added announcement to purgatory"
+        );
+    }
+
+    /// Find an announcement in purgatory by owner and identifier.
+    ///
+    /// # Arguments
+    /// * `owner` - The owner pubkey
+    /// * `identifier` - The repository identifier
+    ///
+    /// # Returns
+    /// The announcement entry if found, None otherwise
+    pub fn find_announcement(&self, owner: &PublicKey, identifier: &str) -> Option<AnnouncementPurgatoryEntry> {
+        let key = (*owner, identifier.to_string());
+        self.announcement_purgatory.get(&key).map(|entry| entry.clone())
+    }
+
+    /// Get all announcements in purgatory for a given identifier.
+    ///
+    /// This is used for authorization - state events and git pushes need to
+    /// check purgatory announcements for maintainer validation.
+    ///
+    /// # Arguments
+    /// * `identifier` - The repository identifier
+    ///
+    /// # Returns
+    /// Vector of announcement entries for this identifier
+    pub fn get_announcements_by_identifier(&self, identifier: &str) -> Vec<AnnouncementPurgatoryEntry> {
+        self.announcement_purgatory
+            .iter()
+            .filter(|entry| entry.key().1 == identifier)
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+
+    /// Remove an announcement from purgatory.
+    ///
+    /// # Arguments
+    /// * `owner` - The owner pubkey
+    /// * `identifier` - The repository identifier
+    pub fn remove_announcement(&self, owner: &PublicKey, identifier: &str) {
+        let key = (*owner, identifier.to_string());
+        self.announcement_purgatory.remove(&key);
+        tracing::debug!(
+            owner = %owner,
+            identifier = %identifier,
+            "Removed announcement from purgatory"
+        );
+    }
+
+    /// Promote an announcement from purgatory to active status.
+    ///
+    /// This is called when git data arrives. The announcement event is returned
+    /// so it can be saved to the database.
+    ///
+    /// # Arguments
+    /// * `owner` - The owner pubkey
+    /// * `identifier` - The repository identifier
+    ///
+    /// # Returns
+    /// The announcement event if found, None otherwise
+    pub fn promote_announcement(&self, owner: &PublicKey, identifier: &str) -> Option<Event> {
+        let key = (*owner, identifier.to_string());
+        self.announcement_purgatory.remove(&key).map(|(_, entry)| {
+            tracing::info!(
+                owner = %owner,
+                identifier = %identifier,
+                "Promoted announcement from purgatory to database"
+            );
+            entry.event
+        })
+    }
+
+    /// Check if there's an announcement in purgatory for the given owner and identifier.
+    ///
+    /// # Arguments
+    /// * `owner` - The owner pubkey
+    /// * `identifier` - The repository identifier
+    ///
+    /// # Returns
+    /// true if an announcement exists in purgatory, false otherwise
+    pub fn has_purgatory_announcement(&self, owner: &PublicKey, identifier: &str) -> bool {
+        let key = (*owner, identifier.to_string());
+        self.announcement_purgatory.contains_key(&key)
+    }
+
+    /// Extend the expiry for an announcement in purgatory.
+    ///
+    /// This is called when state events arrive for a purgatory announcement,
+    /// indicating the repository is actively receiving metadata.
+    ///
+    /// # Arguments
+    /// * `owner` - The owner pubkey
+    /// * `identifier` - The repository identifier
+    /// * `duration` - Minimum duration to guarantee from now
+    pub fn extend_announcement_expiry(&self, owner: &PublicKey, identifier: &str, duration: Duration) {
+        let key = (*owner, identifier.to_string());
+
+        // Collect revival info before taking a mutable borrow
+        let revival_info: Option<(PathBuf, bool)> = self
+            .announcement_purgatory
+            .get(&key)
+            .map(|entry| (entry.repo_path.clone(), entry.soft_expired));
+
+        if let Some(mut entry) = self.announcement_purgatory.get_mut(&key) {
+            let now = Instant::now();
+            let new_expiry = now + duration;
+            if entry.expires_at < new_expiry {
+                entry.expires_at = new_expiry;
+            }
+            // Always reset soft_expired when expiry is extended — the caller
+            // (state event or git auth) signals the repo is still active.
+            if entry.soft_expired {
+                entry.soft_expired = false;
+            }
+        }
+
+        // If the entry was soft-expired, recreate the bare repo outside the
+        // mutable borrow so we don't hold the DashMap lock during I/O.
+        if let Some((repo_path, was_soft_expired)) = revival_info {
+            if was_soft_expired {
+                if !repo_path.exists() {
+                    match std::fs::create_dir_all(&repo_path) {
+                        Ok(()) => {
+                            // Initialise as a bare git repository
+                            let status = std::process::Command::new("git")
+                                .args(["init", "--bare"])
+                                .arg(&repo_path)
+                                .status();
+                            match status {
+                                Ok(s) if s.success() => {
+                                    tracing::info!(
+                                        path = %repo_path.display(),
+                                        owner = %owner,
+                                        identifier = %identifier,
+                                        "Recreated bare repository for revived soft-expired announcement"
+                                    );
+                                }
+                                Ok(s) => {
+                                    tracing::warn!(
+                                        path = %repo_path.display(),
+                                        exit_code = ?s.code(),
+                                        "git init --bare failed when reviving soft-expired announcement"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        path = %repo_path.display(),
+                                        error = %e,
+                                        "Failed to run git init --bare when reviving soft-expired announcement"
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %repo_path.display(),
+                                error = %e,
+                                "Failed to create directory when reviving soft-expired announcement"
+                            );
+                        }
+                    }
+                }
+                tracing::info!(
+                    owner = %owner,
+                    identifier = %identifier,
+                    "Revived soft-expired announcement (bare repo recreated, expiry extended)"
+                );
+            }
+        }
+    }
+
+    /// Get count of announcements in purgatory.
+    pub fn announcement_count(&self) -> usize {
+        self.announcement_purgatory.len()
+    }
+
+    /// Collect (repo_id, relay_urls) for all announcements currently in purgatory.
+    ///
+    /// Returns a vec of `(repo_id, relay_urls)` where `repo_id` is the addressable
+    /// coordinate string `"30617:{pubkey_hex}:{identifier}"`. Used by the purgatory
+    /// announcement sync timer to register StateOnly entries in `repo_sync_index`.
+    pub fn announcements_for_sync(&self) -> Vec<(String, HashSet<String>)> {
+        self.announcement_purgatory
+            .iter()
+            .map(|entry| {
+                let (owner, identifier) = entry.key();
+                let repo_id = format!("30617:{}:{}", owner.to_hex(), identifier);
+                let relays = entry.value().relays.clone();
+                (repo_id, relays)
+            })
+            .collect()
+    }
+
     /// Get all event IDs currently stored in purgatory AND previously expired events.
     ///
     /// Returns a HashSet of all event IDs for:
+    /// - Announcements currently held in purgatory
     /// - State events currently held in purgatory
     /// - PR events currently held in purgatory
     /// - Events that previously expired from purgatory without finding git data
@@ -592,6 +871,11 @@ impl Purgatory {
     /// HashSet of event IDs (as EventId) for all events in purgatory + expired events
     pub fn event_ids(&self) -> HashSet<EventId> {
         let mut ids = HashSet::new();
+
+        // Collect announcement event IDs
+        for entry in self.announcement_purgatory.iter() {
+            ids.insert(entry.value().event.id);
+        }
 
         // Collect state event IDs
         for entry in self.state_events.iter() {
@@ -675,9 +959,86 @@ impl Purgatory {
     /// to support migration scripts and operational monitoring.
     ///
     /// # Returns
-    /// Tuple of (num_state_removed, num_pr_removed)
-    pub fn cleanup(&self) -> (usize, usize) {
+    /// Tuple of (num_announcement_removed, num_state_removed, num_pr_removed)
+    pub fn cleanup(&self) -> (usize, usize, usize) {
         let now = Instant::now();
+
+        // Process expired announcements with two-phase soft expiry:
+        //
+        // Phase 1 (initial expiry, !soft_expired): Delete bare repo, set soft_expired=true,
+        //   extend expiry by SOFT_EXPIRY_EXTENDED so the event is retained for revival.
+        // Phase 2 (extended expiry, soft_expired): Fully remove from purgatory.
+        //
+        // Collect entries that have passed their expires_at deadline.
+        let expired_announcements: Vec<(PublicKey, String, PathBuf, EventId, bool)> = self
+            .announcement_purgatory
+            .iter()
+            .filter(|entry| entry.value().expires_at <= now)
+            .map(|entry| {
+                let key = entry.key();
+                let v = entry.value();
+                (key.0.clone(), key.1.clone(), v.repo_path.clone(), v.event.id, v.soft_expired)
+            })
+            .collect();
+
+        let mut announcement_removed = 0;
+        for (owner, identifier, repo_path, event_id, already_soft_expired) in expired_announcements {
+            if already_soft_expired {
+                // Phase 2: fully remove
+                self.mark_expired(event_id);
+                self.announcement_purgatory.remove(&(owner.clone(), identifier.clone()));
+                announcement_removed += 1;
+                tracing::info!(
+                    owner = %owner,
+                    identifier = %identifier,
+                    "Announcement fully expired from purgatory (soft expiry period elapsed)"
+                );
+            } else {
+                // Phase 1: soft expiry — delete bare repo, retain event.
+                //
+                // Only transition to soft_expired if the directory is gone (or never
+                // existed). If removal fails we leave the entry untouched so the next
+                // cleanup cycle retries the deletion automatically.
+                let repo_gone = if repo_path.exists() {
+                    match std::fs::remove_dir_all(&repo_path) {
+                        Ok(()) => {
+                            tracing::info!(
+                                path = %repo_path.display(),
+                                owner = %owner,
+                                identifier = %identifier,
+                                "Deleted bare repository during soft expiry (event retained for revival)"
+                            );
+                            true
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %repo_path.display(),
+                                error = %e,
+                                "Failed to delete bare repository during soft expiry; will retry next cleanup cycle"
+                            );
+                            false
+                        }
+                    }
+                } else {
+                    // Already gone (e.g. deleted externally)
+                    true
+                };
+
+                if repo_gone {
+                    // Mark soft_expired and extend expiry
+                    if let Some(mut entry) = self.announcement_purgatory.get_mut(&(owner.clone(), identifier.clone())) {
+                        entry.soft_expired = true;
+                        entry.expires_at = now + SOFT_EXPIRY_EXTENDED;
+                    }
+                    tracing::debug!(
+                        owner = %owner,
+                        identifier = %identifier,
+                        "Announcement soft-expired: bare repo deleted, event retained for 24h"
+                    );
+                }
+            }
+        }
+
         let mut state_removed = 0;
 
         // Remove expired state events and mark them as expired
@@ -823,17 +1184,17 @@ impl Purgatory {
             self.pr_events.remove(&event_id_str);
         }
 
-        (state_removed, pr_removed)
+        (announcement_removed, state_removed, pr_removed)
     }
 
     /// Remove expired entries from purgatory (legacy method).
     ///
     /// # Returns
-    /// Total number of entries removed (state + PR events)
+    /// Total number of entries removed (announcement + state + PR events)
     #[deprecated(since = "0.1.0", note = "Use cleanup() instead for separate counts")]
     pub fn remove_expired(&self) -> usize {
-        let (state, pr) = self.cleanup();
-        state + pr
+        let (announcement, state, pr) = self.cleanup();
+        announcement + state + pr
     }
 
     /// Remove old expired event records.
@@ -867,11 +1228,12 @@ impl Purgatory {
     /// Get current count of entries in purgatory.
     ///
     /// # Returns
-    /// Tuple of (state_event_count, pr_event_count)
-    pub fn count(&self) -> (usize, usize) {
+    /// Tuple of (announcement_count, state_event_count, pr_event_count)
+    pub fn count(&self) -> (usize, usize, usize) {
+        let announcement_count = self.announcement_purgatory.len();
         let state_count: usize = self.state_events.iter().map(|e| e.value().len()).sum();
         let pr_count = self.pr_events.len();
-        (state_count, pr_count)
+        (announcement_count, state_count, pr_count)
     }
 
     /// Get count of expired events being tracked.
@@ -885,6 +1247,7 @@ impl Purgatory {
     /// Clear all entries from purgatory (for testing).
     #[cfg(test)]
     pub fn clear(&self) {
+        self.announcement_purgatory.clear();
         self.state_events.clear();
         self.pr_events.clear();
         self.sync_queue.clear();
@@ -948,6 +1311,34 @@ impl Purgatory {
     pub fn save_to_disk(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let saved_at = SystemTime::now();
         let now_instant = Instant::now();
+
+        // Convert announcement_purgatory to serializable format.
+        // Skip soft-expired entries: their bare repos have been deleted, so they
+        // cannot be meaningfully restored (the repo path no longer exists on disk).
+        let mut announcement_purgatory = HashMap::new();
+        for entry in self.announcement_purgatory.iter() {
+            let e = entry.value();
+            if e.soft_expired {
+                continue;
+            }
+            let created_offset =
+                persistence::instant_to_offset(e.created_at, saved_at, now_instant);
+            let expires_offset =
+                persistence::instant_to_offset(e.expires_at, saved_at, now_instant);
+            let key = format!("{}:{}", e.owner.to_hex(), e.identifier);
+            announcement_purgatory.insert(
+                key,
+                SerializableAnnouncementPurgatoryEntry {
+                    event: e.event.clone(),
+                    identifier: e.identifier.clone(),
+                    owner: e.owner,
+                    repo_path: e.repo_path.clone(),
+                    relays: e.relays.clone(),
+                    created_at_offset_secs: created_offset.as_secs(),
+                    expires_at_offset_secs: expires_offset.as_secs(),
+                },
+            );
+        }
 
         // Convert state_events to serializable format
         let mut state_events = HashMap::new();
@@ -1013,6 +1404,7 @@ impl Purgatory {
         let state = PurgatoryState {
             version: 1,
             saved_at,
+            announcement_purgatory,
             state_events,
             pr_events,
             expired_events,
@@ -1024,6 +1416,7 @@ impl Purgatory {
 
         tracing::info!(
             path = %path.display(),
+            announcements = state.announcement_purgatory.len(),
             state_events = state.state_events.len(),
             pr_events = state.pr_events.len(),
             expired_events = state.expired_events.len(),
@@ -1070,6 +1463,45 @@ impl Purgatory {
         }
 
         let now_instant = Instant::now();
+
+        // Restore announcement_purgatory.
+        // Skip entries whose bare repo no longer exists on disk — this can happen
+        // if the repo was deleted externally between save and restore.
+        for (_key, e) in state.announcement_purgatory {
+            if !e.repo_path.exists() {
+                tracing::warn!(
+                    owner = %e.owner,
+                    identifier = %e.identifier,
+                    repo_path = %e.repo_path.display(),
+                    "Skipping announcement restore: bare repo no longer exists"
+                );
+                continue;
+            }
+            let created_at = persistence::offset_to_instant(
+                Duration::from_secs(e.created_at_offset_secs),
+                state.saved_at,
+                now_instant,
+            );
+            let expires_at = persistence::offset_to_instant(
+                Duration::from_secs(e.expires_at_offset_secs),
+                state.saved_at,
+                now_instant,
+            );
+            let key = (e.owner, e.identifier.clone());
+            self.announcement_purgatory.insert(
+                key,
+                AnnouncementPurgatoryEntry {
+                    event: e.event,
+                    identifier: e.identifier,
+                    owner: e.owner,
+                    repo_path: e.repo_path,
+                    relays: e.relays,
+                    created_at,
+                    expires_at,
+                    soft_expired: false,
+                },
+            );
+        }
 
         // Restore state_events
         for (identifier, entries) in state.state_events {
@@ -1140,6 +1572,7 @@ impl Purgatory {
 
         tracing::info!(
             path = %path.display(),
+            announcements = self.announcement_purgatory.len(),
             state_events = self.state_events.len(),
             pr_events = self.pr_events.len(),
             expired_events = self.expired_events.len(),
@@ -1162,7 +1595,8 @@ mod tests {
     #[test]
     fn test_purgatory_creation() {
         let purgatory = Purgatory::new(PathBuf::new());
-        let (state_count, pr_count) = purgatory.count();
+        let (announcement_count, state_count, pr_count) = purgatory.count();
+        assert_eq!(announcement_count, 0);
         assert_eq!(state_count, 0);
         assert_eq!(pr_count, 0);
     }
@@ -1190,7 +1624,8 @@ mod tests {
             false,
         );
 
-        let (state_count, pr_count) = purgatory.count();
+        let (announcement_count, state_count, pr_count) = purgatory.count();
+        assert_eq!(announcement_count, 0);
         assert_eq!(state_count, 1);
         assert_eq!(pr_count, 1);
     }
@@ -1407,7 +1842,7 @@ fn test_cleanup_removes_expired_entries() {
     purgatory.add_pr_placeholder("pr-456".to_string(), "commit-def".to_string());
 
     // Verify entries are there
-    let (state_count, pr_count) = purgatory.count();
+    let (_, state_count, pr_count) = purgatory.count();
     assert_eq!(state_count, 1);
     assert_eq!(pr_count, 2);
 
@@ -1425,14 +1860,14 @@ fn test_cleanup_removes_expired_entries() {
     }
 
     // Run cleanup
-    let (state_removed, pr_removed) = purgatory.cleanup();
+    let (_, state_removed, pr_removed) = purgatory.cleanup();
 
     // Verify counts
     assert_eq!(state_removed, 1);
     assert_eq!(pr_removed, 2);
 
     // Verify entries are gone
-    let (state_count, pr_count) = purgatory.count();
+    let (_, state_count, pr_count) = purgatory.count();
     assert_eq!(state_count, 0);
     assert_eq!(pr_count, 0);
 }
@@ -1464,14 +1899,14 @@ fn test_cleanup_preserves_non_expired_entries() {
     );
 
     // Run cleanup
-    let (state_removed, pr_removed) = purgatory.cleanup();
+    let (_, state_removed, pr_removed) = purgatory.cleanup();
 
     // Nothing should be removed
     assert_eq!(state_removed, 0);
     assert_eq!(pr_removed, 0);
 
     // Verify entries are still there
-    let (state_count, pr_count) = purgatory.count();
+    let (_, state_count, pr_count) = purgatory.count();
     assert_eq!(state_count, 1);
     assert_eq!(pr_count, 1);
 }
@@ -1518,14 +1953,14 @@ fn test_cleanup_mixed_expired_and_fresh() {
     }
 
     // Run cleanup
-    let (state_removed, pr_removed) = purgatory.cleanup();
+    let (_, state_removed, pr_removed) = purgatory.cleanup();
 
     // One of each should be removed
     assert_eq!(state_removed, 1);
     assert_eq!(pr_removed, 1);
 
     // Verify remaining counts
-    let (state_count, pr_count) = purgatory.count();
+    let (_, state_count, pr_count) = purgatory.count();
     assert_eq!(state_count, 1); // One state event remains
     assert_eq!(pr_count, 1); // One PR event remains
 }
@@ -1595,7 +2030,7 @@ fn test_expired_event_tracking() {
     }
 
     // Run cleanup
-    let (state_removed, pr_removed) = purgatory.cleanup();
+    let (_, state_removed, pr_removed) = purgatory.cleanup();
     assert_eq!(state_removed, 1);
     assert_eq!(pr_removed, 1);
 
@@ -1705,7 +2140,7 @@ fn test_expired_events_prevent_readdition() {
     }
 
     // Event should NOT be re-added
-    let (state_count, _) = purgatory.count();
+    let (_, state_count, _) = purgatory.count();
     assert_eq!(state_count, 0, "Event should not be re-added to purgatory");
 }
 
@@ -1724,7 +2159,7 @@ fn test_pr_placeholder_not_marked_expired() {
     }
 
     // Run cleanup
-    let (_, pr_removed) = purgatory.cleanup();
+    let (_, _, pr_removed) = purgatory.cleanup();
     assert_eq!(pr_removed, 1);
 
     // Expired count should be 0 (placeholders don't have event IDs to track)
@@ -1820,7 +2255,7 @@ async fn test_save_and_restore_state_events() {
     assert!(!state_file.exists());
 
     // Verify state events were restored
-    let (state_count, _) = purgatory2.count();
+    let (_, state_count, _) = purgatory2.count();
     assert_eq!(state_count, 2);
 
     let restored_entries = purgatory2.find_state("test-repo");
@@ -1877,7 +2312,7 @@ async fn test_save_and_restore_pr_events() {
     purgatory2.restore_from_disk(&state_file).unwrap();
 
     // Verify PR event was restored
-    let (_, pr_count) = purgatory2.count();
+    let (_, _, pr_count) = purgatory2.count();
     assert_eq!(pr_count, 1);
 
     let restored_entry = purgatory2.find_pr("pr-event-id").unwrap();
@@ -1906,7 +2341,7 @@ async fn test_save_and_restore_pr_placeholders() {
     purgatory2.restore_from_disk(&state_file).unwrap();
 
     // Verify placeholder was restored
-    let (_, pr_count) = purgatory2.count();
+    let (_, _, pr_count) = purgatory2.count();
     assert_eq!(pr_count, 1);
 
     let restored_entry = purgatory2.find_pr("placeholder-id").unwrap();
@@ -1984,7 +2419,7 @@ async fn test_save_and_restore_empty_purgatory() {
     purgatory2.restore_from_disk(&state_file).unwrap();
 
     // Verify purgatory is still empty
-    let (state_count, pr_count) = purgatory2.count();
+    let (_, state_count, pr_count) = purgatory2.count();
     assert_eq!(state_count, 0);
     assert_eq!(pr_count, 0);
     assert_eq!(purgatory2.expired_count(), 0);
@@ -2004,7 +2439,7 @@ async fn test_restore_missing_file() {
     assert!(result.is_err());
 
     // Purgatory should remain empty
-    let (state_count, pr_count) = purgatory.count();
+    let (_, state_count, pr_count) = purgatory.count();
     assert_eq!(state_count, 0);
     assert_eq!(pr_count, 0);
 }
@@ -2026,7 +2461,7 @@ async fn test_restore_corrupted_json() {
     assert!(result.is_err());
 
     // Purgatory should remain empty
-    let (state_count, pr_count) = purgatory.count();
+    let (_, state_count, pr_count) = purgatory.count();
     assert_eq!(state_count, 0);
     assert_eq!(pr_count, 0);
 }
@@ -2263,7 +2698,7 @@ async fn test_mixed_pr_events_and_placeholders() {
     purgatory2.restore_from_disk(&state_file).unwrap();
 
     // Verify both were restored correctly
-    let (_, pr_count) = purgatory2.count();
+    let (_, _, pr_count) = purgatory2.count();
     assert_eq!(pr_count, 2);
 
     // Verify PR event
@@ -2310,6 +2745,141 @@ async fn test_file_cleanup_after_successful_restore() {
 }
 
 #[tokio::test]
+async fn test_save_and_restore_announcement_events() {
+    use tempfile::tempdir;
+
+    let temp_dir = tempdir().unwrap();
+    let state_file = temp_dir.path().join("purgatory_state.json");
+
+    // Create a real bare repo directory so the restore path-existence check passes
+    let repo_dir = temp_dir.path().join("owner.git");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+
+    let purgatory = Purgatory::new(PathBuf::new());
+    let keys = Keys::generate();
+
+    let ann_event = EventBuilder::text_note("announcement event")
+        .sign_with_keys(&keys)
+        .unwrap();
+    let ann_event_id = ann_event.id;
+
+    let mut relays = HashSet::new();
+    relays.insert("wss://relay.example.com".to_string());
+
+    purgatory.add_announcement(
+        ann_event.clone(),
+        "my-repo".to_string(),
+        keys.public_key(),
+        repo_dir.clone(),
+        relays.clone(),
+    );
+
+    // Save to disk
+    purgatory.save_to_disk(&state_file).unwrap();
+    assert!(state_file.exists());
+
+    // Create new purgatory and restore
+    let purgatory2 = Purgatory::new(PathBuf::new());
+    purgatory2.restore_from_disk(&state_file).unwrap();
+
+    // File should be deleted after restore
+    assert!(!state_file.exists());
+
+    // Verify announcement was restored
+    let (ann_count, _, _) = purgatory2.count();
+    assert_eq!(ann_count, 1);
+
+    let restored = purgatory2
+        .find_announcement(&keys.public_key(), "my-repo")
+        .unwrap();
+    assert_eq!(restored.event.id, ann_event_id);
+    assert_eq!(restored.identifier, "my-repo");
+    assert_eq!(restored.owner, keys.public_key());
+    assert_eq!(restored.repo_path, repo_dir);
+    assert_eq!(restored.relays, relays);
+    assert!(!restored.soft_expired);
+}
+
+#[tokio::test]
+async fn test_soft_expired_announcements_not_persisted() {
+    use tempfile::tempdir;
+
+    let temp_dir = tempdir().unwrap();
+    let state_file = temp_dir.path().join("purgatory_state.json");
+
+    let repo_dir = temp_dir.path().join("owner.git");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+
+    let purgatory = Purgatory::new(PathBuf::new());
+    let keys = Keys::generate();
+
+    let ann_event = EventBuilder::text_note("announcement event")
+        .sign_with_keys(&keys)
+        .unwrap();
+
+    purgatory.add_announcement(
+        ann_event.clone(),
+        "my-repo".to_string(),
+        keys.public_key(),
+        repo_dir.clone(),
+        HashSet::new(),
+    );
+
+    // Manually mark as soft-expired (bare repo deleted)
+    let key = (keys.public_key(), "my-repo".to_string());
+    if let Some(mut entry) = purgatory.announcement_purgatory.get_mut(&key) {
+        entry.soft_expired = true;
+    }
+
+    // Save to disk — soft-expired entry should be excluded
+    purgatory.save_to_disk(&state_file).unwrap();
+
+    // Create new purgatory and restore
+    let purgatory2 = Purgatory::new(PathBuf::new());
+    purgatory2.restore_from_disk(&state_file).unwrap();
+
+    // Soft-expired announcement should NOT be restored
+    let (ann_count, _, _) = purgatory2.count();
+    assert_eq!(ann_count, 0);
+}
+
+#[tokio::test]
+async fn test_announcement_with_missing_repo_skipped_on_restore() {
+    use tempfile::tempdir;
+
+    let temp_dir = tempdir().unwrap();
+    let state_file = temp_dir.path().join("purgatory_state.json");
+
+    // Point to a repo path that does NOT exist
+    let missing_repo = temp_dir.path().join("nonexistent.git");
+
+    let purgatory = Purgatory::new(PathBuf::new());
+    let keys = Keys::generate();
+
+    let ann_event = EventBuilder::text_note("announcement event")
+        .sign_with_keys(&keys)
+        .unwrap();
+
+    purgatory.add_announcement(
+        ann_event.clone(),
+        "my-repo".to_string(),
+        keys.public_key(),
+        missing_repo.clone(),
+        HashSet::new(),
+    );
+
+    // Save to disk (repo path is serialized even though it doesn't exist)
+    purgatory.save_to_disk(&state_file).unwrap();
+
+    // Create new purgatory and restore — entry should be skipped
+    let purgatory2 = Purgatory::new(PathBuf::new());
+    purgatory2.restore_from_disk(&state_file).unwrap();
+
+    let (ann_count, _, _) = purgatory2.count();
+    assert_eq!(ann_count, 0);
+}
+
+#[tokio::test]
 async fn test_comprehensive_roundtrip() {
     use nostr_sdk::{Kind, Tag, TagKind};
     use tempfile::tempdir;
@@ -2317,9 +2887,26 @@ async fn test_comprehensive_roundtrip() {
     let temp_dir = tempdir().unwrap();
     let state_file = temp_dir.path().join("purgatory_state.json");
 
+    // Create a real bare repo directory for the announcement
+    let repo_dir = temp_dir.path().join("owner.git");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+
     let purgatory = Purgatory::new(PathBuf::new());
     let keys1 = Keys::generate();
     let keys2 = Keys::generate();
+
+    // Add announcement
+    let ann_event = EventBuilder::text_note("announcement")
+        .sign_with_keys(&keys1)
+        .unwrap();
+    let ann_event_id = ann_event.id;
+    purgatory.add_announcement(
+        ann_event,
+        "repo1".to_string(),
+        keys1.public_key(),
+        repo_dir.clone(),
+        HashSet::new(),
+    );
 
     // Add multiple state events
     let state1 = EventBuilder::text_note("state 1")
@@ -2380,7 +2967,8 @@ async fn test_comprehensive_roundtrip() {
     purgatory.cleanup();
 
     // Verify initial state
-    let (state_count, pr_count) = purgatory.count();
+    let (ann_count, state_count, pr_count) = purgatory.count();
+    assert_eq!(ann_count, 1); // announcement
     assert_eq!(state_count, 2); // state1, state2 (expired_event was cleaned up)
     assert_eq!(pr_count, 2); // pr-1, pr-2
     assert_eq!(purgatory.expired_count(), 1); // expired_event
@@ -2393,10 +2981,17 @@ async fn test_comprehensive_roundtrip() {
     purgatory2.restore_from_disk(&state_file).unwrap();
 
     // Verify all data was restored correctly
-    let (state_count2, pr_count2) = purgatory2.count();
+    let (ann_count2, state_count2, pr_count2) = purgatory2.count();
+    assert_eq!(ann_count2, 1);
     assert_eq!(state_count2, 2);
     assert_eq!(pr_count2, 2);
     assert_eq!(purgatory2.expired_count(), 1);
+
+    // Verify announcement
+    let restored_ann = purgatory2
+        .find_announcement(&keys1.public_key(), "repo1")
+        .unwrap();
+    assert_eq!(restored_ann.event.id, ann_event_id);
 
     // Verify state events
     assert_eq!(purgatory2.find_state("repo1").len(), 1);

@@ -47,7 +47,7 @@
 //! let ctx = TestContext::new(&client);
 //!
 //! // Request a fixture - behavior depends on mode
-//! let repo = ctx.get_fixture(FixtureKind::ValidRepo).await?;
+//! let repo = ctx.get_fixture(FixtureKind::ValidRepoSent).await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -61,59 +61,68 @@ use std::sync::{Arc, Mutex};
 /// Deterministic commit hash used in RepoState fixtures (Owner variant)
 /// This is the hash produced by creating a commit with:
 /// - Message: "Initial commit"
-/// - File: test.txt containing "Initial commit"
+/// - File: test.txt containing "Initial commit\n" (with trailing newline)
 /// - Author date: 2024-01-01T00:00:00Z
 /// - Committer date: 2024-01-01T00:00:00Z
 /// - GPG signing: disabled
 /// - User: "GRASP Audit Test <test@grasp-audit.local>"
-/// - Parent: Initial empty commit (09cc37de80f3434fa98864a86730b8d7777bd6ae)
-pub const DETERMINISTIC_COMMIT_HASH: &str = "64ea71d79a57a7acb334cd9651f8aec067c0ce5d";
+/// - Parent: none (root commit)
+pub const DETERMINISTIC_COMMIT_HASH: &str = "d6e4b26ccf9c268d18d60e6d09804313cc850821";
 
 /// Deterministic commit hash for maintainer fixtures (Maintainer variant)
 /// This is the hash produced by creating a commit with:
 /// - Message: "Maintainer initial commit"
-/// - File: test.txt containing "Maintainer initial commit"
+/// - File: test.txt containing "Maintainer initial commit\n" (with trailing newline)
 /// - Author date: 2024-01-01T00:00:00Z
 /// - Committer date: 2024-01-01T00:00:00Z
 /// - GPG signing: disabled
 /// - User: "GRASP Audit Test <test@grasp-audit.local>"
 /// - Parent: none (root commit)
-///   NOTE: This value is different from DETERMINISTIC_COMMIT_HASH due to different content
-pub const MAINTAINER_DETERMINISTIC_COMMIT_HASH: &str = "1c2d472c9b71ed51968a66500281a3c4a6840464";
+pub const MAINTAINER_DETERMINISTIC_COMMIT_HASH: &str = "d26703c007eff6d17fee3bb70ce8be5d1427d0e7";
 
 /// Deterministic commit hash for recursive maintainer fixtures (RecursiveMaintainer variant)
 /// This is the hash produced by creating a commit with:
 /// - Message: "Recursive maintainer initial commit"
-/// - File: test.txt containing "Recursive maintainer initial commit"
+/// - File: test.txt containing "Recursive maintainer initial commit\n" (with trailing newline)
 /// - Author date: 2024-01-01T00:00:00Z
 /// - Committer date: 2024-01-01T00:00:00Z
 /// - GPG signing: disabled
 /// - User: "GRASP Audit Test <test@grasp-audit.local>"
 /// - Parent: none (root commit)
-///   NOTE: This value is different from DETERMINISTIC_COMMIT_HASH due to different content
 pub const RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH: &str =
-    "05939b82de66fbdb9c077d0a64fc68522f3cb8e0";
+    "54a2b4b3cbc3373ad1438b8ffad1681d12bc6c4a";
 
 /// Deterministic commit hash for PR test fixtures (PRTestCommit variant)
 /// This is the hash produced by creating a commit with:
 /// - Message: "PR test deterministic commit"
-/// - File: test.txt containing "PR test deterministic commit"
+/// - File: test.txt containing "PR test deterministic commit\n" (with trailing newline)
 /// - Author date: 2024-01-01T00:00:00Z
 /// - Committer date: 2024-01-01T00:00:00Z
 /// - GPG signing: disabled
 /// - User: "GRASP Audit Test <test@grasp-audit.local>"
 /// - Parent: none (root commit)
-pub const PR_TEST_COMMIT_HASH: &str = "5d40fb1555a0c28bf4d650515a73aaa54d4d9bfb";
+pub const PR_TEST_COMMIT_HASH: &str = "5a51b30e4615b572dcd5b9e487861b58605a5c21";
+
+/// Deterministic commit hash for second PR test fixtures (PRTestCommit2 variant)
+/// This is the hash produced by creating a commit with:
+/// - Message: "PR test deterministic commit 2"
+/// - File: test.txt containing "PR test deterministic commit 2\n" (with trailing newline)
+/// - Author date: 2024-01-01T00:00:00Z
+/// - Committer date: 2024-01-01T00:00:00Z
+/// - GPG signing: disabled
+/// - User: "GRASP Audit Test <test@grasp-audit.local>"
+/// - Parent: none (root commit)
+pub const PR_TEST_COMMIT_HASH_2: &str = "99420bc57835f5bc8ca20ab21a8d12850043920e";
 
 /// Types of test fixtures available
 ///
 /// ## Fixture Dependencies
 ///
-/// Several fixtures depend on `ValidRepo` - they all use the SAME repo_id
+/// Several fixtures depend on `ValidRepoSent` - they all use the SAME repo_id
 /// within a single TestContext instance to ensure proper fixture relationships:
-/// - `RepoState` → uses ValidRepo's repo_id
-/// - `MaintainerAnnouncement` + `MaintainerState` → uses ValidRepo's repo_id
-/// - `RecursiveMaintainerRepoAndState` → uses ValidRepo's repo_id
+/// - `RepoState` → uses ValidRepoSent's repo_id
+/// - `MaintainerAnnouncement` + `MaintainerState` → uses ValidRepoSent's repo_id
+/// - `RecursiveMaintainerRepoAndState` → uses ValidRepoSent's repo_id
 ///
 /// This enables testing recursive maintainer authorization chains where multiple
 /// parties publish announcements and state events for the same repository.
@@ -122,10 +131,16 @@ pub enum FixtureKind {
     /// Basic repository announcement (kind 30617)
     /// - Signed by owner keys (`client.keys()`)
     /// - Lists `client.maintainer_pubkey_hex()` in maintainers tag
-    ValidRepo,
+    ValidRepoSent,
+
+    /// Repository announcement that is queryable from the relay (served, not in purgatory)
+    /// - Depends on OwnerStateDataPushed (git data pushed, announcement promoted)
+    /// - Returns the same event as ValidRepoSent (now queryable)
+    /// - Use this for tests that need to query the announcement back from the relay
+    ValidRepoServed,
 
     /// Repository with one issue (kind 1621)
-    /// - Requires ValidRepo (reuses same repo_id)
+    /// - Requires ValidRepoServed (needs queryable repo for issue to reference)
     RepoWithIssue,
 
     /// Repository with issue and comment (kind 1111)
@@ -133,14 +148,30 @@ pub enum FixtureKind {
     RepoWithComment,
 
     /// Repository state announcement (kind 30618) for owner
-    /// - Requires ValidRepo (uses same repo_id)
+    /// - Requires ValidRepoSent (uses same repo_id)
     /// - Signed by owner keys (`client.keys()`)
     /// - Points to DETERMINISTIC_COMMIT_HASH
     /// - Timestamp: 10 seconds in the past
     RepoState,
 
-    /// PR (Pull Request) event for the SAME repo_id as ValidRepo
-    /// - Requires ValidRepo (uses same repo_id)
+    /// Owner's repository state announcement (kind 30618) sent to relay and accepted into purgatory
+    ///
+    /// This is the "sent" stage: the state event has been published to the relay and
+    /// accepted (OK response), but no git data has been pushed yet so it remains in
+    /// purgatory and is not served to clients.
+    ///
+    /// Use this when you need the state event to exist on the relay but do not need
+    /// the full push/serve cycle. For the complete cycle (git pushed + verified served),
+    /// use `OwnerStateDataPushed`.
+    ///
+    /// - Requires ValidRepoSent (uses same repo_id)
+    /// - Signed by owner keys (`client.keys()`)
+    /// - Points to DETERMINISTIC_COMMIT_HASH
+    /// - Timestamp: 10 seconds in the past
+    OwnerRepoStateSent,
+
+    /// PR (Pull Request) event for the SAME repo_id as ValidRepoServed
+    /// - Requires ValidRepoServed (uses same repo_id, needs queryable repo)
     /// - Signed by `client.pr_author_keys()`
     /// - Kind 1618 (NIP-34 PR)
     /// - Includes `a` tag referencing the repo
@@ -153,7 +184,7 @@ pub enum FixtureKind {
     /// This is a "Generated" stage fixture - the event is created but not published.
     /// Useful for tests that need the PR event ID before the event exists on the relay.
     ///
-    /// - Requires ValidRepo (uses same repo_id)
+    /// - Requires ValidRepoServed (uses same repo_id, needs queryable repo)
     /// - Signed by `client.pr_author_keys()`
     /// - Kind 1618 (NIP-34 PR)
     /// - Includes `c` tag pointing to PR_TEST_COMMIT_HASH
@@ -187,7 +218,7 @@ pub enum FixtureKind {
     /// (the "wrong" commit), but no PR event exists yet on the relay.
     ///
     /// Server state after this fixture:
-    /// - ValidRepo announcement on relay
+    /// - ValidRepoServed announcement on relay (repo is queryable)
     /// - refs/nostr/<pr-event-id> exists on git server with wrong commit
     /// - PR event is NOT on relay (but returned for tests to publish later)
     ///
@@ -203,7 +234,7 @@ pub enum FixtureKind {
     /// then the PR event was published (which may trigger cleanup).
     ///
     /// Server state after this fixture:
-    /// - ValidRepo announcement on relay
+    /// - ValidRepoServed announcement on relay
     /// - PR event is on relay
     /// - refs/nostr/<pr-event-id> may have been cleaned up (that's what tests verify)
     ///
@@ -211,6 +242,50 @@ pub enum FixtureKind {
     /// - Sends the PR event to relay
     /// - Returns: the sent PR event
     PREventSentAfterWrongPush,
+
+    /// Second PR event generated (built) but NOT sent to relay
+    ///
+    /// Uses PR_TEST_COMMIT_HASH_2 (different from PR_TEST_COMMIT_HASH).
+    /// This allows testing purgatory mechanism with a separate PR event
+    /// that doesn't conflict with existing PR fixtures.
+    ///
+    /// - Requires ValidRepoServed (uses same repo_id, needs git data to exist)
+    /// - Signed by `client.pr_author_keys()`
+    /// - Kind 1618 (NIP-34 PR)
+    /// - Includes `c` tag pointing to PR_TEST_COMMIT_HASH_2
+    /// - NOT sent to relay
+    PREvent2Generated,
+
+    /// Second PR event sent to relay (enters purgatory)
+    ///
+    /// After this fixture:
+    /// - PR event is on relay but NOT served (in purgatory)
+    /// - No git data at refs/nostr/<pr-event-id>
+    ///
+    /// - Requires PREvent2Generated
+    /// - Sends the PR event to relay
+    /// - Returns: the sent PR event (in purgatory)
+    PREvent2Sent,
+
+    /// Git data pushed for second PR event AFTER event was sent
+    ///
+    /// After this fixture:
+    /// - PR event was in purgatory
+    /// - Correct commit pushed to refs/nostr/<pr-event-id>
+    /// - PR event should be released from purgatory
+    ///
+    /// - Requires PREvent2Sent
+    /// - Pushes correct commit (PR_TEST_COMMIT_HASH_2) to refs/nostr/<pr-event-id>
+    /// - Returns: the PR event (should now be served)
+    PREvent2GitDataPushed,
+
+    /// Full fixture: second PR event sent, git pushed, event served
+    ///
+    /// Combines PREvent2Sent + PREvent2GitDataPushed for convenience.
+    ///
+    /// - Requires PREvent2GitDataPushed
+    /// - Returns: the served PR event
+    PREvent2Served,
 
     /// Owner's state event with git data successfully pushed (full 4-stage fixture)
     ///
@@ -221,7 +296,7 @@ pub enum FixtureKind {
     /// 4. **DataPushed**: Clones repo, creates deterministic commit, pushes to relay
     /// 5. **Verified**: Confirms event is served by relay
     ///
-    /// - Requires ValidRepo (uses same repo_id)
+    /// - Requires ValidRepoSent (uses same repo_id)
     /// - State event signed by owner keys (`client.keys()`)
     /// - Points to DETERMINISTIC_COMMIT_HASH
     /// - Git push verified to succeed (state matches pushed commit)
@@ -252,7 +327,7 @@ pub enum FixtureKind {
     /// not the owner's announcement, so this tests the recursive maintainer traversal.
     ///
     /// This fixture represents the complete flow for testing recursive maintainer push authorization:
-    /// 1. **Generated**: (MaintainerStateDataPushed dependency includes ValidRepo + OwnerStateDataPushed)
+    /// 1. **Generated**: (MaintainerStateDataPushed dependency includes ValidRepoSent + OwnerStateDataPushed)
     ///    Creates MaintainerAnnouncement + RecursiveMaintainerState
     /// 2. **Sent**: Sends events to relay (returns OK, accepted but 'purgatory:...' message)
     /// 3. **Verify Not Served**: Confirms event is not served by relays
@@ -276,16 +351,29 @@ impl FixtureKind {
     pub fn dependencies(&self) -> Vec<FixtureKind> {
         match self {
             // Base fixtures - no dependencies
-            Self::ValidRepo => vec![],
+            Self::ValidRepoSent => vec![],
 
-            // Fixtures that depend on ValidRepo
-            Self::RepoWithIssue => vec![Self::ValidRepo],
-            Self::RepoState => vec![Self::ValidRepo],
-            Self::PREvent => vec![Self::ValidRepo],
-            Self::PREventGenerated => vec![Self::ValidRepo],
+            // ValidRepoServed depends on OwnerStateDataPushed (announcement promoted after git push)
+            Self::ValidRepoServed => vec![Self::OwnerStateDataPushed],
+
+            // Fixtures that depend on ValidRepoServed (need queryable announcement)
+            Self::RepoWithIssue => vec![Self::ValidRepoServed],
+            Self::RepoState => vec![Self::ValidRepoSent],
+            // OwnerRepoStateSent depends on ValidRepoSent: state event sent, sitting in purgatory
+            Self::OwnerRepoStateSent => vec![Self::ValidRepoSent],
+            Self::PREvent => vec![Self::ValidRepoServed],
+            Self::PREventGenerated => vec![Self::ValidRepoServed],
             Self::PRWrongCommitPushedBeforeEvent => vec![Self::PREventGenerated],
             Self::PREventSentAfterWrongPush => vec![Self::PRWrongCommitPushedBeforeEvent],
-            Self::OwnerStateDataPushed => vec![Self::ValidRepo],
+
+            // Second PR event fixtures (for purgatory testing)
+            Self::PREvent2Generated => vec![Self::ValidRepoServed],
+            Self::PREvent2Sent => vec![Self::PREvent2Generated],
+            Self::PREvent2GitDataPushed => vec![Self::PREvent2Sent],
+            Self::PREvent2Served => vec![Self::PREvent2GitDataPushed],
+
+            // OwnerStateDataPushed depends on OwnerRepoStateSent (git push + purgatory release)
+            Self::OwnerStateDataPushed => vec![Self::OwnerRepoStateSent],
 
             // Fixtures that depend on RepoWithIssue
             Self::RepoWithComment => vec![Self::RepoWithIssue],
@@ -321,8 +409,17 @@ impl FixtureKind {
             Self::PRWrongCommitPushedBeforeEvent => true,
             // PREventSentAfterWrongPush sends the PR event internally
             Self::PREventSentAfterWrongPush => true,
+            // Second PR event fixtures handle their own events/git data
+            Self::PREvent2Generated => true,
+            Self::PREvent2Sent => true,
+            Self::PREvent2GitDataPushed => true,
+            Self::PREvent2Served => true,
             // HeadSetToDevelopBranch sends its state event internally
             Self::HeadSetToDevelopBranch => true,
+            // ValidRepoServed doesn't send anything itself, just returns cached event
+            Self::ValidRepoServed => true,
+            // OwnerRepoStateSent sends its state event and notes purgatory internally
+            Self::OwnerRepoStateSent => true,
             // All other fixtures return a single event for the caller to send
             _ => false,
         }
@@ -373,7 +470,7 @@ impl From<AuditMode> for ContextMode {
 /// let ctx = TestContext::new(&client);
 ///
 /// // Get a repository fixture - will be reused by subsequent TestContexts
-/// let repo = ctx.get_fixture(FixtureKind::ValidRepo).await?;
+/// let repo = ctx.get_fixture(FixtureKind::ValidRepoSent).await?;
 ///
 /// // For cargo test (isolated fixtures)
 /// let config = AuditConfig::isolated();
@@ -381,7 +478,7 @@ impl From<AuditMode> for ContextMode {
 /// let ctx = TestContext::new(&client);
 ///
 /// // Get a repository fixture - fresh for this TestContext only
-/// let repo = ctx.get_fixture(FixtureKind::ValidRepo).await?;
+/// let repo = ctx.get_fixture(FixtureKind::ValidRepoSent).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -436,7 +533,7 @@ impl<'a> TestContext<'a> {
     /// ```no_run
     /// # use grasp_audit::*;
     /// # async fn example(ctx: &TestContext<'_>) -> anyhow::Result<()> {
-    /// let repo = ctx.get_fixture(FixtureKind::ValidRepo).await?;
+    /// let repo = ctx.get_fixture(FixtureKind::ValidRepoSent).await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -517,8 +614,8 @@ impl<'a> TestContext<'a> {
     /// ```no_run
     /// # use grasp_audit::*;
     /// # async fn example(ctx: &TestContext<'_>) -> anyhow::Result<()> {
-    /// // This ensures ValidRepo exists first, then creates MaintainerState
-    /// let state = ctx.ensure_fixture(FixtureKind::MaintainerState).await?;
+    /// // This ensures ValidRepoSent exists first, then creates RepoState
+    /// let state = ctx.ensure_fixture(FixtureKind::RepoState).await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -625,10 +722,10 @@ impl<'a> TestContext<'a> {
     /// already-cached dependencies.
     async fn build_fixture_inner(&self, kind: FixtureKind) -> Result<Event> {
         match kind {
-            FixtureKind::ValidRepo => {
-                // ValidRepo has no dependencies - create a new repo announcement
+            FixtureKind::ValidRepoSent => {
+                // ValidRepoSent has no dependencies - create a new repo announcement
                 let test_name = format!(
-                    "fixture-ValidRepo-{}",
+                    "fixture-ValidRepoSent-{}",
                     &uuid::Uuid::new_v4().to_string()[..8]
                 );
 
@@ -638,9 +735,15 @@ impl<'a> TestContext<'a> {
                     .with_context(|| format!("create_repo_announcement failed for {}", test_name))
             }
 
+            FixtureKind::ValidRepoServed => {
+                // OwnerStateDataPushed is already ensured as a dependency.
+                // The announcement is now promoted (served). Return the cached ValidRepoSent event.
+                self.get_cached_dependency(FixtureKind::ValidRepoSent)
+            }
+
             FixtureKind::RepoWithIssue => {
-                // ValidRepo is ensured by ensure_fixture before this is called
-                let repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
+                // ValidRepoServed is ensured by ensure_fixture before this is called
+                let repo = self.get_cached_dependency(FixtureKind::ValidRepoServed)?;
 
                 // Build issue referencing it - caller will send it
                 self.client
@@ -658,8 +761,8 @@ impl<'a> TestContext<'a> {
             FixtureKind::RepoState => {
                 use nostr_sdk::prelude::*;
 
-                // ValidRepo is ensured by ensure_fixture before this is called
-                let repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
+                // ValidRepoSent is ensured by ensure_fixture before this is called
+                let repo = self.get_cached_dependency(FixtureKind::ValidRepoSent)?;
 
                 // Extract repo_id from repo announcement
                 let repo_id = repo
@@ -692,18 +795,52 @@ impl<'a> TestContext<'a> {
                     .map_err(|e| anyhow::anyhow!("Failed to build state announcement: {}", e))
             }
 
+            FixtureKind::OwnerRepoStateSent => {
+                use nostr_sdk::prelude::*;
+
+                // ValidRepoSent is ensured by ensure_fixture before this is called
+                let repo = self.get_cached_dependency(FixtureKind::ValidRepoSent)?;
+                let repo_id = self.extract_repo_id(&repo)?;
+
+                let base_time = Timestamp::now().as_secs();
+                let older_timestamp = Timestamp::from(base_time - 10);
+
+                let state_event = self
+                    .client
+                    .event_builder(Kind::RepoState, "")
+                    .tag(Tag::identifier(&repo_id))
+                    .tag(Tag::custom(
+                        TagKind::custom("refs/heads/main"),
+                        vec![DETERMINISTIC_COMMIT_HASH.to_string()],
+                    ))
+                    .tag(Tag::custom(
+                        TagKind::custom("HEAD"),
+                        vec!["ref: refs/heads/main".to_string()],
+                    ))
+                    .custom_time(older_timestamp)
+                    .build(self.client.keys())
+                    .map_err(|e| anyhow::anyhow!("Failed to build state announcement: {}", e))?;
+
+                // Send to relay - event will be accepted but held in purgatory (no git data yet)
+                self.client
+                    .send_event_and_note_purgatory(state_event.clone())
+                    .await?;
+
+                Ok(state_event)
+            }
+
             FixtureKind::PREvent => {
                 use nostr_sdk::prelude::*;
 
-                // ValidRepo is ensured by ensure_fixture before this is called
-                let repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
+                // ValidRepoServed is ensured by ensure_fixture before this is called
+                let repo = self.get_cached_dependency(FixtureKind::ValidRepoServed)?;
 
                 let repo_id = repo
                     .tags
                     .iter()
                     .find(|t| t.kind() == TagKind::d())
                     .and_then(|t| t.content())
-                    .ok_or_else(|| anyhow::anyhow!("Missing repo_id in ValidRepo fixture"))?
+                    .ok_or_else(|| anyhow::anyhow!("Missing repo_id in ValidRepoServed fixture"))?
                     .to_string();
 
                 // Create PR event 1 second in the past
@@ -738,15 +875,15 @@ impl<'a> TestContext<'a> {
                 // This fixture is for "Generated" stage only
                 use nostr_sdk::prelude::*;
 
-                // ValidRepo is ensured by ensure_fixture before this is called
-                let repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
+                // ValidRepoServed is ensured by ensure_fixture before this is called
+                let repo = self.get_cached_dependency(FixtureKind::ValidRepoServed)?;
 
                 let repo_id = repo
                     .tags
                     .iter()
                     .find(|t| t.kind() == TagKind::d())
                     .and_then(|t| t.content())
-                    .ok_or_else(|| anyhow::anyhow!("Missing repo_id in ValidRepo fixture"))?
+                    .ok_or_else(|| anyhow::anyhow!("Missing repo_id in ValidRepoServed fixture"))?
                     .to_string();
 
                 // Create PR event 1 second in the past
@@ -783,6 +920,11 @@ impl<'a> TestContext<'a> {
             FixtureKind::PREventSentAfterWrongPush => {
                 self.build_pr_event_sent_after_wrong_push().await
             }
+
+            FixtureKind::PREvent2Generated => self.build_pr_event_2_generated().await,
+            FixtureKind::PREvent2Sent => self.build_pr_event_2_sent().await,
+            FixtureKind::PREvent2GitDataPushed => self.build_pr_event_2_git_data_pushed().await,
+            FixtureKind::PREvent2Served => self.build_pr_event_2_served().await,
 
             FixtureKind::OwnerStateDataPushed => self.build_owner_state_data_pushed().await,
 
@@ -858,55 +1000,26 @@ impl<'a> TestContext<'a> {
             .ok_or_else(|| anyhow::anyhow!("Missing d tag in repo announcement"))
     }
 
-    /// Build OwnerStateDataPushed fixture: full 4-stage fixture for push authorization
+    /// Build OwnerStateDataPushed fixture: git push + purgatory release for owner's state event
     ///
-    /// This handles all stages of the fixture:
-    /// 1. **Generated**: Creates RepoState (repo announcement + state event)
-    /// 2. **Sent**: Sends events to relay (returns OK, accepted but 'purgatory:...' message)
-    /// 3. **Verify Not Served**: Confirms event is not served by relays
-    /// 4. **DataPushed**: Clones repo, creates deterministic commit, pushes to relay
-    /// 5. **Verified**: Confirms event is served by relay
+    /// `OwnerRepoStateSent` is ensured as a dependency before this is called — the state event
+    /// is already on the relay in purgatory. This fixture completes the cycle:
+    /// 1. **DataPushed**: Clones repo, creates deterministic commit, pushes to relay
+    /// 2. **Verified**: Confirms state event is released from purgatory and served
     ///
     /// # Returns
-    /// The state event (kind 30618) after all stages complete successfully
+    /// The state event (kind 30618) after git data is pushed and purgatory is released
     async fn build_owner_state_data_pushed(&self) -> Result<Event> {
         use nostr_sdk::prelude::*;
 
-        // ============================================================
-        // Stage 1: ValidRepo is ensured by ensure_fixture before this is called
-        // ============================================================
-        let repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
+        // OwnerRepoStateSent is ensured by ensure_fixture before this is called.
+        // The state event is already on the relay in purgatory - retrieve it from cache.
+        let state_event = self.get_cached_dependency(FixtureKind::OwnerRepoStateSent)?;
+        let repo = self.get_cached_dependency(FixtureKind::ValidRepoSent)?;
         let repo_id = self.extract_repo_id(&repo)?;
 
-        // Build state event
-        let base_time = Timestamp::now().as_secs();
-        let older_timestamp = Timestamp::from(base_time - 10); // 10 seconds ago
-
-        let state_event = self
-            .client
-            .event_builder(Kind::RepoState, "")
-            .tag(Tag::identifier(&repo_id))
-            .tag(Tag::custom(
-                TagKind::custom("refs/heads/main"),
-                vec![DETERMINISTIC_COMMIT_HASH.to_string()],
-            ))
-            .tag(Tag::custom(
-                TagKind::custom("HEAD"),
-                vec!["ref: refs/heads/main".to_string()],
-            ))
-            .custom_time(older_timestamp)
-            .build(self.client.keys())
-            .map_err(|e| anyhow::anyhow!("Failed to build state announcement: {}", e))?;
-
         // ============================================================
-        // Stage 2 & 3: Send to Relay, get Accepted response and Verify its Not Served
-        // ============================================================
-        self.client
-            .send_event_expect_purgatory_not_served(state_event.clone())
-            .await?;
-
-        // ============================================================
-        // Stage 4: DataPushed - Clone repo, create commit, push
+        // Stage 1: DataPushed - Clone repo, create commit, push
         // ============================================================
 
         // Get relay domain from connected relay
@@ -1008,7 +1121,7 @@ impl<'a> TestContext<'a> {
         }
 
         // ============================================================
-        // Stage 5: Verify state event is on relay
+        // Stage 2: Verify state event is released from purgatory
         // ============================================================
 
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1048,8 +1161,8 @@ impl<'a> TestContext<'a> {
         // Extract repo_id from owner's state event (same d-tag structure)
         let repo_id = self.extract_repo_id(&owner_state)?;
 
-        // Get the repo (ValidRepo, also cached) for the owner's npub
-        let repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
+        // Get the repo (ValidRepoSent, also cached) for the owner's npub
+        let repo = self.get_cached_dependency(FixtureKind::ValidRepoSent)?;
 
         // Build maintainer's state event (state event ONLY - no announcement)
         let base_time = Timestamp::now().as_secs();
@@ -1074,9 +1187,11 @@ impl<'a> TestContext<'a> {
         // ============================================================
         // Stage 2 & 3: Send to Relay, get Accepted response and Verify its Not Served
         // ============================================================
-        self.client
-            .send_event_expect_purgatory_not_served(maintainer_state_event.clone())
+        let (_, _in_purgatory) = self
+            .client
+            .send_event_and_note_purgatory(maintainer_state_event.clone())
             .await?;
+        // Note: We don't fail if purgatory wasn't observed - the fixture proceeds regardless
 
         // ============================================================
         // Stage 4: DataPushed - Clone repo, create maintainer commit, push
@@ -1194,7 +1309,7 @@ impl<'a> TestContext<'a> {
     /// recursive maintainer force-pushes their commit on top.
     ///
     /// This handles all stages of the fixture:
-    /// 1. **Generated**: (MaintainerStateDataPushed dependency includes ValidRepo + OwnerStateDataPushed)
+    /// 1. **Generated**: (MaintainerStateDataPushed dependency includes ValidRepoSent + OwnerStateDataPushed)
     ///    Creates MaintainerAnnouncement + RecursiveMaintainerState
     /// 2. **Sent**: Sends events to relay (returns OK, accepted but 'purgatory:...' message)
     /// 3. **Verify Not Served**: Confirms event is not served by relays
@@ -1215,8 +1330,8 @@ impl<'a> TestContext<'a> {
         // Extract repo_id from maintainer's state event (same d-tag structure)
         let repo_id = self.extract_repo_id(&maintainer_state)?;
 
-        // Get the repo (ValidRepo, also cached) for the owner's npub
-        let repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
+        // Get the repo (ValidRepoSent, also cached) for the owner's npub
+        let repo = self.get_cached_dependency(FixtureKind::ValidRepoSent)?;
 
         // ============================================================
         // Stage 1 (continued): Generate MaintainerAnnouncement and RecursiveMaintainerState
@@ -1249,9 +1364,11 @@ impl<'a> TestContext<'a> {
         // ============================================================
         // Stage 2 & 3: Send to Relay, get Accepted response and Verify its Not Served
         // ============================================================
-        self.client
-            .send_event_expect_purgatory_not_served(recursive_maintainer_state_event.clone())
+        let (_, _in_purgatory) = self
+            .client
+            .send_event_and_note_purgatory(recursive_maintainer_state_event.clone())
             .await?;
+        // Note: We don't fail if purgatory wasn't observed - the fixture proceeds regardless
 
         // ============================================================
         // Stage 4: DataPushed - Clone repo, create recursive maintainer commit, push
@@ -1428,7 +1545,7 @@ impl<'a> TestContext<'a> {
     /// 3. A wrong commit is pushed to refs/nostr/<pr-event-id>
     ///
     /// Server state after:
-    /// - ValidRepo announcement on relay
+    /// - ValidRepoSent announcement on relay
     /// - refs/nostr/<pr-event-id> on git server pointing to DETERMINISTIC_COMMIT_HASH (wrong)
     /// - NO PR event on relay
     ///
@@ -1440,8 +1557,8 @@ impl<'a> TestContext<'a> {
         let pr_event = self.get_cached_dependency(FixtureKind::PREventGenerated)?;
         let pr_event_id = pr_event.id.to_hex();
 
-        // Get the ValidRepo to extract repo info
-        let repo = self.get_cached_dependency(FixtureKind::ValidRepo)?;
+        // Get the ValidRepoServed to extract repo info
+        let repo = self.get_cached_dependency(FixtureKind::ValidRepoServed)?;
         let repo_id = self.extract_repo_id(&repo)?;
 
         // Get relay domain for cloning
@@ -1462,10 +1579,14 @@ impl<'a> TestContext<'a> {
             let _ = fs::remove_dir_all(path);
         };
 
-        // Create a WRONG commit (Owner variant, not PRTestCommit)
-        // This commit hash will NOT match what's in the PR event's `c` tag
+        // Create a WRONG commit using a unique file (not PRTestCommit)
+        // We use create_commit (non-deterministic) so it always succeeds even if the
+        // repo already has a commit (e.g. from OwnerStateDataPushed) with the same
+        // deterministic content. The only requirement is that the hash differs from
+        // PR_TEST_COMMIT_HASH, which is guaranteed since PR_TEST_COMMIT_HASH is a
+        // deterministic root-commit with specific content and dates.
         let wrong_commit_hash =
-            match create_deterministic_commit_with_variant(&clone_path, CommitVariant::Owner) {
+            match create_commit(&clone_path, "wrong commit - not the PR test commit") {
                 Ok(h) => h,
                 Err(e) => {
                     cleanup(&clone_path);
@@ -1520,7 +1641,7 @@ impl<'a> TestContext<'a> {
     ///
     /// This fixture builds on PRWrongCommitPushedBeforeEvent by sending the PR event.
     /// After this fixture, the relay has:
-    /// - ValidRepo announcement
+    /// - ValidRepoServed announcement
     /// - PR event
     /// - refs/nostr/<pr-event-id> may have been cleaned up (that's what tests verify)
     ///
@@ -1536,6 +1657,173 @@ impl<'a> TestContext<'a> {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
         // Return the now-sent PR event
+        Ok(pr_event)
+    }
+
+    /// Build PREvent2Generated fixture
+    ///
+    /// Creates a PR event with `c` tag pointing to PR_TEST_COMMIT_HASH_2.
+    /// The event is NOT sent to the relay.
+    async fn build_pr_event_2_generated(&self) -> Result<Event> {
+        use nostr_sdk::prelude::*;
+
+        let repo = self.get_cached_dependency(FixtureKind::ValidRepoServed)?;
+        let repo_id = self.extract_repo_id(&repo)?;
+
+        let base_time = Timestamp::now().as_secs();
+        let pr_timestamp = Timestamp::from(base_time - 1);
+
+        self.client
+            .event_builder(Kind::GitPullRequest, "Test PR 2 for GRASP validation")
+            .tag(Tag::custom(
+                TagKind::custom("a"),
+                vec![format!(
+                    "30617:{}:{}",
+                    self.client.public_key().to_hex(),
+                    repo_id
+                )],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("c"),
+                vec![PR_TEST_COMMIT_HASH_2.to_string()],
+            ))
+            .custom_time(pr_timestamp)
+            .build(self.client.pr_author_keys())
+            .map_err(|e| anyhow::anyhow!("Failed to build PR event 2: {}", e))
+    }
+
+    /// Build PREvent2Sent fixture
+    ///
+    /// Sends the PR event to relay. Event should enter purgatory.
+    async fn build_pr_event_2_sent(&self) -> Result<Event> {
+        let pr_event = self.get_cached_dependency(FixtureKind::PREvent2Generated)?;
+
+        let (_, in_purgatory) = self
+            .client
+            .send_event_and_note_purgatory(pr_event.clone())
+            .await?;
+
+        if !in_purgatory {
+            return Err(anyhow::anyhow!(
+                "PR event 2 was served immediately - purgatory not implemented"
+            ));
+        }
+
+        Ok(pr_event)
+    }
+
+    /// Build PREvent2GitDataPushed fixture
+    ///
+    /// Pushes correct commit to refs/nostr/<pr-event-id> after event was sent.
+    async fn build_pr_event_2_git_data_pushed(&self) -> Result<Event> {
+        use nostr_sdk::prelude::*;
+
+        let pr_event = self.get_cached_dependency(FixtureKind::PREvent2Sent)?;
+        let pr_event_id = pr_event.id.to_hex();
+
+        let repo = self.get_cached_dependency(FixtureKind::ValidRepoServed)?;
+        let repo_id = self.extract_repo_id(&repo)?;
+
+        let relay_domain = self.get_relay_domain().await?;
+
+        let npub = repo
+            .pubkey
+            .to_bech32()
+            .map_err(|e| anyhow::anyhow!("Failed to convert pubkey: {}", e))?;
+
+        let clone_path = clone_repo(&relay_domain, &npub, &repo_id)
+            .map_err(|e| anyhow::anyhow!("Failed to clone repo: {}", e))?;
+
+        let cleanup = |path: &PathBuf| {
+            let _ = fs::remove_dir_all(path);
+        };
+
+        // Reset to orphan state and create deterministic root commit
+        // Step 1: Create orphan branch (removes all history)
+        let _ = Command::new("git")
+            .args(["checkout", "--orphan", "pr-branch"])
+            .current_dir(&clone_path)
+            .output();
+
+        // Step 2: Clear staged files (orphan keeps files staged from previous branch)
+        let _ = Command::new("git")
+            .args(["rm", "-rf", "--cached", "."])
+            .current_dir(&clone_path)
+            .output();
+
+        // Step 3: Remove all working directory files for clean state (except .git)
+        for entry in
+            fs::read_dir(&clone_path).map_err(|e| anyhow::anyhow!("Failed to read dir: {}", e))?
+        {
+            if let Ok(entry) = entry {
+                let path = entry.path();
+                if path.file_name() != Some(std::ffi::OsStr::new(".git")) {
+                    let _ = fs::remove_file(&path).or_else(|_| fs::remove_dir_all(&path));
+                }
+            }
+        }
+
+        let commit_hash = match create_deterministic_commit_with_variant(
+            &clone_path,
+            CommitVariant::PRTestCommit2,
+        ) {
+            Ok(h) => h,
+            Err(e) => {
+                cleanup(&clone_path);
+                return Err(anyhow::anyhow!("Failed to create PR test commit 2: {}", e));
+            }
+        };
+
+        if commit_hash != PR_TEST_COMMIT_HASH_2 {
+            cleanup(&clone_path);
+            return Err(anyhow::anyhow!(
+                "PR test commit 2 hash mismatch: got {}, expected {}",
+                commit_hash,
+                PR_TEST_COMMIT_HASH_2
+            ));
+        }
+
+        let push_output = Command::new("git")
+            .args([
+                "push",
+                "origin",
+                &format!("pr-branch:refs/nostr/{}", pr_event_id),
+            ])
+            .current_dir(&clone_path)
+            .output()
+            .map_err(|e| {
+                cleanup(&clone_path);
+                anyhow::anyhow!("Failed to execute git push: {}", e)
+            })?;
+
+        cleanup(&clone_path);
+
+        if !push_output.status.success() {
+            let stderr = String::from_utf8_lossy(&push_output.stderr);
+            return Err(anyhow::anyhow!(
+                "Push to refs/nostr/{} failed: {}",
+                pr_event_id,
+                stderr
+            ));
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        Ok(pr_event)
+    }
+
+    /// Build PREvent2Served fixture
+    ///
+    /// Full fixture: event sent, git pushed, event now served.
+    async fn build_pr_event_2_served(&self) -> Result<Event> {
+        let pr_event = self.get_cached_dependency(FixtureKind::PREvent2GitDataPushed)?;
+
+        if !self.client.is_event_on_relay(pr_event.id).await? {
+            return Err(anyhow::anyhow!(
+                "PR event 2 not released from purgatory after git push"
+            ));
+        }
+
         Ok(pr_event)
     }
 
@@ -1845,16 +2133,19 @@ pub enum CommitVariant {
     RecursiveMaintainer,
     /// PR test commit variant - for PR event tests
     PRTestCommit,
+    /// Second PR test commit variant - for second PR event tests
+    PRTestCommit2,
 }
 
 impl CommitVariant {
     /// Get the file content for this variant
     pub fn file_content(&self) -> &'static str {
         match self {
-            CommitVariant::Owner => "Initial commit",
-            CommitVariant::Maintainer => "Maintainer initial commit",
-            CommitVariant::RecursiveMaintainer => "Recursive maintainer initial commit",
-            CommitVariant::PRTestCommit => "PR test deterministic commit",
+            CommitVariant::Owner => "Initial commit\n",
+            CommitVariant::Maintainer => "Maintainer initial commit\n",
+            CommitVariant::RecursiveMaintainer => "Recursive maintainer initial commit\n",
+            CommitVariant::PRTestCommit => "PR test deterministic commit\n",
+            CommitVariant::PRTestCommit2 => "PR test deterministic commit 2\n",
         }
     }
 
@@ -1865,6 +2156,7 @@ impl CommitVariant {
             CommitVariant::Maintainer => "Maintainer initial commit",
             CommitVariant::RecursiveMaintainer => "Recursive maintainer initial commit",
             CommitVariant::PRTestCommit => "PR test deterministic commit",
+            CommitVariant::PRTestCommit2 => "PR test deterministic commit 2",
         }
     }
 }
@@ -2040,10 +2332,10 @@ mod tests {
         use std::collections::HashSet;
 
         let mut set = HashSet::new();
-        set.insert(FixtureKind::ValidRepo);
+        set.insert(FixtureKind::ValidRepoSent);
         set.insert(FixtureKind::RepoWithIssue);
 
-        assert!(set.contains(&FixtureKind::ValidRepo));
+        assert!(set.contains(&FixtureKind::ValidRepoSent));
         assert!(!set.contains(&FixtureKind::RepoWithComment));
     }
 

@@ -22,6 +22,7 @@
 //! cd grasp-audit && nix develop -c bash test-ngit-relay.sh --mode test
 //! ```
 
+use crate::specs::grasp01::SpecRef;
 use crate::{AuditClient, FixtureKind, TestContext, TestResult};
 use nostr_sdk::prelude::*;
 use std::fs;
@@ -61,12 +62,12 @@ impl GitFilterTests {
         let ctx = TestContext::new(client);
 
         // Create repository announcement
-        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepoSent).await {
             Ok(r) => r,
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:42",
+                    SpecRef::GitIncludeAllowSha1InWant,
                     "MUST include uploadpack.allowFilter in advertisement",
                 )
                 .fail(format!("Failed to create repo fixture: {}", e))
@@ -87,7 +88,7 @@ impl GitFilterTests {
             None => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:42",
+                    SpecRef::GitIncludeAllowSha1InWant,
                     "MUST include uploadpack.allowFilter in advertisement",
                 )
                 .fail("Repository announcement missing d tag")
@@ -99,7 +100,7 @@ impl GitFilterTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:42",
+                    SpecRef::GitIncludeAllowSha1InWant,
                     "MUST include uploadpack.allowFilter in advertisement",
                 )
                 .fail(format!("Failed to convert pubkey to npub: {}", e))
@@ -119,7 +120,7 @@ impl GitFilterTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:42",
+                    SpecRef::GitIncludeAllowSha1InWant,
                     "MUST include uploadpack.allowFilter in advertisement",
                 )
                 .fail(format!("HTTP request failed: {}", e))
@@ -129,7 +130,7 @@ impl GitFilterTests {
         if !response.status().is_success() {
             return TestResult::new(
                 test_name,
-                "GRASP-01:git-http:42",
+                SpecRef::GitIncludeAllowSha1InWant,
                 "MUST include uploadpack.allowFilter in advertisement",
             )
             .fail(format!(
@@ -144,7 +145,7 @@ impl GitFilterTests {
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:42",
+                    SpecRef::GitIncludeAllowSha1InWant,
                     "MUST include uploadpack.allowFilter in advertisement",
                 )
                 .fail(format!("Failed to read response body: {}", e))
@@ -155,7 +156,7 @@ impl GitFilterTests {
         if !body.contains("filter") {
             return TestResult::new(
                 test_name,
-                "GRASP-01:git-http:42",
+                SpecRef::GitIncludeAllowSha1InWant,
                 "MUST include uploadpack.allowFilter in advertisement",
             )
             .fail("Missing capability: filter");
@@ -163,7 +164,7 @@ impl GitFilterTests {
 
         TestResult::new(
             test_name,
-            "GRASP-01:git-http:42",
+            SpecRef::GitIncludeAllowSha1InWant,
             "MUST include uploadpack.allowFilter in advertisement",
         )
         .pass()
@@ -184,12 +185,12 @@ impl GitFilterTests {
         let ctx = TestContext::new(client);
 
         // Create repository announcement
-        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepoSent).await {
             Ok(r) => r,
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:42",
+                    SpecRef::GitIncludeAllowSha1InWant,
                     "MUST serve filtered clone requests",
                 )
                 .fail(format!("Failed to create repo fixture: {}", e))
@@ -243,7 +244,7 @@ impl GitFilterTests {
                 cleanup();
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:42",
+                    SpecRef::GitIncludeAllowSha1InWant,
                     "MUST serve filtered clone requests",
                 )
                 .fail(format!("Failed to execute git clone: {}", e));
@@ -255,7 +256,7 @@ impl GitFilterTests {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return TestResult::new(
                 test_name,
-                "GRASP-01:git-http:42",
+                SpecRef::GitIncludeAllowSha1InWant,
                 "MUST serve filtered clone requests",
             )
             .fail(format!("Filtered git clone failed: {}", stderr));
@@ -266,7 +267,7 @@ impl GitFilterTests {
             cleanup();
             return TestResult::new(
                 test_name,
-                "GRASP-01:git-http:42",
+                SpecRef::GitIncludeAllowSha1InWant,
                 "MUST serve filtered clone requests",
             )
             .fail("Filtered clone missing .git directory");
@@ -275,7 +276,7 @@ impl GitFilterTests {
         cleanup();
         TestResult::new(
             test_name,
-            "GRASP-01:git-http:42",
+            SpecRef::GitIncludeAllowSha1InWant,
             "MUST serve filtered clone requests",
         )
         .pass()
@@ -295,12 +296,12 @@ impl GitFilterTests {
         let ctx = TestContext::new(client);
 
         // Create repository announcement
-        let repo = match ctx.get_fixture(FixtureKind::ValidRepo).await {
+        let repo = match ctx.get_fixture(FixtureKind::ValidRepoSent).await {
             Ok(r) => r,
             Err(e) => {
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:42",
+                    SpecRef::GitIncludeAllowSha1InWant,
                     "MUST serve filtered fetch requests",
                 )
                 .fail(format!("Failed to create repo fixture: {}", e))
@@ -352,7 +353,7 @@ impl GitFilterTests {
             cleanup();
             return TestResult::new(
                 test_name,
-                "GRASP-01:git-http:42",
+                SpecRef::GitIncludeAllowSha1InWant,
                 "MUST serve filtered fetch requests",
             )
             .fail("Failed to create initial shallow clone for fetch test");
@@ -371,7 +372,7 @@ impl GitFilterTests {
                 cleanup();
                 return TestResult::new(
                     test_name,
-                    "GRASP-01:git-http:42",
+                    SpecRef::GitIncludeAllowSha1InWant,
                     "MUST serve filtered fetch requests",
                 )
                 .fail(format!("Failed to execute git fetch: {}", e));
@@ -383,7 +384,7 @@ impl GitFilterTests {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return TestResult::new(
                 test_name,
-                "GRASP-01:git-http:42",
+                SpecRef::GitIncludeAllowSha1InWant,
                 "MUST serve filtered fetch requests",
             )
             .fail(format!("Filtered git fetch failed: {}", stderr));
@@ -392,7 +393,7 @@ impl GitFilterTests {
         cleanup();
         TestResult::new(
             test_name,
-            "GRASP-01:git-http:42",
+            SpecRef::GitIncludeAllowSha1InWant,
             "MUST serve filtered fetch requests",
         )
         .pass()

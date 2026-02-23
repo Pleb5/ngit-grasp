@@ -32,17 +32,20 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use nostr_sdk::Event;
 
 use crate::git::authorization::{
-    collect_authorized_maintainers, fetch_repository_data, RepositoryData,
+    collect_authorized_maintainers, fetch_repository_data, fetch_repository_data_with_purgatory,
+    RepositoryData,
 };
 use crate::git::{self, oid_exists};
-use crate::nostr::builder::SharedDatabase;
+use crate::nostr::builder::{Nip34WritePolicy, SharedDatabase};
 use crate::nostr::events::RepositoryState;
 use crate::purgatory::{can_apply_state, Purgatory};
+use crate::sync::rejected_index::RejectedEventsIndex;
 
 /// Result of processing newly available git data.
 ///
@@ -51,6 +54,8 @@ use crate::purgatory::{can_apply_state, Purgatory};
 /// or from purgatory sync fetching OIDs from remote servers).
 #[derive(Debug, Default, Clone)]
 pub struct ProcessResult {
+    /// Number of announcements released from purgatory
+    pub announcements_released: usize,
     /// Number of state events released from purgatory
     pub states_released: usize,
     /// Number of PR events released from purgatory
@@ -70,11 +75,12 @@ pub struct ProcessResult {
 impl ProcessResult {
     /// Check if any events were released
     pub fn released_any(&self) -> bool {
-        self.states_released > 0 || self.prs_released > 0
+        self.announcements_released > 0 || self.states_released > 0 || self.prs_released > 0
     }
 
     /// Merge another ProcessResult into this one
     pub fn merge(&mut self, other: ProcessResult) {
+        self.announcements_released += other.announcements_released;
         self.states_released += other.states_released;
         self.prs_released += other.prs_released;
         self.repos_synced += other.repos_synced;
@@ -815,6 +821,8 @@ pub async fn process_newly_available_git_data(
     local_relay: Option<&nostr_relay_builder::LocalRelay>,
     purgatory: &Purgatory,
     git_data_path: &Path,
+    write_policy: Option<&Nip34WritePolicy>,
+    rejected_events_index: Option<&Arc<RejectedEventsIndex>>,
 ) -> anyhow::Result<ProcessResult> {
     let mut result = ProcessResult::default();
 
@@ -835,6 +843,20 @@ pub async fn process_newly_available_git_data(
         new_oids_count = new_oids.len(),
         "Processing newly available git data"
     );
+
+    // Process announcements from purgatory
+    let announcement_result = process_purgatory_announcements(
+        &identifier,
+        source_repo_path,
+        database,
+        local_relay,
+        purgatory,
+        git_data_path,
+        write_policy,
+        rejected_events_index,
+    )
+    .await;
+    result.merge(announcement_result);
 
     // Process state events from purgatory
     let state_result = process_purgatory_state_events(
@@ -863,6 +885,7 @@ pub async fn process_newly_available_git_data(
     if result.released_any() {
         info!(
             identifier = %identifier,
+            announcements_released = result.announcements_released,
             states_released = result.states_released,
             prs_released = result.prs_released,
             repos_synced = result.repos_synced,
@@ -907,7 +930,10 @@ async fn process_purgatory_state_events(
     );
 
     // Fetch repository data once for all state events
-    let mut db_repo_data = match fetch_repository_data(database, identifier).await {
+    // IMPORTANT: Use fetch_repository_data_with_purgatory to include announcements
+    // that may still be in purgatory (not yet promoted). This ensures authorization
+    // works correctly even if the announcement promotion happens in the same batch.
+    let mut db_repo_data = match fetch_repository_data_with_purgatory(database, purgatory, identifier).await {
         Ok(data) => data,
         Err(e) => {
             warn!(
@@ -1151,6 +1177,9 @@ async fn process_purgatory_pr_events(
     );
 
     // Fetch repository data for syncing
+    // NOTE: Only fetch from database, NOT purgatory. PR events should only be
+    // released from purgatory when the announcement has been promoted (validated).
+    // This ensures we don't accept PR events for announcements that fail validation.
     let db_repo_data = match fetch_repository_data(database, identifier).await {
         Ok(data) => data,
         Err(e) => {
@@ -1250,6 +1279,195 @@ async fn process_purgatory_pr_events(
     result
 }
 
+/// Process announcements from purgatory that can now be promoted.
+///
+/// When git data arrives for a repository, any announcements in purgatory
+/// for that repository should be promoted to the database and served to clients.
+///
+/// When `write_policy` and `rejected_events_index` are provided (git push path),
+/// any maintainer announcements sitting in the hot cache are re-processed immediately
+/// after the owner announcement is promoted, so they don't wait for the next sync cycle.
+async fn process_purgatory_announcements(
+    identifier: &str,
+    source_repo_path: &Path,
+    database: &SharedDatabase,
+    local_relay: Option<&nostr_relay_builder::LocalRelay>,
+    purgatory: &Purgatory,
+    git_data_path: &Path,
+    write_policy: Option<&Nip34WritePolicy>,
+    rejected_events_index: Option<&Arc<RejectedEventsIndex>>,
+) -> ProcessResult {
+    let mut result = ProcessResult::default();
+
+    // Extract owner pubkey from the source repo path
+    let owner_pubkey = match extract_owner_from_repo_path(source_repo_path, git_data_path) {
+        Some(npub) => npub,
+        None => {
+            debug!(
+                identifier = %identifier,
+                "Could not extract owner from repo path"
+            );
+            return result;
+        }
+    };
+
+    // Parse the npub back to PublicKey
+    let owner = match nostr_sdk::PublicKey::parse(&owner_pubkey) {
+        Ok(pk) => pk,
+        Err(e) => {
+            warn!(
+                identifier = %identifier,
+                owner_pubkey = %owner_pubkey,
+                error = %e,
+                "Failed to parse owner pubkey"
+            );
+            result.errors.push(format!("Failed to parse owner pubkey: {}", e));
+            return result;
+        }
+    };
+
+    // Check if there's an announcement in purgatory for this owner and identifier
+    let announcement_event = purgatory.promote_announcement(&owner, identifier);
+
+    if let Some(event) = announcement_event {
+        // Save to database
+        match database.save_event(&event).await {
+            Ok(_) => {
+                info!(
+                    identifier = %identifier,
+                    event_id = %event.id,
+                    "Promoted announcement from purgatory to database"
+                );
+
+                // Notify WebSocket subscribers
+                if let Some(relay) = local_relay {
+                    if relay.notify_event(event.clone()) {
+                        debug!(
+                            identifier = %identifier,
+                            event_id = %event.id,
+                            "Broadcast announcement event to WebSocket listeners"
+                        );
+                    }
+                }
+
+                result.announcements_released += 1;
+
+                // Re-process any maintainer announcements sitting in the hot cache.
+                //
+                // When an owner announcement is promoted from purgatory via a git push,
+                // maintainer announcements that arrived earlier (via relay sync) may have
+                // been rejected and stored in the hot cache because the owner announcement
+                // didn't exist in the DB yet. Now that the owner announcement is saved,
+                // we must invalidate and re-process those cached events immediately.
+                //
+                // This only applies on the git push path (write_policy + rejected_events_index
+                // are Some). The purgatory sync path already handles this via
+                // SyncManager::process_event_static.
+                if let (Some(wp), Some(rei), Some(relay)) =
+                    (write_policy, rejected_events_index, local_relay)
+                {
+                    use crate::nostr::events::RepositoryAnnouncement;
+                    use nostr_relay_builder::prelude::{WritePolicy, WritePolicyResult};
+                    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+                    if let Ok(announcement) = RepositoryAnnouncement::from_event(event.clone()) {
+                        if !announcement.maintainers.is_empty() {
+                            debug!(
+                                identifier = %identifier,
+                                event_id = %event.id,
+                                maintainer_count = announcement.maintainers.len(),
+                                "Owner announcement promoted via git push, checking hot cache for rejected maintainer announcements"
+                            );
+
+                            for maintainer_hex in &announcement.maintainers {
+                                match nostr_sdk::PublicKey::from_hex(maintainer_hex) {
+                                    Ok(maintainer_pubkey) => {
+                                        let (removed, hot_events) = rei.invalidate_and_get(
+                                            &maintainer_pubkey,
+                                            &announcement.identifier,
+                                            Some(crate::sync::rejected_index::EventType::Announcement),
+                                        );
+
+                                        if removed > 0 {
+                                            info!(
+                                                maintainer = %maintainer_hex,
+                                                identifier = %announcement.identifier,
+                                                removed_from_cold_index = removed,
+                                                hot_cache_events = hot_events.len(),
+                                                "Invalidated rejected maintainer announcements after git push promotion"
+                                            );
+                                        }
+
+                                        // Re-process events from hot cache
+                                        let dummy_addr = SocketAddr::new(
+                                            IpAddr::V4(Ipv4Addr::LOCALHOST),
+                                            0,
+                                        );
+                                        for hot_event in hot_events {
+                                            info!(
+                                                event_id = %hot_event.id,
+                                                maintainer = %maintainer_hex,
+                                                identifier = %announcement.identifier,
+                                                "Re-processing maintainer announcement from hot cache after git push promotion"
+                                            );
+                                            match wp.admit_event(&hot_event, &dummy_addr).await {
+                                                WritePolicyResult::Accept => {
+                                                    match database.save_event(&hot_event).await {
+                                                        Ok(_) => {
+                                                            relay.notify_event(hot_event.clone());
+                                                            info!(
+                                                                event_id = %hot_event.id,
+                                                                "Maintainer announcement accepted and saved on re-processing"
+                                                            );
+                                                        }
+                                                        Err(e) => {
+                                                            warn!(
+                                                                event_id = %hot_event.id,
+                                                                error = %e,
+                                                                "Failed to save re-processed maintainer announcement"
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                _ => {
+                                                    warn!(
+                                                        event_id = %hot_event.id,
+                                                        "Maintainer announcement still rejected on re-processing"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            maintainer_hex = %maintainer_hex,
+                                            error = %e,
+                                            "Invalid maintainer public key in promoted announcement"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    identifier = %identifier,
+                    event_id = %event.id,
+                    error = %e,
+                    "Failed to save announcement to database"
+                );
+                result
+                    .errors
+                    .push(format!("Failed to save announcement: {}", e));
+            }
+        }
+    }
+
+    result
+}
+
 /// Extract owner pubkey from a repository path.
 ///
 /// Given a path like `{git_data_path}/{npub}/{identifier}.git`, extracts the npub.
@@ -1271,6 +1489,7 @@ mod tests {
     #[test]
     fn test_process_result_default() {
         let result = ProcessResult::default();
+        assert_eq!(result.announcements_released, 0);
         assert_eq!(result.states_released, 0);
         assert_eq!(result.prs_released, 0);
         assert_eq!(result.repos_synced, 0);
@@ -1282,6 +1501,10 @@ mod tests {
         let mut result = ProcessResult::default();
         assert!(!result.released_any());
 
+        result.announcements_released = 1;
+        assert!(result.released_any());
+
+        result.announcements_released = 0;
         result.states_released = 1;
         assert!(result.released_any());
 
@@ -1293,6 +1516,7 @@ mod tests {
     #[test]
     fn test_process_result_merge() {
         let mut result1 = ProcessResult {
+            announcements_released: 0,
             states_released: 1,
             prs_released: 2,
             repos_synced: 3,
@@ -1303,6 +1527,7 @@ mod tests {
         };
 
         let result2 = ProcessResult {
+            announcements_released: 5,
             states_released: 10,
             prs_released: 20,
             repos_synced: 30,
@@ -1314,6 +1539,7 @@ mod tests {
 
         result1.merge(result2);
 
+        assert_eq!(result1.announcements_released, 5);
         assert_eq!(result1.states_released, 11);
         assert_eq!(result1.prs_released, 22);
         assert_eq!(result1.repos_synced, 33);

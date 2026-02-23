@@ -18,7 +18,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::nostr::builder::SharedDatabase;
 
-use super::{AddFilters, RepoSyncIndex, RepoSyncNeeds};
+use super::{AddFilters, RepoSyncIndex, RepoSyncNeeds, SyncLevel};
 
 // =============================================================================
 // LoopControl - Result of notification processing
@@ -60,6 +60,7 @@ impl PendingUpdates {
         let entry = self.repos.entry(repo_id).or_insert_with(|| RepoSyncNeeds {
             relays: HashSet::new(),
             root_events: HashSet::new(),
+            sync_level: SyncLevel::Full,
         });
         entry.relays.extend(relays);
         entry.root_events.extend(root_events);
@@ -132,14 +133,14 @@ impl SelfSubscriber {
 
     /// Get batch window from environment or use default
     ///
-    /// Reads `NGIT_SYNC_BATCH_WINDOW_MS` environment variable.
+    /// When `NGIT_TEST=1` is set, uses 200ms for faster test execution.
     /// Default: 5000ms (5 seconds)
     fn get_batch_window() -> Duration {
-        std::env::var("NGIT_SYNC_BATCH_WINDOW_MS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .map(Duration::from_millis)
-            .unwrap_or(Duration::from_millis(5000))
+        if std::env::var("NGIT_TEST").as_deref() == Ok("1") {
+            Duration::from_millis(200)
+        } else {
+            Duration::from_millis(5000)
+        }
     }
 
     /// Load existing events from database on startup
@@ -197,6 +198,7 @@ impl SelfSubscriber {
                     .or_insert_with(|| RepoSyncNeeds {
                         relays: HashSet::new(),
                         root_events: HashSet::new(),
+                        sync_level: SyncLevel::StateOnly,
                     });
                 entry.relays.extend(needs.relays.clone());
             }
@@ -570,7 +572,12 @@ impl SelfSubscriber {
                 .or_insert_with(|| RepoSyncNeeds {
                     relays: HashSet::new(),
                     root_events: HashSet::new(),
+                    sync_level: SyncLevel::Full,
                 });
+            // Upgrade sync_level to Full - this handles the case where the entry
+            // already exists as StateOnly (purgatory announcement) and is now being
+            // promoted (git data arrived and the event was broadcast via notify_event).
+            entry.sync_level = SyncLevel::Full;
             entry.relays.extend(needs.relays);
             entry.root_events.extend(needs.root_events);
 
@@ -594,21 +601,26 @@ impl SelfSubscriber {
                 continue;
             }
 
-            // Build filters for these repos
-            let filters = crate::sync::filters::build_layer2_and_layer3_filters(
+            // Build filters for these repos (sync-level-aware)
+            let filters = crate::sync::filters::build_sync_level_aware_filters(
                 &needs.repos,
+                &needs.state_only_repos,
                 &needs.root_events,
                 None,
             );
 
             // Log before moving values
-            let repo_count = needs.repos.len();
+            let repo_count = needs.repos.len() + needs.state_only_repos.len();
             let event_count = needs.root_events.len();
+
+            // Combine all repos into pending items
+            let mut all_repos = needs.repos;
+            all_repos.extend(needs.state_only_repos);
 
             let action = AddFilters {
                 relay_url: relay_url.clone(),
                 items: crate::sync::PendingItems {
-                    repos: needs.repos,
+                    repos: all_repos,
                     root_events: needs.root_events,
                 },
                 filters,

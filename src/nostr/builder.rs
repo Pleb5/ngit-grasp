@@ -14,9 +14,10 @@ use nostr_relay_builder::prelude::*;
 use crate::config::{Config, DatabaseBackend};
 use crate::nostr::events::RepositoryAnnouncement;
 use crate::nostr::policy::{
-    AnnouncementPolicy, AnnouncementResult, PolicyContext, PrEventPolicy, ReferenceResult,
-    RelatedEventPolicy, StatePolicy, StateResult,
+    AnnouncementPolicy, AnnouncementResult, DeletionPolicy, PolicyContext, PrEventPolicy,
+    ReferenceResult, RelatedEventPolicy, StatePolicy, StateResult,
 };
+
 
 /// Type alias for the shared database used by the relay
 pub type SharedDatabase = Arc<dyn NostrDatabase>;
@@ -28,6 +29,7 @@ pub type SharedDatabase = Arc<dyn NostrDatabase>;
 /// - `StatePolicy` - State event validation + ref alignment
 /// - `PrEventPolicy` - PR/PR Update validation
 /// - `RelatedEventPolicy` - Forward/backward reference checking
+/// - `DeletionPolicy` - NIP-09 event deletion request handling
 ///
 /// Uses stateful database queries to check event relationships.
 #[derive(Clone)]
@@ -37,6 +39,7 @@ pub struct Nip34WritePolicy {
     state_policy: StatePolicy,
     pr_event_policy: PrEventPolicy,
     related_event_policy: RelatedEventPolicy,
+    deletion_policy: DeletionPolicy,
 }
 
 impl std::fmt::Debug for Nip34WritePolicy {
@@ -68,6 +71,7 @@ impl Nip34WritePolicy {
             state_policy: StatePolicy::new(ctx.clone()),
             pr_event_policy: PrEventPolicy::new(ctx.clone()),
             related_event_policy: RelatedEventPolicy::new(ctx.clone()),
+            deletion_policy: DeletionPolicy::new(ctx.clone()),
             ctx,
         }
     }
@@ -202,6 +206,30 @@ impl Nip34WritePolicy {
                             npub
                         );
                         WritePolicyResult::reject(format!("Failed to parse announcement: {}", e))
+                    }
+                }
+            }
+            AnnouncementResult::AcceptPurgatory => {
+                // New announcement - add to purgatory
+                match self.announcement_policy.add_to_purgatory(event) {
+                    Ok(()) => {
+                        tracing::info!(
+                            "Accepted announcement to purgatory: {} (waiting for git data)",
+                            event_id_str
+                        );
+
+                        WritePolicyResult::Reject {
+                            status: true, // Client sees OK
+                            message: "purgatory: won't be served until git data arrives".into(),
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to add announcement to purgatory {}: {}",
+                            event_id_str,
+                            e
+                        );
+                        WritePolicyResult::reject(e)
                     }
                 }
             }
@@ -621,6 +649,7 @@ impl WritePolicy for Nip34WritePolicy {
                     );
                     WritePolicyResult::Accept
                 }
+                Kind::EventDeletion => self.deletion_policy.handle(event).await,
                 _ => self.handle_related_event(event, "Event").await,
             }
         })

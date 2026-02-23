@@ -75,7 +75,12 @@ pub trait SyncContext: Send + Sync {
     /// # Returns
     /// Set of clone URLs from PR events in purgatory for this identifier
     fn collect_pr_clone_urls(&self, identifier: &str) -> HashSet<String>;
-    /// Get repository data (announcements, clone URLs, etc.) from the database.
+    /// Get repository data (announcements, clone URLs, etc.) from the database and purgatory.
+    ///
+    /// Checks both the database (promoted announcements) and purgatory (announcements
+    /// awaiting git data). This is necessary to obtain clone URLs when an announcement
+    /// has not yet been promoted - without purgatory data, the sync loop would have no
+    /// URLs to fetch from and the announcement could never be promoted (circular deadlock).
     ///
     /// # Arguments
     /// * `identifier` - The repository identifier (d-tag value)
@@ -279,7 +284,16 @@ impl SyncContext for RealSyncContext {
     }
 
     async fn fetch_repository_data(&self, identifier: &str) -> Result<RepositoryData> {
-        crate::git::authorization::fetch_repository_data(&self.database, identifier).await
+        // Use the purgatory-aware variant so that clone URLs from announcements still
+        // in purgatory (not yet promoted) are available. Without this, the sync loop
+        // would find no URLs to fetch from and the announcement could never be promoted
+        // (circular deadlock: can't promote without git data, can't get git data without URLs).
+        crate::git::authorization::fetch_repository_data_with_purgatory(
+            &self.database,
+            &self.purgatory,
+            identifier,
+        )
+        .await
     }
 
     fn collect_needed_oids(&self, identifier: &str) -> HashSet<String> {
@@ -487,7 +501,9 @@ impl SyncContext for RealSyncContext {
         source_repo_path: &Path,
         new_oids: &HashSet<String>,
     ) -> Result<ProcessResult> {
-        // Delegate to the unified function from git::sync
+        // Delegate to the unified function from git::sync.
+        // Pass None for write_policy and rejected_events_index: the purgatory sync path
+        // already handles hot-cache re-processing via SyncManager::process_event_static.
         let result = crate::git::sync::process_newly_available_git_data(
             source_repo_path,
             new_oids,
@@ -495,6 +511,8 @@ impl SyncContext for RealSyncContext {
             self.local_relay.as_ref(),
             &self.purgatory,
             &self.git_data_path,
+            None,
+            None,
         )
         .await?;
 

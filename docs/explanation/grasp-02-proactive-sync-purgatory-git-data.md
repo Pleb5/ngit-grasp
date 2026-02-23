@@ -12,7 +12,13 @@
 
 ## Overview
 
-When Nostr events arrive before their git data, they enter **purgatory** waiting to be served. But they don't wait passively—ngit-grasp **actively hunts** for the missing git data across all git servers assoicated with the repo until it finds what it needs.
+When Nostr events arrive before their git data, they enter **purgatory** waiting to be served. But they don't wait passively—ngit-grasp **actively hunts** for the missing git data across all git servers associated with the repo until it finds what it needs.
+
+This applies to three types of purgatory entries:
+
+- **Announcement purgatory** — kind 30617 announcements waiting for a git push to prove the repo has content
+- **State event purgatory** — kind 30618 state events waiting for their referenced git objects
+- **PR event purgatory** — kind 1617/1618 PR events waiting for their referenced commits
 
 ### How It Works
 
@@ -42,6 +48,7 @@ We respect remote server capacity with:
 ✅ **Respectful throttling** - 5 concurrent + 30/min per domain, plays nice with other implementations  
 ✅ **Smart timing** - 3min delay for user pushes, 500ms for synced events  
 ✅ **30min expiry** - Auto-cleanup of events when data never arrives  
+✅ **Soft expiry for announcements** - Bare repo deleted at 30min, event retained 24h to allow revival  
 ✅ **Fully testable** - Mock-based architecture for reliable unit tests
 
 ---
@@ -73,6 +80,16 @@ Timeline D: Data never arrives
   t=60s:   Retry → all servers checked, no data
   ...
   t=1800s: 30 minutes expired → event discarded, purgatory cleaned up 🗑️
+
+Timeline E: Announcement purgatory (no git data within 30 min)
+  t=0s:    Announcement received → bare repo created, enters announcement purgatory
+  t=0.5s:  Start hunting git servers for any content
+  ...
+  t=1800s: 30 minutes expired → bare repo deleted, event retained (soft_expired=true)
+  t=3600s: State event arrives (slow sync) → bare repo recreated, expiry reset ✅
+  t=5400s: Git push arrives → announcement promoted to DB, served to clients ✅
+  OR
+  t=86400s: 24 hours elapsed, no revival → event added to expired_events, removed 🗑️
 ```
 
 **Without proactive sync**: Events in Timeline C would wait indefinitely (or until manual git push).  
@@ -330,11 +347,11 @@ Both methods check `has_capacity()` and trigger `try_process_next()` if true.
 
 ---
 
-## 30-Minute Purgatory Expiry
+## Purgatory Expiry
 
-Purgatory entries **automatically expire** after 30 minutes to prevent unbounded memory growth.
+### State and PR Events: 30-Minute Hard Expiry
 
-### Why 30 Minutes?
+State and PR purgatory entries **automatically expire** after 30 minutes.
 
 From the [GRASP-01 spec](https://github.com/DanConwayDev/grasp/blob/main/01.md#purgatory):
 
@@ -346,25 +363,40 @@ This balances:
 - 🧹 **Short enough** to prevent memory leaks from abandoned events
 - 🔄 **Recoverable** events are still on other relays and can be re-submitted
 
-### Implementation
+Each entry tracks `expires_at: Instant` (30 min from creation). The sync loop checks expiry before processing via `has_pending_events()`. If all events for an identifier have expired, the identifier is removed from the sync queue.
 
-Each purgatory entry tracks:
-
-- `created_at: Instant` - When added to purgatory
-- `expires_at: Instant` - When to discard (created_at + 30min)
-
-The main sync loop checks expiry before processing:
-
-```rust
-if !self.has_pending_events(&identifier) {
-    // No events remain (expired or released) → remove from sync queue
-    self.sync_queue.remove(&identifier);
-}
-```
-
-**Note**: Expiry is checked implicitly via `has_pending_events()`. If all events for an identifier have expired, the identifier is removed from the sync queue.
+To prevent infinite re-sync loops, expired event IDs are added to an `expired_events` set. If a sync delivers an event that previously expired, it is rejected with `"previously expired from purgatory without git data"`.
 
 **Implementation**: [`src/purgatory/mod.rs:DEFAULT_EXPIRY`](../../src/purgatory/mod.rs)
+
+### Announcement Purgatory: Two-Phase Soft Expiry
+
+Announcements use a different expiry strategy because they have an additional concern: the bare git repo created on arrival must be cleaned up, but we also need to avoid re-syncing the announcement event on every sync cycle.
+
+**Phase 1 — Initial 30-minute expiry:**
+
+- Delete the bare git repo (frees disk space, respects the protocol's 30-minute expiry)
+- Set `soft_expired = true` on the entry
+- Extend `expires_at` by **24 hours** (`SOFT_EXPIRY_EXTENDED`)
+- Continue syncing state events for this repo (same as active purgatory)
+
+**Phase 2 — 24-hour soft expiry:**
+
+- Add event ID to `expired_events` (prevents re-sync loops)
+- Remove entry completely from `announcement_purgatory`
+
+**Why not just hard-expire at 30 minutes?**
+
+The protocol's 30-minute expiry creates a dilemma for announcements:
+
+- **Option A: Add to `failed_events` at 30 min** → Permanently rejects future state events, losing potential revival when state events arrive late (e.g. from a slow sync)
+- **Option B: Remove entirely at 30 min** → The announcement gets re-fetched on every subsequent sync cycle, wasting bandwidth indefinitely
+
+Soft expiry is the solution: the bare repo is deleted at 30 minutes (respecting the protocol), but the event is retained for 24 hours. During this window, a late-arriving state event can **revive** the announcement—`extend_announcement_expiry()` recreates the bare repo, clears `soft_expired`, and resets the 30-minute timer. After 24 hours with no revival, the event is added to `expired_events` and fully removed.
+
+**Why 24 hours specifically?** This covers the worst-case sync delay. A relay that was offline for up to 24 hours will re-sync state events when it reconnects. The 24-hour window ensures announcements remain revivable throughout that period without permanently occupying disk space.
+
+**Implementation**: [`src/purgatory/mod.rs:SOFT_EXPIRY_EXTENDED`](../../src/purgatory/mod.rs)
 
 ---
 
@@ -670,6 +702,7 @@ The purgatory sync system is a sophisticated, production-ready implementation th
 ✅ **Throttles respectfully** - 5 concurrent + 30/min per domain, round-robin fairness  
 ✅ **Times strategically** - 3min for user events, 500ms for synced events  
 ✅ **Expires responsibly** - 30min auto-cleanup prevents memory leaks  
+✅ **Soft-expires announcements** - Bare repo deleted at 30min, event retained 24h for revival  
 ✅ **Tests thoroughly** - Mock-based architecture enables comprehensive unit tests
 
 This design ensures ngit-grasp can serve repositories reliably even when git data and Nostr events arrive out-of-order or from different sources, while respecting remote server capacity and providing excellent observability.

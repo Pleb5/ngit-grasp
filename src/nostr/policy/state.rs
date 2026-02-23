@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -10,7 +11,7 @@ use nostr_relay_builder::prelude::Event;
 
 use super::PolicyContext;
 use crate::git;
-use crate::git::authorization::fetch_repository_data;
+use crate::git::authorization::fetch_repository_data_with_purgatory;
 use crate::nostr::events::{validate_state, RepositoryAnnouncement, RepositoryState};
 
 /// Result of state policy evaluation
@@ -76,7 +77,13 @@ impl StatePolicy {
         }
 
         // Get all repositories and state events from db with identifier
-        let db_repo_data = fetch_repository_data(&self.ctx.database, &state.identifier).await?;
+        // Include purgatory announcements for authorization
+        let db_repo_data = fetch_repository_data_with_purgatory(
+            &self.ctx.database,
+            &self.ctx.purgatory,
+            &state.identifier,
+        )
+        .await?;
 
         // CRITICAL: Check if author is authorized via maintainer set
         // State events MUST be rejected if author is not in maintainer set of any accepted announcement
@@ -139,6 +146,34 @@ impl StatePolicy {
             "State event author authorized via maintainer set"
         );
 
+        // Extend expiry for any purgatory announcements for this identifier.
+        //
+        // Per design doc decision #4: state event arrival extends the purgatory
+        // announcement's expiry (reset the 30-minute protocol timer). This prevents
+        // premature expiry during slow sync operations — the repo is actively receiving
+        // metadata so it should stay alive.
+        //
+        // We extend for all owners that authorized this state event, since the state
+        // event proves the repo is active regardless of which owner's announcement
+        // authorized it.
+        for owner_hex in &authorized_owners {
+            if let Ok(owner_pk) = nostr_sdk::PublicKey::from_hex(owner_hex) {
+                if self.ctx.purgatory.has_purgatory_announcement(&owner_pk, &state.identifier) {
+                    self.ctx.purgatory.extend_announcement_expiry(
+                        &owner_pk,
+                        &state.identifier,
+                        std::time::Duration::from_secs(1800),
+                    );
+                    tracing::debug!(
+                        event_id = %event.id,
+                        identifier = %state.identifier,
+                        owner = %owner_hex,
+                        "Extended purgatory announcement expiry due to state event arrival"
+                    );
+                }
+            }
+        }
+
         // Duplicate check in db
         if db_repo_data.states.iter().any(|e| e.event.id.eq(&event.id)) {
             tracing::debug!("processed state event duplicate (in db): {}", event.id);
@@ -183,6 +218,42 @@ impl StatePolicy {
                         error = %error,
                         "Error processing state event"
                     );
+                }
+            }
+
+            // After copying OIDs to other owner repos, promote any purgatory announcements
+            // for those repos. This handles the case where two maintainers push to the same
+            // identifier on the same relay with identical commit hashes: the second maintainer's
+            // announcement sits in purgatory, and when their state event arrives the relay copies
+            // commits from the first maintainer's repo — but without this call the announcement
+            // would stay in purgatory indefinitely.
+            let local_relay = self.ctx.get_local_relay();
+            let empty_oids: HashSet<String> = HashSet::new();
+            for announcement in &db_repo_data.announcements {
+                let target_repo_path = self.ctx.git_data_path.join(announcement.repo_path());
+                if target_repo_path != repo_with_git_data {
+                    // OIDs were copied to this repo by process_state_with_git_data;
+                    // check if there's a purgatory announcement waiting for it.
+                    if let Err(e) = crate::git::sync::process_newly_available_git_data(
+                        &target_repo_path,
+                        &empty_oids,
+                        &self.ctx.database,
+                        local_relay.as_ref(),
+                        &self.ctx.purgatory,
+                        &self.ctx.git_data_path,
+                        None,
+                        None,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            identifier = %state.identifier,
+                            event_id = %event.id,
+                            repo_path = %target_repo_path.display(),
+                            error = %e,
+                            "Failed to process purgatory announcements for target repo after git sync copy"
+                        );
+                    }
                 }
             }
 

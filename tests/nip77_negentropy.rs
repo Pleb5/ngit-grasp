@@ -35,56 +35,67 @@ use common::{sync_helpers::*, TestRelay};
 /// 3. Create a fresh client with empty local database
 /// 4. Call client.sync() to perform negentropy reconciliation
 /// 5. Verify reconciliation found the events on the relay
+///
+/// Uses kind 10317 (GitUserGraspList) events which are unconditionally accepted
+/// by the relay without requiring a promoted repository. This avoids the
+/// announcements-purgatory system which holds kind 30617 events until git data
+/// arrives, meaning announcement events are not stored in the DB and would not
+/// appear in negentropy sync results.
 #[tokio::test]
 async fn test_nip77_negentropy_sync_finds_events() {
     // 1. Start relay
     let relay = TestRelay::start().await;
     println!("Relay started at {}", relay.url());
 
-    // 2. Create keys and publish events
-    let keys = Keys::generate();
+    // 2. Create two distinct keypairs - each publishes a kind 10317 event.
+    //    Kind 10317 (GitUserGraspList) is unconditionally accepted and stored in
+    //    the relay DB, unlike kind 30617 announcements which go to purgatory.
+    let keys1 = Keys::generate();
+    let keys2 = Keys::generate();
 
-    // Create a repository announcement that will be accepted by the relay
-    let announcement = create_repo_announcement(&keys, &[&relay.domain()], "test-repo-nip77");
-    let event1_id = announcement.id;
+    // Build kind 10317 events (replaceable per pubkey, so two keys = two stored events)
+    let event1 = EventBuilder::new(Kind::GitUserGraspList, "")
+        .tags(vec![Tag::identifier("grasp-list-nip77-a")])
+        .sign_with_keys(&keys1)
+        .expect("Failed to sign event 1");
+    let event1_id = event1.id;
     println!(
         "Created event 1: {} (kind {})",
         event1_id,
-        announcement.kind.as_u16()
+        event1.kind.as_u16()
     );
 
-    // Create a second event (issue referencing the repo)
-    let repo_coord = format!(
-        "{}:{}:{}",
-        Kind::GitRepoAnnouncement.as_u16(),
-        keys.public_key().to_hex(),
-        "test-repo-nip77"
-    );
-    let issue = build_layer2_issue_event(&keys, &repo_coord, "Test issue for NIP-77")
-        .expect("Failed to build issue event");
-    let event2_id = issue.id;
+    let event2 = EventBuilder::new(Kind::GitUserGraspList, "")
+        .tags(vec![Tag::identifier("grasp-list-nip77-b")])
+        .sign_with_keys(&keys2)
+        .expect("Failed to sign event 2");
+    let event2_id = event2.id;
     println!(
         "Created event 2: {} (kind {})",
         event2_id,
-        issue.kind.as_u16()
+        event2.kind.as_u16()
     );
 
     // 3. Send events to relay using TestClient
-    let publish_client = TestClient::new(relay.url(), keys.clone())
+    let publish_client1 = TestClient::new(relay.url(), keys1.clone())
         .await
         .expect("Failed to connect to relay");
+    publish_client1
+        .send_event(&event1)
+        .await
+        .expect("Failed to send event 1");
+    publish_client1.disconnect().await;
 
-    publish_client
-        .send_event(&announcement)
+    let publish_client2 = TestClient::new(relay.url(), keys2.clone())
         .await
-        .expect("Failed to send announcement");
-    publish_client
-        .send_event(&issue)
+        .expect("Failed to connect to relay");
+    publish_client2
+        .send_event(&event2)
         .await
-        .expect("Failed to send issue");
+        .expect("Failed to send event 2");
+    publish_client2.disconnect().await;
+
     println!("Events published to relay");
-
-    publish_client.disconnect().await;
 
     // 4. Wait a moment for events to be stored
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -104,8 +115,8 @@ async fn test_nip77_negentropy_sync_finds_events() {
 
     // 6. Perform negentropy sync with filter matching our events
     let filter = Filter::new()
-        .author(keys.public_key())
-        .kinds(vec![Kind::GitRepoAnnouncement, Kind::GitIssue]);
+        .authors(vec![keys1.public_key(), keys2.public_key()])
+        .kind(Kind::GitUserGraspList);
 
     println!("Starting negentropy sync with filter: {:?}", filter);
 

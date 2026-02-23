@@ -204,7 +204,7 @@ impl TestRelay {
             .env("NGIT_GIT_DATA_PATH", git_data_dir.path())
             .env("NGIT_DATABASE_BACKEND", "memory") // Force in-memory database for isolation
             .env("NGIT_OWNER_NPUB", &test_npub)
-            .env("NGIT_SYNC_BATCH_WINDOW_MS", "200") // Fast batch window for tests (200ms instead of 5s default)
+            .env("NGIT_TEST", "1") // Enable test mode: fast timers (200ms batch window, 200ms purgatory sync)
             .env("NGIT_SYNC_STARTUP_DELAY_SECS", "0") // No startup delay for faster tests
             .env("NGIT_SYNC_STARTUP_JITTER_MS", "0") // No jitter for tests
             .env("NGIT_SYNC_DISCONNECT_CHECK_INTERVAL_SECS", "1") // Fast reconnect attempts for tests
@@ -213,8 +213,15 @@ impl TestRelay {
                 "RUST_LOG",
                 std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
             ) // Use RUST_LOG from environment or default to info
-            .stdout(Stdio::null()) // Suppress stdout for cleaner test output
-            .stderr(Stdio::null()); // Suppress stderr for cleaner test output
+            .stdout(
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(format!("/tmp/relay-{}.log", port))
+                    .map(Stdio::from)
+                    .unwrap_or(Stdio::null()),
+            )
+            .stderr(Stdio::inherit()); // Inherit stderr for test output
 
         // Add bootstrap relay URL if provided
         if let Some(ref bootstrap_url) = bootstrap_relay_url {

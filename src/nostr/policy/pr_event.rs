@@ -127,6 +127,10 @@ impl PrEventPolicy {
                 .ok_or_else(|| anyhow::anyhow!("No identifier in PR event"))?;
 
             // Fetch repository data
+            // NOTE: Only fetch from database, NOT purgatory. Incoming PR events should
+            // only be accepted for announcements that have been promoted (validated).
+            // If the announcement is still in purgatory, the PR event should also go
+            // to purgatory and wait for the announcement to be promoted.
             let db_repo_data = fetch_repository_data(&self.ctx.database, &identifier).await?;
 
             // Extract owner pubkey from source repo path
@@ -203,6 +207,10 @@ impl PrEventPolicy {
         let identifier = parts[2];
 
         // 2. Fetch repo data
+        // NOTE: Only fetch from database, NOT purgatory. Incoming PR events should
+        // only be accepted for announcements that have been promoted (validated).
+        // If the announcement is still in purgatory, the PR event should also go
+        // to purgatory and wait for the announcement to be promoted.
         let db_repo_data = fetch_repository_data(&self.ctx.database, identifier).await?;
 
         // 3. Extract list of maintainers from "a 30617:<maintainer>:<identifier>" tags

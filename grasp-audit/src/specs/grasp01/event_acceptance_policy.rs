@@ -92,6 +92,7 @@
 //! - Transitive tests verify multi-hop acceptance chains
 
 use crate::fixtures::{send_and_verify_accepted, send_and_verify_rejected};
+use crate::specs::grasp01::SpecRef;
 use crate::{AuditClient, AuditResult, FixtureKind, TestContext, TestResult};
 use nostr_sdk::{Event, Filter, Kind, Tag, TagKind, Timestamp, ToBech32};
 use std::time::Duration;
@@ -148,20 +149,23 @@ impl EventAcceptancePolicyTests {
     pub async fn test_accept_valid_repo_announcement(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_valid_repo_announcement",
-            "GRASP-01:nostr-relay:7",
-            "Accept valid repository announcements with service in clone and relays tags",
+            SpecRef::NostrRelayNip01Compliant,
+            "MUST accept repo announcements listing service in clone & relays tags",
         )
         .run(|| async {
             // Create TestContext for mode-aware fixture management
             let ctx = TestContext::new(client);
 
             // Request repository fixture - behavior depends on mode
-            let event = ctx.get_fixture(FixtureKind::ValidRepo).await.map_err(|e| {
-                format!(
-                    "Test setup failed: could not get valid repository fixture: {}",
-                    e
-                )
-            })?;
+            let event = ctx
+                .get_fixture(FixtureKind::ValidRepoServed)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Test setup failed: could not get valid repository fixture: {}",
+                        e
+                    )
+                })?;
 
             // Get relay URL for validation
             let relay_url = client
@@ -253,8 +257,8 @@ impl EventAcceptancePolicyTests {
     ) -> TestResult {
         TestResult::new(
             "reject_repo_announcement_missing_clone_tag",
-            "GRASP-01:nostr-relay:9",
-            "Reject repository announcements without service in clone tag",
+            SpecRef::NostrRelayRejectMissingCloneRelays,
+            "MUST reject announcements not listing service in clone tag",
         )
         .run(|| async {
             // Get relay URL from client
@@ -329,8 +333,8 @@ impl EventAcceptancePolicyTests {
     ) -> TestResult {
         TestResult::new(
             "reject_repo_announcement_missing_relays_tag",
-            "GRASP-01:nostr-relay:9",
-            "Reject repository announcements without service in relays tag",
+            SpecRef::NostrRelayRejectMissingCloneRelays,
+            "MUST reject announcements not listing service in relays tag",
         )
         .run(|| async {
             // Get relay URL from client
@@ -425,8 +429,8 @@ impl EventAcceptancePolicyTests {
     ) -> TestResult {
         TestResult::new(
             "accept_recursive_maintainer_announcement_without_service",
-            "GRASP-01:nostr-relay:9",
-            "Accept recursive maintainer announcement for chain discovery (even without GRASP server in clone)",
+            SpecRef::NostrRelayRejectMissingCloneRelays,
+            "MUST accept recursive maintainer announcements for chain discovery",
         )
         .run(|| async {
             // Create TestContext for mode-aware fixture management
@@ -593,7 +597,7 @@ impl EventAcceptancePolicyTests {
     pub async fn test_accept_issue_via_a_tag(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_issue_via_a_tag",
-            "GRASP-01:nostr-relay:13",
+            SpecRef::NostrRelayMustAcceptTaggedEvents,
             "Accept issue referencing repo via 'a' tag",
         )
         .run(|| async {
@@ -601,12 +605,15 @@ impl EventAcceptancePolicyTests {
             let ctx = TestContext::new(client);
 
             // NEW: Get repository fixture (mode-aware)
-            let repo = ctx.get_fixture(FixtureKind::ValidRepo).await.map_err(|e| {
-                format!(
-                    "Test setup failed: could not get valid repository fixture: {}",
-                    e
-                )
-            })?;
+            let repo = ctx
+                .get_fixture(FixtureKind::ValidRepoServed)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Test setup failed: could not get valid repository fixture: {}",
+                        e
+                    )
+                })?;
 
             // 2. Create issue that references the repo
             let issue = Self::create_issue_for_repo(client, &repo, "Test Issue 1")?;
@@ -628,7 +635,7 @@ impl EventAcceptancePolicyTests {
     pub async fn test_accept_comment_via_capital_a_tag(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_comment_via_A_tag",
-            "GRASP-01:nostr-relay:13",
+            SpecRef::NostrRelayMustAcceptTaggedEvents,
             "Accept NIP-22 comment with root 'A' tag referencing repo",
         )
         .run(|| async {
@@ -636,12 +643,15 @@ impl EventAcceptancePolicyTests {
             let ctx = TestContext::new(client);
 
             // Get repository fixture (mode-aware)
-            let repo = ctx.get_fixture(FixtureKind::ValidRepo).await.map_err(|e| {
-                format!(
-                    "Test setup failed: could not get valid repository fixture: {}",
-                    e
-                )
-            })?;
+            let repo = ctx
+                .get_fixture(FixtureKind::ValidRepoServed)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Test setup failed: could not get valid repository fixture: {}",
+                        e
+                    )
+                })?;
 
             // Extract repo_id and create `A` tag manually
             let repo_id =
@@ -681,20 +691,23 @@ impl EventAcceptancePolicyTests {
     pub async fn test_accept_kind1_via_q_tag(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_kind1_via_q_tag",
-            "GRASP-01:nostr-relay:13",
-            "Accept kind 1 note quoting repo via 'q' tag",
+            SpecRef::NostrRelayMustAcceptTaggedEvents,
+            "Accept kind 1 text note quoting repo via 'q' tag",
         )
         .run(|| async {
             // Create TestContext
             let ctx = TestContext::new(client);
 
             // Get repository fixture (mode-aware)
-            let repo = ctx.get_fixture(FixtureKind::ValidRepo).await.map_err(|e| {
-                format!(
-                    "Test setup failed: could not get valid repository fixture: {}",
-                    e
-                )
-            })?;
+            let repo = ctx
+                .get_fixture(FixtureKind::ValidRepoServed)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Test setup failed: could not get valid repository fixture: {}",
+                        e
+                    )
+                })?;
 
             // Extract repo_id and create `q` tag
             let repo_id =
@@ -731,8 +744,8 @@ impl EventAcceptancePolicyTests {
     pub async fn test_accept_issue_quoting_issue_via_q(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_issue_quoting_issue_via_q",
-            "GRASP-01:nostr-relay:13",
-            "Accept issue quoting accepted issue (transitive)",
+            SpecRef::NostrRelayMustAcceptTaggedEvents,
+            "Accept issue quoting another accepted issue (transitive)",
         )
         .run(|| async {
             // Create TestContext
@@ -777,7 +790,7 @@ impl EventAcceptancePolicyTests {
     pub async fn test_accept_comment_via_capital_e_tag(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_comment_via_E_tag",
-            "GRASP-01:nostr-relay:13",
+            SpecRef::NostrRelayMustAcceptTaggedEvents,
             "Accept NIP-22 comment with root 'E' tag to accepted issue",
         )
         .run(|| async {
@@ -816,7 +829,7 @@ impl EventAcceptancePolicyTests {
     pub async fn test_accept_kind1_via_e_tag(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_kind1_via_e_tag",
-            "GRASP-01:nostr-relay:13",
+            SpecRef::NostrRelayMustAcceptTaggedEvents,
             "Accept kind 1 reply via 'e' tag to accepted kind 1",
         )
         .run(|| async {
@@ -824,12 +837,15 @@ impl EventAcceptancePolicyTests {
             let ctx = TestContext::new(client);
 
             // Get repository fixture (mode-aware)
-            let repo = ctx.get_fixture(FixtureKind::ValidRepo).await.map_err(|e| {
-                format!(
-                    "Test setup failed: could not get valid repository fixture: {}",
-                    e
-                )
-            })?;
+            let repo = ctx
+                .get_fixture(FixtureKind::ValidRepoServed)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Test setup failed: could not get valid repository fixture: {}",
+                        e
+                    )
+                })?;
 
             // Create Kind 1 A that quotes the repo (makes it accepted)
             let repo_id = Self::extract_d_tag(&repo).ok_or("Failed to extract repo_id")?;
@@ -872,7 +888,7 @@ impl EventAcceptancePolicyTests {
     pub async fn test_accept_kind1_referenced_in_issue(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_kind1_referenced_in_issue",
-            "GRASP-01:nostr-relay:13",
+            SpecRef::NostrRelayMustAcceptTaggedEvents,
             "Accept kind 1 referenced in accepted issue (forward ref)",
         )
         .run(|| async {
@@ -880,12 +896,15 @@ impl EventAcceptancePolicyTests {
             let ctx = TestContext::new(client);
 
             // Get repository fixture (mode-aware)
-            let repo = ctx.get_fixture(FixtureKind::ValidRepo).await.map_err(|e| {
-                format!(
-                    "Test setup failed: could not get valid repository fixture: {}",
-                    e
-                )
-            })?;
+            let repo = ctx
+                .get_fixture(FixtureKind::ValidRepoServed)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Test setup failed: could not get valid repository fixture: {}",
+                        e
+                    )
+                })?;
 
             // Verify repo is queryable (ensures it's fully indexed before we reference it)
             let repo_id = Self::extract_d_tag(&repo).ok_or("Failed to extract repo_id")?;
@@ -964,7 +983,7 @@ impl EventAcceptancePolicyTests {
     pub async fn test_accept_comment_referenced_in_comment(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_comment_referenced_in_comment",
-            "GRASP-01:nostr-relay:13",
+            SpecRef::NostrRelayMustAcceptTaggedEvents,
             "Accept comment referenced in another accepted comment (forward ref)",
         )
         .run(|| async {
@@ -1025,7 +1044,7 @@ impl EventAcceptancePolicyTests {
     pub async fn test_accept_kind1_referenced_in_kind1(client: &AuditClient) -> TestResult {
         TestResult::new(
             "accept_kind1_referenced_in_kind1",
-            "GRASP-01:nostr-relay:13",
+            SpecRef::NostrRelayMustAcceptTaggedEvents,
             "Accept kind 1 referenced in another accepted kind 1 (forward ref)",
         )
         .run(|| async {
@@ -1033,12 +1052,15 @@ impl EventAcceptancePolicyTests {
             let ctx = TestContext::new(client);
 
             // Get repository fixture (mode-aware)
-            let repo = ctx.get_fixture(FixtureKind::ValidRepo).await.map_err(|e| {
-                format!(
-                    "Test setup failed: could not get valid repository fixture: {}",
-                    e
-                )
-            })?;
+            let repo = ctx
+                .get_fixture(FixtureKind::ValidRepoServed)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Test setup failed: could not get valid repository fixture: {}",
+                        e
+                    )
+                })?;
 
             // Create Kind 1 A locally but DON'T send it yet
             let kind1_a = client
@@ -1083,7 +1105,7 @@ impl EventAcceptancePolicyTests {
     pub async fn test_reject_orphan_issue(client: &AuditClient) -> TestResult {
         TestResult::new(
             "reject_orphan_issue",
-            "GRASP-01:nostr-relay:18",
+            SpecRef::NostrRelayMayRejectSpamCuration,
             "Reject issue referencing unaccepted repo",
         )
         .run(|| async {
@@ -1110,7 +1132,7 @@ impl EventAcceptancePolicyTests {
     pub async fn test_reject_orphan_kind1(client: &AuditClient) -> TestResult {
         TestResult::new(
             "reject_orphan_kind1",
-            "GRASP-01:nostr-relay:18",
+            SpecRef::NostrRelayMayRejectSpamCuration,
             "Reject kind 1 with no repo references",
         )
         .run(|| async {
@@ -1139,7 +1161,7 @@ impl EventAcceptancePolicyTests {
     pub async fn test_reject_comment_quoting_other_repo(client: &AuditClient) -> TestResult {
         TestResult::new(
             "reject_comment_quoting_other_repo",
-            "GRASP-01:nostr-relay:18",
+            SpecRef::NostrRelayMayRejectSpamCuration,
             "Reject comment quoting unaccepted repo",
         )
         .run(|| async {
@@ -1147,12 +1169,15 @@ impl EventAcceptancePolicyTests {
             let ctx = TestContext::new(client);
 
             // Get accepted repo A fixture (mode-aware)
-            let _repo_a = ctx.get_fixture(FixtureKind::ValidRepo).await.map_err(|e| {
-                format!(
-                    "Test setup failed: could not get valid repository fixture: {}",
-                    e
-                )
-            })?;
+            let _repo_a = ctx
+                .get_fixture(FixtureKind::ValidRepoServed)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Test setup failed: could not get valid repository fixture: {}",
+                        e
+                    )
+                })?;
 
             // Create Repo B but DON'T send it (unaccepted)
             let repo_b = Self::create_test_repo(client, "unaccepted-repo-b").await?;

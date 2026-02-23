@@ -82,14 +82,12 @@
 //! **Example from `discovery.rs`:**
 //! ```rust
 //! #[tokio::test]
-//! async fn test_recursive_relay_discovery() {
+//! async fn test_discovers_layer3_via_layer2() {
 //!     // Multi-relay orchestration
-//!     let relay1 = TestRelay::start().await;
-//!     let relay2 = TestRelay::start().await;
-//!     let relay3 = TestRelay::start().await;
+//!     let relay_a = TestRelay::start().await;
+//!     let relay_b = TestRelay::start_with_sync(None).await;
 //!
-//!     // relay1 announces relay2, relay2 announces relay3
-//!     // Verify relay1 discovers relay3 through chain
+//!     // relay_b receives announcement listing relay_a, discovers and syncs from it
 //! }
 //! ```
 //!

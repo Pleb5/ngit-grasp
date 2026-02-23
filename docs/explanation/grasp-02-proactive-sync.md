@@ -47,10 +47,19 @@ This state starts afresh when the binary loads.
 ### RepoSyncIndex (Source of Truth)
 
 ```rust
-/// What we WANT to sync - derived from events received via self-subscription.
-/// Updated immediately when self-subscriber batch fires.
+/// What we WANT to sync - derived from events received via self-subscription
+/// and from purgatory announcements.
+/// Updated immediately when self-subscriber batch fires or purgatory sync timer runs.
 /// Key: repo addressable ref - 30617:pubkey:identifier
 pub type RepoSyncIndex = Arc<RwLock<HashMap<String, RepoSyncNeeds>>>;
+
+/// Controls which sync filters are built for a repo
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SyncLevel {
+    #[default]
+    Full,       // Full L2 + L3 sync (promoted repos with git data)
+    StateOnly,  // Only state events (kind 30618) — for purgatory announcements
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct RepoSyncNeeds {
@@ -58,8 +67,16 @@ pub struct RepoSyncNeeds {
     pub relays: HashSet<String>,
     /// Root event IDs - 1617/1618/1621 - that reference this repo
     pub root_events: HashSet<EventId>,
+    /// Controls which filters are built: Full (L2+L3) or StateOnly (kind 30618 only)
+    pub sync_level: SyncLevel,
 }
 ```
+
+**Two sources populate `RepoSyncIndex`:**
+
+1. **`SelfSubscriber`** — monitors the relay's own event stream for accepted announcements (kinds 30617, 1617, 1618, 1621). Adds entries with `SyncLevel::Full`. When an announcement is promoted from purgatory to the database, the SelfSubscriber sees it and upgrades the entry to `Full`.
+
+2. **Purgatory announcement sync timer** (`run_purgatory_announcement_sync`, every 5 seconds) — iterates `purgatory.announcements_for_sync()` and ensures each purgatory announcement has a `SyncLevel::StateOnly` entry in `RepoSyncIndex`. This is the only registration path for purgatory announcements because they are not saved to the database and therefore never seen by the SelfSubscriber.
 
 ### RelaySyncIndex (Confirmed State + Connection)
 
@@ -336,7 +353,23 @@ The sync system uses three background tasks that run continuously:
 
 1. Queue events to `PendingUpdates`
 2. Timer fires (interval, does not reset on events)
-3. Process batch: update RepoSyncIndex → derive targets → send AddFilters to SyncManager
+3. Process batch: update RepoSyncIndex with `SyncLevel::Full` → derive targets → send AddFilters to SyncManager
+
+**Note**: The SelfSubscriber only sees announcements that have been accepted to the database (promoted from purgatory). Purgatory announcements are registered separately by the purgatory sync timer (see below).
+
+### 4. Purgatory Announcement Sync Timer (`run_purgatory_announcement_sync`)
+
+**Purpose**: Register purgatory announcements in `RepoSyncIndex` so state events are synced for them
+
+**Interval**: Every 5 seconds (200ms in test mode)
+
+**Flow**:
+
+1. Iterate `purgatory.announcements_for_sync()`
+2. For each announcement not already in `RepoSyncIndex`: insert with `SyncLevel::StateOnly`
+3. When an announcement is promoted (git data arrives), the SelfSubscriber sees the newly accepted event and upgrades the entry to `SyncLevel::Full`
+
+**Why a separate timer?** Purgatory announcements are never saved to the database, so the SelfSubscriber never sees them. The timer bridges this gap, ensuring state events are synced for repos that may still receive git data.
 
 ---
 
@@ -602,9 +635,10 @@ flowchart TB
 
 - Self-subscriber monitors own relay for 30617, 1617, 1618, 1621 (NOT 1619 or 30618)
 - Batches events in `PendingUpdates` (5 second window via interval timer)
-- `process_batch()` updates RepoSyncIndex, then builds AddFilters **directly** (no compute_actions)
+- `process_batch()` updates RepoSyncIndex with `SyncLevel::Full`, then builds AddFilters **directly** (no compute_actions)
 - AddFilters sent via channel to SyncManager, which calls `handle_new_sync_filters()`
 - This path does NOT use compute_actions because it's building fresh filters from the updated index
+- Purgatory announcements (not in DB) are registered separately by the purgatory sync timer with `SyncLevel::StateOnly`
 
 ---
 
@@ -687,16 +721,23 @@ fn compute_actions(
 - **Tags**: lowercase `a`, uppercase `A`, and `q` tags for comprehensive coverage
 - **Batching**: Per 100 repo refs
 - **Function**: `build_repo_tag_filters(repos, since)`
+- **Only for `SyncLevel::Full` repos** — purgatory announcements (`StateOnly`) skip this layer
 
 ### Layer 3: Events Tagging Our Root Events
 
 - **Tags**: lowercase `e`, uppercase `E`, and `q` tags for comprehensive coverage
 - **Batching**: Per 100 event IDs
 - **Function**: `build_root_event_tag_filters(root_events, since)`
+- **Only for `SyncLevel::Full` repos** — purgatory announcements (`StateOnly`) skip this layer
 
-### Combined Layer 2+3
+### Combined Layer 2+3 (SyncLevel-Aware)
 
-The `build_layer2_and_layer3_filters()` function combines both layers. Used by:
+The `build_sync_level_aware_filters()` function combines both layers, partitioning repos by `SyncLevel`:
+
+- **`Full` repos**: state event filters + repo-tag filters + root-event-tag filters
+- **`StateOnly` repos**: state event filters only (kind 30618 with `#d` tags)
+
+Used by:
 
 - `recompute_new_sync_filters_for_relay` for new item subscriptions
 - `reconstruct_filters` for rebuilding from confirmed state
@@ -871,9 +912,9 @@ flowchart TB
 
 ```
 src/sync/
-├── mod.rs              # SyncManager, main loop, data structures
+├── mod.rs              # SyncManager, main loop, data structures, SyncLevel, run_purgatory_announcement_sync
 ├── algorithms.rs       # derive_relay_targets(), compute_actions()
-├── filters.rs          # build_announcement_filter(), build_layer2_and_layer3_filters()
+├── filters.rs          # build_announcement_filter(), build_sync_level_aware_filters()
 ├── health.rs           # RelayHealthTracker with exponential backoff
 ├── relay_connection.rs # RelayConnection, RelayEvent handling
 ├── self_subscriber.rs  # SelfSubscriber with batching

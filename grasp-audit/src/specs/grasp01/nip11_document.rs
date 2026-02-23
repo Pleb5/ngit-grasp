@@ -8,6 +8,7 @@
 //! - Includes repo_acceptance_criteria field describing acceptance policy
 //! - Handles curation field correctly (present if curated, absent otherwise)
 
+use crate::specs::grasp01::SpecRef;
 use crate::{AuditClient, AuditResult, TestResult};
 
 pub struct Nip11DocumentTests;
@@ -37,8 +38,8 @@ impl Nip11DocumentTests {
     pub async fn test_nip11_document_exists(client: &AuditClient) -> TestResult {
         TestResult::new(
             "nip11_document_exists",
-            "GRASP-01:nostr-relay:26",
-            "Serve NIP-11 relay information document",
+            SpecRef::Nip11ServeDocument,
+            "MUST serve NIP-11 document",
         )
         .run(|| async {
             // 1. Extract HTTP(S) URL from client's WebSocket URL
@@ -96,8 +97,8 @@ impl Nip11DocumentTests {
     pub async fn test_nip11_supported_grasps_field(client: &AuditClient) -> TestResult {
         TestResult::new(
             "nip11_supported_grasps_field",
-            "GRASP-01:nostr-relay:28",
-            "NIP-11 document includes supported_grasps field with GRASP-01",
+            SpecRef::Nip11ListSupportedGrasps,
+            "MUST list supported GRASPs as string array",
         )
         .run(|| async {
             // 1. Fetch NIP-11 document
@@ -172,8 +173,8 @@ impl Nip11DocumentTests {
     pub async fn test_nip11_repo_acceptance_criteria_field(client: &AuditClient) -> TestResult {
         TestResult::new(
             "nip11_repo_acceptance_criteria_field",
-            "GRASP-01:nostr-relay:29",
-            "NIP-11 document includes repo_acceptance_criteria field",
+            SpecRef::Nip11ListRepoAcceptanceCriteria,
+            "MUST list repository acceptance criteria",
         )
         .run(|| async {
             // 1. Fetch NIP-11 document
@@ -227,8 +228,8 @@ impl Nip11DocumentTests {
     pub async fn test_nip11_curation_field(client: &AuditClient) -> TestResult {
         TestResult::new(
             "nip11_curation_field",
-            "GRASP-01:nostr-relay:30",
-            "NIP-11 curation field present if curated, absent otherwise",
+            SpecRef::Nip11ListCurationPolicy,
+            "MUST include curation if curated, omit otherwise",
         )
         .run(|| async {
             // 1. Fetch NIP-11 document
