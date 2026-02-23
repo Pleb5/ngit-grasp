@@ -898,33 +898,48 @@ impl Purgatory {
                     "Announcement fully expired from purgatory (soft expiry period elapsed)"
                 );
             } else {
-                // Phase 1: soft expiry — delete bare repo, retain event
-                if repo_path.exists() {
-                    if let Err(e) = std::fs::remove_dir_all(&repo_path) {
-                        tracing::warn!(
-                            path = %repo_path.display(),
-                            error = %e,
-                            "Failed to delete bare repository during soft expiry"
-                        );
-                    } else {
-                        tracing::info!(
-                            path = %repo_path.display(),
-                            owner = %owner,
-                            identifier = %identifier,
-                            "Deleted bare repository during soft expiry (event retained for revival)"
-                        );
+                // Phase 1: soft expiry — delete bare repo, retain event.
+                //
+                // Only transition to soft_expired if the directory is gone (or never
+                // existed). If removal fails we leave the entry untouched so the next
+                // cleanup cycle retries the deletion automatically.
+                let repo_gone = if repo_path.exists() {
+                    match std::fs::remove_dir_all(&repo_path) {
+                        Ok(()) => {
+                            tracing::info!(
+                                path = %repo_path.display(),
+                                owner = %owner,
+                                identifier = %identifier,
+                                "Deleted bare repository during soft expiry (event retained for revival)"
+                            );
+                            true
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %repo_path.display(),
+                                error = %e,
+                                "Failed to delete bare repository during soft expiry; will retry next cleanup cycle"
+                            );
+                            false
+                        }
                     }
+                } else {
+                    // Already gone (e.g. deleted externally)
+                    true
+                };
+
+                if repo_gone {
+                    // Mark soft_expired and extend expiry
+                    if let Some(mut entry) = self.announcement_purgatory.get_mut(&(owner.clone(), identifier.clone())) {
+                        entry.soft_expired = true;
+                        entry.expires_at = now + SOFT_EXPIRY_EXTENDED;
+                    }
+                    tracing::debug!(
+                        owner = %owner,
+                        identifier = %identifier,
+                        "Announcement soft-expired: bare repo deleted, event retained for 24h"
+                    );
                 }
-                // Mark soft_expired and extend expiry
-                if let Some(mut entry) = self.announcement_purgatory.get_mut(&(owner.clone(), identifier.clone())) {
-                    entry.soft_expired = true;
-                    entry.expires_at = now + SOFT_EXPIRY_EXTENDED;
-                }
-                tracing::debug!(
-                    owner = %owner,
-                    identifier = %identifier,
-                    "Announcement soft-expired: bare repo deleted, event retained for 24h"
-                );
             }
         }
 
