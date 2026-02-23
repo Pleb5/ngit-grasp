@@ -39,13 +39,35 @@ This ensures we only serve announcements for repos that actually have content.
 
 ## Key Design Principles
 
-### 1. In-Memory Only
+### 1. Graceful-Shutdown Persistence
 
-Purgatory data is **not persisted** to disk. On restart, all purgatory entries are lost. This is acceptable because:
+Purgatory state is **saved to disk on graceful shutdown** and **restored on startup**. This preserves in-flight work across planned restarts (deployments, reboots).
+
+On `SIGINT` / Ctrl-C, `main.rs` calls `purgatory.save_to_disk()` before exiting. On startup, if the state file exists, `purgatory.restore_from_disk()` is called before the server begins accepting connections.
+
+**What is persisted:**
+
+| Store | Persisted? | Notes |
+|-------|-----------|-------|
+| `announcement_purgatory` | ✅ Yes | Non-soft-expired entries only (bare repo must exist) |
+| `state_events` | ✅ Yes | All active entries |
+| `pr_events` | ✅ Yes | Both events and placeholders |
+| `expired_events` | ✅ Yes | Prevents re-sync loops after restart |
+| `sync_queue` | ❌ No | Rebuilt automatically after restore |
+
+**What is NOT persisted (unclean shutdown):**
+
+On a crash or `SIGKILL`, the state file is not written. In that case:
 
 - Events are still on other relays (can be re-submitted)
 - Git data can be re-pushed
 - 30-minute expiry means data is transient anyway
+
+**State file location:** `<git_data_path>/purgatory-state.json`
+
+**Downtime accounting:** Expiry deadlines are stored as duration offsets from the save timestamp. On restore, elapsed downtime is subtracted from each deadline. Entries that expired during downtime are immediately swept by the next cleanup tick.
+
+**Soft-expired announcements are excluded:** Their bare repos have already been deleted, so they cannot be meaningfully restored. They will be re-fetched via background sync if needed.
 
 ### 2. Separate Storage for Each Event Type
 
@@ -232,6 +254,31 @@ pub struct Purgatory {
     expired_events: DashMap<EventId, Instant>,
 }
 ```
+
+### Persistence State (Disk Format)
+
+`Instant` fields cannot be serialized directly. Each entry type has a corresponding `Serializable*` wrapper that stores time fields as `u64` second offsets from a `saved_at: SystemTime` reference point. On restore, elapsed downtime is subtracted to produce the correct remaining TTL.
+
+```rust
+struct PurgatoryState {
+    version: u32,                    // currently 1
+    saved_at: SystemTime,            // reference for offset math
+
+    /// Non-soft-expired announcements indexed by "owner_hex:identifier"
+    announcement_purgatory: HashMap<String, SerializableAnnouncementPurgatoryEntry>,
+
+    /// State events indexed by repository identifier
+    state_events: HashMap<String, Vec<SerializableStatePurgatoryEntry>>,
+
+    /// PR events (and placeholders) indexed by event ID hex
+    pr_events: HashMap<String, SerializablePrPurgatoryEntry>,
+
+    /// Expired event IDs → approximate expiry SystemTime
+    expired_events: HashMap<String, SystemTime>,
+}
+```
+
+The `announcement_purgatory` field uses `#[serde(default)]` so that state files written before announcement persistence was added (version 1 without the field) still deserialize correctly.
 
 ---
 
@@ -806,8 +853,9 @@ A background timer (`run_purgatory_announcement_sync`, every 5 seconds) ensures 
 ```
 src/
 ├── purgatory/
-│   ├── mod.rs              # Main Purgatory struct and API
+│   ├── mod.rs              # Main Purgatory struct, API, save_to_disk, restore_from_disk
 │   ├── types.rs            # RefPair, AnnouncementPurgatoryEntry, StatePurgatoryEntry, PrPurgatoryEntry
+│   ├── persistence.rs      # instant_to_offset / offset_to_instant time conversion utilities
 │   ├── helpers.rs          # Ref extraction and matching functions
 │   └── sync/
 │       ├── mod.rs          # Sync module exports
@@ -835,7 +883,8 @@ src/
 
 Located in each module:
 
-- **[`src/purgatory/mod.rs`](../../src/purgatory/mod.rs)** - Core purgatory operations including announcement purgatory
+- **[`src/purgatory/mod.rs`](../../src/purgatory/mod.rs)** - Core purgatory operations including announcement purgatory; persistence round-trip tests for all entry types (state, PR, announcement, expired events, downtime calculation, soft-expired exclusion, missing-repo skip)
+- **[`src/purgatory/persistence.rs`](../../src/purgatory/persistence.rs)** - `instant_to_offset` / `offset_to_instant` round-trip tests
 - **[`src/purgatory/helpers.rs`](../../src/purgatory/helpers.rs)** - Ref matching logic
 - **[`src/purgatory/sync/functions.rs`](../../src/purgatory/sync/functions.rs)** - Sync functions with MockSyncContext
 - **[`src/purgatory/sync/throttle.rs`](../../src/purgatory/sync/throttle.rs)** - Throttle manager
@@ -852,6 +901,7 @@ Located in [`tests/`](../../tests/):
 - **Git-data-first flow** - Git push creates placeholder, event completes it
 - **Authorization with purgatory** - Push authorized by purgatory state
 - **Background sync** - Sync fetches git data and releases events
+- **Persistence across restart** - Save/restore cycle preserves all entry types including announcements
 
 ---
 
@@ -893,6 +943,14 @@ PR events can arrive before or after git data:
 - Git first → Create placeholder, wait for event
 
 **Solution:** `PrPurgatoryEntry.event: Option<Event>` with `None` = placeholder.
+
+### 6. Persistence Requires Instant → Duration Conversion
+
+`std::time::Instant` is not serializable and is not meaningful across process boundaries. Expiry deadlines must be converted to a portable form.
+
+**Solution:** Store each deadline as a `u64` second offset from a `saved_at: SystemTime` reference. On restore, subtract elapsed downtime from each offset to compute the new `Instant`. Entries whose deadline already passed during downtime get `expires_at = now` and are swept by the next cleanup tick.
+
+**Soft-expired announcements are excluded from persistence** because their bare repos have been deleted. Restoring them would leave purgatory entries pointing at non-existent repos. They are simply dropped; background sync will re-fetch the announcement event if needed.
 
 ---
 

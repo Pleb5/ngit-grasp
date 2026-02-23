@@ -338,6 +338,44 @@ pub fn build_repo_coord(keys: &Keys, identifier: &str) -> String {
     format!("30617:{}:{}", keys.public_key().to_hex(), identifier)
 }
 
+/// Create a repository announcement event (kind 30617) for purgatory tests.
+///
+/// Creates a minimal but valid NIP-34 repository announcement with a `d` tag,
+/// optional `clone` URLs, and optional `relays` URLs.
+///
+/// # Arguments
+/// * `keys` - Keys for signing
+/// * `identifier` - Repository identifier (d-tag)
+/// * `clone_urls` - Clone URLs to include (may be empty)
+/// * `relay_urls` - Relay URLs to include (may be empty)
+///
+/// # Returns
+/// * `Ok(Event)` - Signed announcement event
+/// * `Err(String)` - If signing fails
+pub fn create_announcement_event(
+    keys: &Keys,
+    identifier: &str,
+    clone_urls: &[&str],
+    relay_urls: &[&str],
+) -> Result<Event, String> {
+    let mut tags = vec![Tag::identifier(identifier)];
+
+    if !clone_urls.is_empty() {
+        let urls: Vec<String> = clone_urls.iter().map(|s| s.to_string()).collect();
+        tags.push(Tag::custom(TagKind::custom("clone"), urls));
+    }
+
+    if !relay_urls.is_empty() {
+        let urls: Vec<String> = relay_urls.iter().map(|s| s.to_string()).collect();
+        tags.push(Tag::custom(TagKind::custom("relays"), urls));
+    }
+
+    EventBuilder::new(Kind::GitRepoAnnouncement, "")
+        .tags(tags)
+        .sign_with_keys(keys)
+        .map_err(|e| format!("Failed to sign announcement event: {}", e))
+}
+
 /// Wait for an event to be served by a relay (not in purgatory).
 ///
 /// Polls the relay until the event is queryable, indicating it has

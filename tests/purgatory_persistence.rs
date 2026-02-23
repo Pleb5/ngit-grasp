@@ -31,9 +31,11 @@
 
 mod common;
 
+use common::purgatory_helpers::create_announcement_event;
 use ngit_grasp::purgatory::Purgatory;
 use ngit_grasp::sync::rejected_index::{EventType, RejectedEventsIndex, RejectionReason};
 use nostr_sdk::prelude::*;
+use std::collections::HashSet;
 use std::time::Duration;
 
 /// Helper to create a test event
@@ -116,12 +118,31 @@ async fn test_full_purgatory_save_restore_cycle() {
     // Add a PR placeholder (git-data-first scenario)
     purgatory.add_pr_placeholder("placeholder-id".to_string(), "commit-xyz".to_string());
 
-    // Note: We can't directly test expired events without accessing private fields,
-    // so we'll focus on testing state and PR events persistence
+    // Add an announcement to purgatory (requires a real directory for the repo path)
+    let repo_dir = temp_dir.path().join("repo.git");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    let ann_keys = Keys::generate();
+    let ann_event = create_announcement_event(
+        &ann_keys,
+        "my-repo",
+        &["http://example.com/my-repo.git"],
+        &["wss://relay.example.com"],
+    )
+    .unwrap();
+    let ann_event_id = ann_event.id;
+    let mut ann_relays = HashSet::new();
+    ann_relays.insert("wss://relay.example.com".to_string());
+    purgatory.add_announcement(
+        ann_event,
+        "my-repo".to_string(),
+        ann_keys.public_key(),
+        repo_dir.clone(),
+        ann_relays,
+    );
 
     // Verify initial counts
     let (announcement_count, state_count, pr_count) = purgatory.count();
-    assert_eq!(announcement_count, 0, "Should have 0 announcements");
+    assert_eq!(announcement_count, 1, "Should have 1 announcement");
     assert_eq!(state_count, 2, "Should have 2 state events");
     assert_eq!(
         pr_count, 3,
@@ -144,12 +165,21 @@ async fn test_full_purgatory_save_restore_cycle() {
 
     // Verify all data was restored
     let (announcement_count2, state_count2, pr_count2) = purgatory2.count();
-    assert_eq!(announcement_count2, 0, "Should have 0 announcements after restore");
+    assert_eq!(announcement_count2, 1, "Should have 1 announcement after restore");
     assert_eq!(state_count2, 2, "Should have 2 state events after restore");
     assert_eq!(
         pr_count2, 3,
         "Should have 3 PR events after restore (2 events + 1 placeholder)"
     );
+
+    // Verify announcement was restored correctly
+    let restored_ann = purgatory2
+        .find_announcement(&ann_keys.public_key(), "my-repo")
+        .expect("Announcement should be restored");
+    assert_eq!(restored_ann.event.id, ann_event_id);
+    assert_eq!(restored_ann.identifier, "my-repo");
+    assert_eq!(restored_ann.repo_path, repo_dir);
+    assert!(!restored_ann.soft_expired);
 
     // Verify specific state events
     let repo1_states = purgatory2.find_state("repo1");
@@ -747,4 +777,101 @@ async fn test_rejected_cache_entries_expired_during_downtime() {
 
     assert_eq!(index2.hot_cache_len(), 0);
     assert_eq!(index2.cold_index_len(), 1);
+}
+
+/// Test 18: Announcement events are saved and restored across restarts
+#[tokio::test]
+async fn test_announcement_save_restore_cycle() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let git_data_path = temp_dir.path().join("git");
+    let state_path = temp_dir.path().join("purgatory.json");
+
+    // Create a real bare repo directory (restore skips entries whose path is missing)
+    let repo_dir = temp_dir.path().join("owner.git");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+
+    let purgatory = Purgatory::new(&git_data_path);
+    let keys = Keys::generate();
+
+    let ann_event = create_announcement_event(
+        &keys,
+        "my-repo",
+        &["http://example.com/my-repo.git"],
+        &["wss://relay.example.com"],
+    )
+    .unwrap();
+    let ann_event_id = ann_event.id;
+
+    let mut relays = HashSet::new();
+    relays.insert("wss://relay.example.com".to_string());
+
+    purgatory.add_announcement(
+        ann_event,
+        "my-repo".to_string(),
+        keys.public_key(),
+        repo_dir.clone(),
+        relays.clone(),
+    );
+
+    let (ann_count, _, _) = purgatory.count();
+    assert_eq!(ann_count, 1);
+
+    // Save to disk
+    purgatory.save_to_disk(&state_path).unwrap();
+    assert!(state_path.exists());
+
+    // Restore into a fresh purgatory
+    let purgatory2 = Purgatory::new(&git_data_path);
+    purgatory2.restore_from_disk(&state_path).unwrap();
+
+    assert!(!state_path.exists(), "State file should be deleted after restore");
+
+    let (ann_count2, _, _) = purgatory2.count();
+    assert_eq!(ann_count2, 1, "Announcement should be restored");
+
+    let restored = purgatory2
+        .find_announcement(&keys.public_key(), "my-repo")
+        .expect("Announcement should be findable after restore");
+
+    assert_eq!(restored.event.id, ann_event_id);
+    assert_eq!(restored.identifier, "my-repo");
+    assert_eq!(restored.owner, keys.public_key());
+    assert_eq!(restored.repo_path, repo_dir);
+    assert_eq!(restored.relays, relays);
+    assert!(!restored.soft_expired);
+}
+
+/// Test 19: Announcement with missing repo path is skipped on restore
+#[tokio::test]
+async fn test_announcement_missing_repo_skipped_on_restore() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let git_data_path = temp_dir.path().join("git");
+    let state_path = temp_dir.path().join("purgatory.json");
+
+    // Point to a path that does NOT exist on disk
+    let missing_repo = temp_dir.path().join("nonexistent.git");
+
+    let purgatory = Purgatory::new(&git_data_path);
+    let keys = Keys::generate();
+
+    let ann_event = create_announcement_event(&keys, "my-repo", &[], &[]).unwrap();
+
+    purgatory.add_announcement(
+        ann_event,
+        "my-repo".to_string(),
+        keys.public_key(),
+        missing_repo,
+        HashSet::new(),
+    );
+
+    purgatory.save_to_disk(&state_path).unwrap();
+
+    let purgatory2 = Purgatory::new(&git_data_path);
+    purgatory2.restore_from_disk(&state_path).unwrap();
+
+    let (ann_count, _, _) = purgatory2.count();
+    assert_eq!(
+        ann_count, 0,
+        "Announcement with missing repo path must be skipped"
+    );
 }
