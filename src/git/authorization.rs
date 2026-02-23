@@ -661,6 +661,27 @@ pub async fn get_state_authorization_for_specific_owner_repo(
                         .unwrap_or_else(|_| latest_authorized.pubkey.to_hex())
                 );
 
+                // Extend purgatory announcement expiry for the owner.
+                //
+                // Per design doc decision #4: git auth extending a state event's expiry
+                // also extends the announcement's expiry. The repo is actively receiving
+                // git data, so the announcement should not expire prematurely.
+                // This also revives soft-expired announcements (recreates bare repo).
+                if let Ok(owner_pk) = PublicKey::parse(owner_pubkey) {
+                    if purgatory.has_purgatory_announcement(&owner_pk, identifier) {
+                        purgatory.extend_announcement_expiry(
+                            &owner_pk,
+                            identifier,
+                            std::time::Duration::from_secs(1800),
+                        );
+                        debug!(
+                            identifier = %identifier,
+                            owner = %owner_pubkey,
+                            "Extended purgatory announcement expiry due to git push authorization"
+                        );
+                    }
+                }
+
                 return Ok(AuthorizationResult {
                     authorized: true,
                     reason: "Authorized by state event in purgatory".to_string(),
