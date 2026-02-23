@@ -146,6 +146,34 @@ impl StatePolicy {
             "State event author authorized via maintainer set"
         );
 
+        // Extend expiry for any purgatory announcements for this identifier.
+        //
+        // Per design doc decision #4: state event arrival extends the purgatory
+        // announcement's expiry (reset the 30-minute protocol timer). This prevents
+        // premature expiry during slow sync operations — the repo is actively receiving
+        // metadata so it should stay alive.
+        //
+        // We extend for all owners that authorized this state event, since the state
+        // event proves the repo is active regardless of which owner's announcement
+        // authorized it.
+        for owner_hex in &authorized_owners {
+            if let Ok(owner_pk) = nostr_sdk::PublicKey::from_hex(owner_hex) {
+                if self.ctx.purgatory.has_purgatory_announcement(&owner_pk, &state.identifier) {
+                    self.ctx.purgatory.extend_announcement_expiry(
+                        &owner_pk,
+                        &state.identifier,
+                        std::time::Duration::from_secs(1800),
+                    );
+                    tracing::debug!(
+                        event_id = %event.id,
+                        identifier = %state.identifier,
+                        owner = %owner_hex,
+                        "Extended purgatory announcement expiry due to state event arrival"
+                    );
+                }
+            }
+        }
+
         // Duplicate check in db
         if db_repo_data.states.iter().any(|e| e.event.id.eq(&event.id)) {
             tracing::debug!("processed state event duplicate (in db): {}", event.id);
