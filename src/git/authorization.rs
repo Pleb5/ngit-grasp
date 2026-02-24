@@ -275,7 +275,7 @@ pub async fn fetch_repository_data(
     }
 
     debug!(
-        "Parsed {} announcements and {} states for identifier {}",
+        "Parsed {} announcements and {} states from database for identifier {}",
         announcements.len(),
         states.len(),
         identifier
