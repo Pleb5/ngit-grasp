@@ -1,3 +1,4 @@
+pub mod audit_cleanup;
 pub mod config;
 pub mod git;
 pub mod http;

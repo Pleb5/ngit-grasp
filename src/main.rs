@@ -7,6 +7,7 @@ use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 use ngit_grasp::{
+    audit_cleanup,
     config::{Config, DatabaseBackend},
     git, http,
     metrics::Metrics,
@@ -174,6 +175,14 @@ async fn main() -> Result<()> {
             }
         });
         info!("Expired event cleanup task started (24h interval, keeps 7 days)");
+
+        // Spawn audit event cleanup task (30m interval, removes events >2h old)
+        let audit_db = relay_with_db.database.clone();
+        let audit_git_path = PathBuf::from(config.effective_git_data_path());
+        tokio::spawn(async move {
+            audit_cleanup::run_audit_cleanup_loop(audit_db, audit_git_path).await;
+        });
+        info!("Audit event cleanup task started (30m interval, removes events >2h old)");
 
         // Start purgatory sync loop for background git data fetching
         // Create naughty list tracker for git remote domains with persistent errors (12h expiration)
