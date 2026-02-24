@@ -7,7 +7,7 @@ use nostr_relay_builder::prelude::Event;
 
 use super::PolicyContext;
 use crate::git;
-use crate::git::authorization::{collect_authorized_maintainers, fetch_repository_data};
+use crate::git::authorization::{collect_authorized_maintainers, fetch_repository_data_excluding_purgatory};
 
 /// Policy for validating PR and PR Update events
 #[derive(Clone)]
@@ -131,7 +131,7 @@ impl PrEventPolicy {
             // only be accepted for announcements that have been promoted (validated).
             // If the announcement is still in purgatory, the PR event should also go
             // to purgatory and wait for the announcement to be promoted.
-            let db_repo_data = fetch_repository_data(&self.ctx.database, &identifier).await?;
+            let db_repo_data = fetch_repository_data_excluding_purgatory(&self.ctx.database, &identifier).await?;
 
             // Extract owner pubkey from source repo path
             let owner_pubkey = crate::git::sync::extract_owner_from_repo_path(
@@ -211,7 +211,7 @@ impl PrEventPolicy {
         // only be accepted for announcements that have been promoted (validated).
         // If the announcement is still in purgatory, the PR event should also go
         // to purgatory and wait for the announcement to be promoted.
-        let db_repo_data = fetch_repository_data(&self.ctx.database, identifier).await?;
+        let db_repo_data = fetch_repository_data_excluding_purgatory(&self.ctx.database, identifier).await?;
 
         // 3. Extract list of maintainers from "a 30617:<maintainer>:<identifier>" tags
         let mut maintainer_pubkeys = std::collections::HashSet::new();

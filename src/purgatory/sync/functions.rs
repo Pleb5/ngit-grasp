@@ -104,7 +104,7 @@ pub async fn sync_identifier_next_url<C: SyncContext + ?Sized>(
     }
 
     // 3. Get repository data
-    let repo_data = match ctx.fetch_repository_data(identifier).await {
+    let repo_data = match ctx.fetch_repository_data_with_purgatory(identifier).await {
         Ok(data) => data,
         Err(e) => {
             debug!(
@@ -228,7 +228,7 @@ pub async fn get_throttled_domains_with_untried_urls<C: SyncContext + ?Sized>(
     throttle_manager: &ThrottleManager,
     git_naughty_list: &NaughtyListTracker,
 ) -> Vec<ThrottledDomainInfo> {
-    let repo_data = match ctx.fetch_repository_data(identifier).await {
+    let repo_data = match ctx.fetch_repository_data_with_purgatory(identifier).await {
         Ok(data) => data,
         Err(_) => return vec![],
     };
@@ -333,7 +333,7 @@ pub async fn sync_identifier_from_url<C: SyncContext + ?Sized>(
     };
 
     // Get repository data for target repo path
-    let repo_data = match ctx.fetch_repository_data(identifier).await {
+    let repo_data = match ctx.fetch_repository_data_with_purgatory(identifier).await {
         Ok(data) => data,
         Err(e) => {
             debug!(

@@ -38,8 +38,8 @@ use tracing::{debug, info, warn};
 use nostr_sdk::Event;
 
 use crate::git::authorization::{
-    collect_authorized_maintainers, fetch_repository_data, fetch_repository_data_with_purgatory,
-    RepositoryData,
+    collect_authorized_maintainers, fetch_repository_data_excluding_purgatory,
+    fetch_repository_data_with_purgatory, RepositoryData,
 };
 use crate::git::{self, oid_exists};
 use crate::nostr::builder::{Nip34WritePolicy, SharedDatabase};
@@ -933,20 +933,21 @@ async fn process_purgatory_state_events(
     // IMPORTANT: Use fetch_repository_data_with_purgatory to include announcements
     // that may still be in purgatory (not yet promoted). This ensures authorization
     // works correctly even if the announcement promotion happens in the same batch.
-    let mut db_repo_data = match fetch_repository_data_with_purgatory(database, purgatory, identifier).await {
-        Ok(data) => data,
-        Err(e) => {
-            warn!(
-                identifier = %identifier,
-                error = %e,
-                "Failed to fetch repository data for purgatory state events"
-            );
-            result
-                .errors
-                .push(format!("Failed to fetch repo data: {}", e));
-            return result;
-        }
-    };
+    let mut db_repo_data =
+        match fetch_repository_data_with_purgatory(database, purgatory, identifier).await {
+            Ok(data) => data,
+            Err(e) => {
+                warn!(
+                    identifier = %identifier,
+                    error = %e,
+                    "Failed to fetch repository data for purgatory state events"
+                );
+                result
+                    .errors
+                    .push(format!("Failed to fetch repo data: {}", e));
+                return result;
+            }
+        };
 
     // Process each state event in chronological order
     for entry in &purgatory_states {
@@ -1231,7 +1232,7 @@ async fn process_purgatory_pr_events(
     // NOTE: Only fetch from database, NOT purgatory. PR events should only be
     // released from purgatory when the announcement has been promoted (validated).
     // This ensures we don't accept PR events for announcements that fail validation.
-    let db_repo_data = match fetch_repository_data(database, identifier).await {
+    let db_repo_data = match fetch_repository_data_excluding_purgatory(database, identifier).await {
         Ok(data) => data,
         Err(e) => {
             warn!(
@@ -1372,7 +1373,9 @@ async fn process_purgatory_announcements(
                 error = %e,
                 "Failed to parse owner pubkey"
             );
-            result.errors.push(format!("Failed to parse owner pubkey: {}", e));
+            result
+                .errors
+                .push(format!("Failed to parse owner pubkey: {}", e));
             return result;
         }
     };
@@ -1450,10 +1453,8 @@ async fn process_purgatory_announcements(
                                         }
 
                                         // Re-process events from hot cache
-                                        let dummy_addr = SocketAddr::new(
-                                            IpAddr::V4(Ipv4Addr::LOCALHOST),
-                                            0,
-                                        );
+                                        let dummy_addr =
+                                            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
                                         for hot_event in hot_events {
                                             info!(
                                                 event_id = %hot_event.id,

@@ -234,7 +234,7 @@ pub struct RepositoryData {
 ///
 /// This performs a single database query to fetch both announcement and state events,
 /// which is more efficient than separate queries.
-pub async fn fetch_repository_data(
+pub async fn fetch_repository_data_excluding_purgatory(
     database: &SharedDatabase,
     identifier: &str,
 ) -> Result<RepositoryData> {
@@ -298,7 +298,7 @@ pub async fn fetch_repository_data_with_purgatory(
     identifier: &str,
 ) -> Result<RepositoryData> {
     // First, fetch from database
-    let mut repo_data = fetch_repository_data(database, identifier).await?;
+    let mut repo_data = fetch_repository_data_excluding_purgatory(database, identifier).await?;
 
     // Then, add announcements from purgatory
     let purgatory_announcements = purgatory.get_announcements_by_identifier(identifier);
@@ -511,7 +511,7 @@ pub async fn get_authorization_from_db(
     identifier: &str,
 ) -> Result<AuthorizationResult> {
     // Fetch all repository data with a single query
-    let repo_data = fetch_repository_data(database, identifier).await?;
+    let repo_data = fetch_repository_data_excluding_purgatory(database, identifier).await?;
 
     if repo_data.announcements.is_empty() {
         return Ok(AuthorizationResult::denied(

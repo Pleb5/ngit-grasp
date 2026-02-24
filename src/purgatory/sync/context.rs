@@ -87,7 +87,10 @@ pub trait SyncContext: Send + Sync {
     ///
     /// # Returns
     /// Repository data including announcements and state events
-    async fn fetch_repository_data(&self, identifier: &str) -> Result<RepositoryData>;
+    async fn fetch_repository_data_with_purgatory(
+        &self,
+        identifier: &str,
+    ) -> Result<RepositoryData>;
 
     /// Get all OIDs needed for purgatory events with this identifier.
     ///
@@ -283,7 +286,10 @@ impl SyncContext for RealSyncContext {
         urls
     }
 
-    async fn fetch_repository_data(&self, identifier: &str) -> Result<RepositoryData> {
+    async fn fetch_repository_data_with_purgatory(
+        &self,
+        identifier: &str,
+    ) -> Result<RepositoryData> {
         // Use the purgatory-aware variant so that clone URLs from announcements still
         // in purgatory (not yet promoted) are available. Without this, the sync loop
         // would find no URLs to fetch from and the announcement could never be promoted
@@ -585,7 +591,7 @@ pub mod mock {
     /// assert_eq!(mock.fetch_log(), vec!["https://github.com/foo/bar.git"]);
     /// ```
     pub struct MockSyncContext {
-        /// Repository data to return from fetch_repository_data
+        /// Repository data to return from fetch_repository_data_with_purgatory
         repo_data: RwLock<Option<RepositoryData>>,
 
         /// Clone URLs available for the repository (from announcements)
@@ -732,7 +738,10 @@ pub mod mock {
             self.pr_clone_urls.clone()
         }
 
-        async fn fetch_repository_data(&self, _identifier: &str) -> Result<RepositoryData> {
+        async fn fetch_repository_data_with_purgatory(
+            &self,
+            _identifier: &str,
+        ) -> Result<RepositoryData> {
             // Return stored repo_data or create a minimal one with clone URLs
             if let Some(data) = self.repo_data.read().unwrap().as_ref() {
                 // Clone the data - this is a test mock so efficiency isn't critical
