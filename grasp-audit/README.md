@@ -23,7 +23,7 @@ cargo install --path .
 grasp-audit audit --relay wss://relay.ngit.dev
 
 # Or audit a local development relay
-grasp-audit audit --relay ws://localhost:7000
+grasp-audit audit --relay ws://localhost:7334
 ```
 
 ## Usage Examples
@@ -38,10 +38,10 @@ cargo install --path .
 grasp-audit audit --relay wss://relay.ngit.dev
 
 # Audit local development relay
-grasp-audit audit --relay ws://localhost:7000 --spec nip01-smoke
+grasp-audit audit --relay ws://localhost:7334 --spec nip01-smoke
 
 # Run with isolated fixtures (for testing/debugging)
-grasp-audit audit --relay ws://localhost:7000 --mode isolated --spec push-auth
+grasp-audit audit --relay ws://localhost:7334 --mode isolated --spec push-auth
 ```
 
 ### As a Library
@@ -54,7 +54,7 @@ async fn main() -> Result<()> {
     // Create audit client with isolated fixtures (recommended for library use)
     let config = AuditConfig::isolated();
     // let config = AuditConfig::shared();  // Alternative: shared fixtures
-    let client = AuditClient::new("ws://localhost:7000", config).await?;
+    let client = AuditClient::new("ws://localhost:7334", config).await?;
 
     // Run NIP-01 smoke tests
     let results = specs::Nip01SmokeTests::run_all(&client).await;
@@ -135,7 +135,7 @@ Use this when:
 
 ```bash
 # Use isolated mode explicitly
-grasp-audit audit --relay ws://localhost:7000 --mode isolated
+grasp-audit audit --relay ws://localhost:7334 --mode isolated
 ```
 
 ```rust
