@@ -124,7 +124,14 @@ fetch_kind() {
     
     # Use --paginate to ensure we get all events, not just first page
     # nak outputs one event per line (JSONL format)
-    if ! nak req -k "$kind" --paginate "$relay" > "$output_file" 2>/dev/null; then
+    # NOTE: nak buffers output when stdout is not a TTY (e.g. non-interactive SSH).
+    # Use 'script' to provide a pseudo-TTY so nak flushes each line immediately.
+    # Then strip the nak connection banner ("connecting to ...") and carriage returns
+    # that 'script' injects into the output stream.
+    if ! script -q -c "nak req -k $kind --paginate $relay" /dev/null 2>/dev/null \
+        | tr -d '\r' \
+        | grep -v '^connecting to ' \
+        > "$output_file"; then
         log_error "Failed to fetch $description from $relay"
         return 1
     fi

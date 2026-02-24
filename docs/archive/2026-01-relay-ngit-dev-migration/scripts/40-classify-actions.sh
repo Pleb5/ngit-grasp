@@ -103,11 +103,13 @@ log_info "Building lookup tables..."
 
 # Build prod category lookup: repo|npub -> category
 declare -A PROD_CAT
+PROD_CAT_COUNT=0
 while IFS='|' read -r repo npub rest || [[ -n "$repo" ]]; do
     repo="${repo// /}"  # Remove all spaces
     npub="${npub// /}"  # Remove all spaces
     [[ -z "$repo" || -z "$npub" ]] && continue
     PROD_CAT["$repo|$npub"]="cat1"
+    PROD_CAT_COUNT=$((PROD_CAT_COUNT + 1))
 done < "$PROD_DIR/category1-complete-match.txt"
 
 while IFS='|' read -r repo npub rest || [[ -n "$repo" ]]; do
@@ -115,6 +117,7 @@ while IFS='|' read -r repo npub rest || [[ -n "$repo" ]]; do
     npub="${npub// /}"
     [[ -z "$repo" || -z "$npub" ]] && continue
     PROD_CAT["$repo|$npub"]="cat2"
+    PROD_CAT_COUNT=$((PROD_CAT_COUNT + 1))
 done < "$PROD_DIR/category2-empty-blank.txt"
 
 while IFS='|' read -r repo npub rest || [[ -n "$repo" ]]; do
@@ -122,6 +125,7 @@ while IFS='|' read -r repo npub rest || [[ -n "$repo" ]]; do
     npub="${npub// /}"
     [[ -z "$repo" || -z "$npub" ]] && continue
     PROD_CAT["$repo|$npub"]="cat3"
+    PROD_CAT_COUNT=$((PROD_CAT_COUNT + 1))
 done < "$PROD_DIR/category3-partial-match.txt"
 
 while IFS='|' read -r repo npub rest || [[ -n "$repo" ]]; do
@@ -129,17 +133,20 @@ while IFS='|' read -r repo npub rest || [[ -n "$repo" ]]; do
     npub="${npub// /}"
     [[ -z "$repo" || -z "$npub" ]] && continue
     PROD_CAT["$repo|$npub"]="cat4"
+    PROD_CAT_COUNT=$((PROD_CAT_COUNT + 1))
 done < "$PROD_DIR/category4-no-match.txt"
 
-log_info "Loaded ${#PROD_CAT[@]} prod entries"
+log_info "Loaded $PROD_CAT_COUNT prod entries"
 
 # Build archive category lookup: repo|npub -> category
 declare -A ARCHIVE_CAT
+ARCHIVE_CAT_COUNT=0
 while IFS='|' read -r repo npub rest; do
     repo="${repo// /}"
     npub="${npub// /}"
     [[ -z "$repo" || -z "$npub" ]] && continue
     ARCHIVE_CAT["$repo|$npub"]="cat1"
+    ARCHIVE_CAT_COUNT=$((ARCHIVE_CAT_COUNT + 1))
 done < "$ARCHIVE_DIR/category1-complete-match.txt"
 
 while IFS='|' read -r repo npub rest; do
@@ -147,6 +154,7 @@ while IFS='|' read -r repo npub rest; do
     npub="${npub// /}"
     [[ -z "$repo" || -z "$npub" ]] && continue
     ARCHIVE_CAT["$repo|$npub"]="cat2"
+    ARCHIVE_CAT_COUNT=$((ARCHIVE_CAT_COUNT + 1))
 done < "$ARCHIVE_DIR/category2-empty-blank.txt"
 
 while IFS='|' read -r repo npub rest; do
@@ -154,6 +162,7 @@ while IFS='|' read -r repo npub rest; do
     npub="${npub// /}"
     [[ -z "$repo" || -z "$npub" ]] && continue
     ARCHIVE_CAT["$repo|$npub"]="cat3"
+    ARCHIVE_CAT_COUNT=$((ARCHIVE_CAT_COUNT + 1))
 done < "$ARCHIVE_DIR/category3-partial-match.txt"
 
 while IFS='|' read -r repo npub rest; do
@@ -161,9 +170,10 @@ while IFS='|' read -r repo npub rest; do
     npub="${npub// /}"
     [[ -z "$repo" || -z "$npub" ]] && continue
     ARCHIVE_CAT["$repo|$npub"]="cat4"
+    ARCHIVE_CAT_COUNT=$((ARCHIVE_CAT_COUNT + 1))
 done < "$ARCHIVE_DIR/category4-no-match.txt"
 
-log_info "Loaded ${#ARCHIVE_CAT[@]} archive entries"
+log_info "Loaded $ARCHIVE_CAT_COUNT archive entries"
 
 # Build purgatory lookup: repo|npub -> 1 (if purgatory expired)
 declare -A PURGATORY
@@ -237,7 +247,7 @@ process_deletions() {
 process_deletions "$PROD_DIR/raw/deletions.json"
 process_deletions "$ARCHIVE_DIR/raw/deletions.json"
 DELETED_COUNT=0
-[[ ${#DELETED[@]} -gt 0 ]] && DELETED_COUNT=${#DELETED[@]}
+for _k in "${!DELETED[@]}"; do DELETED_COUNT=$((DELETED_COUNT + 1)); done
 log_info "Loaded $DELETED_COUNT deletion entries"
 
 # Build git ancestry lookup: repo|npub -> relationship (archive-ahead, prod-ahead, diverged, etc.)
@@ -266,17 +276,20 @@ fi
 log_info "Building unique repo list..."
 
 declare -A ALL_REPOS
+ALL_REPOS_COUNT=0
+set +u
 for key in "${!PROD_CAT[@]}"; do
-    ALL_REPOS["$key"]=1
+    [[ -z "${ALL_REPOS[$key]+x}" ]] && { ALL_REPOS["$key"]=1; ALL_REPOS_COUNT=$((ALL_REPOS_COUNT + 1)); }
 done
 for key in "${!ARCHIVE_CAT[@]}"; do
-    ALL_REPOS["$key"]=1
+    [[ -z "${ALL_REPOS[$key]+x}" ]] && { ALL_REPOS["$key"]=1; ALL_REPOS_COUNT=$((ALL_REPOS_COUNT + 1)); }
 done
 for key in "${!PURGATORY[@]}"; do
-    ALL_REPOS["$key"]=1
+    [[ -z "${ALL_REPOS[$key]+x}" ]] && { ALL_REPOS["$key"]=1; ALL_REPOS_COUNT=$((ALL_REPOS_COUNT + 1)); }
 done
+set -u
 
-log_info "Total unique repos: ${#ALL_REPOS[@]}"
+log_info "Total unique repos: $ALL_REPOS_COUNT"
 
 # ============================================================================
 # Phase 3: Classify each repo according to revised decision tree
@@ -351,6 +364,7 @@ cat_to_status() {
 }
 
 LOOP_COUNT=0
+set +u
 for key in "${!ALL_REPOS[@]}"; do
     LOOP_COUNT=$((LOOP_COUNT + 1))
     [[ $((LOOP_COUNT % 100)) -eq 0 ]] && log_info "Processed $LOOP_COUNT repos..."
@@ -473,6 +487,7 @@ for key in "${!ALL_REPOS[@]}"; do
             ;;
     esac
 done
+set -u
 
 # ============================================================================
 # Phase 4: Write output files
@@ -488,9 +503,11 @@ TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")
     echo "# Generated: $TIMESTAMP"
     echo "# Format: repo | npub | prod_status | archive_status | context | reason"
     echo "#"
+    set +u
     for line in "${READY_LINES[@]}"; do
         echo "$line"
     done
+    set -u
 } > "$READY_FILE"
 
 # Write needs-resync.txt
@@ -503,9 +520,11 @@ TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")
     echo "#   purgatory-expired = archive tried to sync but failed (30min timeout)"
     echo "#   none = archive never tried or announcement missing"
     echo "#"
+    set +u
     for line in "${RESYNC_LINES[@]}"; do
         echo "$line"
     done
+    set -u
 } > "$RESYNC_FILE"
 
 # Write manual-review.txt
@@ -514,9 +533,11 @@ TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")
     echo "# Generated: $TIMESTAMP"
     echo "# Format: repo | npub | prod_status | archive_status | context | reason"
     echo "#"
+    set +u
     for line in "${REVIEW_LINES[@]}"; do
         echo "$line"
     done
+    set -u
 } > "$REVIEW_FILE"
 
 # ============================================================================
@@ -525,9 +546,11 @@ TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")
 
 log_info "Generating summary..."
 
+set +u
 TOTAL_READY="${#READY_LINES[@]}"
 TOTAL_RESYNC="${#RESYNC_LINES[@]}"
 TOTAL_REVIEW="${#REVIEW_LINES[@]}"
+set -u
 TOTAL=$((TOTAL_READY + TOTAL_RESYNC + TOTAL_REVIEW))
 
 # Calculate percentages
