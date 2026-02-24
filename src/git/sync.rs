@@ -1076,6 +1076,57 @@ async fn process_purgatory_state_events(
                         event_id = %entry.event.id,
                         "Released state event from purgatory"
                     );
+
+                    // Promote purgatory announcements for repos that received OIDs via
+                    // the state event copy above.
+                    //
+                    // process_state_with_git_data copies OIDs from source_repo_path to every
+                    // other owner repo listed in db_repo_data.announcements.  When an
+                    // announcement for one of those owners is still in purgatory (e.g. the
+                    // meshman announcement waiting while c03rad0's state event triggered the
+                    // copy), the announcement would never be promoted because
+                    // process_purgatory_announcements only promotes the owner derived from
+                    // source_repo_path.  Without this promotion the purgatory expiry timer
+                    // keeps running and eventually deletes the bare repo even though the
+                    // announcement was effectively satisfied.
+                    for announcement in &db_repo_data.announcements {
+                        let target_repo_path = git_data_path.join(announcement.repo_path());
+                        if target_repo_path == source_repo_path {
+                            // This is the source repo — already handled by
+                            // process_purgatory_announcements called before us.
+                            continue;
+                        }
+                        let owner = &announcement.event.pubkey;
+                        if let Some(ann_event) = purgatory.promote_announcement(owner, identifier) {
+                            match database.save_event(&ann_event).await {
+                                Ok(_) => {
+                                    info!(
+                                        identifier = %identifier,
+                                        owner = %owner,
+                                        event_id = %ann_event.id,
+                                        "Promoted purgatory announcement for owner whose repo received OIDs via state event copy"
+                                    );
+                                    if let Some(relay) = local_relay {
+                                        relay.notify_event(ann_event.clone());
+                                    }
+                                    result.announcements_released += 1;
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        identifier = %identifier,
+                                        owner = %owner,
+                                        event_id = %ann_event.id,
+                                        error = %e,
+                                        "Failed to save promoted announcement to database"
+                                    );
+                                    result.errors.push(format!(
+                                        "Failed to save promoted announcement for owner {}: {}",
+                                        owner, e
+                                    ));
+                                }
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
                     warn!(
