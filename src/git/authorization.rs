@@ -410,31 +410,6 @@ fn get_maintainers_recursive(
     }
 }
 
-/// Collect all authorized maintainers as a flat set from all announcements
-///
-/// This is a convenience function that flattens the per-owner maintainer lists
-/// into a single set. Use this when you don't need owner-specific authorization.
-pub fn collect_all_authorized_maintainers(
-    announcements: &[RepositoryAnnouncement],
-) -> HashSet<String> {
-    let by_owner = collect_authorized_maintainers(announcements);
-    let mut all_authorized = HashSet::new();
-
-    for maintainers in by_owner.values() {
-        for maintainer in maintainers {
-            all_authorized.insert(maintainer.clone());
-        }
-    }
-
-    debug!(
-        "Collected {} total authorized maintainers from {} owners",
-        all_authorized.len(),
-        by_owner.len()
-    );
-
-    all_authorized
-}
-
 /// Find the latest state event authored by an authorized maintainer
 ///
 /// Returns the state with the highest created_at timestamp among those
@@ -495,55 +470,6 @@ pub fn is_latest_state(
         }
     }
     true
-}
-
-/// Get the authorization result for a repository from the database
-///
-/// This is the main entry point for authorization that queries the database directly.
-/// It:
-/// 1. Fetches all announcements and states for the identifier with a single query
-/// 2. Collects all authorized maintainers from announcements
-/// 3. Finds the latest state event from an authorized maintainer
-///
-/// Returns an `AuthorizationResult` that indicates whether a push is authorized.
-pub async fn get_authorization_from_db(
-    database: &SharedDatabase,
-    identifier: &str,
-) -> Result<AuthorizationResult> {
-    // Fetch all repository data with a single query
-    let repo_data = fetch_repository_data_excluding_purgatory(database, identifier).await?;
-
-    if repo_data.announcements.is_empty() {
-        return Ok(AuthorizationResult::denied(
-            "No repository announcement found",
-        ));
-    }
-
-    // Collect all authorized maintainers (flattened across all owners)
-    let authorized = collect_all_authorized_maintainers(&repo_data.announcements);
-
-    if authorized.is_empty() {
-        return Ok(AuthorizationResult::denied(
-            "No authorized maintainers found",
-        ));
-    }
-
-    debug!(
-        "Found {} authorized maintainers for repository {}",
-        authorized.len(),
-        identifier
-    );
-
-    // Find the latest authorized state
-    match find_latest_authorized_state(&repo_data.states, &authorized) {
-        Some(state) => Ok(AuthorizationResult::authorized(
-            state.clone(),
-            authorized.into_iter().collect(),
-        )),
-        None => Ok(AuthorizationResult::denied(
-            "No state event found from authorized publishers",
-        )),
-    }
 }
 
 /// Get the authorization result for a repository scoped to a specific owner
