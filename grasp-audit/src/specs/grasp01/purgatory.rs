@@ -46,17 +46,17 @@ impl PurgatoryTests {
         results.add(Self::test_announcement_not_served_before_git_data(client).await);
         results.add(Self::test_announcement_served_after_git_push(client).await);
         results.add(Self::test_bare_repo_exists_for_purgatory_announcement(client).await);
+
+        // State event purgatory tests
         results.add(Self::test_state_event_accepted_for_purgatory_announcement(client).await);
+        results.add(Self::test_state_event_not_served_before_git_data(client).await);
+        results.add(Self::test_state_event_served_after_git_push(client).await);
 
         // Deletion event tests (NIP-09)
         results.add(Self::test_deletion_by_event_id_removes_purgatory_state_event(client).await);
         results.add(
             Self::test_deletion_by_coordinate_removes_purgatory_state_event(client).await,
         );
-
-        // State event purgatory tests (already implemented)
-        results.add(Self::test_state_event_not_served_before_git_data(client).await);
-        results.add(Self::test_state_event_served_after_git_push(client).await);
 
         // PR purgatory tests
         results.add(Self::test_pr_event_accepted_into_purgatory_and_isnt_served(client).await);
@@ -92,9 +92,12 @@ impl PurgatoryTests {
         .run(|| async {
             let ctx = TestContext::new(client);
 
-            // Create a fresh repo announcement (not the served variant)
+            // Use the purgatory-specific fixture which creates its own independent repo.
+            // The shared ValidRepoSent may already be promoted (served) by the time this
+            // test runs if earlier specs triggered OwnerStateDataPushed. PurgatoryValidRepoSent
+            // is never promoted by any other test so the announcement stays in purgatory.
             let repo = ctx
-                .get_fixture(FixtureKind::ValidRepoSent)
+                .get_fixture(FixtureKind::PurgatoryValidRepoSent)
                 .await
                 .map_err(|e| format!("Failed to create repo announcement: {}", e))?;
 
@@ -106,7 +109,7 @@ impl PurgatoryTests {
                 .ok_or("Missing d tag in repo announcement")?
                 .to_string();
 
-            // Query for the announcement - should NOT be served
+            // Query for the announcement - should NOT be served (purgatory)
             let filter = Filter::new()
                 .kind(Kind::GitRepoAnnouncement)
                 .author(client.public_key())
@@ -153,13 +156,13 @@ impl PurgatoryTests {
         .run(|| async {
             let ctx = TestContext::new(client);
 
-            // OwnerStateDataPushed fixture handles the full lifecycle:
+            // PurgatoryOwnerStateDataPushed fixture handles the full lifecycle:
             // 1. Creates repo announcement (purgatory)
             // 2. Creates state event (purgatory)
             // 3. Pushes git data
             // 4. Verifies events are served
             let state_event = ctx
-                .get_fixture(FixtureKind::OwnerStateDataPushed)
+                .get_fixture(FixtureKind::PurgatoryOwnerStateDataPushed)
                 .await
                 .map_err(|e| format!("Failed to complete full lifecycle: {}", e))?;
 
@@ -190,18 +193,16 @@ impl PurgatoryTests {
                 ));
             }
 
-            // Verify state event is served
-            let state_filter = Filter::new()
-                .kind(Kind::RepoState)
-                .author(client.public_key())
-                .identifier(&repo_id);
-
-            let state_events = client
-                .query(state_filter)
+            // Verify state event is served by querying its specific event ID.
+            // We intentionally query by ID rather than kind+author+identifier because
+            // other tests (e.g. push-auth) may have sent a newer replaceable state event
+            // for the same repo_id, which would displace this one in an identifier query.
+            let served = client
+                .is_event_on_relay(state_event.id)
                 .await
-                .map_err(|e| format!("Failed to query state events: {}", e))?;
+                .map_err(|e| format!("Failed to query state event: {}", e))?;
 
-            if !state_events.iter().any(|e| e.id == state_event.id) {
+            if !served {
                 return Err(format!(
                     "State event not served after git push. Event ID: {}",
                     state_event.id
@@ -234,9 +235,9 @@ impl PurgatoryTests {
         .run(|| async {
             let ctx = TestContext::new(client);
 
-            // Get a repo announcement (in purgatory, no git data yet)
+            // Get the purgatory-specific repo announcement (never promoted by other tests)
             let repo = ctx
-                .get_fixture(FixtureKind::ValidRepoSent)
+                .get_fixture(FixtureKind::PurgatoryValidRepoSent)
                 .await
                 .map_err(|e| format!("Failed to create repo announcement: {}", e))?;
 
@@ -314,9 +315,9 @@ impl PurgatoryTests {
         .run(|| async {
             let ctx = TestContext::new(client);
 
-            // Get a repo announcement (in purgatory)
+            // Get the purgatory-specific repo announcement (never promoted by other tests)
             let repo = ctx
-                .get_fixture(FixtureKind::ValidRepoSent)
+                .get_fixture(FixtureKind::PurgatoryValidRepoSent)
                 .await
                 .map_err(|e| format!("Failed to create repo announcement: {}", e))?;
 
@@ -407,11 +408,13 @@ impl PurgatoryTests {
         .run(|| async {
             let ctx = TestContext::new(client);
 
-            // Get a repo with git data already pushed
+            // Use the isolated purgatory repo so this test's new state event
+            // does not displace the shared OwnerStateDataPushed state event
+            // that push-authorization tests depend on.
             let existing_state = ctx
-                .get_fixture(FixtureKind::OwnerStateDataPushed)
+                .get_fixture(FixtureKind::PurgatoryOwnerStateDataPushed)
                 .await
-                .map_err(|e| format!("Failed to get existing repo: {}", e))?;
+                .map_err(|e| format!("Failed to get purgatory test repo: {}", e))?;
 
             let repo_id = existing_state
                 .tags
@@ -461,7 +464,7 @@ impl PurgatoryTests {
     /// Spec: GRASP-01 Line 22
     /// "...kept in purgatory (not served) until the related git data arrives"
     ///
-    /// This test verifies the full lifecycle using OwnerStateDataPushed fixture:
+    /// This test verifies the full lifecycle using PurgatoryOwnerStateDataPushed fixture:
     /// 1. State event is sent (enters purgatory)
     /// 2. Git data is pushed matching the state event
     /// 3. State event is now served
@@ -474,32 +477,22 @@ impl PurgatoryTests {
         .run(|| async {
             let ctx = TestContext::new(client);
 
-            // OwnerStateDataPushed handles the full lifecycle
+            // PurgatoryOwnerStateDataPushed handles the full lifecycle
             let state_event = ctx
-                .get_fixture(FixtureKind::OwnerStateDataPushed)
+                .get_fixture(FixtureKind::PurgatoryOwnerStateDataPushed)
                 .await
                 .map_err(|e| format!("Failed to complete full lifecycle: {}", e))?;
 
-            // Verify state event is now served
-            let repo_id = state_event
-                .tags
-                .iter()
-                .find(|t| t.kind() == TagKind::d())
-                .and_then(|t| t.content())
-                .ok_or("Missing d tag in state event")?
-                .to_string();
-
-            let filter = Filter::new()
-                .kind(Kind::RepoState)
-                .author(client.public_key())
-                .identifier(&repo_id);
-
-            let events = client
-                .query(filter)
+            // Verify state event is served by querying its specific event ID.
+            // We intentionally query by ID rather than kind+author+identifier because
+            // other tests (e.g. push-auth) may have sent a newer replaceable state event
+            // for the same repo_id, which would displace this one in an identifier query.
+            let served = client
+                .is_event_on_relay(state_event.id)
                 .await
-                .map_err(|e| format!("Failed to query state events: {}", e))?;
+                .map_err(|e| format!("Failed to query state event: {}", e))?;
 
-            if !events.iter().any(|e| e.id == state_event.id) {
+            if !served {
                 return Err(format!(
                     "State event not served after git push. Event ID: {}",
                     state_event.id
@@ -665,7 +658,7 @@ impl PurgatoryTests {
     /// each referencing an event the author is requesting to be deleted."
     ///
     /// This test verifies:
-    /// 1. Get a promoted repo (OwnerStateDataPushed) so git pushes are possible
+    /// 1. Get a promoted repo (PurgatoryOwnerStateDataPushed) so git pushes are possible
     /// 2. Clone the repo and create a unique commit (not yet pushed)
     /// 3. Submit a state event pointing to that unique commit (enters purgatory)
     /// 4. Send a kind 5 deletion event referencing the state event by event ID
@@ -681,11 +674,12 @@ impl PurgatoryTests {
         .run(|| async {
             let ctx = TestContext::new(client);
 
-            // Stage 1: get a promoted repo with git data already on the relay
+            // Stage 1: get the isolated purgatory repo (independent from the shared
+            // OwnerStateDataPushed chain that push-authorization tests depend on)
             let existing_state = ctx
-                .get_fixture(FixtureKind::OwnerStateDataPushed)
+                .get_fixture(FixtureKind::PurgatoryOwnerStateDataPushed)
                 .await
-                .map_err(|e| format!("Failed to get promoted repo: {}", e))?;
+                .map_err(|e| format!("Failed to get purgatory test repo: {}", e))?;
 
             let repo_id = existing_state
                 .tags
@@ -788,7 +782,7 @@ impl PurgatoryTests {
     /// event up to the `created_at` timestamp of the deletion request event."
     ///
     /// This test verifies:
-    /// 1. Get a promoted repo (OwnerStateDataPushed) so git pushes are possible
+    /// 1. Get a promoted repo (PurgatoryOwnerStateDataPushed) so git pushes are possible
     /// 2. Generate a fresh keypair for a new maintainer
     /// 3. Send a replacement owner announcement adding the new maintainer (goes to DB)
     /// 4. Send a state event signed by the new maintainer pointing to a unique commit
@@ -807,11 +801,14 @@ impl PurgatoryTests {
         .run(|| async {
             let ctx = TestContext::new(client);
 
-            // Stage 1: get a promoted repo with git data already on the relay
+            // Stage 1: get the isolated purgatory repo (independent from the shared
+            // OwnerStateDataPushed chain that push-authorization tests depend on).
+            // This test sends a replacement announcement (kind 30617) for the repo which
+            // would corrupt the shared repo's maintainer set if we used OwnerStateDataPushed.
             let existing_state = ctx
-                .get_fixture(FixtureKind::OwnerStateDataPushed)
+                .get_fixture(FixtureKind::PurgatoryOwnerStateDataPushed)
                 .await
-                .map_err(|e| format!("Failed to get promoted repo: {}", e))?;
+                .map_err(|e| format!("Failed to get purgatory test repo: {}", e))?;
 
             let repo_id = existing_state
                 .tags

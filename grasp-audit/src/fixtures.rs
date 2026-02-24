@@ -287,6 +287,36 @@ pub enum FixtureKind {
     /// - Returns: the served PR event
     PREvent2Served,
 
+    /// Independent repo announcement, used exclusively by purgatory tests.
+    ///
+    /// Creates its own fresh repo announcement (unique repo_id) that is NOT shared with
+    /// the main ValidRepoSent chain. The shared ValidRepoSent may already be promoted
+    /// (served) by the time purgatory tests run if earlier specs triggered OwnerStateDataPushed.
+    /// This fixture is never promoted by any other test, so the announcement stays in purgatory.
+    ///
+    /// - No dependencies
+    /// - Sends its own announcement to the relay
+    /// - Returns the repo announcement event (kind 30617)
+    PurgatoryValidRepoSent,
+
+    /// Independent owner state data pushed, used exclusively by purgatory tests.
+    ///
+    /// This fixture creates its own completely independent repo (fresh UUID, own announcement,
+    /// own state event, own git push) that is NOT shared with the main OwnerStateDataPushed
+    /// chain. It exists so that purgatory tests which mutate relay state (sending replacement
+    /// announcements, new state events pointing to non-existent commits, etc.) do not corrupt
+    /// the shared repo that push-authorization tests depend on.
+    ///
+    /// Stages (self-contained, no external dependencies):
+    /// 1. Creates a fresh repo announcement with a unique repo_id
+    /// 2. Creates and sends an owner state event (purgatory)
+    /// 3. Pushes git data (DETERMINISTIC_COMMIT_HASH) to release from purgatory
+    /// 4. Verifies state event is served
+    ///
+    /// - No dependencies (creates its own ValidRepoSent + OwnerStateDataPushed internally)
+    /// - Returns the owner state event (kind 30618) after git data is pushed
+    PurgatoryOwnerStateDataPushed,
+
     /// Owner's state event with git data successfully pushed (full 4-stage fixture)
     ///
     /// This fixture represents the complete flow for testing state push authorization:
@@ -372,6 +402,12 @@ impl FixtureKind {
             Self::PREvent2GitDataPushed => vec![Self::PREvent2Sent],
             Self::PREvent2Served => vec![Self::PREvent2GitDataPushed],
 
+            // PurgatoryValidRepoSent has no dependencies — creates its own fresh repo
+            Self::PurgatoryValidRepoSent => vec![],
+
+            // PurgatoryOwnerStateDataPushed depends on PurgatoryValidRepoSent
+            Self::PurgatoryOwnerStateDataPushed => vec![Self::PurgatoryValidRepoSent],
+
             // OwnerStateDataPushed depends on OwnerRepoStateSent (git push + purgatory release)
             Self::OwnerStateDataPushed => vec![Self::OwnerRepoStateSent],
 
@@ -416,6 +452,10 @@ impl FixtureKind {
             Self::PREvent2Served => true,
             // HeadSetToDevelopBranch sends its state event internally
             Self::HeadSetToDevelopBranch => true,
+            // PurgatoryValidRepoSent sends its own announcement internally
+            Self::PurgatoryValidRepoSent => true,
+            // PurgatoryOwnerStateDataPushed sends its own state event and git push internally
+            Self::PurgatoryOwnerStateDataPushed => true,
             // ValidRepoServed doesn't send anything itself, just returns cached event
             Self::ValidRepoServed => true,
             // OwnerRepoStateSent sends its state event and notes purgatory internally
@@ -926,6 +966,9 @@ impl<'a> TestContext<'a> {
             FixtureKind::PREvent2GitDataPushed => self.build_pr_event_2_git_data_pushed().await,
             FixtureKind::PREvent2Served => self.build_pr_event_2_served().await,
 
+            FixtureKind::PurgatoryValidRepoSent => self.build_purgatory_valid_repo_sent().await,
+            FixtureKind::PurgatoryOwnerStateDataPushed => self.build_purgatory_owner_state_data_pushed().await,
+
             FixtureKind::OwnerStateDataPushed => self.build_owner_state_data_pushed().await,
 
             FixtureKind::MaintainerStateDataPushed => {
@@ -998,6 +1041,166 @@ impl<'a> TestContext<'a> {
             .and_then(|t| t.content())
             .map(|s| s.to_string())
             .ok_or_else(|| anyhow::anyhow!("Missing d tag in repo announcement"))
+    }
+
+    /// Build PurgatoryValidRepoSent fixture: independent repo announcement for purgatory tests.
+    ///
+    /// Creates a fresh repo announcement with a unique repo_id, sends it to the relay,
+    /// and returns it. Never promoted by any other test so the announcement stays in purgatory.
+    async fn build_purgatory_valid_repo_sent(&self) -> Result<Event> {
+        use nostr_sdk::prelude::*;
+
+        let repo_id = format!(
+            "fixture-PurgatoryValidRepoSent-{}",
+            &uuid::Uuid::new_v4().to_string()[..8]
+        );
+
+        let relay_domain = self.get_relay_domain().await?;
+        let relay_url = format!("ws://{}", relay_domain);
+        let http_url = format!("http://{}", relay_domain);
+
+        let npub = self
+            .client
+            .public_key()
+            .to_bech32()
+            .map_err(|e| anyhow::anyhow!("Failed to convert pubkey to bech32: {}", e))?;
+
+        let announcement = self
+            .client
+            .event_builder(Kind::GitRepoAnnouncement, "")
+            .tag(Tag::identifier(&repo_id))
+            .tag(Tag::custom(TagKind::custom("name"), vec![repo_id.clone()]))
+            .tag(Tag::custom(
+                TagKind::custom("clone"),
+                vec![format!("{}/{}/{}.git", http_url, npub, repo_id)],
+            ))
+            .tag(Tag::custom(TagKind::custom("relays"), vec![relay_url]))
+            .build(self.client.keys())
+            .map_err(|e| anyhow::anyhow!("Failed to build repo announcement: {}", e))?;
+
+        self.client.send_event(announcement.clone()).await?;
+
+        Ok(announcement)
+    }
+
+    /// Build PurgatoryOwnerStateDataPushed fixture: a self-contained independent repo for purgatory tests.
+    ///
+    /// Creates its own fresh repo announcement (unique repo_id), state event, and git push
+    /// without touching the shared OwnerStateDataPushed chain. This ensures that purgatory
+    /// tests which mutate relay state (replacement announcements, new state events, deletions)
+    /// do not corrupt the repo that push-authorization tests depend on.
+    async fn build_purgatory_owner_state_data_pushed(&self) -> Result<Event> {
+        use nostr_sdk::prelude::*;
+
+        // ============================================================
+        // Step 1: Get the cached PurgatoryValidRepoSent announcement
+        // (ensured as a dependency before this is called)
+        // ============================================================
+        let announcement = self.get_cached_dependency(FixtureKind::PurgatoryValidRepoSent)?;
+        let repo_id = self.extract_repo_id(&announcement)?;
+
+        let relay_domain = self.get_relay_domain().await?;
+
+        let npub = self
+            .client
+            .public_key()
+            .to_bech32()
+            .map_err(|e| anyhow::anyhow!("Failed to convert pubkey to bech32: {}", e))?;
+
+        // ============================================================
+        // Step 2: Create and send owner state event (enters purgatory)
+        // ============================================================
+        let base_time = Timestamp::now().as_secs();
+        let older_timestamp = Timestamp::from(base_time - 10);
+
+        let state_event = self
+            .client
+            .event_builder(Kind::RepoState, "")
+            .tag(Tag::identifier(&repo_id))
+            .tag(Tag::custom(
+                TagKind::custom("refs/heads/main"),
+                vec![DETERMINISTIC_COMMIT_HASH.to_string()],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("HEAD"),
+                vec!["ref: refs/heads/main".to_string()],
+            ))
+            .custom_time(older_timestamp)
+            .build(self.client.keys())
+            .map_err(|e| anyhow::anyhow!("Failed to build state event: {}", e))?;
+
+        self.client
+            .send_event_and_note_purgatory(state_event.clone())
+            .await?;
+
+        // ============================================================
+        // Step 3: Clone repo, create deterministic commit, push
+        // ============================================================
+        let clone_path = clone_repo(&relay_domain, &npub, &repo_id)
+            .map_err(|e| anyhow::anyhow!("Failed to clone repo: {}", e))?;
+
+        let cleanup = |path: &PathBuf| {
+            let _ = fs::remove_dir_all(path);
+        };
+
+        let commit_hash = match create_deterministic_commit(&clone_path, "Initial commit") {
+            Ok(h) => h,
+            Err(e) => {
+                cleanup(&clone_path);
+                return Err(anyhow::anyhow!("Failed to create deterministic commit: {}", e));
+            }
+        };
+
+        if commit_hash != DETERMINISTIC_COMMIT_HASH {
+            cleanup(&clone_path);
+            return Err(anyhow::anyhow!(
+                "Commit hash mismatch: got {}, expected {}",
+                commit_hash,
+                DETERMINISTIC_COMMIT_HASH
+            ));
+        }
+
+        let branch_out = Command::new("git")
+            .args(["branch", "main"])
+            .current_dir(&clone_path)
+            .output();
+        if let Ok(o) = &branch_out {
+            if !o.status.success() {
+                // branch may already exist (detached HEAD clone) — ignore
+            }
+        }
+
+        let _ = Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(&clone_path)
+            .output();
+
+        let push_result = try_push(&clone_path);
+        cleanup(&clone_path);
+
+        match push_result {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(anyhow::anyhow!(
+                    "PurgatoryOwnerStateDataPushed git push rejected (state event points to {})",
+                    DETERMINISTIC_COMMIT_HASH
+                ));
+            }
+            Err(e) => return Err(anyhow::anyhow!("PurgatoryOwnerStateDataPushed push error: {}", e)),
+        }
+
+        // ============================================================
+        // Step 4: Verify state event released from purgatory
+        // ============================================================
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        if !self.client.is_event_on_relay(state_event.id).await? {
+            return Err(anyhow::anyhow!(
+                "PurgatoryOwnerStateDataPushed state event not released from purgatory"
+            ));
+        }
+
+        Ok(state_event)
     }
 
     /// Build OwnerStateDataPushed fixture: git push + purgatory release for owner's state event

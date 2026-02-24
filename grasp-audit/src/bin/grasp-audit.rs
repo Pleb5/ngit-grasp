@@ -144,50 +144,55 @@ async fn main() -> Result<()> {
                     println!("Running all tests...\n");
                     let mut all_results = AuditResult::new("All GRASP-01 Tests");
 
-                    // Repository creation tests
-                    println!("  → Repository creation tests...");
-                    let repo_results = specs::RepositoryCreationTests::run_all(&client, &relay_domain).await;
-                    all_results.merge(repo_results);
-
-                    // Git clone tests
-                    println!("  → Git clone tests...");
-                    let clone_results = specs::GitCloneTests::run_all(&client, &relay_domain).await;
-                    all_results.merge(clone_results);
-
-                    // Git filter capability tests
-                    println!("  → Git filter capability tests...");
-                    let filter_results = specs::GitFilterTests::run_all(&client, &relay_domain).await;
-                    all_results.merge(filter_results);
-
-                    // Push authorization tests
-                    println!("  → Push authorization tests...");
-                    let push_results = specs::PushAuthorizationTests::run_all(&client, &relay_domain).await;
-                    all_results.merge(push_results);
-
-                    // Event acceptance policy tests
-                    println!("  → Event acceptance policy tests...");
-                    let event_results = specs::EventAcceptancePolicyTests::run_all(&client).await;
-                    all_results.merge(event_results);
-
-                    // NIP-01 smoke tests
+                    // NIP-01 smoke tests (stateless - no shared fixture dependencies)
                     println!("  → NIP-01 smoke tests...");
                     let nip01_results = specs::Nip01SmokeTests::run_all(&client).await;
                     all_results.merge(nip01_results);
 
-                    // NIP-11 document tests
+                    // NIP-11 document tests (stateless)
                     println!("  → NIP-11 document tests...");
                     let nip11_results = specs::Nip11DocumentTests::run_all(&client).await;
                     all_results.merge(nip11_results);
 
-                    // CORS tests
+                    // CORS tests (stateless HTTP checks)
                     println!("  → CORS tests...");
                     let cors_results = specs::CorsTests::run_all(&client, &relay_domain).await;
                     all_results.merge(cors_results);
 
-                    // Purgatory tests
+                    // Repository creation tests (uses ValidRepoSent only - no state events)
+                    println!("  → Repository creation tests...");
+                    let repo_results = specs::RepositoryCreationTests::run_all(&client, &relay_domain).await;
+                    all_results.merge(repo_results);
+
+                    // Git clone tests (uses ValidRepoSent only - no state events)
+                    println!("  → Git clone tests...");
+                    let clone_results = specs::GitCloneTests::run_all(&client, &relay_domain).await;
+                    all_results.merge(clone_results);
+
+                    // Git filter capability tests (uses ValidRepoSent only - no state events)
+                    println!("  → Git filter capability tests...");
+                    let filter_results = specs::GitFilterTests::run_all(&client, &relay_domain).await;
+                    all_results.merge(filter_results);
+
+                    // Event acceptance policy tests (uses ValidRepoServed - no extra state events)
+                    println!("  → Event acceptance policy tests...");
+                    let event_results = specs::EventAcceptancePolicyTests::run_all(&client).await;
+                    all_results.merge(event_results);
+
+                    // Purgatory tests MUST run before push-auth.
+                    // Push-auth sends new replaceable state events (kind 30618) for the same
+                    // repo_id as OwnerStateDataPushed (e.g. test_head_set_after_git_push_with_required_oids
+                    // sends a develop1 state event that displaces the original). If purgatory ran
+                    // after push-auth, is_event_on_relay(original_id) would return false because
+                    // the original state event has been replaced on the relay.
                     println!("  → Purgatory tests...");
                     let purgatory_results = specs::PurgatoryTests::run_all(&client).await;
                     all_results.merge(purgatory_results);
+
+                    // Push authorization tests (mutates shared state - must run last among git specs)
+                    println!("  → Push authorization tests...");
+                    let push_results = specs::PushAuthorizationTests::run_all(&client, &relay_domain).await;
+                    all_results.merge(push_results);
 
                     println!();
                     all_results
