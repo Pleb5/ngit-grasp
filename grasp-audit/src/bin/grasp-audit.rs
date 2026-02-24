@@ -27,7 +27,7 @@ enum Commands {
         #[arg(short, long, default_value = "shared")]
         mode: String,
 
-        /// Spec to test (nip01-smoke, nip11, event-acceptance, cors, git-clone, git-filter, push-auth, repo-creation, all)
+        /// Spec to test (nip01-smoke, nip11, event-acceptance, cors, git-clone, git-filter, push-auth, repo-creation, purgatory, all)
         #[arg(short, long, default_value = "all")]
         spec: String,
 
@@ -136,6 +136,10 @@ async fn main() -> Result<()> {
                     println!("Running repository creation tests...\n");
                     specs::RepositoryCreationTests::run_all(&client, &relay_domain).await
                 }
+                "purgatory" => {
+                    println!("Running purgatory tests...\n");
+                    specs::PurgatoryTests::run_all(&client).await
+                }
                 "all" => {
                     println!("Running all tests...\n");
                     let mut all_results = AuditResult::new("All GRASP-01 Tests");
@@ -180,12 +184,17 @@ async fn main() -> Result<()> {
                     let cors_results = specs::CorsTests::run_all(&client, &relay_domain).await;
                     all_results.merge(cors_results);
 
+                    // Purgatory tests
+                    println!("  → Purgatory tests...");
+                    let purgatory_results = specs::PurgatoryTests::run_all(&client).await;
+                    all_results.merge(purgatory_results);
+
                     println!();
                     all_results
                 }
                 _ => {
                     return Err(anyhow!(
-                        "Unknown spec: {}. Use 'nip01-smoke', 'nip11', 'event-acceptance', 'cors', 'git-clone', 'git-filter', 'push-auth', 'repo-creation', or 'all'",
+                        "Unknown spec: {}. Use 'nip01-smoke', 'nip11', 'event-acceptance', 'cors', 'git-clone', 'git-filter', 'push-auth', 'repo-creation', 'purgatory', or 'all'",
                         spec
                     ))
                 }
