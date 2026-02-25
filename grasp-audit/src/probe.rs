@@ -746,7 +746,7 @@ pub async fn run_probe(
                         .unwrap_or("unknown")
                         .to_string();
                     checks.push(ProbeCheck {
-                        name: "find_announcement",
+                        name: "serves_latest_announcement",
                         passed: true,
                         skipped: false,
                         duration_ms: 0,
@@ -756,7 +756,7 @@ pub async fn run_probe(
                 }
                 None => {
                     checks.push(ProbeCheck {
-                        name: "find_announcement",
+                        name: "serves_latest_announcement",
                         passed: false,
                         skipped: false,
                         duration_ms: 0,
@@ -788,13 +788,6 @@ pub async fn run_probe(
                     .unwrap_or("unknown")
                     .to_string();
 
-                // detail (npub/identifier) only shown in read-only mode
-                let detail_id = if read_only {
-                    Some(format!("{}/{}", ann_npub, ann_id))
-                } else {
-                    None
-                };
-
                 // Prefer the clone tag URL; fall back to constructing from relay
                 let fetch_url = ev
                     .tags
@@ -825,7 +818,7 @@ pub async fn run_probe(
                             passed: true,
                             skipped: false,
                             duration_ms: step6_ms,
-                            detail: detail_id,
+                             detail: None,
                             error: None,
                         });
                         Some(body)
@@ -836,7 +829,7 @@ pub async fn run_probe(
                             passed: false,
                             skipped: false,
                             duration_ms: step6_ms,
-                            detail: detail_id,
+                             detail: None,
                             error: Some(format!("HTTP {}", resp.status())),
                         });
                         None
@@ -847,7 +840,7 @@ pub async fn run_probe(
                             passed: false,
                             skipped: false,
                             duration_ms: step6_ms,
-                            detail: detail_id,
+                             detail: None,
                             error: Some(e.to_string()),
                         });
                         None
@@ -858,7 +851,7 @@ pub async fn run_probe(
                             passed: false,
                             skipped: false,
                             duration_ms: step6_ms,
-                            detail: detail_id,
+                             detail: None,
                             error: Some("timeout".to_string()),
                         });
                         None
