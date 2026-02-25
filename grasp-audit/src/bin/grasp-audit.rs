@@ -37,9 +37,11 @@ enum Commands {
         #[arg(long)]
         nsec: Option<String>,
 
-        /// Read-only mode: skip write steps, only check existing repos
+        /// Create a test repo on the relay to verify the full write path
+        /// (publish events, git push, verify refs match state).
+        /// Requires write access; use --nsec for whitelisted relays.
         #[arg(long, default_value_t = false)]
-        read_only: bool,
+        create_repo: bool,
     },
 
     /// Run audit tests against a server
@@ -90,7 +92,7 @@ async fn main() -> Result<()> {
             timeout,
             watch,
             nsec,
-            read_only,
+            create_repo,
         } => {
             // Parse nsec if provided
             let keys = if let Some(nsec_str) = nsec {
@@ -101,6 +103,9 @@ async fn main() -> Result<()> {
             } else {
                 None
             };
+
+            // read_only is the default; --create-repo opts into the write path
+            let read_only = !create_repo;
 
             // Overall probe timeout: min(20s, watch_interval) to prevent
             // overlapping runs under --watch or cron scheduling.
