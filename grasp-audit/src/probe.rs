@@ -799,8 +799,10 @@ pub async fn run_probe(
                 .await;
                 let step6_ms = step6_start.elapsed().as_millis() as u64;
 
-                match refs_result {
+                // Capture body for git_refs_match_state if fetch succeeds
+                let refs_body_fallback: Option<String> = match refs_result {
                     Ok(Ok(resp)) if resp.status().is_success() => {
+                        let body = resp.text().await.unwrap_or_default();
                         checks.push(ProbeCheck {
                             name: "git_fetch_refs",
                             passed: true,
@@ -809,6 +811,7 @@ pub async fn run_probe(
                             detail: detail_id,
                             error: None,
                         });
+                        Some(body)
                     }
                     Ok(Ok(resp)) => {
                         checks.push(ProbeCheck {
@@ -819,6 +822,7 @@ pub async fn run_probe(
                             detail: detail_id,
                             error: Some(format!("HTTP {}", resp.status())),
                         });
+                        None
                     }
                     Ok(Err(e)) => {
                         checks.push(ProbeCheck {
@@ -829,6 +833,7 @@ pub async fn run_probe(
                             detail: detail_id,
                             error: Some(e.to_string()),
                         });
+                        None
                     }
                     Err(_) => {
                         checks.push(ProbeCheck {
@@ -839,14 +844,124 @@ pub async fn run_probe(
                             detail: detail_id,
                             error: Some("timeout".to_string()),
                         });
+                        None
+                    }
+                };
+
+                // git_refs_match_state: fetch all served kind 30618 state events for this
+                // repo (by #d tag), derive expected refs (latest timestamp wins per ref
+                // across all authorized state events — relay already validated auth,
+                // including recursive maintainer chains), then compare against git refs.
+                match refs_body_fallback {
+                    None => {
+                        checks.push(skipped(
+                            "git_refs_match_state",
+                            "git_fetch_refs failed",
+                        ));
+                    }
+                    Some(body) => {
+                        let fetched_refs = parse_refs(&body);
+
+                        // Fetch all state events for this repo_id from the relay.
+                        // The relay only serves authorized state events (owner + full
+                        // recursive maintainer chain already resolved by the relay).
+                        let state_filter = Filter::new()
+                            .kind(Kind::RepoState)
+                            .custom_tag(
+                                nostr_sdk::prelude::SingleLetterTag::lowercase(
+                                    nostr_sdk::prelude::Alphabet::D,
+                                ),
+                                ann_id.clone(),
+                            );
+                        let state_events = client
+                            .client()
+                            .fetch_events(state_filter, Duration::from_secs(5))
+                            .await
+                            .unwrap_or_default();
+
+                        if state_events.is_empty() {
+                            checks.push(ProbeCheck {
+                                name: "git_refs_match_state",
+                                passed: false,
+                                skipped: false,
+                                duration_ms: 0,
+                                detail: None,
+                                error: Some(
+                                    "no kind:30618 state events found for this repo".to_string(),
+                                ),
+                            });
+                        } else {
+                            // Build expected refs: for each ref name, the state event with
+                            // the highest created_at timestamp wins (mirrors relay behaviour).
+                            // This correctly handles recursive maintainership — any authorized
+                            // party's state event may be the most recent for a given ref.
+                            let mut expected: std::collections::HashMap<String, String> =
+                                std::collections::HashMap::new();
+                            let mut latest_ts: std::collections::HashMap<String, u64> =
+                                std::collections::HashMap::new();
+
+                            for state_ev in state_events.iter() {
+                                let ts = state_ev.created_at.as_secs();
+                                for tag in state_ev.tags.iter() {
+                                    let kind_str = match tag.kind() {
+                                        TagKind::Custom(ref s) => s.clone(),
+                                        _ => continue,
+                                    };
+                                    if !kind_str.starts_with("refs/heads/")
+                                        && !kind_str.starts_with("refs/tags/")
+                                    {
+                                        continue;
+                                    }
+                                    let hash = match tag.content() {
+                                        Some(h) => h.to_string(),
+                                        None => continue,
+                                    };
+                                    let prev_ts = latest_ts.get(kind_str.as_ref()).copied().unwrap_or(0);
+                                    if ts >= prev_ts {
+                                        expected.insert(kind_str.to_string(), hash);
+                                        latest_ts.insert(kind_str.to_string(), ts);
+                                    }
+                                }
+                            }
+
+                            let mut mismatches: Vec<String> = Vec::new();
+                            for (refname, expected_hash) in &expected {
+                                let found = fetched_refs.iter().find(|(r, _)| r == refname);
+                                match found {
+                                    Some((_, actual_hash)) if actual_hash == expected_hash => {}
+                                    Some((_, actual_hash)) => {
+                                        mismatches.push(format!(
+                                            "{}: expected {} got {}",
+                                            refname,
+                                            &expected_hash[..8.min(expected_hash.len())],
+                                            &actual_hash[..8.min(actual_hash.len())]
+                                        ));
+                                    }
+                                    None => {
+                                        mismatches.push(format!(
+                                            "{}: expected {} not found in refs",
+                                            refname,
+                                            &expected_hash[..8.min(expected_hash.len())]
+                                        ));
+                                    }
+                                }
+                            }
+
+                            checks.push(ProbeCheck {
+                                name: "git_refs_match_state",
+                                passed: mismatches.is_empty(),
+                                skipped: false,
+                                duration_ms: 0,
+                                detail: None,
+                                error: if mismatches.is_empty() {
+                                    None
+                                } else {
+                                    Some(mismatches.join("; "))
+                                },
+                            });
+                        }
                     }
                 }
-
-                // git_refs_match_state is skipped in fallback — no state event to compare
-                checks.push(skipped(
-                    "git_refs_match_state",
-                    "no state event (fallback path)",
-                ));
             }
             None => {
                 // Not read-only (already handled above) but no repo found
@@ -860,7 +975,7 @@ pub async fn run_probe(
                 });
                 checks.push(skipped(
                     "git_refs_match_state",
-                    "no state event (fallback path)",
+                    "no announcement found",
                 ));
             }
         }
