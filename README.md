@@ -477,7 +477,6 @@ NGIT_RELAY_OWNER_NSEC=nsec1... ngit-grasp --domain relay.example.com
 
 - `lmdb`: LMDB backend (default, persistent, general purpose)
 - `memory`: In-memory database (fastest, no persistence - uses temp directories)
-- `nostrdb`: NostrDB backend (persistent, optimized for Nostr) [Not yet implemented]
 
 > **Note:** When using the `memory` backend, git data are automatically stored in temporary directories for ephemeral testing.
 

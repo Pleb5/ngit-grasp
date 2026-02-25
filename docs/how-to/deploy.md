@@ -233,7 +233,7 @@ git ls-remote https://ngit.example.com/<npub>/<repo>.git
 
 ### Storage
 - `dataDir` - Base directory for data (default: /var/lib/ngit-grasp-{name})
-- `databaseBackend` - "lmdb" | "nostr-db" | "memory" (default: "lmdb")
+- `databaseBackend` - "lmdb" | "memory" (default: "lmdb")
 
 ### Identity
 - `relayName` - Relay name for NIP-11 (default: "{domain} grasp relay")
@@ -363,7 +363,7 @@ curl http://localhost:8082/metrics
 **Tune configuration:**
 - Reduce `metricsTopNRepos`
 - Increase `syncMaxBackoffSecs`
-- Switch to `databaseBackend = "nostr-db"` for better performance
+- Tune `syncMaxBackoffSecs` for your network conditions
 
 ---
 

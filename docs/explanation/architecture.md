@@ -101,7 +101,7 @@ After examining both the reference implementation and HTTP server options, we ha
 - Initialize configuration from environment (clap + dotenvy)
 - Set up Hyper HTTP server with request routing
 - Initialize Nostr relay builder with custom [`Nip34WritePolicy`](src/nostr/builder.rs:51)
-- Set up shared storage (LMDB, NostrDB, or Memory)
+- Set up shared storage (LMDB or Memory)
 - Handle WebSocket upgrades for Nostr relay
 - Handle graceful shutdown
 

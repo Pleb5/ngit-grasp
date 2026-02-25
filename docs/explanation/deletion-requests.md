@@ -28,7 +28,7 @@ The deletion system uses three separate data stores:
 ┌─────────────────────────────────────────────────────────┐
 │                    Main Database                        │
 │         (Live events - actively served)                 │
-│    LMDB/NostrDB/Memory backend                         │
+│    LMDB/Memory backend                                 │
 └─────────────────────────────────────────────────────────┘
                          ↓ deletion request
 ┌─────────────────────────────────────────────────────────┐

@@ -689,16 +689,6 @@ pub async fn create_relay(
                 max_events: Some(NonZeroUsize::new(100_000).unwrap()),
             }))
         }
-        DatabaseBackend::NostrDb => {
-            tracing::info!("Using NostrDB backend at: {}", db_path.display());
-            // TODO: Implement NostrDB backend once nostr-relay-builder supports it
-            // For now, fall back to memory database
-            tracing::warn!("NostrDB backend not yet implemented, using in-memory database");
-            Arc::new(MemoryDatabase::with_opts(MemoryDatabaseOptions {
-                events: true,
-                max_events: Some(NonZeroUsize::new(100_000).unwrap()),
-            }))
-        }
         DatabaseBackend::Lmdb => {
             tracing::info!("Using LMDB backend at: {}", db_path.display());
             // Ensure the database directory exists

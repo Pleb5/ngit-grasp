@@ -20,7 +20,7 @@
 |-----------|--------|-----------|
 | HTTP Server | Hyper (not actix-web) | Better control over WebSocket upgrade handling |
 | Nostr Relay | nostr-relay-builder | Mature, well-tested, supports custom policies |
-| Database | LMDB (default), NostrDB, Memory | LMDB for production, Memory for testing |
+| Database | LMDB (default), Memory | LMDB for production, Memory for testing |
 | Configuration | clap + dotenvy | CLI flags > env vars > .env > defaults |
 
 ---
@@ -125,7 +125,7 @@ The decision to validate pushes **before** spawning git-receive-pack worked extr
 Using rust-nostr's relay builder was the right call:
 - Handles NIP-01 protocol correctly
 - Custom `WritePolicy` trait for our validation
-- Database abstraction (LMDB, NostrDB, Memory)
+- Database abstraction (LMDB, Memory)
 - Active maintenance and updates
 
 ### 3. Separate Audit Tool

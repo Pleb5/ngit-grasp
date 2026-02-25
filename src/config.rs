@@ -280,8 +280,6 @@ pub enum DatabaseBackend {
     /// LMDB backend (persistent, general purpose)
     #[default]
     Lmdb,
-    /// NostrDB backend (persistent, optimized for Nostr)
-    NostrDb,
     /// In-memory database (fastest, no persistence - uses temp directory for git data)
     Memory,
 }
@@ -290,7 +288,6 @@ impl std::fmt::Display for DatabaseBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Memory => write!(f, "memory"),
-            Self::NostrDb => write!(f, "nostrdb"),
             Self::Lmdb => write!(f, "lmdb"),
         }
     }
@@ -821,7 +818,6 @@ mod tests {
     #[test]
     fn test_database_backend_display() {
         assert_eq!(DatabaseBackend::Memory.to_string(), "memory");
-        assert_eq!(DatabaseBackend::NostrDb.to_string(), "nostrdb");
         assert_eq!(DatabaseBackend::Lmdb.to_string(), "lmdb");
     }
 

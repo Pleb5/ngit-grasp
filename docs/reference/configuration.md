@@ -245,44 +245,38 @@ NGIT_RELAY_DATA_PATH=/mnt/ssd/relay-data
 #### `NGIT_DATABASE_BACKEND`
 
 **Description:** Database backend type for storing Nostr events
-**Type:** String (enum: memory, nostrdb, lmdb)
-**Default:** `memory`
+**Type:** String (enum: memory, lmdb)
+**Default:** `lmdb`
 **Required:** No
 
 **Valid Values:**
 
-- `memory` - In-memory database (default, fastest, no persistence)
-- `nostrdb` - NostrDB backend (persistent, optimized for Nostr) [Not yet implemented]
-- `lmdb` - LMDB backend (persistent, general purpose) [Not yet implemented]
+- `lmdb` - LMDB backend (persistent, general purpose)
+- `memory` - In-memory database (fastest, no persistence)
 
 **Examples:**
 
 ```bash
-# Development (default, no persistence)
-NGIT_DATABASE_BACKEND=memory
-
-# Production with NostrDB (when implemented)
-NGIT_DATABASE_BACKEND=nostrdb
-
-# Production with LMDB (when implemented)
+# Production (default, persistent)
 NGIT_DATABASE_BACKEND=lmdb
+
+# Development/testing (no persistence)
+NGIT_DATABASE_BACKEND=memory
 ```
 
 **Comparison:**
 
 | Backend | Persistence | Performance | Use Case                     |
 | ------- | ----------- | ----------- | ---------------------------- |
-| memory  | No          | Fastest     | Development, testing         |
-| nostrdb | Yes         | High        | Production (Nostr-optimized) |
 | lmdb    | Yes         | High        | Production (general purpose) |
+| memory  | No          | Fastest     | Development, testing         |
 
 **Notes:**
 
 - `memory` backend loses all data on restart
-- NostrDB and LMDB backends will use `NGIT_RELAY_DATA_PATH` for storage
-- NostrDB and LMDB are planned features, not yet available
+- `lmdb` backend uses `NGIT_RELAY_DATA_PATH` for storage
 - Default `memory` backend suitable for development and testing only
-- Production deployments should use persistent backends when available
+- Production deployments should use `lmdb`
 
 ---
 

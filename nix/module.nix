@@ -97,12 +97,11 @@ let
       };
 
       databaseBackend = mkOption {
-        type = types.enum [ "lmdb" "nostr-db" "memory" ];
+        type = types.enum [ "lmdb" "memory" ];
         default = "lmdb";
         description = ''
           Database backend type:
           - lmdb: LMDB backend (persistent, general purpose)
-          - nostr-db: NostrDB backend (persistent, optimized for Nostr)
           - memory: In-memory database (fastest, no persistence)
         '';
       };

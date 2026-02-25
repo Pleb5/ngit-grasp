@@ -11,7 +11,7 @@ This document compares ngit-grasp (this project) with ngit-relay (the reference 
 | **Git Protocol** | git-http-backend (C via fcgiwrap) | HTTP layer in Rust + git subprocess |
 | **Authorization** | Pre-receive Git hook | Inline HTTP handler validation |
 | **Nostr Relay** | Khatru (Go library) | nostr-relay-builder (Rust library) |
-| **Event Store** | Badger (Go KV database) | LMDB or NostrDB (Rust) |
+| **Event Store** | Badger (Go KV database) | LMDB (Rust) |
 | **Proactive Sync** | Git-only (polls DB + fetches from git servers) | Nostr event sync + git sync (event-driven) |
 | **Process Management** | supervisord (4 processes) | Single tokio runtime |
 | **Packaging** | Docker with supervisord | Single static binary or Docker |
@@ -78,7 +78,7 @@ This document compares ngit-grasp (this project) with ngit-relay (the reference 
 │  │              │      │  builder library)  │         │
 │  │ - info/refs  │      │  - NIP-34 Policy   │         │
 │  │ - upload-pk  │◀─────┤    (inline query)  │         │
-│  │ - receive-pk │ auth │  - LMDB/NostrDB    │         │
+│  │ - receive-pk │ auth │  - LMDB/Memory     │         │
 │  │   + inline   │ check│  - WebSocket       │         │
 │  │   validation │      │  - NIP-11 endpoint │         │
 │  └──────┬───────┘      └──────────┬─────────┘         │
@@ -100,7 +100,7 @@ This document compares ngit-grasp (this project) with ngit-relay (the reference 
 │                                                        │
 │  ┌──────────────────────────────────────────────────┐ │
 │  │      Shared State (Arc<T>)                        │ │
-│  │  - Database (LMDB/NostrDB/Memory)                 │ │
+│  │  - Database (LMDB/Memory)                         │ │
 │  │  - Purgatory (DashMap - concurrent queue)         │ │
 │  │  - Metrics (Prometheus)                           │ │
 │  └──────────────────────────────────────────────────┘ │
@@ -161,7 +161,7 @@ This is why ngit-grasp has ~13x more code - the majority is implementing GRASP-0
 | Feature | ngit-relay | ngit-grasp |
 |---------|-----------|-----------|
 | **Implementation** | Khatru (Go library) | nostr-relay-builder (Rust library) |
-| **Database** | Badger (Go KV store) | LMDB or NostrDB (Rust) |
+| **Database** | Badger (Go KV store) | LMDB (Rust) |
 | **Process** | Separate process on :3334 | Integrated (same binary) |
 | **Policies** | Go functions in `policies.go` | Rust traits (modular sub-policies) |
 | **Event Validation** | Single function with branches | 4 separate policy modules |
@@ -287,7 +287,7 @@ For users of ngit-relay, migration to ngit-grasp involves:
 
 ### Data Migration
 
-1. **Events**: Export from Badger → Import to LMDB/NostrDB
+1. **Events**: Export from Badger → Import to LMDB
    - No direct migration tool yet (would need to be built)
    - Alternative: Use proactive sync to re-fetch from other relays
 2. **Git Repositories**: Direct copy (same structure)
