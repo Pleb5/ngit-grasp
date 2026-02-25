@@ -1,6 +1,6 @@
 //! GRASP Audit CLI Tool
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use grasp_audit::*;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -17,9 +17,9 @@ struct Cli {
 enum Commands {
     /// Run a probe/smoke test against a server
     Probe {
-        /// Relay URL (e.g., ws://localhost:7000)
+        /// Relay URL (e.g., wss://relay.ngit.dev)
         #[arg(short, long)]
-        relay: String,
+        relay: Option<String>,
 
         /// Output machine-readable JSON
         #[arg(long, default_value_t = false)]
@@ -94,6 +94,17 @@ async fn main() -> Result<()> {
             nsec,
             create_repo,
         } => {
+            let relay = match relay {
+                Some(r) => r,
+                None => {
+                    // Print probe-specific help and exit cleanly
+                    let mut cmd = Cli::command();
+                    let _ = cmd.find_subcommand_mut("probe").unwrap().print_help();
+                    println!();
+                    return Ok(());
+                }
+            };
+
             // Parse nsec if provided
             let keys = if let Some(nsec_str) = nsec {
                 use nostr_sdk::prelude::SecretKey;
