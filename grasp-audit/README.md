@@ -12,28 +12,66 @@ A reusable audit and compliance testing tool for GRASP protocol implementations.
 
 ## Quick Start
 
-Run GRASP compliance tests against any GRASP relay:
-
 ```bash
 # Install
 cd grasp-audit
 cargo install --path .
 
-# Audit a production relay
-grasp-audit audit --relay wss://relay.ngit.dev
+# Probe a relay (read-only health check — no keys needed)
+grasp-audit probe --relay wss://relay.ngit.dev
 
-# Or audit a local development relay
-grasp-audit audit --relay ws://localhost:7334
+# Full compliance audit
+grasp-audit audit --relay wss://relay.ngit.dev
 ```
 
 ## Usage Examples
 
-### As a CLI Tool
+### Probe (Health Check)
+
+A fast, lightweight smoke test that checks whether a relay is healthy. Read-only by default — no keys or write access required.
 
 ```bash
-# Install
-cargo install --path .
+# Basic health check
+grasp-audit probe --relay wss://relay.ngit.dev
 
+# Machine-readable JSON (one line per run — pipe-friendly)
+grasp-audit probe --relay wss://relay.ngit.dev --json
+
+# Continuous monitoring (re-runs every 10 seconds)
+grasp-audit probe --relay wss://relay.ngit.dev --watch 10
+
+# Pipe JSON output to a log file
+grasp-audit probe --relay wss://relay.ngit.dev --json --watch 10 >> probe.log
+
+# Full write-path check: publish events, git push, verify refs match state
+# (requires write access; use --nsec for whitelisted relays)
+grasp-audit probe --relay wss://relay.ngit.dev --create-repo
+grasp-audit probe --relay wss://relay.ngit.dev --create-repo --nsec nsec1...
+```
+
+**Probe checks (read-only):**
+
+| Check | What it verifies |
+|---|---|
+| `connect_websocket` | WebSocket connection succeeds |
+| `nip11_fetch` | NIP-11 relay info document is served (shows software & version) |
+| `serves_latest_announcement` | At least one kind:30617 repo announcement is served |
+| `git_fetch_refs` | Git HTTP info/refs endpoint responds |
+| `git_refs_match_state` | Git refs match the latest kind:30618 state events |
+
+**Additional checks with `--create-repo`:**
+
+| Check | What it verifies |
+|---|---|
+| `publish_events` | Relay accepts kind:30617 and kind:30618 events |
+| `git_repo_initialised` | Relay initialises the git repo after events are published |
+| `git_push` | Git push succeeds |
+
+**Overall timeout:** The probe enforces an overall deadline of `min(20s, --watch interval)` to prevent overlapping runs. If the deadline fires, completed checks retain their real results; the step that couldn't start is marked failed with a diagnosis (single slow check vs. cumulative slowness); remaining checks are marked skipped.
+
+### Audit (Compliance Tests)
+
+```bash
 # Audit a production GRASP relay (shared fixtures - default)
 grasp-audit audit --relay wss://relay.ngit.dev
 
@@ -44,7 +82,7 @@ grasp-audit audit --relay ws://localhost:7334 --spec nip01-smoke
 grasp-audit audit --relay ws://localhost:7334 --mode isolated --spec push-auth
 ```
 
-### As a Library
+### As a Library (Audit)
 
 ```rust
 use grasp_audit::*;
