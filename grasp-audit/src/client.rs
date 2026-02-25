@@ -112,6 +112,73 @@ impl AuditClient {
         })
     }
 
+    /// Create a new audit client with explicit keys
+    ///
+    /// Identical to [`new()`] but accepts an explicit `Keys` parameter instead of
+    /// generating fresh ones. The maintainer, recursive maintainer, and PR author
+    /// keys are still generated fresh internally.
+    ///
+    /// This is useful for probe mode where the caller wants to use a specific
+    /// identity (e.g., from an `nsec` argument) for all events.
+    pub async fn new_with_keys(relay_url: &str, config: AuditConfig, keys: Keys) -> Result<Self> {
+        let maintainer_keys = Keys::generate();
+        let recursive_maintainer_keys = Keys::generate();
+        let pr_author_keys = Keys::generate();
+        let client = Client::new(keys.clone());
+
+        // Add relay and connect
+        client.add_relay(relay_url).await?;
+        client.connect().await;
+
+        // Wait for connection to establish (with retries)
+        let mut attempts = 0;
+        let mut connected = false;
+        while attempts < 20 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            let relays = client.relays().await;
+            connected = relays.values().any(|r| r.is_connected());
+
+            if connected {
+                break;
+            }
+
+            attempts += 1;
+        }
+
+        // Verify we actually connected
+        if !connected {
+            return Err(anyhow!(
+                "Failed to connect to relay at '{}'\n\
+                \n\
+                Possible causes:\n\
+                  • Relay is not running at this address\n\
+                  • Network connectivity issues\n\
+                  • Incorrect URL or port\n\
+                \n\
+                To start ngit-relay for testing:\n\
+                  docker run --rm -p 18081:8081 ghcr.io/danconwaydev/ngit-relay:latest\n\
+                \n\
+                Or use the test script:\n\
+                  cd grasp-audit && ./test-ngit-relay.sh",
+                relay_url
+            ));
+        }
+
+        // Give it a bit more time to stabilize
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        Ok(Self {
+            client,
+            config,
+            keys,
+            maintainer_keys,
+            recursive_maintainer_keys,
+            pr_author_keys,
+            fixture_cache: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
     /// Get the fixture cache for TestContext usage
     ///
     /// This cache is shared across all TestContext instances created from this client.

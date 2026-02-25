@@ -32,6 +32,7 @@ pub mod audit;
 pub mod client;
 pub mod fixtures;
 pub mod isolation;
+pub mod probe;
 pub mod result;
 pub mod specs;
 
@@ -43,6 +44,7 @@ pub use fixtures::{
     create_commit,
     create_deterministic_commit,
     create_deterministic_commit_with_variant,
+    init_local_repo,
     // Verification helpers
     send_and_verify_accepted,
     send_and_verify_rejected,
@@ -58,6 +60,7 @@ pub use fixtures::{
     PR_TEST_COMMIT_HASH,
     RECURSIVE_MAINTAINER_DETERMINISTIC_COMMIT_HASH,
 };
+pub use probe::{run_probe, ProbeCheck, ProbeReport};
 pub use result::{AuditResult, TestResult};
 
 // Re-export commonly used types

@@ -3,6 +3,7 @@
 use clap::{Parser, Subcommand};
 use grasp_audit::*;
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(name = "grasp-audit")]
@@ -14,6 +15,33 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Run a probe/smoke test against a server
+    Probe {
+        /// Relay URL (e.g., ws://localhost:7000)
+        #[arg(short, long)]
+        relay: String,
+
+        /// Output machine-readable JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+
+        /// Per-step timeout in seconds
+        #[arg(long, default_value_t = 30)]
+        timeout: u64,
+
+        /// Re-run every N seconds (watch mode)
+        #[arg(long)]
+        watch: Option<u64>,
+
+        /// Secret key in nsec bech32 format (for whitelisted relays)
+        #[arg(long)]
+        nsec: Option<String>,
+
+        /// Read-only mode: skip write steps, only check existing repos
+        #[arg(long, default_value_t = false)]
+        read_only: bool,
+    },
+
     /// Run audit tests against a server
     Audit {
         /// Relay URL (e.g., ws://localhost:7000)
@@ -50,6 +78,53 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Probe {
+            relay,
+            json,
+            timeout,
+            watch,
+            nsec,
+            read_only,
+        } => {
+            // Parse nsec if provided
+            let keys = if let Some(nsec_str) = nsec {
+                use nostr_sdk::prelude::SecretKey;
+                let sk = SecretKey::from_bech32(&nsec_str)
+                    .map_err(|e| anyhow!("Invalid nsec: {}", e))?;
+                Some(Keys::new(sk))
+            } else {
+                None
+            };
+
+            if let Some(interval) = watch {
+                let mut run = 1u64;
+                loop {
+                    println!("\n[Run {}]", run);
+                    let report =
+                        grasp_audit::probe::run_probe(&relay, keys.clone(), read_only, timeout)
+                            .await;
+                    if json {
+                        report.print_json();
+                    } else {
+                        report.print_human();
+                    }
+                    run += 1;
+                    tokio::time::sleep(Duration::from_secs(interval)).await;
+                }
+            } else {
+                let report =
+                    grasp_audit::probe::run_probe(&relay, keys, read_only, timeout).await;
+                if json {
+                    report.print_json();
+                } else {
+                    report.print_human();
+                }
+                if !report.all_passed {
+                    std::process::exit(1);
+                }
+            }
+        }
+
         Commands::Audit {
             relay,
             mode,

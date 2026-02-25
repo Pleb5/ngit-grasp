@@ -2516,6 +2516,78 @@ pub fn try_push_to_ref(clone_path: &Path, ref_name: &str) -> Result<bool, String
     Ok(output.status.success())
 }
 
+/// Initialise a fresh local git repo with a remote URL configured, ready for push.
+///
+/// Creates a new git repository at `path`, configures user identity,
+/// sets the default branch to `main`, and adds `remote_url` as the `origin` remote.
+/// After calling this, use `create_commit()` then `try_push()`.
+///
+/// # Arguments
+/// * `path` - Directory to initialise (must not already exist as a git repo)
+/// * `remote_url` - The remote URL to add as `origin`
+pub fn init_local_repo(path: &Path, remote_url: &str) -> Result<(), String> {
+    // Step 1: git init <path>
+    let output = Command::new("git")
+        .args(["init", path.to_str().unwrap_or(".")])
+        .output()
+        .map_err(|e| format!("Failed to execute git init: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git init failed: {}", stderr));
+    }
+
+    // Step 2: git config user.email
+    let output = Command::new("git")
+        .args(["config", "user.email", "probe@grasp-audit.local"])
+        .current_dir(path)
+        .output()
+        .map_err(|e| format!("Failed to set git user.email: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git config user.email failed: {}", stderr));
+    }
+
+    // Step 3: git config user.name
+    let output = Command::new("git")
+        .args(["config", "user.name", "GRASP Probe"])
+        .current_dir(path)
+        .output()
+        .map_err(|e| format!("Failed to set git user.name: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git config user.name failed: {}", stderr));
+    }
+
+    // Step 4: git symbolic-ref HEAD refs/heads/main (sets default branch to main)
+    let output = Command::new("git")
+        .args(["symbolic-ref", "HEAD", "refs/heads/main"])
+        .current_dir(path)
+        .output()
+        .map_err(|e| format!("Failed to set default branch: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git symbolic-ref HEAD failed: {}", stderr));
+    }
+
+    // Step 5: git remote add origin <remote_url>
+    let output = Command::new("git")
+        .args(["remote", "add", "origin", remote_url])
+        .current_dir(path)
+        .output()
+        .map_err(|e| format!("Failed to add remote: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git remote add origin failed: {}", stderr));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

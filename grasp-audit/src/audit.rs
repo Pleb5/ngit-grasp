@@ -68,6 +68,20 @@ impl AuditConfig {
         }
     }
 
+    /// Create config for probe/smoke test mode
+    ///
+    /// Identical to `isolated()` but uses a `probe-` prefix for the run ID,
+    /// making probe events easy to distinguish from regular audit events.
+    pub fn probe() -> Self {
+        let run_id = format!("probe-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        Self {
+            run_id,
+            mode: AuditMode::Isolated,
+            cleanup_after: Timestamp::now() + 3600, // 1 hour from now
+            read_only: false,
+        }
+    }
+
     /// Create config with custom run ID
     pub fn with_run_id(run_id: String, mode: AuditMode) -> Self {
         Self {
