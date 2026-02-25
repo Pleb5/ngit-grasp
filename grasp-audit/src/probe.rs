@@ -447,7 +447,20 @@ pub async fn run_probe(
                     .json::<serde_json::Value>()
                     .await
                     .ok()
-                    .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()));
+                    .map(|v| {
+                        let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
+                        // software is typically a repo URL; take the last path segment
+                        let software = v
+                            .get("software")
+                            .and_then(|s| s.as_str())
+                            .map(|s| s.trim_end_matches('/').rsplit('/').next().unwrap_or(s))
+                            .unwrap_or("unknown");
+                        let version = v
+                            .get("version")
+                            .and_then(|ver| ver.as_str())
+                            .unwrap_or("unknown");
+                        format!("{} ({} v{})", name, software, version)
+                    });
                 checks.push(ProbeCheck {
                     name: "nip11_fetch",
                     passed: true,
