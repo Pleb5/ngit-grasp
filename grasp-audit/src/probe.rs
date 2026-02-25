@@ -124,6 +124,26 @@ impl ProbeReport {
     }
 }
 
+impl ProbeReport {
+    /// Build a synthetic report for when the overall probe timeout fires.
+    pub fn overall_timeout(relay_url: &str, duration_ms: u64) -> Self {
+        ProbeReport {
+            relay_url: relay_url.to_string(),
+            timestamp: now_iso8601(),
+            all_passed: false,
+            total_duration_ms: duration_ms,
+            checks: vec![ProbeCheck {
+                name: "overall_timeout",
+                passed: false,
+                skipped: false,
+                duration_ms,
+                detail: None,
+                error: Some("probe exceeded overall timeout".to_string()),
+            }],
+        }
+    }
+}
+
 // ============================================================
 // Helpers
 // ============================================================

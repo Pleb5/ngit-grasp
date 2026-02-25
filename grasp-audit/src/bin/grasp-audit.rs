@@ -102,15 +102,31 @@ async fn main() -> Result<()> {
                 None
             };
 
+            // Overall probe timeout: min(20s, watch_interval) to prevent
+            // overlapping runs under --watch or cron scheduling.
+            let overall_secs = match watch {
+                Some(interval) => interval.min(20),
+                None => 20,
+            };
+
             if let Some(interval) = watch {
                 let mut run = 1u64;
                 loop {
                     if !json {
                         println!("\n[Run {}]", run);
                     }
-                    let report =
-                        grasp_audit::probe::run_probe(&relay, keys.clone(), read_only, timeout)
-                            .await;
+                    let start = std::time::Instant::now();
+                    let report = tokio::time::timeout(
+                        Duration::from_secs(overall_secs),
+                        grasp_audit::probe::run_probe(&relay, keys.clone(), read_only, timeout),
+                    )
+                    .await
+                    .unwrap_or_else(|_| {
+                        grasp_audit::probe::ProbeReport::overall_timeout(
+                            &relay,
+                            start.elapsed().as_millis() as u64,
+                        )
+                    });
                     if json {
                         report.print_json();
                     } else {
@@ -120,8 +136,18 @@ async fn main() -> Result<()> {
                     tokio::time::sleep(Duration::from_secs(interval)).await;
                 }
             } else {
-                let report =
-                    grasp_audit::probe::run_probe(&relay, keys, read_only, timeout).await;
+                let start = std::time::Instant::now();
+                let report = tokio::time::timeout(
+                    Duration::from_secs(overall_secs),
+                    grasp_audit::probe::run_probe(&relay, keys, read_only, timeout),
+                )
+                .await
+                .unwrap_or_else(|_| {
+                    grasp_audit::probe::ProbeReport::overall_timeout(
+                        &relay,
+                        start.elapsed().as_millis() as u64,
+                    )
+                });
                 if json {
                     report.print_json();
                 } else {
