@@ -67,13 +67,25 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
-        )
-        .init();
+    // In JSON mode logs must not pollute stdout (used for machine-readable output).
+    // Check argv directly so we know the mode before parsing the full CLI.
+    let json_mode = std::env::args().any(|a| a == "--json");
+    if json_mode {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .with_writer(std::io::stderr)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .init();
+    }
 
     let cli = Cli::parse();
 
@@ -99,7 +111,9 @@ async fn main() -> Result<()> {
             if let Some(interval) = watch {
                 let mut run = 1u64;
                 loop {
-                    println!("\n[Run {}]", run);
+                    if !json {
+                        println!("\n[Run {}]", run);
+                    }
                     let report =
                         grasp_audit::probe::run_probe(&relay, keys.clone(), read_only, timeout)
                             .await;
