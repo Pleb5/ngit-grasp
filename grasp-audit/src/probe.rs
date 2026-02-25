@@ -124,26 +124,6 @@ impl ProbeReport {
     }
 }
 
-impl ProbeReport {
-    /// Build a synthetic report for when the overall probe timeout fires.
-    pub fn overall_timeout(relay_url: &str, duration_ms: u64) -> Self {
-        ProbeReport {
-            relay_url: relay_url.to_string(),
-            timestamp: now_iso8601(),
-            all_passed: false,
-            total_duration_ms: duration_ms,
-            checks: vec![ProbeCheck {
-                name: "overall_timeout",
-                passed: false,
-                skipped: false,
-                duration_ms,
-                detail: None,
-                error: Some("probe exceeded overall timeout".to_string()),
-            }],
-        }
-    }
-}
-
 // ============================================================
 // Helpers
 // ============================================================
@@ -197,6 +177,19 @@ fn now_iso8601() -> String {
 // Main probe function
 // ============================================================
 
+/// All check names in the order they may appear, used to fill skipped entries
+/// when the overall deadline fires.
+const ALL_CHECK_NAMES: &[&str] = &[
+    "connect_websocket",
+    "nip11_fetch",
+    "publish_events",
+    "git_repo_initialised",
+    "git_push",
+    "serves_latest_announcement",
+    "git_fetch_refs",
+    "git_refs_match_state",
+];
+
 /// Run a probe against a GRASP relay and return a full report.
 ///
 /// # Arguments
@@ -204,15 +197,51 @@ fn now_iso8601() -> String {
 /// * `keys` - Optional keypair to use; `None` generates fresh keys
 /// * `read_only` - When `true`, skip write steps and only check existing repos
 /// * `timeout_secs` - Per-step timeout in seconds
+/// * `overall_secs` - Hard cap on total probe duration; remaining checks are
+///   marked skipped with reason "overall timeout" if the deadline fires
 pub async fn run_probe(
     relay_url: &str,
     keys: Option<Keys>,
     read_only: bool,
     timeout_secs: u64,
+    overall_secs: u64,
 ) -> ProbeReport {
     let total_start = Instant::now();
+    let deadline = total_start + Duration::from_secs(overall_secs);
     let timestamp = now_iso8601();
     let mut checks: Vec<ProbeCheck> = Vec::new();
+
+    /// Fill all check names not yet present in `checks` as skipped with the
+    /// given reason, then return a finished ProbeReport.
+    macro_rules! deadline_return {
+        ($relay_url:expr, $timestamp:expr, $total_start:expr, $checks:expr, $timed_out_name:expr) => {{
+            // Mark the step that hit the deadline as a timeout failure
+            $checks.push(ProbeCheck {
+                name: $timed_out_name,
+                passed: false,
+                skipped: false,
+                duration_ms: $total_start.elapsed().as_millis() as u64,
+                detail: None,
+                error: Some("overall timeout".to_string()),
+            });
+            // Skip all subsequent checks
+            let already: std::collections::HashSet<&str> =
+                $checks.iter().map(|c| c.name).collect();
+            for name in ALL_CHECK_NAMES {
+                if !already.contains(name) {
+                    $checks.push(skipped(name, "overall timeout"));
+                }
+            }
+            let all_passed = $checks.iter().all(|c| c.passed || c.skipped);
+            return ProbeReport {
+                relay_url: $relay_url.to_string(),
+                timestamp: $timestamp,
+                all_passed,
+                total_duration_ms: $total_start.elapsed().as_millis() as u64,
+                checks: $checks,
+            };
+        }};
+    }
 
     // ============================================================
     // PREPARE (offline)
@@ -317,8 +346,16 @@ pub async fn run_probe(
     // ============================================================
     // Step 1: connect_websocket
     // ============================================================
+    if Instant::now() >= deadline {
+        deadline_return!(relay_url, timestamp, total_start, checks, "connect_websocket");
+    }
     let step1_start = Instant::now();
-    let client_result = AuditClient::new_with_keys(relay_url, config.clone(), keys.clone()).await;
+    let client_result = tokio::time::timeout(
+        deadline.saturating_duration_since(Instant::now()),
+        AuditClient::new_with_keys(relay_url, config.clone(), keys.clone()),
+    )
+    .await
+    .unwrap_or_else(|_| Err(anyhow::anyhow!("overall timeout")));
     let step1_ms = step1_start.elapsed().as_millis() as u64;
 
     let client = match client_result {
@@ -367,10 +404,13 @@ pub async fn run_probe(
     // Step 2: nip11_fetch (independent — always runs if step 1 passed)
     // ============================================================
     {
+        if Instant::now() >= deadline {
+            deadline_return!(relay_url, timestamp, total_start, checks, "nip11_fetch");
+        }
         let step2_start = Instant::now();
         let http_client = reqwest::Client::new();
         let nip11_result = tokio::time::timeout(
-            Duration::from_secs(timeout_secs),
+            deadline.saturating_duration_since(Instant::now()).min(Duration::from_secs(timeout_secs)),
             http_client
                 .get(&http_base)
                 .header("Accept", "application/nostr+json")
@@ -434,6 +474,10 @@ pub async fn run_probe(
     // ============================================================
     let mut write_succeeded = false;
 
+    if Instant::now() >= deadline {
+        deadline_return!(relay_url, timestamp, total_start, checks, "publish_events");
+    }
+
     if read_only {
         checks.push(skipped("publish_events", "read-only mode"));
         checks.push(skipped("git_repo_initialised", "read-only mode"));
@@ -492,14 +536,18 @@ pub async fn run_probe(
         // Step 4: git_repo_initialised (requires step 3)
         // ============================================================
         if write_succeeded {
+            if Instant::now() >= deadline {
+                deadline_return!(relay_url, timestamp, total_start, checks, "git_repo_initialised");
+            }
             let step4_start = Instant::now();
             let poll_url = format!("{}/info/refs?service=git-upload-pack", clone_url);
             let http_client = reqwest::Client::new();
-            let deadline = Instant::now() + Duration::from_secs(15);
+            // Cap the poll deadline at both 15s and the overall deadline
+            let poll_deadline = (Instant::now() + Duration::from_secs(15)).min(deadline);
             let mut repo_ready = false;
 
             loop {
-                if Instant::now() >= deadline {
+                if Instant::now() >= poll_deadline {
                     break;
                 }
                 match http_client.get(&poll_url).send().await {
@@ -541,6 +589,9 @@ pub async fn run_probe(
         // Step 5: git_push (requires step 4)
         // ============================================================
         if write_succeeded {
+            if Instant::now() >= deadline {
+                deadline_return!(relay_url, timestamp, total_start, checks, "git_push");
+            }
             let step5_start = Instant::now();
             let push_result = try_push(&local_repo_path);
             let step5_ms = step5_start.elapsed().as_millis() as u64;
@@ -619,12 +670,15 @@ pub async fn run_probe(
     if write_succeeded {
         // ---- Write path ----
         // Step 6a: git_fetch_refs — just verify the endpoint returns 200
+        if Instant::now() >= deadline {
+            deadline_return!(relay_url, timestamp, total_start, checks, "git_fetch_refs");
+        }
         let refs_url = format!("{}/info/refs?service=git-upload-pack", clone_url);
         let http_client = reqwest::Client::new();
 
         let step6_start = Instant::now();
         let refs_result = tokio::time::timeout(
-            Duration::from_secs(timeout_secs),
+            deadline.saturating_duration_since(Instant::now()).min(Duration::from_secs(timeout_secs)),
             http_client.get(&refs_url).send(),
         )
         .await;
@@ -744,10 +798,16 @@ pub async fn run_probe(
         // ---- Fallback path: find any existing kind 30617, check refs readable ----
 
         // In read-only mode: first check that at least one announcement exists
+        if Instant::now() >= deadline {
+            deadline_return!(relay_url, timestamp, total_start, checks, "serves_latest_announcement");
+        }
         let filter = Filter::new().kind(Kind::GitRepoAnnouncement).limit(1);
         let existing = client
             .client()
-            .fetch_events(filter, Duration::from_secs(5))
+            .fetch_events(
+                filter,
+                deadline.saturating_duration_since(Instant::now()).min(Duration::from_secs(5)),
+            )
             .await
             .unwrap_or_default();
 
@@ -819,11 +879,14 @@ pub async fn run_probe(
                         format!("{}/{}/{}.git", http_base, ann_npub, ann_id)
                     });
 
+                if Instant::now() >= deadline {
+                    deadline_return!(relay_url, timestamp, total_start, checks, "git_fetch_refs");
+                }
                 let step6_start = Instant::now();
                 let refs_url = format!("{}/info/refs?service=git-upload-pack", fetch_url);
                 let http_client = reqwest::Client::new();
                 let refs_result = tokio::time::timeout(
-                    Duration::from_secs(timeout_secs),
+                    deadline.saturating_duration_since(Instant::now()).min(Duration::from_secs(timeout_secs)),
                     http_client.get(&refs_url).send(),
                 )
                 .await;
@@ -905,7 +968,10 @@ pub async fn run_probe(
                             );
                         let state_events = client
                             .client()
-                            .fetch_events(state_filter, Duration::from_secs(5))
+                            .fetch_events(
+                                state_filter,
+                                deadline.saturating_duration_since(Instant::now()).min(Duration::from_secs(5)),
+                            )
                             .await
                             .unwrap_or_default();
 

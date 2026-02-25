@@ -115,18 +115,10 @@ async fn main() -> Result<()> {
                     if !json {
                         println!("\n[Run {}]", run);
                     }
-                    let start = std::time::Instant::now();
-                    let report = tokio::time::timeout(
-                        Duration::from_secs(overall_secs),
-                        grasp_audit::probe::run_probe(&relay, keys.clone(), read_only, timeout),
+                    let report = grasp_audit::probe::run_probe(
+                        &relay, keys.clone(), read_only, timeout, overall_secs,
                     )
-                    .await
-                    .unwrap_or_else(|_| {
-                        grasp_audit::probe::ProbeReport::overall_timeout(
-                            &relay,
-                            start.elapsed().as_millis() as u64,
-                        )
-                    });
+                    .await;
                     if json {
                         report.print_json();
                     } else {
@@ -136,18 +128,10 @@ async fn main() -> Result<()> {
                     tokio::time::sleep(Duration::from_secs(interval)).await;
                 }
             } else {
-                let start = std::time::Instant::now();
-                let report = tokio::time::timeout(
-                    Duration::from_secs(overall_secs),
-                    grasp_audit::probe::run_probe(&relay, keys, read_only, timeout),
+                let report = grasp_audit::probe::run_probe(
+                    &relay, keys, read_only, timeout, overall_secs,
                 )
-                .await
-                .unwrap_or_else(|_| {
-                    grasp_audit::probe::ProbeReport::overall_timeout(
-                        &relay,
-                        start.elapsed().as_millis() as u64,
-                    )
-                });
+                .await;
                 if json {
                     report.print_json();
                 } else {
