@@ -2,53 +2,7 @@
 
 ## Executive Summary
 
-`ngit-grasp` implements the GRASP protocol in Rust with **inline authorization** rather than Git hooks. The key architectural insight is that we can intercept and validate Git push operations at the HTTP handler level before reaching the Git repository, eliminating the need for pre-receive hooks.
-
-## Architectural Decision: Inline vs. Hook-Based Authorization
-
-### Investigation Summary
-
-After examining both the reference implementation and HTTP server options, we have two options:
-
-#### Option 1: Hook-Based (Reference Implementation Approach)
-
-- Use standard Git HTTP backend
-- Create pre-receive and post-receive hooks
-- Hooks query the Nostr relay and validate pushes
-- **Pros**: Follows reference implementation closely
-- **Cons**: Requires hook management, harder to test, less Rust-native
-
-#### Option 2: Inline Authorization (Recommended)
-
-- Intercept Git receive-pack requests in the HTTP handler
-- Validate against Nostr state before spawning Git process
-- Only forward valid pushes to Git
-- **Pros**: Better error handling, easier testing, pure Rust, simpler deployment
-- **Cons**: Requires custom Git protocol handling
-
-### Decision: Inline Authorization (Option 2)
-
-**Rationale:**
-
-1. **Full control over HTTP layer**: Using Hyper directly gives us complete control over request handling, WebSocket upgrades, and CORS headers.
-
-2. **Better Developer Experience**:
-
-   - Validation errors can be returned as proper HTTP responses
-   - No need to parse hook stderr output
-   - Shared state between Git and Nostr components
-   - Pure Rust testing without shell scripts
-
-3. **Simpler Deployment**:
-
-   - Single binary
-   - No hook symlinks or permissions to manage
-   - No multi-process coordination
-
-4. **Performance**:
-   - Can parse incoming pack data once
-   - Avoid process spawn overhead for invalid pushes
-   - Better async integration
+`ngit-grasp` implements the GRASP protocol in Rust with **inline authorization** rather than Git hooks. Git push operations are intercepted and validated at the HTTP handler level before reaching the Git repository, eliminating the need for pre-receive hooks.
 
 ## System Architecture
 
@@ -257,57 +211,73 @@ State events undergo authorization checks at multiple points:
 
 ### 5. Purgatory System ([`src/purgatory/`](../../src/purgatory/))
 
-The purgatory system solves the "which arrives first?" problem where either nostr events or git pushes can arrive in any order. It provides an in-memory holding area for events and git data awaiting their counterparts.
+The purgatory system solves two related problems:
+
+1. **"Which arrives first?"** — Either nostr events or git pushes can arrive in any order. Purgatory holds events awaiting their git data counterparts.
+2. **Misleading empty repository announcements** — New announcements are held in purgatory until git data arrives, ensuring clients are never served announcements for repos with no content.
 
 **Design Document**: See [`purgatory-design.md`](purgatory-design.md) for complete design specifications.
 
 #### Architecture
 
 ```rust
-/// Main purgatory structure with two separate stores
+/// Main purgatory structure with separate stores per event type
 pub struct Purgatory {
+    /// Announcement events (kind 30617) indexed by (owner, identifier)
+    /// Held until git data proves content exists
+    announcement_purgatory: DashMap<(PublicKey, String), AnnouncementPurgatoryEntry>,
+
     /// State events (kind 30618) indexed by repository identifier
-    state_events: Arc<DashMap<String, Vec<StatePurgatoryEntry>>>,
+    state_events: DashMap<String, Vec<StatePurgatoryEntry>>,
     
     /// PR events (kind 1617/1618) or placeholders indexed by event ID
-    pr_events: Arc<DashMap<String, PrPurgatoryEntry>>,
+    pr_events: DashMap<String, PrPurgatoryEntry>,
 }
 ```
 
 **Key Design Principles:**
 
-1. **Separate Storage**: State events and PR events use different indexing strategies
+1. **Separate Storage**: Each event type uses a different indexing strategy
+   - Announcements: Indexed by `(pubkey, identifier)` (unique per owner)
    - State events: Indexed by `identifier` (multiple events can wait for same repo)
    - PR events: Indexed by `event_id` (one-to-one mapping)
 
-2. **Late Binding**: State event refs are extracted at git push time, not event arrival
+2. **Announcement Purgatory**: New announcements are held until git data arrives
+   - Bare repo created immediately so pushes can succeed
+   - Announcement promoted to database only when git data proves content exists
+   - Two-phase soft expiry: bare repo deleted at 30 min, event retained 24h for revival
+
+3. **Late Binding**: State event refs are extracted at git push time, not event arrival
    - Enables flexible matching when pushes arrive out-of-order
    - Helper functions in [`helpers.rs`](../../src/purgatory/helpers.rs) handle ref extraction
 
-3. **Bidirectional Waiting**: Either side can arrive first
+4. **Bidirectional Waiting**: Either side can arrive first
    - **Event-first**: Event waits for git push
    - **Git-first**: Placeholder created, waits for event
 
-4. **Automatic Expiry**: 30-minute default expiry, extensible during processing
+5. **Automatic Expiry**: 30-minute default expiry, extensible during processing
    - Background cleanup task runs every 60 seconds
-   - Removes expired entries from both stores
+   - Removes expired entries from all stores
 
 #### Data Types
 
 See [`types.rs`](../../src/purgatory/types.rs) for complete definitions:
 
 - **[`RefPair`](../../src/purgatory/types.rs:16)**: Ref name + object SHA pair
+- **[`AnnouncementPurgatoryEntry`](../../src/purgatory/types.rs)**: Announcement with bare repo path, relays, and expiry
 - **[`StatePurgatoryEntry`](../../src/purgatory/types.rs:29)**: State event with metadata
 - **[`PrPurgatoryEntry`](../../src/purgatory/types.rs:52)**: PR event or placeholder with metadata
 
 #### Integration Points
 
 **Write Policy** ([`src/nostr/policy/`](../../src/nostr/policy/)):
-- State policy checks git data existence before adding to purgatory
+- Announcement policy routes new announcements to purgatory; replacements accepted immediately
+- State policy checks git data existence before adding to purgatory; checks purgatory announcements for authorization
 - PR policy checks for placeholders before adding to purgatory
 - Events return "purgatory: will not be served until git data arrives" message
 
 **Git Handlers** ([`src/git/handlers.rs`](../../src/git/handlers.rs)):
+- On git push: Promote announcement from purgatory to database if present
 - On git push: Check purgatory for matching state events
 - On refs/nostr/* push: Check purgatory for PR events or create placeholders
 - Release events from purgatory when git data arrives
@@ -392,11 +362,25 @@ Configuration is loaded via **clap CLI > environment variables > .env > defaults
    └─ Accept or reject
                 ↓
 4. If ACCEPTED:
-   ├─ Event saved to database
-   └─ ensure_bare_repository() called
+   ├─ Is there an active announcement for (pubkey, identifier) in DB?
+   │  ├─ YES → Accept immediately (replacement, repo already proven)
+   │  └─ NO  → Route to announcement purgatory
                 ↓
-5. Bare Git repository created at
-   <git_data_path>/<npub>/<identifier>.git
+5. Announcement Purgatory path:
+   ├─ Bare Git repository created immediately at
+   │  <git_data_path>/<npub>/<identifier>.git
+   ├─ Announcement held in purgatory (not served to clients)
+   └─ Awaiting git data to prove content exists
+                ↓
+6. When git data arrives (push or background sync):
+   ├─ Announcement promoted from purgatory to database
+   ├─ Event now served to clients
+   └─ SyncManager upgrades to Full sync level
+                ↓
+7. If no git data within 30 minutes:
+   ├─ Bare repo deleted (soft expiry)
+   ├─ Event retained 24h for potential revival
+   └─ Eventually discarded if no git data arrives
 ```
 
 ### State Event Flow
@@ -407,14 +391,25 @@ Configuration is loaded via **clap CLI > environment variables > .env > defaults
 2. Nostr relay receives event
                 ↓
 3. Nip34WritePolicy::admit_event()
-   ├─ Check author is in maintainer set
+   ├─ Check author is in maintainer set (DB + purgatory announcements)
    ├─ Validate state structure
    └─ Accept or reject
                 ↓
-4. If ACCEPTED and is latest state:
-   ├─ Align repository refs to match state
-   ├─ Create/update/delete refs as needed
-   └─ Set HEAD if commit available
+4. If ACCEPTED:
+   ├─ Does git data already exist for this state?
+   │  ├─ YES → Save to database immediately
+   │  └─ NO  → Add to state purgatory
+                ↓
+5. State Purgatory path:
+   ├─ Event held in purgatory (not served to clients)
+   ├─ Enqueued for background git data sync (3 min delay)
+   └─ Awaiting git push or background sync
+                ↓
+6. When git push arrives:
+   ├─ Authorization checks both database AND purgatory
+   ├─ If authorized via purgatory state: push proceeds
+   ├─ After successful push: state event saved to database
+   └─ Removed from purgatory
 ```
 
 ## Testing Strategy
@@ -613,9 +608,7 @@ WantedBy=multi-user.target
 
 ## Conclusion
 
-The inline authorization approach provides a cleaner, more maintainable architecture than hook-based authorization while maintaining full GRASP-01 compliance. Using Hyper for the HTTP layer gives us complete control over request handling, WebSocket upgrades, and CORS headers.
-
-The key insight is that we don't need to rely on Git's hook mechanism when we have full control over the HTTP layer that Git operates through. By intercepting at the HTTP handler level, we gain better error handling, easier testing, and tighter integration between the Git and Nostr components.
+ngit-grasp uses inline authorization at the HTTP handler level, giving full control over request handling, WebSocket upgrades, and CORS headers while maintaining full GRASP-01 compliance. The purgatory system ensures that only repositories with actual git content are served to clients, and that events and git data are always consistent when released to the database.
 
 ## Related Documentation
 
