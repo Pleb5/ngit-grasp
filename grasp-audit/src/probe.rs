@@ -213,16 +213,37 @@ pub async fn run_probe(
 
     /// Fill all check names not yet present in `checks` as skipped with the
     /// given reason, then return a finished ProbeReport.
+    ///
+    /// The deadline fired before `$timed_out_name` could start.  Diagnose
+    /// whether a single prior check dominated the budget (>50%) or whether
+    /// the relay was generally slow across multiple steps.
     macro_rules! deadline_return {
-        ($relay_url:expr, $timestamp:expr, $total_start:expr, $checks:expr, $timed_out_name:expr) => {{
-            // Mark the step that hit the deadline as a timeout failure
+        ($relay_url:expr, $timestamp:expr, $total_start:expr, $overall_secs:expr, $checks:expr, $timed_out_name:expr) => {{
+            let total_ms = $total_start.elapsed().as_millis() as u64;
+            let budget_ms = ($overall_secs as u64) * 1000;
+
+            // Find the single check that consumed the most time, if it took
+            // more than half the overall budget it is the likely culprit.
+            let slowest = $checks
+                .iter()
+                .filter(|c| !c.skipped)
+                .max_by_key(|c| c.duration_ms);
+
+            let error_msg = match slowest {
+                Some(c) if c.duration_ms > budget_ms / 2 => {
+                    format!("overall timeout (likely caused by slow {})", c.name)
+                }
+                _ => "overall timeout (cumulative slowness across checks)".to_string(),
+            };
+
+            // The step that couldn't start due to the deadline
             $checks.push(ProbeCheck {
                 name: $timed_out_name,
                 passed: false,
                 skipped: false,
-                duration_ms: $total_start.elapsed().as_millis() as u64,
+                duration_ms: 0,
                 detail: None,
-                error: Some("overall timeout".to_string()),
+                error: Some(error_msg),
             });
             // Skip all subsequent checks
             let already: std::collections::HashSet<&str> =
@@ -237,7 +258,7 @@ pub async fn run_probe(
                 relay_url: $relay_url.to_string(),
                 timestamp: $timestamp,
                 all_passed,
-                total_duration_ms: $total_start.elapsed().as_millis() as u64,
+                total_duration_ms: total_ms,
                 checks: $checks,
             };
         }};
@@ -347,7 +368,7 @@ pub async fn run_probe(
     // Step 1: connect_websocket
     // ============================================================
     if Instant::now() >= deadline {
-        deadline_return!(relay_url, timestamp, total_start, checks, "connect_websocket");
+        deadline_return!(relay_url, timestamp, total_start, overall_secs, checks, "connect_websocket");
     }
     let step1_start = Instant::now();
     let client_result = tokio::time::timeout(
@@ -405,7 +426,7 @@ pub async fn run_probe(
     // ============================================================
     {
         if Instant::now() >= deadline {
-            deadline_return!(relay_url, timestamp, total_start, checks, "nip11_fetch");
+            deadline_return!(relay_url, timestamp, total_start, overall_secs, checks, "nip11_fetch");
         }
         let step2_start = Instant::now();
         let http_client = reqwest::Client::new();
@@ -475,7 +496,7 @@ pub async fn run_probe(
     let mut write_succeeded = false;
 
     if Instant::now() >= deadline {
-        deadline_return!(relay_url, timestamp, total_start, checks, "publish_events");
+        deadline_return!(relay_url, timestamp, total_start, overall_secs, checks, "publish_events");
     }
 
     if read_only {
@@ -537,7 +558,7 @@ pub async fn run_probe(
         // ============================================================
         if write_succeeded {
             if Instant::now() >= deadline {
-                deadline_return!(relay_url, timestamp, total_start, checks, "git_repo_initialised");
+                deadline_return!(relay_url, timestamp, total_start, overall_secs, checks, "git_repo_initialised");
             }
             let step4_start = Instant::now();
             let poll_url = format!("{}/info/refs?service=git-upload-pack", clone_url);
@@ -590,7 +611,7 @@ pub async fn run_probe(
         // ============================================================
         if write_succeeded {
             if Instant::now() >= deadline {
-                deadline_return!(relay_url, timestamp, total_start, checks, "git_push");
+                deadline_return!(relay_url, timestamp, total_start, overall_secs, checks, "git_push");
             }
             let step5_start = Instant::now();
             let push_result = try_push(&local_repo_path);
@@ -671,7 +692,7 @@ pub async fn run_probe(
         // ---- Write path ----
         // Step 6a: git_fetch_refs — just verify the endpoint returns 200
         if Instant::now() >= deadline {
-            deadline_return!(relay_url, timestamp, total_start, checks, "git_fetch_refs");
+            deadline_return!(relay_url, timestamp, total_start, overall_secs, checks, "git_fetch_refs");
         }
         let refs_url = format!("{}/info/refs?service=git-upload-pack", clone_url);
         let http_client = reqwest::Client::new();
@@ -799,7 +820,7 @@ pub async fn run_probe(
 
         // In read-only mode: first check that at least one announcement exists
         if Instant::now() >= deadline {
-            deadline_return!(relay_url, timestamp, total_start, checks, "serves_latest_announcement");
+            deadline_return!(relay_url, timestamp, total_start, overall_secs, checks, "serves_latest_announcement");
         }
         let filter = Filter::new().kind(Kind::GitRepoAnnouncement).limit(1);
         let existing = client
@@ -880,7 +901,7 @@ pub async fn run_probe(
                     });
 
                 if Instant::now() >= deadline {
-                    deadline_return!(relay_url, timestamp, total_start, checks, "git_fetch_refs");
+                    deadline_return!(relay_url, timestamp, total_start, overall_secs, checks, "git_fetch_refs");
                 }
                 let step6_start = Instant::now();
                 let refs_url = format!("{}/info/refs?service=git-upload-pack", fetch_url);
