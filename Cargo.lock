@@ -727,6 +727,7 @@ dependencies = [
  "nostr-sdk",
  "regex",
  "reqwest 0.11.27",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

@@ -55,6 +55,12 @@ impl ProbeReport {
 
         for check in &self.checks {
             if check.skipped {
+                // Don't list checks skipped due to read-only mode — they are
+                // not applicable, not failures.  Only show skips caused by
+                // earlier check failures so the user can see the causal chain.
+                if check.error.as_deref() == Some("read-only mode") {
+                    continue;
+                }
                 let reason = check.error.as_deref().unwrap_or("skipped");
                 println!(
                     "{}→{}  {:<28} skipped  {}({}){} ",
@@ -103,7 +109,18 @@ impl ProbeReport {
 
     /// Print machine-readable JSON
     pub fn print_json(&self) {
-        println!("{}", serde_json::to_string_pretty(self).unwrap());
+        // Exclude checks skipped due to read-only mode — they are not
+        // applicable and would clutter automated consumers.
+        let filtered = ProbeReport {
+            checks: self
+                .checks
+                .iter()
+                .filter(|c| !(c.skipped && c.error.as_deref() == Some("read-only mode")))
+                .cloned()
+                .collect(),
+            ..self.clone()
+        };
+        println!("{}", serde_json::to_string_pretty(&filtered).unwrap());
     }
 }
 
