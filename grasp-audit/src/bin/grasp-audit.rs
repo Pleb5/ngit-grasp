@@ -67,18 +67,12 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // In JSON mode logs must not pollute stdout (used for machine-readable output).
-    // Check argv directly so we know the mode before parsing the full CLI.
-    let json_mode = std::env::args().any(|a| a == "--json");
-    if json_mode {
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::from_default_env()
-                    .add_directive(tracing::Level::INFO.into()),
-            )
-            .with_writer(std::io::stderr)
-            .init();
-    } else {
+    // Probe output is self-contained — library chatter (nostr_relay_pool etc.)
+    // adds no value and clutters both human and JSON output.  Skip the tracing
+    // subscriber entirely for the probe subcommand; initialise it normally for
+    // audit subcommands where verbose output is expected.
+    let is_probe = std::env::args().nth(1).as_deref() == Some("probe");
+    if !is_probe {
         tracing_subscriber::fmt()
             .with_env_filter(
                 tracing_subscriber::EnvFilter::from_default_env()
