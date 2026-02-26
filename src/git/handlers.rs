@@ -288,7 +288,10 @@ pub async fn handle_receive_pack(
         Ok(auth_result) => {
             if !auth_result.authorized {
                 warn!("Push rejected for {}: {}", identifier, auth_result.reason);
-                return Err(GitError::Unauthorized);
+                return Ok(build_git_protocol_error_response(
+                    GitService::ReceivePack,
+                    &format!("authorisation failed: {}", auth_result.reason),
+                ));
             }
             info!(
                 "Push authorized for {} - {} maintainers, {} purgatory events: {}",
@@ -301,7 +304,10 @@ pub async fn handle_receive_pack(
         }
         Err(e) => {
             warn!("Authorization check failed for {}: {}", identifier, e);
-            return Err(GitError::Unauthorized);
+            return Ok(build_git_protocol_error_response(
+                GitService::ReceivePack,
+                &format!("authorisation failed: {}", e),
+            ));
         }
     };
 
@@ -442,13 +448,16 @@ pub async fn handle_receive_pack(
 }
 
 /// Errors that can occur in Git handlers
+///
+/// These represent transport/infrastructure failures, not application-level
+/// rejections. Application-level rejections (e.g. auth failures) are returned
+/// as HTTP 200 with an ERR pkt-line so git clients can display the message.
 #[derive(Debug)]
 pub enum GitError {
     RepositoryNotFound,
     ProcessSpawnFailed(std::io::Error),
     IoError(std::io::Error),
     GitFailed(Option<i32>),
-    Unauthorized,
 }
 
 impl std::fmt::Display for GitError {
@@ -458,7 +467,6 @@ impl std::fmt::Display for GitError {
             Self::ProcessSpawnFailed(e) => write!(f, "failed to spawn git process: {}", e),
             Self::IoError(e) => write!(f, "IO error: {}", e),
             Self::GitFailed(code) => write!(f, "git process failed with code: {:?}", code),
-            Self::Unauthorized => write!(f, "unauthorized"),
         }
     }
 }
@@ -470,7 +478,6 @@ impl GitError {
     pub fn status_code(&self) -> StatusCode {
         match self {
             Self::RepositoryNotFound => StatusCode::NOT_FOUND,
-            Self::Unauthorized => StatusCode::FORBIDDEN,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
