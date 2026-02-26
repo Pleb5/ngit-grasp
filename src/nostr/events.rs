@@ -260,12 +260,14 @@ impl RepositoryState {
 
         // Extract tags (refs/tags/*)
         // Tag format: ["refs/tags/v1.0", "commit_hash"]
+        // Exclude peeled tag notation ("refs/tags/v1.0^{}") — these are git's internal
+        // dereference markers pointing to the underlying commit, not real refs.
         let tags = event
             .tags
             .iter()
             .filter_map(|t| {
                 if let TagKind::Custom(s) = t.kind() {
-                    if s.as_ref().starts_with("refs/tags/") {
+                    if s.as_ref().starts_with("refs/tags/") && !s.as_ref().ends_with("^{}") {
                         let parts = t.clone().to_vec();
                         if parts.len() >= 2 {
                             Some(TagState {

@@ -58,7 +58,11 @@ pub fn extract_refs_from_state(event: &Event) -> Vec<RefPair> {
                 let ref_str = ref_name.as_ref();
 
                 // Only process refs/heads/* and refs/tags/*
-                if ref_str.starts_with("refs/heads/") || ref_str.starts_with("refs/tags/") {
+                // Exclude peeled tag notation (e.g. "refs/tags/v1.0.0^{}") — these are
+                // git's internal dereference markers, not real refs that get pushed.
+                if (ref_str.starts_with("refs/heads/") || ref_str.starts_with("refs/tags/"))
+                    && !ref_str.ends_with("^{}")
+                {
                     // Get the object SHA (first value in tag)
                     let parts = tag.clone().to_vec();
                     if parts.len() >= 2 {
