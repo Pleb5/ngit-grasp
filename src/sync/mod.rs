@@ -2406,7 +2406,8 @@ impl SyncManager {
         }
 
         // Register any new entries in repo_sync_index as StateOnly
-        let mut new_relay_urls: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut new_relay_urls: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         {
             let mut index = self.repo_sync_index.write().await;
             for (repo_id, relays) in &announcements {

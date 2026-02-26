@@ -711,15 +711,10 @@ async fn test_concurrent_state_and_pr_sync() {
     );
 
     // Check refs/nostr/<event-id> points to pr_commit
-    let pr_ref_correct = check_ref_at_commit(
-        &syncing_domain,
-        &npub,
-        identifier,
-        &pr_ref_name,
-        &pr_commit,
-    )
-    .await
-    .expect("Failed to check PR ref");
+    let pr_ref_correct =
+        check_ref_at_commit(&syncing_domain, &npub, identifier, &pr_ref_name, &pr_commit)
+            .await
+            .expect("Failed to check PR ref");
 
     assert!(
         pr_ref_correct,
@@ -993,7 +988,7 @@ async fn test_pr_event_clone_tag_sync_with_partial_oid_aggregation_from_multiple
     let syncing_relay = TestRelay::start_on_port_with_options(
         syncing_port,
         Some(source_grasp.url().to_string()), // Bootstrap from source_grasp
-        true,                                  // Disable negentropy - MockRelay doesn't support NIP-77
+        true, // Disable negentropy - MockRelay doesn't support NIP-77
     )
     .await;
 

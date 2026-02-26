@@ -167,10 +167,7 @@ fn now_iso8601() -> String {
     let mo = if mp < 10 { mp + 3 } else { mp - 9 }; // month [1, 12]
     let yr = if mo <= 2 { y + 1 } else { y };
 
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        yr, mo, d, h, m, s
-    )
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", yr, mo, d, h, m, s)
 }
 
 // ============================================================
@@ -246,8 +243,7 @@ pub async fn run_probe(
                 error: Some(error_msg),
             });
             // Skip all subsequent checks
-            let already: std::collections::HashSet<&str> =
-                $checks.iter().map(|c| c.name).collect();
+            let already: std::collections::HashSet<&str> = $checks.iter().map(|c| c.name).collect();
             for name in ALL_CHECK_NAMES {
                 if !already.contains(name) {
                     $checks.push(skipped(name, "overall timeout"));
@@ -303,8 +299,8 @@ pub async fn run_probe(
     let clone_url = format!("{}/{}/{}.git", http_base, npub, repo_id);
 
     // Create temp dir for local repo
-    let local_repo_path = std::env::temp_dir()
-        .join(format!("grasp-probe-{}", uuid::Uuid::new_v4()));
+    let local_repo_path =
+        std::env::temp_dir().join(format!("grasp-probe-{}", uuid::Uuid::new_v4()));
 
     // Initialise local repo (offline)
     let init_result = init_local_repo(&local_repo_path, &clone_url);
@@ -368,7 +364,14 @@ pub async fn run_probe(
     // Step 1: connect_websocket
     // ============================================================
     if Instant::now() >= deadline {
-        deadline_return!(relay_url, timestamp, total_start, overall_secs, checks, "connect_websocket");
+        deadline_return!(
+            relay_url,
+            timestamp,
+            total_start,
+            overall_secs,
+            checks,
+            "connect_websocket"
+        );
     }
     let step1_start = Instant::now();
     let client_result = tokio::time::timeout(
@@ -426,12 +429,21 @@ pub async fn run_probe(
     // ============================================================
     {
         if Instant::now() >= deadline {
-            deadline_return!(relay_url, timestamp, total_start, overall_secs, checks, "nip11_fetch");
+            deadline_return!(
+                relay_url,
+                timestamp,
+                total_start,
+                overall_secs,
+                checks,
+                "nip11_fetch"
+            );
         }
         let step2_start = Instant::now();
         let http_client = reqwest::Client::new();
         let nip11_result = tokio::time::timeout(
-            deadline.saturating_duration_since(Instant::now()).min(Duration::from_secs(timeout_secs)),
+            deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_secs(timeout_secs)),
             http_client
                 .get(&http_base)
                 .header("Accept", "application/nostr+json")
@@ -443,24 +455,20 @@ pub async fn run_probe(
 
         match nip11_result {
             Ok(Ok(resp)) if resp.status().is_success() => {
-                let detail = resp
-                    .json::<serde_json::Value>()
-                    .await
-                    .ok()
-                    .map(|v| {
-                        let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
-                        // software is typically a repo URL; take the last path segment
-                        let software = v
-                            .get("software")
-                            .and_then(|s| s.as_str())
-                            .map(|s| s.trim_end_matches('/').rsplit('/').next().unwrap_or(s))
-                            .unwrap_or("unknown");
-                        let version = v
-                            .get("version")
-                            .and_then(|ver| ver.as_str())
-                            .unwrap_or("unknown");
-                        format!("{} ({} v{})", name, software, version)
-                    });
+                let detail = resp.json::<serde_json::Value>().await.ok().map(|v| {
+                    let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
+                    // software is typically a repo URL; take the last path segment
+                    let software = v
+                        .get("software")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.trim_end_matches('/').rsplit('/').next().unwrap_or(s))
+                        .unwrap_or("unknown");
+                    let version = v
+                        .get("version")
+                        .and_then(|ver| ver.as_str())
+                        .unwrap_or("unknown");
+                    format!("{} ({} v{})", name, software, version)
+                });
                 checks.push(ProbeCheck {
                     name: "nip11_fetch",
                     passed: true,
@@ -509,7 +517,14 @@ pub async fn run_probe(
     let mut write_succeeded = false;
 
     if Instant::now() >= deadline {
-        deadline_return!(relay_url, timestamp, total_start, overall_secs, checks, "publish_events");
+        deadline_return!(
+            relay_url,
+            timestamp,
+            total_start,
+            overall_secs,
+            checks,
+            "publish_events"
+        );
     }
 
     if read_only {
@@ -558,10 +573,7 @@ pub async fn run_probe(
                     error: Some(e.to_string()),
                 });
                 // Skip steps 4 and 5; step 6 will use fallback
-                checks.push(skipped(
-                    "git_repo_initialised",
-                    "publish_events failed",
-                ));
+                checks.push(skipped("git_repo_initialised", "publish_events failed"));
                 checks.push(skipped("git_push", "publish_events failed"));
             }
         }
@@ -571,7 +583,14 @@ pub async fn run_probe(
         // ============================================================
         if write_succeeded {
             if Instant::now() >= deadline {
-                deadline_return!(relay_url, timestamp, total_start, overall_secs, checks, "git_repo_initialised");
+                deadline_return!(
+                    relay_url,
+                    timestamp,
+                    total_start,
+                    overall_secs,
+                    checks,
+                    "git_repo_initialised"
+                );
             }
             let step4_start = Instant::now();
             let poll_url = format!("{}/info/refs?service=git-upload-pack", clone_url);
@@ -624,7 +643,14 @@ pub async fn run_probe(
         // ============================================================
         if write_succeeded {
             if Instant::now() >= deadline {
-                deadline_return!(relay_url, timestamp, total_start, overall_secs, checks, "git_push");
+                deadline_return!(
+                    relay_url,
+                    timestamp,
+                    total_start,
+                    overall_secs,
+                    checks,
+                    "git_push"
+                );
             }
             let step5_start = Instant::now();
             let push_result = try_push(&local_repo_path);
@@ -690,8 +716,14 @@ pub async fn run_probe(
                 continue;
             }
             let mut parts = content.splitn(2, ' ');
-            let hash = match parts.next() { Some(h) if h.len() == 40 => h, _ => continue };
-            let refname = match parts.next() { Some(r) => r.trim(), None => continue };
+            let hash = match parts.next() {
+                Some(h) if h.len() == 40 => h,
+                _ => continue,
+            };
+            let refname = match parts.next() {
+                Some(r) => r.trim(),
+                None => continue,
+            };
             // Skip refs/nostr/* — only branches (refs/heads/*) and tags (refs/tags/*)
             if refname.starts_with("refs/nostr/") {
                 continue;
@@ -705,14 +737,23 @@ pub async fn run_probe(
         // ---- Write path ----
         // Step 6a: git_fetch_refs — just verify the endpoint returns 200
         if Instant::now() >= deadline {
-            deadline_return!(relay_url, timestamp, total_start, overall_secs, checks, "git_fetch_refs");
+            deadline_return!(
+                relay_url,
+                timestamp,
+                total_start,
+                overall_secs,
+                checks,
+                "git_fetch_refs"
+            );
         }
         let refs_url = format!("{}/info/refs?service=git-upload-pack", clone_url);
         let http_client = reqwest::Client::new();
 
         let step6_start = Instant::now();
         let refs_result = tokio::time::timeout(
-            deadline.saturating_duration_since(Instant::now()).min(Duration::from_secs(timeout_secs)),
+            deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_secs(timeout_secs)),
             http_client.get(&refs_url).send(),
         )
         .await;
@@ -833,14 +874,23 @@ pub async fn run_probe(
 
         // In read-only mode: first check that at least one announcement exists
         if Instant::now() >= deadline {
-            deadline_return!(relay_url, timestamp, total_start, overall_secs, checks, "serves_latest_announcement");
+            deadline_return!(
+                relay_url,
+                timestamp,
+                total_start,
+                overall_secs,
+                checks,
+                "serves_latest_announcement"
+            );
         }
         let filter = Filter::new().kind(Kind::GitRepoAnnouncement).limit(1);
         let existing = client
             .client()
             .fetch_events(
                 filter,
-                deadline.saturating_duration_since(Instant::now()).min(Duration::from_secs(5)),
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_secs(5)),
             )
             .await
             .unwrap_or_default();
@@ -909,18 +959,25 @@ pub async fn run_probe(
                     .find(|t| t.kind() == TagKind::custom("clone"))
                     .and_then(|t| t.content())
                     .map(|s| s.to_string())
-                    .unwrap_or_else(|| {
-                        format!("{}/{}/{}.git", http_base, ann_npub, ann_id)
-                    });
+                    .unwrap_or_else(|| format!("{}/{}/{}.git", http_base, ann_npub, ann_id));
 
                 if Instant::now() >= deadline {
-                    deadline_return!(relay_url, timestamp, total_start, overall_secs, checks, "git_fetch_refs");
+                    deadline_return!(
+                        relay_url,
+                        timestamp,
+                        total_start,
+                        overall_secs,
+                        checks,
+                        "git_fetch_refs"
+                    );
                 }
                 let step6_start = Instant::now();
                 let refs_url = format!("{}/info/refs?service=git-upload-pack", fetch_url);
                 let http_client = reqwest::Client::new();
                 let refs_result = tokio::time::timeout(
-                    deadline.saturating_duration_since(Instant::now()).min(Duration::from_secs(timeout_secs)),
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_secs(timeout_secs)),
                     http_client.get(&refs_url).send(),
                 )
                 .await;
@@ -935,7 +992,7 @@ pub async fn run_probe(
                             passed: true,
                             skipped: false,
                             duration_ms: step6_ms,
-                             detail: None,
+                            detail: None,
                             error: None,
                         });
                         Some(body)
@@ -946,7 +1003,7 @@ pub async fn run_probe(
                             passed: false,
                             skipped: false,
                             duration_ms: step6_ms,
-                             detail: None,
+                            detail: None,
                             error: Some(format!("HTTP {}", resp.status())),
                         });
                         None
@@ -957,7 +1014,7 @@ pub async fn run_probe(
                             passed: false,
                             skipped: false,
                             duration_ms: step6_ms,
-                             detail: None,
+                            detail: None,
                             error: Some(e.to_string()),
                         });
                         None
@@ -968,7 +1025,7 @@ pub async fn run_probe(
                             passed: false,
                             skipped: false,
                             duration_ms: step6_ms,
-                             detail: None,
+                            detail: None,
                             error: Some("timeout".to_string()),
                         });
                         None
@@ -981,10 +1038,7 @@ pub async fn run_probe(
                 // including recursive maintainer chains), then compare against git refs.
                 match refs_body_fallback {
                     None => {
-                        checks.push(skipped(
-                            "git_refs_match_state",
-                            "git_fetch_refs failed",
-                        ));
+                        checks.push(skipped("git_refs_match_state", "git_fetch_refs failed"));
                     }
                     Some(body) => {
                         let fetched_refs = parse_refs(&body);
@@ -992,19 +1046,19 @@ pub async fn run_probe(
                         // Fetch all state events for this repo_id from the relay.
                         // The relay only serves authorized state events (owner + full
                         // recursive maintainer chain already resolved by the relay).
-                        let state_filter = Filter::new()
-                            .kind(Kind::RepoState)
-                            .custom_tag(
-                                nostr_sdk::prelude::SingleLetterTag::lowercase(
-                                    nostr_sdk::prelude::Alphabet::D,
-                                ),
-                                ann_id.clone(),
-                            );
+                        let state_filter = Filter::new().kind(Kind::RepoState).custom_tag(
+                            nostr_sdk::prelude::SingleLetterTag::lowercase(
+                                nostr_sdk::prelude::Alphabet::D,
+                            ),
+                            ann_id.clone(),
+                        );
                         let state_events = client
                             .client()
                             .fetch_events(
                                 state_filter,
-                                deadline.saturating_duration_since(Instant::now()).min(Duration::from_secs(5)),
+                                deadline
+                                    .saturating_duration_since(Instant::now())
+                                    .min(Duration::from_secs(5)),
                             )
                             .await
                             .unwrap_or_default();
@@ -1046,7 +1100,8 @@ pub async fn run_probe(
                                         Some(h) => h.to_string(),
                                         None => continue,
                                     };
-                                    let prev_ts = latest_ts.get(kind_str.as_ref()).copied().unwrap_or(0);
+                                    let prev_ts =
+                                        latest_ts.get(kind_str.as_ref()).copied().unwrap_or(0);
                                     if ts >= prev_ts {
                                         expected.insert(kind_str.to_string(), hash);
                                         latest_ts.insert(kind_str.to_string(), ts);
@@ -1103,10 +1158,7 @@ pub async fn run_probe(
                     detail: None,
                     error: Some("no repositories found on relay".to_string()),
                 });
-                checks.push(skipped(
-                    "git_refs_match_state",
-                    "no announcement found",
-                ));
+                checks.push(skipped("git_refs_match_state", "no announcement found"));
             }
         }
     }

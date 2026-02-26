@@ -16,8 +16,14 @@ pub mod persistence;
 pub mod sync;
 mod types;
 
-pub use helpers::{can_apply_state, can_satisfy_state, diagnose_state_mismatch, extract_refs_from_state, get_unpushed_refs};
-pub use types::{AnnouncementPurgatoryEntry, EventSource, PrPurgatoryEntry, RefPair, RefUpdate, StatePurgatoryEntry};
+pub use helpers::{
+    can_apply_state, can_satisfy_state, diagnose_state_mismatch, extract_refs_from_state,
+    get_unpushed_refs,
+};
+pub use types::{
+    AnnouncementPurgatoryEntry, EventSource, PrPurgatoryEntry, RefPair, RefUpdate,
+    StatePurgatoryEntry,
+};
 
 use dashmap::DashMap;
 use nostr_sdk::prelude::*;
@@ -672,9 +678,15 @@ impl Purgatory {
     ///
     /// # Returns
     /// The announcement entry if found, None otherwise
-    pub fn find_announcement(&self, owner: &PublicKey, identifier: &str) -> Option<AnnouncementPurgatoryEntry> {
+    pub fn find_announcement(
+        &self,
+        owner: &PublicKey,
+        identifier: &str,
+    ) -> Option<AnnouncementPurgatoryEntry> {
         let key = (*owner, identifier.to_string());
-        self.announcement_purgatory.get(&key).map(|entry| entry.clone())
+        self.announcement_purgatory
+            .get(&key)
+            .map(|entry| entry.clone())
     }
 
     /// Get all announcements in purgatory for a given identifier.
@@ -687,7 +699,10 @@ impl Purgatory {
     ///
     /// # Returns
     /// Vector of announcement entries for this identifier
-    pub fn get_announcements_by_identifier(&self, identifier: &str) -> Vec<AnnouncementPurgatoryEntry> {
+    pub fn get_announcements_by_identifier(
+        &self,
+        identifier: &str,
+    ) -> Vec<AnnouncementPurgatoryEntry> {
         self.announcement_purgatory
             .iter()
             .filter(|entry| entry.key().1 == identifier)
@@ -755,7 +770,12 @@ impl Purgatory {
     /// * `owner` - The owner pubkey
     /// * `identifier` - The repository identifier
     /// * `duration` - Minimum duration to guarantee from now
-    pub fn extend_announcement_expiry(&self, owner: &PublicKey, identifier: &str, duration: Duration) {
+    pub fn extend_announcement_expiry(
+        &self,
+        owner: &PublicKey,
+        identifier: &str,
+        duration: Duration,
+    ) {
         let key = (*owner, identifier.to_string());
 
         // Collect revival info before taking a mutable borrow
@@ -977,16 +997,24 @@ impl Purgatory {
             .map(|entry| {
                 let key = entry.key();
                 let v = entry.value();
-                (key.0.clone(), key.1.clone(), v.repo_path.clone(), v.event.id, v.soft_expired)
+                (
+                    key.0,
+                    key.1.clone(),
+                    v.repo_path.clone(),
+                    v.event.id,
+                    v.soft_expired,
+                )
             })
             .collect();
 
         let mut announcement_removed = 0;
-        for (owner, identifier, repo_path, event_id, already_soft_expired) in expired_announcements {
+        for (owner, identifier, repo_path, event_id, already_soft_expired) in expired_announcements
+        {
             if already_soft_expired {
                 // Phase 2: fully remove
                 self.mark_expired(event_id);
-                self.announcement_purgatory.remove(&(owner.clone(), identifier.clone()));
+                self.announcement_purgatory
+                    .remove(&(owner, identifier.clone()));
                 announcement_removed += 1;
                 tracing::info!(
                     owner = %owner,
@@ -1026,7 +1054,10 @@ impl Purgatory {
 
                 if repo_gone {
                     // Mark soft_expired and extend expiry
-                    if let Some(mut entry) = self.announcement_purgatory.get_mut(&(owner.clone(), identifier.clone())) {
+                    if let Some(mut entry) = self
+                        .announcement_purgatory
+                        .get_mut(&(owner, identifier.clone()))
+                    {
                         entry.soft_expired = true;
                         entry.expires_at = now + SOFT_EXPIRY_EXTENDED;
                     }

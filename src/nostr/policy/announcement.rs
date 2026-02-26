@@ -70,7 +70,10 @@ impl AnnouncementPolicy {
                             .is_some_and(|entry| event.created_at > entry.event.created_at);
 
                         if should_evict {
-                            self.remove_purgatory_announcement(&event.pubkey, &announcement.identifier);
+                            self.remove_purgatory_announcement(
+                                &event.pubkey,
+                                &announcement.identifier,
+                            );
                         }
 
                         match self
@@ -145,10 +148,9 @@ impl AnnouncementPolicy {
                         );
                         AnnouncementResult::AcceptPurgatory
                     }
-                    Err(e) => AnnouncementResult::Reject(format!(
-                        "Failed to parse announcement: {}",
-                        e
-                    )),
+                    Err(e) => {
+                        AnnouncementResult::Reject(format!("Failed to parse announcement: {}", e))
+                    }
                 }
             }
             // AcceptPurgatory shouldn't come from validate_announcement, but handle it
@@ -161,11 +163,7 @@ impl AnnouncementPolicy {
     /// Called when a replacement announcement arrives for a (pubkey, identifier) pair
     /// that is currently in purgatory. Updates the purgatory entry and extends the
     /// expiry so the new announcement has a fresh waiting window.
-    fn replace_purgatory_announcement(
-        &self,
-        event: &Event,
-        announcement: &RepositoryAnnouncement,
-    ) {
+    fn replace_purgatory_announcement(&self, event: &Event, announcement: &RepositoryAnnouncement) {
         let repo_path = self.ctx.git_data_path.join(announcement.repo_path());
         let relays: HashSet<String> = announcement.relays.iter().cloned().collect();
 

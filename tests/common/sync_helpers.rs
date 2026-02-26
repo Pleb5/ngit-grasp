@@ -1240,8 +1240,11 @@ pub async fn push_unique_git_data_to_relay(
     git(path, &["config", "commit.gpgsign", "false"]);
 
     // Write a unique file so each maintainer gets a distinct commit hash
-    std::fs::write(path.join("state_test.txt"), "State test content for purgatory sync")
-        .expect("write state_test.txt");
+    std::fs::write(
+        path.join("state_test.txt"),
+        "State test content for purgatory sync",
+    )
+    .expect("write state_test.txt");
     std::fs::write(path.join(".unique"), unique_seed).expect("write .unique");
     git(path, &["add", "."]);
     git(path, &["commit", "-m", "State test commit"]);

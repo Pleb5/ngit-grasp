@@ -169,7 +169,10 @@ async fn test_full_purgatory_save_restore_cycle() {
 
     // Verify all data was restored
     let (announcement_count2, state_count2, pr_count2) = purgatory2.count();
-    assert_eq!(announcement_count2, 1, "Should have 1 announcement after restore");
+    assert_eq!(
+        announcement_count2, 1,
+        "Should have 1 announcement after restore"
+    );
     assert_eq!(state_count2, 2, "Should have 2 state events after restore");
     assert_eq!(
         pr_count2, 3,
@@ -853,7 +856,10 @@ async fn test_announcement_save_restore_cycle() {
     let purgatory2 = Purgatory::new(&git_data_path);
     purgatory2.restore_from_disk(&state_path).unwrap();
 
-    assert!(!state_path.exists(), "State file should be deleted after restore");
+    assert!(
+        !state_path.exists(),
+        "State file should be deleted after restore"
+    );
 
     let (ann_count2, _, _) = purgatory2.count();
     assert_eq!(ann_count2, 1, "Announcement should be restored");

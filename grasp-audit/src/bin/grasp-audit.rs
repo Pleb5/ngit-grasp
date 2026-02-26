@@ -132,7 +132,11 @@ async fn main() -> Result<()> {
                         println!("\n[Run {}]", run);
                     }
                     let report = grasp_audit::probe::run_probe(
-                        &relay, keys.clone(), read_only, timeout, overall_secs,
+                        &relay,
+                        keys.clone(),
+                        read_only,
+                        timeout,
+                        overall_secs,
                     )
                     .await;
                     if json {
@@ -144,10 +148,9 @@ async fn main() -> Result<()> {
                     tokio::time::sleep(Duration::from_secs(interval)).await;
                 }
             } else {
-                let report = grasp_audit::probe::run_probe(
-                    &relay, keys, read_only, timeout, overall_secs,
-                )
-                .await;
+                let report =
+                    grasp_audit::probe::run_probe(&relay, keys, read_only, timeout, overall_secs)
+                        .await;
                 if json {
                     report.print_json();
                 } else {

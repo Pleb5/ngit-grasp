@@ -967,7 +967,9 @@ impl<'a> TestContext<'a> {
             FixtureKind::PREvent2Served => self.build_pr_event_2_served().await,
 
             FixtureKind::PurgatoryValidRepoSent => self.build_purgatory_valid_repo_sent().await,
-            FixtureKind::PurgatoryOwnerStateDataPushed => self.build_purgatory_owner_state_data_pushed().await,
+            FixtureKind::PurgatoryOwnerStateDataPushed => {
+                self.build_purgatory_owner_state_data_pushed().await
+            }
 
             FixtureKind::OwnerStateDataPushed => self.build_owner_state_data_pushed().await,
 
@@ -1147,7 +1149,10 @@ impl<'a> TestContext<'a> {
             Ok(h) => h,
             Err(e) => {
                 cleanup(&clone_path);
-                return Err(anyhow::anyhow!("Failed to create deterministic commit: {}", e));
+                return Err(anyhow::anyhow!(
+                    "Failed to create deterministic commit: {}",
+                    e
+                ));
             }
         };
 
@@ -1186,7 +1191,12 @@ impl<'a> TestContext<'a> {
                     DETERMINISTIC_COMMIT_HASH
                 ));
             }
-            Err(e) => return Err(anyhow::anyhow!("PurgatoryOwnerStateDataPushed push error: {}", e)),
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "PurgatoryOwnerStateDataPushed push error: {}",
+                    e
+                ))
+            }
         }
 
         // ============================================================

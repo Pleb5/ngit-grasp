@@ -814,6 +814,7 @@ pub fn extract_identifier_from_pr_event(event: &Event) -> Option<String> {
 ///
 /// # Returns
 /// A `ProcessResult` describing what was processed
+#[allow(clippy::too_many_arguments)]
 pub async fn process_newly_available_git_data(
     source_repo_path: &Path,
     new_oids: &HashSet<String>,
@@ -1339,6 +1340,7 @@ async fn process_purgatory_pr_events(
 /// When `write_policy` and `rejected_events_index` are provided (git push path),
 /// any maintainer announcements sitting in the hot cache are re-processed immediately
 /// after the owner announcement is promoted, so they don't wait for the next sync cycle.
+#[allow(clippy::too_many_arguments)]
 async fn process_purgatory_announcements(
     identifier: &str,
     source_repo_path: &Path,

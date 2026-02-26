@@ -54,9 +54,7 @@ impl PurgatoryTests {
 
         // Deletion event tests (NIP-09)
         results.add(Self::test_deletion_by_event_id_removes_purgatory_state_event(client).await);
-        results.add(
-            Self::test_deletion_by_coordinate_removes_purgatory_state_event(client).await,
-        );
+        results.add(Self::test_deletion_by_coordinate_removes_purgatory_state_event(client).await);
 
         // PR purgatory tests
         results.add(Self::test_pr_event_accepted_into_purgatory_and_isnt_served(client).await);

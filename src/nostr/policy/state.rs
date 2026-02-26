@@ -158,7 +158,11 @@ impl StatePolicy {
         // authorized it.
         for owner_hex in &authorized_owners {
             if let Ok(owner_pk) = nostr_sdk::PublicKey::from_hex(owner_hex) {
-                if self.ctx.purgatory.has_purgatory_announcement(&owner_pk, &state.identifier) {
+                if self
+                    .ctx
+                    .purgatory
+                    .has_purgatory_announcement(&owner_pk, &state.identifier)
+                {
                     self.ctx.purgatory.extend_announcement_expiry(
                         &owner_pk,
                         &state.identifier,

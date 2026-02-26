@@ -155,7 +155,9 @@ impl DeletionPolicy {
                         author = %author.to_hex(),
                         "Deletion request: removing purgatory state event by event ID"
                     );
-                    self.ctx.purgatory.remove_state_event(&identifier, &entry.event.id);
+                    self.ctx
+                        .purgatory
+                        .remove_state_event(&identifier, &entry.event.id);
                     return; // event IDs are unique
                 }
             }
@@ -223,7 +225,9 @@ impl DeletionPolicy {
                     if entry.author == *author
                         && entry.event.created_at.as_secs() <= deletion_created_at
                     {
-                        self.ctx.purgatory.remove_state_event(identifier, &entry.event.id);
+                        self.ctx
+                            .purgatory
+                            .remove_state_event(identifier, &entry.event.id);
                         removed += 1;
                     }
                 }
@@ -306,7 +310,10 @@ mod tests {
         EventBuilder::new(Kind::GitRepoAnnouncement, "")
             .tags(vec![
                 Tag::identifier(identifier),
-                Tag::custom(TagKind::custom("clone"), vec!["https://example.com/repo.git"]),
+                Tag::custom(
+                    TagKind::custom("clone"),
+                    vec!["https://example.com/repo.git"],
+                ),
             ])
             .sign_with_keys(keys)
             .unwrap()
@@ -331,7 +338,9 @@ mod tests {
         let announcement = make_announcement_event(&keys, identifier);
         add_to_purgatory(&ctx, &announcement, identifier);
 
-        assert!(ctx.purgatory.has_purgatory_announcement(&keys.public_key(), identifier));
+        assert!(ctx
+            .purgatory
+            .has_purgatory_announcement(&keys.public_key(), identifier));
 
         // Build kind 5 deletion event referencing the announcement by event ID
         let deletion = EventBuilder::new(Kind::EventDeletion, "")
@@ -347,7 +356,8 @@ mod tests {
 
         assert!(matches!(result, WritePolicyResult::Accept));
         assert!(
-            !ctx.purgatory.has_purgatory_announcement(&keys.public_key(), identifier),
+            !ctx.purgatory
+                .has_purgatory_announcement(&keys.public_key(), identifier),
             "Purgatory entry should have been removed"
         );
     }
@@ -361,7 +371,9 @@ mod tests {
         let announcement = make_announcement_event(&keys, identifier);
         add_to_purgatory(&ctx, &announcement, identifier);
 
-        assert!(ctx.purgatory.has_purgatory_announcement(&keys.public_key(), identifier));
+        assert!(ctx
+            .purgatory
+            .has_purgatory_announcement(&keys.public_key(), identifier));
 
         // Build kind 5 deletion event referencing the announcement by coordinate
         let coord = format!("30617:{}:{}", keys.public_key().to_hex(), identifier);
@@ -378,7 +390,8 @@ mod tests {
 
         assert!(matches!(result, WritePolicyResult::Accept));
         assert!(
-            !ctx.purgatory.has_purgatory_announcement(&keys.public_key(), identifier),
+            !ctx.purgatory
+                .has_purgatory_announcement(&keys.public_key(), identifier),
             "Purgatory entry should have been removed"
         );
     }
@@ -407,7 +420,8 @@ mod tests {
 
         assert!(matches!(result, WritePolicyResult::Accept));
         assert!(
-            ctx.purgatory.has_purgatory_announcement(&owner_keys.public_key(), identifier),
+            ctx.purgatory
+                .has_purgatory_announcement(&owner_keys.public_key(), identifier),
             "Purgatory entry should NOT have been removed by wrong author"
         );
     }
@@ -438,7 +452,8 @@ mod tests {
 
         assert!(matches!(result, WritePolicyResult::Accept));
         assert!(
-            ctx.purgatory.has_purgatory_announcement(&owner_keys.public_key(), identifier),
+            ctx.purgatory
+                .has_purgatory_announcement(&owner_keys.public_key(), identifier),
             "Purgatory entry should NOT have been removed by wrong author"
         );
     }
@@ -450,11 +465,10 @@ mod tests {
 
         // No purgatory entry exists — deletion should still be accepted
         let deletion = EventBuilder::new(Kind::EventDeletion, "")
-            .tags(vec![
-                Tag::custom(TagKind::custom("a"), vec![
-                    format!("30617:{}:nonexistent", keys.public_key().to_hex())
-                ]),
-            ])
+            .tags(vec![Tag::custom(
+                TagKind::custom("a"),
+                vec![format!("30617:{}:nonexistent", keys.public_key().to_hex())],
+            )])
             .sign_with_keys(&keys)
             .unwrap();
 
@@ -491,7 +505,8 @@ mod tests {
 
         assert!(matches!(result, WritePolicyResult::Accept));
         assert!(
-            ctx.purgatory.has_purgatory_announcement(&keys.public_key(), identifier),
+            ctx.purgatory
+                .has_purgatory_announcement(&keys.public_key(), identifier),
             "Purgatory entry should NOT be removed: entry is newer than deletion request"
         );
     }

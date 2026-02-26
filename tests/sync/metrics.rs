@@ -417,9 +417,12 @@ async fn test_live_sync_event_count() {
     println!("Announcement set up on source relay with git data");
 
     // Start syncing relay with pre-allocated port
-    let syncing_relay =
-        TestRelay::start_on_port_with_options(sync_port, Some(source_relay.url().to_string()), false)
-            .await;
+    let syncing_relay = TestRelay::start_on_port_with_options(
+        sync_port,
+        Some(source_relay.url().to_string()),
+        false,
+    )
+    .await;
     println!("Syncing relay started at {}", syncing_relay.url());
 
     // Wait for sync connection to be fully established with EOSE received
@@ -458,8 +461,14 @@ async fn test_live_sync_event_count() {
     let client = TestClient::new(source_relay.url(), keys.clone())
         .await
         .expect("Failed to connect to source");
-    client.send_event(&patch1).await.expect("Failed to send patch 1");
-    client.send_event(&patch2).await.expect("Failed to send patch 2");
+    client
+        .send_event(&patch1)
+        .await
+        .expect("Failed to send patch 1");
+    client
+        .send_event(&patch2)
+        .await
+        .expect("Failed to send patch 2");
     client.disconnect().await;
     println!("Two patches sent to source relay (live mode)");
 

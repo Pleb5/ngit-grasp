@@ -105,6 +105,7 @@ struct HttpService {
 }
 
 impl HttpService {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         relay: LocalRelay,
         config: Config,

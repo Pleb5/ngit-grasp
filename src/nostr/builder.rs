@@ -18,7 +18,6 @@ use crate::nostr::policy::{
     ReferenceResult, RelatedEventPolicy, StatePolicy, StateResult,
 };
 
-
 /// Type alias for the shared database used by the relay
 pub type SharedDatabase = Arc<dyn NostrDatabase>;
 

@@ -15,7 +15,7 @@
 //!
 //! Runs every `AUDIT_CLEANUP_INTERVAL_SECS` seconds.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use nostr_sdk::prelude::*;
@@ -46,8 +46,12 @@ pub async fn run_audit_cleanup_loop(database: SharedDatabase, git_data_path: Pat
 }
 
 /// Perform a single cleanup pass.
-async fn run_audit_cleanup_once(database: &SharedDatabase, git_data_path: &PathBuf) {
-    let cutoff = Timestamp::from(Timestamp::now().as_secs().saturating_sub(AUDIT_CLEANUP_AGE_SECS));
+async fn run_audit_cleanup_once(database: &SharedDatabase, git_data_path: &Path) {
+    let cutoff = Timestamp::from(
+        Timestamp::now()
+            .as_secs()
+            .saturating_sub(AUDIT_CLEANUP_AGE_SECS),
+    );
 
     // --- Step 1: Find repo announcements to delete git repos for ---
     let repo_filter = Filter::new()
@@ -73,10 +77,7 @@ async fn run_audit_cleanup_once(database: &SharedDatabase, git_data_path: &PathB
                 if repo_path.exists() {
                     match std::fs::remove_dir_all(&repo_path) {
                         Ok(()) => {
-                            debug!(
-                                "audit_cleanup: deleted git repo {}",
-                                repo_path.display()
-                            );
+                            debug!("audit_cleanup: deleted git repo {}", repo_path.display());
                             repos_deleted += 1;
 
                             // Remove the parent npub directory if it is now empty
@@ -131,9 +132,7 @@ async fn run_audit_cleanup_once(database: &SharedDatabase, git_data_path: &PathB
     }
 
     // --- Step 2: Delete all audit events from the database ---
-    let all_audit_filter = Filter::new()
-        .hashtag(AUDIT_TEST_EVENT_TAG)
-        .until(cutoff);
+    let all_audit_filter = Filter::new().hashtag(AUDIT_TEST_EVENT_TAG).until(cutoff);
 
     match database.delete(all_audit_filter).await {
         Ok(()) => {
@@ -143,7 +142,10 @@ async fn run_audit_cleanup_once(database: &SharedDatabase, git_data_path: &PathB
             );
         }
         Err(e) => {
-            error!("audit_cleanup: failed to delete audit events from database: {}", e);
+            error!(
+                "audit_cleanup: failed to delete audit events from database: {}",
+                e
+            );
         }
     }
 }

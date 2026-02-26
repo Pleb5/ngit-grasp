@@ -183,7 +183,10 @@ async fn test_relay_discovery_via_announcements_with_historic_sync() {
     let (announcement, _git_dir_a) =
         setup_announcement_on_relay(&relay_a, &keys, &domain_refs, repo_id).await;
     let announcement_id = announcement.id;
-    println!("Announcement {} set up on relay_a with git data (Layer 1)", announcement_id);
+    println!(
+        "Announcement {} set up on relay_a with git data (Layer 1)",
+        announcement_id
+    );
 
     // Build repo coordinate for Layer 2 reference
     let repo_coord = repo_coord(&keys, repo_id);
@@ -235,4 +238,3 @@ async fn test_relay_discovery_via_announcements_with_historic_sync() {
         issue_id
     );
 }
-

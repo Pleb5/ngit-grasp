@@ -70,17 +70,15 @@ async fn test_maintainer_announcement_reprocessed_immediately() {
                         identifier
                     )],
                 ),
-                Tag::custom(
-                    TagKind::custom("relays"),
-                    vec![relay_a.url().to_string()],
-                ),
+                Tag::custom(TagKind::custom("relays"), vec![relay_a.url().to_string()]),
             ])
             .sign_with_keys(&maintainer_keys)
             .unwrap();
-    send_to_relay(&relay_a, &maintainer_announcement).await.unwrap();
+    send_to_relay(&relay_a, &maintainer_announcement)
+        .await
+        .unwrap();
     let _git_dir_maintainer =
-        push_git_data_to_relay(&relay_a, &maintainer_keys, identifier, &[&relay_a.domain()])
-            .await;
+        push_git_data_to_relay(&relay_a, &maintainer_keys, identifier, &[&relay_a.domain()]).await;
     println!("✓ Maintainer announcement + git data pushed to relay_a");
 
     // Step 2: Start relay_b with relay_a as bootstrap so its SyncManager connects immediately.
@@ -134,7 +132,9 @@ async fn test_maintainer_announcement_reprocessed_immediately() {
     // re-processing of the maintainer announcement via our new code path.
     let _git_dir_owner =
         push_git_data_to_relay(&relay_b, &owner_keys, identifier, &[&relay_b.domain()]).await;
-    println!("✓ Owner git data pushed to relay_b (owner announcement promoted, hot cache re-processed)");
+    println!(
+        "✓ Owner git data pushed to relay_b (owner announcement promoted, hot cache re-processed)"
+    );
 
     // Step 5: Wait briefly for async processing to complete.
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -363,9 +363,12 @@ async fn test_multiple_maintainers_all_reprocessed() {
             .kind(Kind::GitRepoAnnouncement)
             .author(keys.public_key())
             .identifier(identifier);
-        let found =
-            wait_for_event_on_relay(relay_a.url(), filter, Duration::from_secs(10)).await;
-        assert!(found, "{} announcement should be in relay_a before starting relay_b", name);
+        let found = wait_for_event_on_relay(relay_a.url(), filter, Duration::from_secs(10)).await;
+        assert!(
+            found,
+            "{} announcement should be in relay_a before starting relay_b",
+            name
+        );
     }
     println!("✓ All three maintainer announcements confirmed in relay_a's DB");
 
