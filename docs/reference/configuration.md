@@ -997,15 +997,15 @@ Event blacklist does **not** affect NIP-11 metadata:
 
 #### `NGIT_MAX_CONNECTIONS`
 
-**Description:** Maximum total connections to the relay. Prevents connection exhaustion DoS attacks.  
+**Description:** Maximum total connections to the relay. When unset, connections are unlimited, deferring to OS fd limits and infrastructure-level controls.  
 **Type:** Integer  
-**Default:** `4096`  
+**Default:** unlimited  
 **Required:** No
 
 **Examples:**
 
 ```bash
-# Default: 4096 connections
+# Cap connections for a resource-constrained deployment
 NGIT_MAX_CONNECTIONS=4096
 
 # Higher limit for large public relay
@@ -1017,8 +1017,8 @@ NGIT_MAX_CONNECTIONS=100
 
 **Notes:**
 
-- Limits total concurrent WebSocket connections to the relay
-- Prevents connection exhaustion attacks
+- When unset, the relay imposes no connection limit (`Semaphore::MAX_PERMITS`); OS fd limits and infrastructure controls apply
+- Set this only if you need an explicit cap; otherwise leave unset
 - Works in conjunction with per-connection limits (500 subscriptions, 60 events/min)
 - When limit is reached, new connections are rejected
 - Existing connections continue to work normally

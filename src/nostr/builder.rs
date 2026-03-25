@@ -736,7 +736,7 @@ pub async fn create_relay(
     let write_policy =
         Nip34WritePolicy::new(database.clone(), &git_data_path, purgatory, config.clone());
 
-    let relay = LocalRelayBuilder::default()
+    let mut builder = LocalRelayBuilder::default()
         .database(database.clone())
         .write_policy(write_policy.clone())
         // Explicitly set rate limits (make defaults visible in code)
@@ -744,10 +744,13 @@ pub async fn create_relay(
         .rate_limit(RateLimit {
             max_reqs: 500,        // Max concurrent subscriptions per connection
             notes_per_minute: 60, // Max events per minute per connection
-        })
-        // Total connection limit to prevent DoS attacks
-        .max_connections(config.max_connections)
-        .build();
+        });
+
+    if let Some(max) = config.max_connections {
+        builder = builder.max_connections(max);
+    }
+
+    let relay = builder.build();
 
     tracing::info!(
         "Relay configured with GRASP-01 validation for domain: {}",

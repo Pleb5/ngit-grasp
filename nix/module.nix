@@ -268,9 +268,10 @@ let
       };
 
       maxConnections = mkOption {
-        type = types.int;
-        default = 4096;
-        description = "Maximum total connections to the relay";
+        type = types.nullOr types.int;
+        default = null;
+        description =
+          "Maximum total connections to the relay (default: unlimited, defers to OS/infrastructure limits)";
       };
 
       user = mkOption {
@@ -337,8 +338,9 @@ let
       NGIT_REPOSITORY_WHITELIST = concatStringsSep "," cfg.repositoryWhitelist;
       NGIT_REPOSITORY_BLACKLIST = concatStringsSep "," cfg.repositoryBlacklist;
       NGIT_EVENT_BLACKLIST = concatStringsSep "," cfg.eventBlacklist;
-      NGIT_MAX_CONNECTIONS = toString cfg.maxConnections;
       NGIT_LOG_LEVEL = cfg.logLevel;
+    } // optionalAttrs (cfg.maxConnections != null) {
+      NGIT_MAX_CONNECTIONS = toString cfg.maxConnections;
     } // optionalAttrs (cfg.relayName != null) {
       NGIT_RELAY_NAME = cfg.relayName;
     } // optionalAttrs (cfg.archiveReadOnly != null) {

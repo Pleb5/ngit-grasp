@@ -466,10 +466,9 @@ pub struct Config {
     #[arg(long, env = "NGIT_EVENT_BLACKLIST", default_value = "")]
     pub event_blacklist: String,
 
-    /// Maximum total connections to the relay (default: 4096)
-    /// Prevents connection exhaustion DoS attacks
-    #[arg(long, env = "NGIT_MAX_CONNECTIONS", default_value_t = 4096)]
-    pub max_connections: usize,
+    /// Maximum total connections to the relay (default: unlimited, defers to OS/infrastructure limits)
+    #[arg(long, env = "NGIT_MAX_CONNECTIONS")]
+    pub max_connections: Option<usize>,
 
     /// Log level for application logging
     #[arg(long, env = "NGIT_LOG_LEVEL", default_value = "info")]
@@ -755,7 +754,7 @@ impl Config {
             repository_whitelist: String::new(),
             repository_blacklist: String::new(),
             event_blacklist: String::new(),
-            max_connections: 500,
+            max_connections: None,
             log_level: "debug".to_string(),
         }
     }
