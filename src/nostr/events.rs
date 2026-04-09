@@ -361,6 +361,52 @@ impl RepositoryState {
     }
 }
 
+/// Validate that a repository identifier is safe for use as a filesystem path component
+/// and as a URL path segment without percent-encoding.
+///
+/// Rejects identifiers that:
+/// - Are empty
+/// - Contain path separators (`/`, `\`)
+/// - Contain null bytes
+/// - Contain whitespace (spaces, tabs, newlines, etc.) — these require percent-encoding
+///   in URLs and cause a mismatch between the stored path and the URL-decoded request
+/// - Are `.` or `..` (directory traversal)
+///
+/// NIP-34 recommends kebab-case identifiers; this function enforces the minimum
+/// safety constraints needed for correct filesystem and HTTP serving behaviour.
+pub fn validate_identifier(identifier: &str) -> Result<(), String> {
+    if identifier.is_empty() {
+        return Err("identifier must not be empty".to_string());
+    }
+    if identifier == "." || identifier == ".." {
+        return Err(format!(
+            "identifier '{}' is a reserved path component",
+            identifier
+        ));
+    }
+    for ch in identifier.chars() {
+        if ch == '/' || ch == '\\' {
+            return Err(format!(
+                "identifier '{}' contains path separator '{}'",
+                identifier, ch
+            ));
+        }
+        if ch == '\0' {
+            return Err(format!(
+                "identifier '{}' contains a null byte",
+                identifier
+            ));
+        }
+        if ch.is_whitespace() {
+            return Err(format!(
+                "identifier '{}' contains whitespace — use hyphens instead (e.g. 'my-repo')",
+                identifier
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Validate a repository announcement according to GRASP-01 and GRASP-05
 ///
 /// Returns:
@@ -404,6 +450,11 @@ pub fn validate_announcement(
         Ok(a) => a,
         Err(e) => return AnnouncementResult::Reject(format!("Invalid announcement: {}", e)),
     };
+
+    // Validate identifier is safe for filesystem and URL use
+    if let Err(reason) = validate_identifier(&announcement.identifier) {
+        return AnnouncementResult::Reject(format!("Invalid identifier: {}", reason));
+    }
 
     // Get validated configs (config.validate() must be called at startup)
     let archive_config = config.archive_config();
@@ -1510,5 +1561,71 @@ mod tests {
 
         let result = validate_announcement(&event, &config);
         assert!(matches!(result, AnnouncementResult::Accept));
+    }
+
+    // -------------------------------------------------------------------------
+    // validate_identifier tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_validate_identifier_valid() {
+        assert!(validate_identifier("my-repo").is_ok());
+        assert!(validate_identifier("my_repo").is_ok());
+        assert!(validate_identifier("repo123").is_ok());
+        assert!(validate_identifier("kuboslopp").is_ok());
+    }
+
+    #[test]
+    fn test_validate_identifier_rejects_empty() {
+        assert!(validate_identifier("").is_err());
+    }
+
+    #[test]
+    fn test_validate_identifier_rejects_dot_components() {
+        assert!(validate_identifier(".").is_err());
+        assert!(validate_identifier("..").is_err());
+    }
+
+    #[test]
+    fn test_validate_identifier_rejects_path_separators() {
+        assert!(validate_identifier("foo/bar").is_err());
+        assert!(validate_identifier("foo\\bar").is_err());
+    }
+
+    #[test]
+    fn test_validate_identifier_rejects_whitespace() {
+        assert!(validate_identifier("kuboslopp by Shakespeare").is_err());
+        assert!(validate_identifier("my\trepo").is_err());
+        assert!(validate_identifier("my\nrepo").is_err());
+    }
+
+    #[test]
+    fn test_validate_announcement_rejects_identifier_with_spaces() {
+        use crate::config::Config;
+        use crate::nostr::policy::AnnouncementResult;
+
+        let keys = create_test_keys();
+        // Identifier contains spaces — should be rejected regardless of clone/relay tags
+        let event = create_announcement_event(
+            &keys,
+            "kuboslopp by Shakespeare",
+            vec!["https://gitnostr.com/alice/kuboslopp%20by%20Shakespeare.git"],
+            vec!["wss://gitnostr.com"],
+        );
+
+        let config = Config {
+            domain: "gitnostr.com".to_string(),
+            ..Config::for_testing()
+        };
+        let result = validate_announcement(&event, &config);
+        if let AnnouncementResult::Reject(reason) = result {
+            assert!(
+                reason.contains("whitespace") || reason.contains("identifier"),
+                "unexpected rejection reason: {}",
+                reason
+            );
+        } else {
+            panic!("Expected Reject for identifier with spaces, got {:?}", result);
+        }
     }
 }

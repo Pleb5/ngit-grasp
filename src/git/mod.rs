@@ -451,12 +451,42 @@ pub fn get_repository_head(repo_path: &Path) -> Option<String> {
     }
 }
 
+/// Decode percent-encoded characters in a URL path component.
+///
+/// Handles `%XX` sequences (e.g. `%20` → space). Invalid sequences are left as-is.
+pub fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (
+                (bytes[i + 1] as char).to_digit(16),
+                (bytes[i + 2] as char).to_digit(16),
+            ) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
 /// Extract npub and identifier from a Git URL path
 ///
 /// Parses paths like `/<npub>/<identifier>.git/info/refs`
 ///
+/// The identifier component is percent-decoded so that URLs like
+/// `/npub1.../my%20repo.git/info/refs` resolve to the filesystem path
+/// `my repo.git` (though such identifiers should be rejected at announcement
+/// validation time — see `validate_announcement`).
+///
 /// Returns (npub, identifier, subpath) where subpath is the part after .git/
-pub fn parse_git_url(path: &str) -> Option<(&str, &str, &str)> {
+/// and identifier has been percent-decoded.
+pub fn parse_git_url(path: &str) -> Option<(String, String, String)> {
     // Remove leading slash
     let path = path.strip_prefix('/').unwrap_or(path);
 
@@ -467,12 +497,15 @@ pub fn parse_git_url(path: &str) -> Option<(&str, &str, &str)> {
         return None;
     }
 
-    let npub = parts[0];
-    let repo_part = parts[1];
-    let subpath = parts[2];
+    let npub = parts[0].to_string();
+    let repo_part = percent_decode(parts[1]);
+    let subpath = parts[2].to_string();
 
     // Extract identifier (remove .git suffix if present for the middle part)
-    let identifier = repo_part.strip_suffix(".git").unwrap_or(repo_part);
+    let identifier = repo_part
+        .strip_suffix(".git")
+        .unwrap_or(&repo_part)
+        .to_string();
 
     Some((npub, identifier, subpath))
 }
@@ -610,6 +643,32 @@ mod tests {
     fn test_parse_git_url_invalid() {
         assert!(parse_git_url("/npub1abc").is_none());
         assert!(parse_git_url("/npub1abc/repo").is_none());
+    }
+
+    #[test]
+    fn test_parse_git_url_percent_encoded_identifier() {
+        // Identifiers with spaces encoded as %20 must be decoded so the
+        // filesystem path lookup finds the correct directory.
+        let (npub, id, subpath) =
+            parse_git_url("/npub17plqk/kuboslopp%20by%20Shakespeare.git/info/refs").unwrap();
+        assert_eq!(npub, "npub17plqk");
+        assert_eq!(id, "kuboslopp by Shakespeare");
+        assert_eq!(subpath, "info/refs");
+    }
+
+    #[test]
+    fn test_percent_decode_basic() {
+        assert_eq!(percent_decode("hello%20world"), "hello world");
+        assert_eq!(percent_decode("no-encoding"), "no-encoding");
+        assert_eq!(percent_decode("a%2Fb"), "a/b");
+        assert_eq!(percent_decode("%41%42%43"), "ABC");
+    }
+
+    #[test]
+    fn test_percent_decode_invalid_sequence_passthrough() {
+        // Incomplete or invalid sequences are left as-is
+        assert_eq!(percent_decode("foo%2"), "foo%2");
+        assert_eq!(percent_decode("foo%zz"), "foo%zz");
     }
 
     #[test]

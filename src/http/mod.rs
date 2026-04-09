@@ -42,8 +42,11 @@ const ICON_PNG: &[u8] = include_bytes!("../../static/icon.png");
 ///
 /// Parses paths like `/<npub>/<identifier>.git` (for repository webpage/404)
 ///
+/// The identifier is percent-decoded so that URLs like `/npub1.../my%20repo.git`
+/// resolve to the correct filesystem path.
+///
 /// Returns (npub, identifier) if the path matches a repository URL pattern
-fn parse_repo_url(path: &str) -> Option<(&str, &str)> {
+fn parse_repo_url(path: &str) -> Option<(String, String)> {
     // Remove leading slash
     let path = path.strip_prefix('/').unwrap_or(path);
 
@@ -56,7 +59,7 @@ fn parse_repo_url(path: &str) -> Option<(&str, &str)> {
     }
 
     let npub = parts[0];
-    let repo_part = parts[1];
+    let repo_part = git::percent_decode(parts[1]);
 
     // The repo part must end with .git
     if !repo_part.ends_with(".git") {
@@ -69,14 +72,17 @@ fn parse_repo_url(path: &str) -> Option<(&str, &str)> {
     }
 
     // Extract identifier (remove .git suffix)
-    let identifier = repo_part.strip_suffix(".git").unwrap_or(repo_part);
+    let identifier = repo_part
+        .strip_suffix(".git")
+        .unwrap_or(&repo_part)
+        .to_string();
 
     // Identifier must not be empty
     if identifier.is_empty() {
         return None;
     }
 
-    Some((npub, identifier))
+    Some((npub.to_string(), identifier))
 }
 
 /// Add CORS headers to a response builder
@@ -160,9 +166,6 @@ impl Service<Request<Incoming>> for HttpService {
 
         // Check for Git HTTP requests first
         if let Some((npub, identifier, subpath)) = git::parse_git_url(&path) {
-            let npub = npub.to_string();
-            let identifier = identifier.to_string();
-            let subpath = subpath.to_string();
 
             // Extract Git-Protocol header for protocol v2 support
             let git_protocol = req
@@ -391,8 +394,6 @@ impl Service<Request<Incoming>> for HttpService {
         // GRASP-01: "SHOULD serve a webpage at the same endpoint linking to git nostr client(s)
         // to browse the repository and a 404 page for repositories it doesn't host"
         if let Some((npub, identifier)) = parse_repo_url(&path) {
-            let npub = npub.to_string();
-            let identifier = identifier.to_string();
             let config = self.config.clone();
             let repo_path = git::resolve_repo_path(&git_data_path, &npub, &identifier);
 
