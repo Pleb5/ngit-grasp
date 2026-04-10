@@ -451,6 +451,29 @@ pub fn get_repository_head(repo_path: &Path) -> Option<String> {
     }
 }
 
+/// Percent-encode a string for use as a URL path segment (RFC 3986 §2.1).
+///
+/// Encodes all bytes that are not unreserved characters (`A-Z a-z 0-9 - _ . ~`).
+/// This is suitable for encoding a repository identifier in a `nostr://` URL or
+/// an HTTP path component such as `/<npub>/<encoded-identifier>.git`.
+pub fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        match byte {
+            // RFC 3986 unreserved characters — never encoded
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => {
+                out.push('%');
+                out.push(char::from_digit((byte >> 4) as u32, 16).unwrap().to_ascii_uppercase());
+                out.push(char::from_digit((byte & 0xf) as u32, 16).unwrap().to_ascii_uppercase());
+            }
+        }
+    }
+    out
+}
+
 /// Decode percent-encoded characters in a URL path component.
 ///
 /// Handles `%XX` sequences (e.g. `%20` → space). Invalid sequences are left as-is.
@@ -481,8 +504,8 @@ pub fn percent_decode(s: &str) -> String {
 ///
 /// The identifier component is percent-decoded so that URLs like
 /// `/npub1.../my%20repo.git/info/refs` resolve to the filesystem path
-/// `my repo.git` (though such identifiers should be rejected at announcement
-/// validation time — see `validate_announcement`).
+/// `my repo.git`. Per NIP-34 and GRASP-01, identifiers MUST be percent-encoded
+/// in URLs; they are stored verbatim on disk.
 ///
 /// Returns (npub, identifier, subpath) where subpath is the part after .git/
 /// and identifier has been percent-decoded.
@@ -669,6 +692,30 @@ mod tests {
         // Incomplete or invalid sequences are left as-is
         assert_eq!(percent_decode("foo%2"), "foo%2");
         assert_eq!(percent_decode("foo%zz"), "foo%zz");
+    }
+
+    #[test]
+    fn test_percent_encode_basic() {
+        assert_eq!(percent_encode("my-repo"), "my-repo");
+        assert_eq!(percent_encode("my_repo"), "my_repo");
+        assert_eq!(percent_encode("repo123"), "repo123");
+        assert_eq!(percent_encode("hello world"), "hello%20world");
+        assert_eq!(percent_encode("kuboslopp by Shakespeare"), "kuboslopp%20by%20Shakespeare");
+    }
+
+    #[test]
+    fn test_percent_encode_special_chars() {
+        assert_eq!(percent_encode("a/b"), "a%2Fb");
+        assert_eq!(percent_encode("a\\b"), "a%5Cb");
+        assert_eq!(percent_encode("a b\tc"), "a%20b%09c");
+    }
+
+    #[test]
+    fn test_percent_encode_decode_roundtrip() {
+        let identifiers = ["my-repo", "my repo", "kuboslopp by Shakespeare", "a/b", "foo\0bar"];
+        for id in &identifiers {
+            assert_eq!(percent_decode(&percent_encode(id)), *id);
+        }
     }
 
     #[test]

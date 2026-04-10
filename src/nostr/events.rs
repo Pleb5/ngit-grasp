@@ -361,19 +361,20 @@ impl RepositoryState {
     }
 }
 
-/// Validate that a repository identifier is safe for use as a filesystem path component
-/// and as a URL path segment without percent-encoding.
+/// Validate that a repository identifier is safe for use as a filesystem path component.
 ///
-/// Rejects identifiers that:
-/// - Are empty
-/// - Contain path separators (`/`, `\`)
-/// - Contain null bytes
-/// - Contain whitespace (spaces, tabs, newlines, etc.) — these require percent-encoding
-///   in URLs and cause a mismatch between the stored path and the URL-decoded request
-/// - Are `.` or `..` (directory traversal)
+/// NIP-34 places no restriction on `d` tag characters beyond NIP-01 (any string).
+/// Identifiers are stored on disk verbatim and percent-encoded when used in URLs
+/// (per NIP-34 `nostr://` spec and GRASP-01 HTTP path spec). This function only
+/// rejects identifiers that cannot safely be stored as a filesystem directory name:
 ///
-/// NIP-34 recommends kebab-case identifiers; this function enforces the minimum
-/// safety constraints needed for correct filesystem and HTTP serving behaviour.
+/// - Empty string
+/// - Path separators (`/`, `\`) — would escape the repository directory
+/// - Null bytes — rejected by most filesystems
+/// - `.` or `..` — reserved path components (directory traversal)
+///
+/// Whitespace and other characters that require percent-encoding in URLs are
+/// explicitly allowed here; callers are responsible for encoding them in URLs.
 pub fn validate_identifier(identifier: &str) -> Result<(), String> {
     if identifier.is_empty() {
         return Err("identifier must not be empty".to_string());
@@ -394,12 +395,6 @@ pub fn validate_identifier(identifier: &str) -> Result<(), String> {
         if ch == '\0' {
             return Err(format!(
                 "identifier '{}' contains a null byte",
-                identifier
-            ));
-        }
-        if ch.is_whitespace() {
-            return Err(format!(
-                "identifier '{}' contains whitespace — use hyphens instead (e.g. 'my-repo')",
                 identifier
             ));
         }
@@ -1573,6 +1568,11 @@ mod tests {
         assert!(validate_identifier("my_repo").is_ok());
         assert!(validate_identifier("repo123").is_ok());
         assert!(validate_identifier("kuboslopp").is_ok());
+        // Whitespace is valid — identifiers are stored verbatim on disk and
+        // percent-encoded when used in URLs (NIP-34 / GRASP-01)
+        assert!(validate_identifier("kuboslopp by Shakespeare").is_ok());
+        assert!(validate_identifier("my\trepo").is_ok());
+        assert!(validate_identifier("my repo").is_ok());
     }
 
     #[test]
@@ -1593,19 +1593,12 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_identifier_rejects_whitespace() {
-        assert!(validate_identifier("kuboslopp by Shakespeare").is_err());
-        assert!(validate_identifier("my\trepo").is_err());
-        assert!(validate_identifier("my\nrepo").is_err());
-    }
-
-    #[test]
-    fn test_validate_announcement_rejects_identifier_with_spaces() {
+    fn test_validate_announcement_accepts_identifier_with_spaces() {
         use crate::config::Config;
         use crate::nostr::policy::AnnouncementResult;
 
         let keys = create_test_keys();
-        // Identifier contains spaces — should be rejected regardless of clone/relay tags
+        // Identifier contains spaces — valid per NIP-34; must be percent-encoded in URLs
         let event = create_announcement_event(
             &keys,
             "kuboslopp by Shakespeare",
@@ -1618,14 +1611,10 @@ mod tests {
             ..Config::for_testing()
         };
         let result = validate_announcement(&event, &config);
-        if let AnnouncementResult::Reject(reason) = result {
-            assert!(
-                reason.contains("whitespace") || reason.contains("identifier"),
-                "unexpected rejection reason: {}",
-                reason
-            );
-        } else {
-            panic!("Expected Reject for identifier with spaces, got {:?}", result);
-        }
+        assert!(
+            matches!(result, AnnouncementResult::Accept),
+            "Expected Accept for identifier with spaces, got {:?}",
+            result
+        );
     }
 }

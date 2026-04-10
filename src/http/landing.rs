@@ -2,6 +2,7 @@
 ///
 /// Generates HTML landing page for the Nostr relay.
 use crate::config::Config;
+use crate::git::percent_encode;
 use crate::http::nip11::RelayInformationDocument;
 use std::collections::HashMap;
 
@@ -847,7 +848,7 @@ pub fn get_repo_html(config: &Config, npub: &str, identifier: &str) -> String {
             <div class="card">
                 <div class="clone-box">
                     <div class="clone-line"><span class="cmd">curl -Ls https://ngit.dev/install.sh | bash</span></div>
-                    <div class="clone-line"><span class="cmd">git clone</span> <span class="url" id="nostr-clone-url">nostr://{{npub}}/<span id="relayref"></span>/{{identifier}}</span></div>
+                     <div class="clone-line"><span class="cmd">git clone</span> <span class="url" id="nostr-clone-url">nostr://{npub}/<span id="relayref"></span>/{encoded_identifier}</span></div>
                 </div>
             </div>
         </div>
@@ -867,7 +868,7 @@ pub fn get_repo_html(config: &Config, npub: &str, identifier: &str) -> String {
         
         // Construct gitworkshop link: gitworkshop.dev/npub/relayref/identifier
         const gitworkshopLink = document.getElementById('gitworkshop-link');
-        gitworkshopLink.setAttribute('href', 'https://gitworkshop.dev/{npub}/' + relayref + '/{identifier}');
+        gitworkshopLink.setAttribute('href', 'https://gitworkshop.dev/{npub}/' + relayref + '/{encoded_identifier}');
         
         // Set footer domain
         var footerDomain = document.getElementById('footer-domain');
@@ -882,6 +883,7 @@ pub fn get_repo_html(config: &Config, npub: &str, identifier: &str) -> String {
         relay_name = config.relay_name(),
         npub = npub,
         identifier = identifier,
+        encoded_identifier = percent_encode(identifier),
         version = get_version(),
         theme_toggle = get_theme_toggle_html(),
         theme_script = get_theme_script(),
