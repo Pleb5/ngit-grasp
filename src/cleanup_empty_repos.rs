@@ -344,18 +344,19 @@ pub async fn run(args: &CleanupArgs) -> Result<()> {
 ///
 /// Returns `(exists, is_empty)`:
 /// - `(false, true)` — path does not exist (treated as empty)
-/// - `(true, true)`  — path exists but `git for-each-ref` returns no output
+/// - `(true, true)`  — path exists but `git --git-dir=<path> for-each-ref` returns no output
 /// - `(true, false)` — path exists and has at least one ref
 fn check_repo_empty(repo_path: &Path) -> (bool, bool) {
     if !repo_path.exists() {
         return (false, true);
     }
 
-    // Run `git for-each-ref --git-dir=<path>` — empty output means no refs
+    // Run `git --git-dir=<path> for-each-ref` — empty output means no refs.
+    // --git-dir must be a global option before the subcommand, not an argument to for-each-ref.
     let output = Command::new("git")
-        .args(["for-each-ref", "--format=%(refname)"])
         .arg("--git-dir")
         .arg(repo_path)
+        .args(["for-each-ref", "--format=%(refname)"])
         .output();
 
     match output {
