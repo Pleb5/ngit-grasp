@@ -2,12 +2,14 @@ use std::time::Duration;
 use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
+use clap::Parser;
 use tokio::signal;
 use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 use ngit_grasp::{
     audit_cleanup,
+    cleanup_empty_repos,
     config::{Config, DatabaseBackend},
     git, http,
     metrics::Metrics,
@@ -16,10 +18,61 @@ use ngit_grasp::{
     sync::{naughty_list::NaughtyListTracker, SyncManager},
 };
 
+/// Top-level CLI dispatcher.
+///
+/// With no subcommand the binary runs the relay (all relay flags apply).
+/// With a subcommand it runs the requested maintenance tool instead.
+#[derive(Debug, Parser)]
+#[command(author, version, about = "ngit-grasp GRASP relay", long_about = None)]
+#[command(propagate_version = true)]
+enum Cli {
+    /// Run the GRASP relay server (default when no subcommand is given).
+    #[command(name = "serve")]
+    Serve(Config),
+
+    /// Remove kind 30617/30618 events whose bare git repository is empty or missing.
+    ///
+    /// Runs in dry-run mode by default. Pass --execute to make changes.
+    /// Stop the relay service before running with --execute.
+    CleanupEmptyRepos(cleanup_empty_repos::CleanupArgs),
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Load configuration first (priority: CLI flags > env vars > .env file > defaults)
-    let config = Config::load()?;
+    // Load .env file before clap parses, so env vars are available.
+    dotenvy::dotenv().ok();
+
+    // Peek at argv[1] to decide whether a subcommand was explicitly provided.
+    // If not, prepend the implicit "serve" subcommand so that clap routes to Cli::Serve
+    // and all relay flags are parsed normally (preserving backward compatibility).
+    let mut args: Vec<String> = std::env::args().collect();
+    let known_subcommands = ["serve", "cleanup-empty-repos", "help"];
+    let has_subcommand = args.get(1).map_or(false, |a| {
+        known_subcommands.contains(&a.as_str())
+            || matches!(a.as_str(), "-h" | "--help" | "-V" | "--version")
+    });
+    if !has_subcommand {
+        args.insert(1, "serve".to_string());
+    }
+
+    match Cli::parse_from(args) {
+        Cli::CleanupEmptyRepos(cleanup_args) => {
+            cleanup_empty_repos::run(&cleanup_args).await
+        }
+        Cli::Serve(mut config) => {
+            // Finish initialising the Config (load relay owner key if not provided).
+            if config.relay_owner_nsec.is_none() {
+                config.relay_owner_nsec = Some(Config::load_or_generate_relay_owner_key()?);
+            } else {
+                config.relay_owner_nsec =
+                    config.relay_owner_nsec.take().map(|s| s.trim().to_string());
+            }
+            run_relay(config).await
+        }
+    }
+}
+
+async fn run_relay(config: Config) -> Result<()> {
 
     // Initialize tracing with configured log level
     let subscriber = FmtSubscriber::builder()

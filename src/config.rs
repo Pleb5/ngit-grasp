@@ -506,7 +506,7 @@ impl Config {
     }
 
     /// Load relay owner key from file, or generate and save a new one
-    fn load_or_generate_relay_owner_key() -> Result<String> {
+    pub fn load_or_generate_relay_owner_key() -> Result<String> {
         let key_path = PathBuf::from(Self::RELAY_OWNER_KEY_FILE);
 
         // Try to load existing key
