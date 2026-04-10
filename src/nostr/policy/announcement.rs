@@ -137,8 +137,10 @@ impl AnnouncementPolicy {
                                 "Replacement announcement (purgatory) - replacing purgatory entry"
                             );
                             self.replace_purgatory_announcement(event, &announcement);
-                            // Return Accept (not AcceptPurgatory) - this is a replacement, not new
-                            return validation_result;
+                            // Return AcceptPurgatory - git data hasn't arrived yet so the
+                            // announcement must NOT be saved to the database. The purgatory
+                            // entry has already been updated above with the newer event.
+                            return AnnouncementResult::AcceptPurgatory;
                         }
 
                         // No existing announcement - route to purgatory
