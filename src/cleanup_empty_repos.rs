@@ -11,6 +11,15 @@
 //! git data. If the bare repo is empty or absent, the events are stale and should be
 //! removed so the relay does not serve them.
 //!
+//! Two scans are performed:
+//!
+//! 1. **DB → filesystem**: finds 30617 events whose bare git repo is empty or missing.
+//!    Both the 30617 and any matching 30618 events are removed.
+//!
+//! 2. **Filesystem → DB**: finds bare git repos on disk with no matching 30617 event.
+//!    Empty orphan repos are always removed. Non-empty orphan repos are flagged and
+//!    only removed when `--purge-orphans` is also passed.
+//!
 //! ## Usage
 //!
 //! ```text
@@ -22,6 +31,11 @@
 //! ngit-grasp cleanup-empty-repos --relay-data-path /var/lib/ngit-grasp/relay \
 //!                                 --git-data-path   /var/lib/ngit-grasp/git \
 //!                                 --execute
+//!
+//! # Also purge non-empty orphan repos (no matching 30617 in DB)
+//! ngit-grasp cleanup-empty-repos --relay-data-path /var/lib/ngit-grasp/relay \
+//!                                 --git-data-path   /var/lib/ngit-grasp/git \
+//!                                 --execute --purge-orphans
 //! ```
 //!
 //! The relay service should be stopped before running with `--execute` to avoid
@@ -59,6 +73,26 @@ pub struct CleanupArgs {
     /// would be deleted. Stop the relay service before using this flag.
     #[arg(long, default_value_t = false)]
     pub execute: bool,
+
+    /// Also purge non-empty orphan git repos (repos on disk with no matching 30617 event).
+    ///
+    /// By default, non-empty orphan repos are flagged but not deleted. Pass this flag
+    /// together with `--execute` to permanently delete them. Use with caution.
+    #[arg(long, default_value_t = false)]
+    pub purge_orphans: bool,
+}
+
+/// A bare git repo on disk that has no matching kind 30617 event in the DB.
+#[derive(Debug)]
+struct OrphanRepo {
+    /// Absolute path to the bare repo directory
+    repo_path: PathBuf,
+    /// npub directory name (may not be a valid npub)
+    npub: String,
+    /// Repository directory name (e.g. "my-repo.git")
+    dir_name: String,
+    /// Whether the repo has any refs (non-empty)
+    has_data: bool,
 }
 
 /// A repository that has an empty (or missing) bare git repo on disk.
@@ -170,8 +204,17 @@ pub async fn run(args: &CleanupArgs) -> Result<()> {
         });
     }
 
-    if empty_repos.is_empty() {
-        println!("No empty repositories found. Nothing to do.");
+    // --- Filesystem → DB scan: orphan repos ---
+    println!("Scanning git data directory for orphan repos (no matching 30617 event)...");
+    let orphan_repos = find_orphan_repos(git_data_path, &database).await?;
+    println!(
+        "Found {} orphan repo(s) on disk with no matching 30617 event.",
+        orphan_repos.len()
+    );
+    println!();
+
+    if empty_repos.is_empty() && orphan_repos.is_empty() {
+        println!("Nothing to do.");
         return Ok(());
     }
 
@@ -211,13 +254,64 @@ pub async fn run(args: &CleanupArgs) -> Result<()> {
         );
     }
 
-    println!();
+    // Print orphan report
+    if !orphan_repos.is_empty() {
+        println!(
+            "Found {} orphan repo(s) on disk with no matching 30617 event:\n",
+            orphan_repos.len()
+        );
+        let mut empty_orphan_count = 0usize;
+        let mut nonempty_orphan_count = 0usize;
+        for (i, repo) in orphan_repos.iter().enumerate() {
+            let status = if repo.has_data {
+                nonempty_orphan_count += 1;
+                "NON-EMPTY (has git data)"
+            } else {
+                empty_orphan_count += 1;
+                "empty (no refs)"
+            };
+            println!(
+                "  [{:>3}] {}/{} — {}",
+                i + 1,
+                repo.npub,
+                repo.dir_name,
+                status,
+            );
+            println!("         repo path: {}", repo.repo_path.display());
+        }
+        println!();
+        if nonempty_orphan_count > 0 {
+            println!(
+                "  NOTE: {} non-empty orphan repo(s) will NOT be deleted unless --purge-orphans is passed.",
+                nonempty_orphan_count
+            );
+        }
+        if empty_orphan_count > 0 {
+            println!(
+                "  NOTE: {} empty orphan repo(s) will be deleted (no git data to lose).",
+                empty_orphan_count
+            );
+        }
+        println!();
+    }
 
     if !args.execute {
+        let would_delete = empty_repos.len()
+            + orphan_repos.iter().filter(|r| !r.has_data).count()
+            + if args.purge_orphans {
+                orphan_repos.iter().filter(|r| r.has_data).count()
+            } else {
+                0
+            };
         println!(
-            "DRY-RUN: {} repository/repositories would be cleaned up.",
-            empty_repos.len()
+            "DRY-RUN: {} item(s) would be cleaned up.",
+            would_delete
         );
+        if orphan_repos.iter().any(|r| r.has_data) && !args.purge_orphans {
+            println!(
+                "  (non-empty orphan repos flagged above would be skipped; add --purge-orphans to include them)"
+            );
+        }
         println!("Run with --execute to perform the cleanup (stop the relay first).");
         return Ok(());
     }
@@ -328,16 +422,189 @@ pub async fn run(args: &CleanupArgs) -> Result<()> {
         }
     }
 
+    // --- Execute orphan repo cleanup ---
+    let mut deleted_orphan_repos = 0usize;
+    let mut skipped_nonempty_orphans = 0usize;
+
+    for repo in &orphan_repos {
+        if repo.has_data && !args.purge_orphans {
+            println!(
+                "SKIP (non-empty, --purge-orphans not set): {}/{} — {}",
+                repo.npub,
+                repo.dir_name,
+                repo.repo_path.display()
+            );
+            skipped_nonempty_orphans += 1;
+            continue;
+        }
+
+        println!(
+            "Deleting orphan repo {}/{} ({})...",
+            repo.npub,
+            repo.dir_name,
+            if repo.has_data { "non-empty" } else { "empty" }
+        );
+
+        match std::fs::remove_dir_all(&repo.repo_path) {
+            Ok(()) => {
+                println!("  Deleted git repo: {}", repo.repo_path.display());
+                deleted_orphan_repos += 1;
+
+                // Remove the parent npub directory if now empty
+                if let Some(npub_dir) = repo.repo_path.parent() {
+                    if npub_dir.exists() {
+                        match std::fs::read_dir(npub_dir) {
+                            Ok(mut entries) => {
+                                if entries.next().is_none() {
+                                    if let Err(e) = std::fs::remove_dir(npub_dir) {
+                                        eprintln!(
+                                            "  WARN: Could not remove empty npub dir {}: {}",
+                                            npub_dir.display(),
+                                            e
+                                        );
+                                    } else {
+                                        println!(
+                                            "  Removed empty npub dir: {}",
+                                            npub_dir.display()
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "  WARN: Could not read npub dir {}: {}",
+                                    npub_dir.display(),
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "  ERROR: Failed to delete orphan repo {}: {}",
+                    repo.repo_path.display(),
+                    e
+                );
+                failed_repos += 1;
+            }
+        }
+    }
+
     println!();
     println!("=== Cleanup complete ===");
-    println!("  Git repos deleted       : {}", deleted_repos);
-    if failed_repos > 0 {
-        println!("  Git repos failed        : {} (see errors above)", failed_repos);
+    println!("  Git repos deleted (stale events)  : {}", deleted_repos);
+    println!("  Git repos deleted (orphans)        : {}", deleted_orphan_repos);
+    if skipped_nonempty_orphans > 0 {
+        println!(
+            "  Non-empty orphans skipped          : {} (re-run with --purge-orphans to delete)",
+            skipped_nonempty_orphans
+        );
     }
-    println!("  30617 events removed    : {}", deleted_announcements);
-    println!("  30618 events removed    : {}", deleted_state_events);
+    if failed_repos > 0 {
+        println!("  Git repos failed                   : {} (see errors above)", failed_repos);
+    }
+    println!("  30617 events removed               : {}", deleted_announcements);
+    println!("  30618 events removed               : {}", deleted_state_events);
 
     Ok(())
+}
+
+/// Scan the git data directory for bare repos that have no matching 30617 event in the DB.
+///
+/// The expected layout is `<git_data_path>/<npub>/<identifier>.git`.
+/// Any directory under `<git_data_path>` that ends in `.git` and has no corresponding
+/// 30617 event (matched by pubkey + identifier d-tag) is returned as an orphan.
+async fn find_orphan_repos(
+    git_data_path: &Path,
+    database: &Arc<dyn NostrDatabase>,
+) -> Result<Vec<OrphanRepo>> {
+    let mut orphans = Vec::new();
+
+    // Iterate npub-level directories
+    let npub_entries = match std::fs::read_dir(git_data_path) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(orphans),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "Failed to read git data directory {}: {}",
+                git_data_path.display(),
+                e
+            ))
+        }
+    };
+
+    for npub_entry in npub_entries {
+        let npub_entry = npub_entry.context("Failed to read git data directory entry")?;
+        let npub_path = npub_entry.path();
+        if !npub_path.is_dir() {
+            continue;
+        }
+        let npub = npub_entry.file_name().to_string_lossy().into_owned();
+
+        // Iterate repo-level directories inside this npub dir
+        let repo_entries = match std::fs::read_dir(&npub_path) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!(
+                    "  WARN: Could not read npub directory {}: {}",
+                    npub_path.display(),
+                    e
+                );
+                continue;
+            }
+        };
+
+        for repo_entry in repo_entries {
+            let repo_entry = repo_entry.context("Failed to read repo directory entry")?;
+            let repo_path = repo_entry.path();
+            if !repo_path.is_dir() {
+                continue;
+            }
+            let dir_name = repo_entry.file_name().to_string_lossy().into_owned();
+            if !dir_name.ends_with(".git") {
+                continue;
+            }
+
+            // Derive the identifier (strip .git suffix)
+            let identifier = dir_name.strip_suffix(".git").unwrap_or(&dir_name);
+
+            // Check whether a 30617 event exists for this (npub, identifier)
+            // We query by identifier d-tag; if the npub is not a valid bech32 pubkey
+            // we won't be able to filter by author, so we check the results manually.
+            let filter = Filter::new()
+                .kind(Kind::GitRepoAnnouncement)
+                .identifier(identifier.to_string());
+
+            let matching = database
+                .query(filter)
+                .await
+                .with_context(|| format!("Failed to query 30617 for identifier {}", identifier))?;
+
+            // Verify at least one event's owner npub matches the directory name
+            let has_event = matching.iter().any(|ev| {
+                ev.pubkey
+                    .to_bech32()
+                    .map(|n| n == npub)
+                    .unwrap_or(false)
+            });
+
+            if has_event {
+                continue;
+            }
+
+            let (_, is_empty) = check_repo_empty(&repo_path);
+            orphans.push(OrphanRepo {
+                repo_path,
+                npub: npub.clone(),
+                dir_name,
+                has_data: !is_empty,
+            });
+        }
+    }
+
+    Ok(orphans)
 }
 
 /// Check whether a bare git repository is empty (has no refs).
