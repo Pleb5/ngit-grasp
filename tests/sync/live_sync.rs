@@ -59,7 +59,7 @@ async fn test_live_sync_layer2_events() {
     // 4. Create a repository announcement on both relays with git data
     // (purgatory requires git data before announcements are accepted)
     let repo_id = "test-repo-live-l2";
-    let domains = vec![relay_a.domain(), relay_b.domain()];
+    let domains = [relay_a.domain(), relay_b.domain()];
     let domain_refs: Vec<&str> = domains.iter().map(|s| s.as_str()).collect();
 
     let (_announcement, _git_dir_a) =
@@ -153,7 +153,7 @@ async fn test_live_sync_layer3_events() {
     // 2. Create and send repository announcement to both relays with git data
     // (purgatory requires git data before announcements are accepted)
     let repo_id = "test-repo-live-l3";
-    let domains = vec![relay_a.domain(), relay_b.domain()];
+    let domains = [relay_a.domain(), relay_b.domain()];
     let domain_refs: Vec<&str> = domains.iter().map(|s| s.as_str()).collect();
 
     let (_announcement, _git_dir_a) =
@@ -322,7 +322,7 @@ async fn test_live_sync_event_ordering() {
     // 2. Create and send repository announcement to both relays with git data
     // (purgatory requires git data before announcements are accepted)
     let repo_id = "test-repo-ordering";
-    let domains = vec![relay_a.domain(), relay_b.domain()];
+    let domains = [relay_a.domain(), relay_b.domain()];
     let domain_refs: Vec<&str> = domains.iter().map(|s| s.as_str()).collect();
 
     let (_announcement, _git_dir_a) =

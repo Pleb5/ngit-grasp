@@ -172,7 +172,7 @@ pub async fn run(args: &CleanupArgs) -> Result<()> {
 
         let npub = announcement.owner_npub();
         let identifier = announcement.identifier.clone();
-        let repo_path = git_data_path.join(&announcement.repo_path());
+        let repo_path = git_data_path.join(announcement.repo_path());
 
         let (repo_exists, is_empty) = check_repo_empty(&repo_path);
 

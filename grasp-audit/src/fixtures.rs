@@ -1965,14 +1965,13 @@ impl<'a> TestContext<'a> {
             .output();
 
         // Step 3: Remove all working directory files for clean state (except .git)
-        for entry in
-            fs::read_dir(&clone_path).map_err(|e| anyhow::anyhow!("Failed to read dir: {}", e))?
+        for entry in fs::read_dir(&clone_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read dir: {}", e))?
+            .flatten()
         {
-            if let Ok(entry) = entry {
-                let path = entry.path();
-                if path.file_name() != Some(std::ffi::OsStr::new(".git")) {
-                    let _ = fs::remove_file(&path).or_else(|_| fs::remove_dir_all(&path));
-                }
+            let path = entry.path();
+            if path.file_name() != Some(std::ffi::OsStr::new(".git")) {
+                let _ = fs::remove_file(&path).or_else(|_| fs::remove_dir_all(&path));
             }
         }
 

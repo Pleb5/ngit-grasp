@@ -27,7 +27,7 @@ use ngit_grasp::{
 enum Cli {
     /// Run the GRASP relay server (default when no subcommand is given).
     #[command(name = "serve")]
-    Serve(Config),
+    Serve(Box<Config>),
 
     /// Remove kind 30617/30618 events whose bare git repository is empty or missing.
     ///
@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
     // and all relay flags are parsed normally (preserving backward compatibility).
     let mut args: Vec<String> = std::env::args().collect();
     let known_subcommands = ["serve", "cleanup-empty-repos", "help"];
-    let has_subcommand = args.get(1).map_or(false, |a| {
+    let has_subcommand = args.get(1).is_some_and(|a| {
         known_subcommands.contains(&a.as_str())
             || matches!(a.as_str(), "-h" | "--help" | "-V" | "--version")
     });
@@ -56,7 +56,8 @@ async fn main() -> Result<()> {
 
     match Cli::parse_from(args) {
         Cli::CleanupEmptyRepos(cleanup_args) => cleanup_empty_repos::run(&cleanup_args).await,
-        Cli::Serve(mut config) => {
+        Cli::Serve(config) => {
+            let mut config = *config;
             // Finish initialising the Config (load relay owner key if not provided).
             if config.relay_owner_nsec.is_none() {
                 config.relay_owner_nsec = Some(Config::load_or_generate_relay_owner_key()?);
