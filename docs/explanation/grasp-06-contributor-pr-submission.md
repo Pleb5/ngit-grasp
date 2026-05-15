@@ -1,9 +1,10 @@
 # GRASP-06: Contributor Pull Request Submission — Design
 
-**Status**: 🚧 **PLANNED — NOT YET IMPLEMENTED** 🚧
+**Status**: Implemented (opt-in via `NGIT_GRASP06_ENABLE`)
 
 **Spec**: [GRASP-06](https://github.com/DanConwayDev/grasp/blob/main/06.md)
 **Related**: [Purgatory Design](purgatory-design.md), [Architecture](architecture.md), [Inline Authorization](inline-authorization.md)
+**Operator how-to**: [Enable GRASP-06](../how-to/enable-grasp-06.md)
 
 ---
 
@@ -104,6 +105,10 @@ POST /prs/<npub>/<id>.git/git-receive-pack
 
 The flow mirrors the existing `refs/nostr/<event-id>` path at the standard endpoint (see [`src/git/handlers.rs:handle_receive_pack`](../../src/git/handlers.rs) and the PR purgatory entries in [`src/purgatory/types.rs`](../../src/purgatory/types.rs)) — it just skips the `authorize_push` path that checks the maintainer set, and applies the spec's validation invariant instead.
 
+#### On-demand bare repo creation
+
+The first push to `/prs/<submitter>/<identifier>.git` creates the bare repo on disk. A per-`(submitter, identifier)` `tokio::sync::Mutex` (kept in a `DashMap` on the `HttpService`, see [`crate::grasp06::receive::RepoInitLocks`](../../src/grasp06/receive.rs)) serialises only the `git init --bare` step. Once init has succeeded, git's own ref locking handles intra-push concurrency, so simultaneous pushes to the same path proceed in parallel.
+
 ### Event acceptance relaxation
 
 The existing PR event policy in [`src/nostr/policy/pr_event.rs`](../../src/nostr/policy/pr_event.rs) calls `fetch_repository_data_excluding_purgatory` to require an accepted announcement in the database before accepting a PR event. Under GRASP-06 this check is loosened for events that satisfy:
@@ -116,6 +121,8 @@ Such events skip the "references accepted announcement" check and are accepted i
 
 Events that qualify under the existing GRASP-01 rules still flow through the normal path unchanged — the GRASP-06 branch is only taken when the existing path would have rejected.
 
+The clone-URL match is implemented in [`src/grasp06/policy.rs`](../../src/grasp06/policy.rs) as a strict comparator: it requires `http`/`https` scheme, an exact (case-insensitive) authority match against `config.domain`, no query string or fragment, exactly two path segments `<npub-segment>/<repo-segment>.git`, the npub segment decoding via `PublicKey::from_bech32` to the event's signer, and the percent-decoded identifier matching one of the event's `a`-tag `<d>` values. Anything else fails the relaxation and the event falls through to the existing rejection path.
+
 ### Cross-service mirror
 
 When a PR or PR Update's purgatory entry is released via a `/prs/` push:
@@ -126,6 +133,10 @@ When a PR or PR Update's purgatory entry is released via a `/prs/` push:
    - If that repo has an active (non-purgatory) announcement, copy objects + install `refs/nostr/<event-id>` into it (same mechanism as existing cross-owner sync in [`src/git/sync.rs`](../../src/git/sync.rs)).
 
 The mirror copies the same ref, same commits. No separate object store. Dedup can be added transparently later via git alternates keyed on d-tag.
+
+The mirror is **one-directional**: pushes to `/<maintainer>/<id>.git` are not mirrored into `/prs/*`. Only the `/prs/` → `<maintainer>/` direction fires, and only when the source repo path is under `prs_base_path`.
+
+The mirror also does **not back-fill** retroactively. If an announcement for one of the event's `a` coords is accepted *after* a matching `/prs/` push has already happened, the ref remains only at `/prs/<signer>/<d>.git`; clients can still fetch it via the event's `clone` tag. Back-filling on announcement promotion is deferred — the simplest correct shape ships first, and the spec allows clients to resolve the PR through `/prs/` indefinitely.
 
 ### Purgatory integration
 
@@ -138,9 +149,20 @@ Placeholder entries created at `/prs/` should be validated against `(submitter =
 
 ### Exclusion from other subsystems
 
-- **Empty-repo cleanup** ([`src/cleanup_empty_repos.rs`](../../src/cleanup_empty_repos.rs)): skip `<git_data_path>/prs/*`. The `/prs/` endpoint has its own cleanup rule (zero-refs repos, expired placeholders).
-- **Proactive sync** (GRASP-02): `/prs/` repos are not replicated between relays. A GRASP-06 relay is authoritative for the PRs it accepts. Clients that need a PR should fetch it from the relay the event's `clone` tag names.
-- **Repo listings / NIP-11**: `/prs/` repos are not advertised as repositories. They are a submission side-channel, not first-class hosted repos.
+- **Empty-repo cleanup** ([`src/cleanup_empty_repos.rs`](../../src/cleanup_empty_repos.rs)): skips `<git_data_path>/prs/*` via [`is_prs_repo_path`](../../src/grasp06/paths.rs) before recursing, so contributor-submission repos cannot be misreported as orphans.
+- **Repo landing pages** ([`src/http/mod.rs::parse_repo_url`](../../src/http/mod.rs)): refuses any path starting with `/prs/` as a defensive guard, regardless of `grasp06_enable`. The `HttpService` routing also intercepts `/prs/*` earlier when the feature is on.
+- **Proactive sync** (GRASP-02): `/prs/` repos are not replicated between relays. The proactive-sync subsystem derives every subscription from the DB-resident announcement set; `/prs/` repos have no announcement and so are excluded by construction. No filesystem walk discovers them. A GRASP-06 relay is authoritative for the PRs it accepts. Clients that need a PR should fetch it from the relay the event's `clone` tag names.
+- **Repo listings / NIP-11**: `/prs/` repos are not advertised as repositories. They are a submission side-channel, not first-class hosted repos. GRASP-06 itself is advertised in the relay's NIP-11 `supported_grasps` list when the flag is on.
+
+### Periodic `/prs/` cleanup
+
+In addition to the receive-handler's post-push zero-ref cleanup, a periodic sweep ([`src/grasp06/cleanup.rs`](../../src/grasp06/cleanup.rs)) walks `<git_data_path>/prs/` every ten minutes (one second under `NGIT_TEST=1`) and removes any `<hex>/<id>.git` directory that:
+
+1. has zero refs,
+2. has no active `PrPurgatoryEntry` scoped to `(submitter=<hex>, identifier=<id>)`, and
+3. has a directory mtime older than the purgatory TTL ([`purgatory::DEFAULT_EXPIRY`](../../src/purgatory/mod.rs), 30 minutes).
+
+The mtime check defends against deleting a repo out from under an in-flight push. Empty submitter directories are removed when the sweep empties them.
 
 ## Flow examples
 
