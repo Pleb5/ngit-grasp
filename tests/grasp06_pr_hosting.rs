@@ -287,6 +287,36 @@ isolated_test_with_grasp_06!(
 );
 
 // =============================================================================
+// Test 8b: git-first ordering — PR event arriving after a matching /prs/ push
+//          MUST be promoted from purgatory and mirrored
+// =============================================================================
+//
+// Spec: design doc `docs/explanation/grasp-06-contributor-pr-submission.md`
+//       "Git-first" flow (lines 204–218).
+//
+// Contract: in the reverse ordering of test 8 (push first, event second),
+// the mirror contract still holds. When the PR event arrives matching a
+// scoped placeholder created by an earlier `/prs/` push, the relay MUST
+// promote the event out of purgatory (save to DB, broadcast) AND fire the
+// cross-service mirror into matching announced repos. Test 8 alone does
+// not cover this: the event-first path triggers promotion via
+// `process_newly_available_git_data` on push, while git-first relies on the
+// PR-event policy doing the same work on event arrival.
+//
+// Wired only as `with_grasp_06`. Today this fails: the policy in
+// `src/nostr/policy/pr_event.rs::git_data_check` matches the scoped
+// placeholder but then falls through to `find_relevant_repo_paths` which
+// returns empty for un-announced coords; the function returns `Ok(false)`
+// and the builder re-purgatorises the event without mirroring. Once that
+// gap is closed, the test goes green and stays green as the regression
+// guard for git-first promotion.
+
+isolated_test_with_grasp_06!(
+    test_prs_push_then_pr_event_promotes_and_mirrors_with_grasp_06,
+    MirroringTests::test_prs_push_then_pr_event_promotes_and_mirrors
+);
+
+// =============================================================================
 // Test 9: Standard endpoint push MUST NOT mirror into /prs/
 // =============================================================================
 //

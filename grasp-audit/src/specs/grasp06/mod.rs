@@ -123,6 +123,9 @@ impl Grasp06Tests {
             // direction (test 7) verifies /prs/ → announced repo. Reverse
             // direction (test 8) verifies the inverse must NOT mirror.
             results.add(MirroringTests::test_prs_push_mirrors_to_announced_repo(client).await);
+            results.add(
+                MirroringTests::test_prs_push_then_pr_event_promotes_and_mirrors(client).await,
+            );
             results.add(MirroringTests::test_standard_push_does_not_mirror_to_prs(client).await);
         } else {
             // (3b) Visible skipped stubs — same SpecRef and requirement text
@@ -211,6 +214,16 @@ impl Grasp06Tests {
                     SpecRef::Grasp06MirrorToAnnouncedRepo,
                     "refs accepted via /prs/ MUST be mirrored into any matching \
                      accepted-announcement repos on this relay",
+                )
+                .skip(reason),
+            );
+            results.add(
+                TestResult::new(
+                    "prs_push_then_pr_event_promotes_and_mirrors",
+                    SpecRef::Grasp06MirrorToAnnouncedRepo,
+                    "git-first ordering: when a /prs/ push arrives before the PR event, the \
+                     event MUST still be promoted out of purgatory on arrival and the mirror \
+                     MUST still fire",
                 )
                 .skip(reason),
             );

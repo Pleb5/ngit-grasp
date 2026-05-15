@@ -296,6 +296,247 @@ impl MirroringTests {
         .await
     }
 
+    /// Test 7b: git-first ordering — when the push to `/prs/` arrives
+    /// BEFORE the matching PR event, the event MUST still be promoted out
+    /// of purgatory on arrival and the mirror MUST still fire.
+    ///
+    /// Spec ref: [`SpecRef::Grasp06MirrorToAnnouncedRepo`]. The mirror
+    /// contract is order-independent — the design doc's "Git-first" flow
+    /// (`docs/explanation/grasp-06-contributor-pr-submission.md` lines
+    /// 204–218) says: "Event arrives: ... ref locked; event promoted."
+    /// Promotion + mirror must fire in this ordering too, not only in
+    /// event-first.
+    ///
+    /// ## Why this is distinct from test 7
+    ///
+    /// Test 7 publishes the PR event first, then pushes. That exercises
+    /// the path where `process_newly_available_git_data` (called from the
+    /// `/prs/` receive handler) finds a full PR entry waiting in
+    /// purgatory and releases it. The git-first ordering hits a different
+    /// code path: the `/prs/` push creates a *scoped placeholder*; when
+    /// the event arrives later, the PR-event policy is responsible for
+    /// matching the placeholder, validating the (signer, identifier,
+    /// commit) tuple, saving the event to the DB, and triggering the
+    /// mirror. A green test 7 does not imply this path works.
+    ///
+    /// ## Timing
+    ///
+    /// No long wait is required — promotion is supposed to happen
+    /// immediately on the event's arrival. We reuse the same short fixed
+    /// sleeps as test 7 (300 ms before the served check, then 1 s before
+    /// the mirror probe) so timing-flake behaviour stays comparable
+    /// across the two ordering variants.
+    ///
+    /// ## TDD posture
+    ///
+    /// Pre-implementation this fails: the policy in
+    /// `src/nostr/policy/pr_event.rs::git_data_check` matches the scoped
+    /// placeholder, removes it, then falls through to
+    /// `find_relevant_repo_paths`, which only returns DB-resident
+    /// announcement paths. For un-announced coords that list is empty
+    /// and the function returns `Ok(false)` — the builder then re-adds
+    /// the event to purgatory as a *scopeless* full entry, where it sits
+    /// until 30-minute expiry. The event is never saved to the DB, the
+    /// mirror never fires, and the orphan ref at `/prs/` survives until
+    /// the next startup scan picks up a zero-ref repo.
+    pub async fn test_prs_push_then_pr_event_promotes_and_mirrors(
+        client: &AuditClient,
+    ) -> TestResult {
+        TestResult::new(
+            "prs_push_then_pr_event_promotes_and_mirrors",
+            SpecRef::Grasp06MirrorToAnnouncedRepo,
+            "git-first ordering: when a /prs/ push arrives before the PR event, the event MUST \
+             still be promoted out of purgatory on arrival and the mirror MUST still fire",
+        )
+        .run(|| async {
+            let ctx = TestContext::new(client);
+
+            // 1. Same destination setup as test 7 — an accepted, served
+            //    announcement on the standard endpoint to mirror INTO. Built
+            //    via ValidRepoServed which transitively pushes the owner's
+            //    git data.
+            let repo = ctx
+                .get_fixture(FixtureKind::ValidRepoServed)
+                .await
+                .map_err(|e| format!("Failed to build ValidRepoServed fixture: {}", e))?;
+
+            // 2. Resolve coords / URLs. Same shape as test 7.
+            let owner_pubkey_hex = repo.pubkey.to_hex();
+            let owner_npub = repo
+                .pubkey
+                .to_bech32()
+                .map_err(|e| format!("Failed to bech32-encode owner npub: {}", e))?;
+            let repo_id = extract_repo_id(&repo)?;
+
+            let ws_url = client
+                .relay_url()
+                .await
+                .map_err(|e| format!("Failed to get relay URL: {}", e))?;
+            let http_base = AuditClient::ws_to_http_url(&ws_url)
+                .map_err(|e| format!("Failed to convert WebSocket URL to HTTP: {}", e))?;
+            let http_base = http_base.trim_end_matches('/').to_string();
+
+            let pr_author_npub = client
+                .pr_author_keys()
+                .public_key()
+                .to_bech32()
+                .map_err(|e| format!("Failed to bech32-encode pr_author npub: {}", e))?;
+
+            let prs_url = format!("{}/prs/{}/{}.git", http_base, pr_author_npub, repo_id);
+            let standard_url = format!("{}/{}/{}.git", http_base, owner_npub, repo_id);
+
+            // 3. Materialise the commit locally first — we need its hash for
+            //    the PR event's `c` tag, and we need the event built (but
+            //    NOT yet published) so we can pin the push refname to the
+            //    event id before the relay ever sees the event.
+            let workspace = TempPath::new("grasp06-mirror-git-first-");
+            init_local_repo(&workspace.path, &prs_url)
+                .map_err(|e| format!("Failed to init local workspace: {}", e))?;
+
+            let commit_hash = create_commit(
+                &workspace.path,
+                "grasp-06 audit: PR commit for git-first mirror test",
+            )
+            .map_err(|e| format!("Failed to create local commit: {}", e))?;
+
+            // 4. Build & sign the PR event but DO NOT publish it yet. The
+            //    event-id we use to build the push refname must come from
+            //    the same event we will later publish, so building here
+            //    (without sending) is the cleanest way to bind the two.
+            let pr_event = client
+                .event_builder(
+                    Kind::GitPullRequest,
+                    "grasp-06 audit: git-first PR via /prs/ should still promote + mirror",
+                )
+                .tag(Tag::custom(
+                    TagKind::custom("a"),
+                    vec![format!("30617:{}:{}", owner_pubkey_hex, repo_id)],
+                ))
+                .tag(Tag::custom(TagKind::custom("c"), vec![commit_hash.clone()]))
+                .tag(Tag::custom(TagKind::custom("clone"), vec![prs_url.clone()]))
+                .build(client.pr_author_keys())
+                .map_err(|e| format!("Failed to build PR event: {}", e))?;
+            let pr_event_id_typed = pr_event.id;
+            let pr_event_id = pr_event_id_typed.to_hex();
+
+            // 5. PUSH FIRST. The relay sees no matching event in DB or
+            //    purgatory, so per the spec's git-first flow it creates a
+            //    scoped placeholder keyed by event-id, with submitter +
+            //    identifier from the URL. Asserting the push is accepted
+            //    here is a precondition check — if the push itself is
+            //    rejected the rest of the test is meaningless and we want
+            //    a clear error pointing at the receive-pack contract
+            //    rather than the promotion contract.
+            let refname = format!("refs/nostr/{}", pr_event_id);
+            let push_ok = try_push_to_ref(&workspace.path, &refname).map_err(|e| {
+                format!(
+                    "git push HEAD:{} to {} failed to execute: {}",
+                    refname, prs_url, e
+                )
+            })?;
+            if !push_ok {
+                return Err(format!(
+                    "git push HEAD:{} to {} was rejected by the relay — git-first ordering \
+                     precondition (push acceptance into a scoped placeholder) did not hold",
+                    refname, prs_url
+                ));
+            }
+
+            // 6. NOW publish the PR event. Per the design doc's "Git-first"
+            //    flow: the relay finds the matching scoped placeholder by
+            //    event-id, validates (signer, identifier, commit) — all
+            //    match by construction — and MUST promote the event:
+            //    save to DB, remove placeholder, broadcast to subscribers,
+            //    and trigger the cross-service mirror into any matching
+            //    announced repo.
+            client
+                .send_event_and_note_purgatory(pr_event)
+                .await
+                .map_err(|e| format!("Relay rejected the PR event after the /prs/ push: {}", e))?;
+
+            // 7. Verify the PR event is served. Same gating as test 7 —
+            //    if the event never leaves purgatory the mirror assertion
+            //    below is meaningless and the failure mode would be
+            //    confusing.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            if !client
+                .is_event_on_relay(pr_event_id_typed)
+                .await
+                .map_err(|e| format!("Failed to query relay for PR event served-status: {}", e))?
+            {
+                return Err(format!(
+                    "PR event {} arrived after a matching /prs/ push but was NOT promoted out \
+                     of purgatory — git-first promotion contract (design doc lines 204–218: \
+                     \"ref locked; event promoted\") did not hold. The event-driven policy \
+                     branch that matches scoped placeholders is not saving the event to the \
+                     DB.",
+                    pr_event_id
+                ));
+            }
+
+            // 8. Same mirror probe as test 7. The ref + commit must be
+            //    fetchable from the announced repo on the standard
+            //    endpoint, proving the cross-service mirror fired in this
+            //    ordering too.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+
+            let verify = TempPath::new("grasp06-mirror-git-first-verify-");
+            init_local_repo(&verify.path, &standard_url)
+                .map_err(|e| format!("Failed to init verify workspace: {}", e))?;
+
+            let fetch_refspec = format!("{}:{}", refname, refname);
+            let fetch_out = run_git(&verify.path, &["fetch", "origin", &fetch_refspec])
+                .map_err(|e| format!("Failed to execute git fetch: {}", e))?;
+            if !fetch_out.status.success() {
+                let stderr = String::from_utf8_lossy(&fetch_out.stderr);
+                return Err(format!(
+                    "PR event {} was served but ref {} did not appear at {}: {} — git-first \
+                     mirror does not appear to have run. The placeholder match in \
+                     `src/nostr/policy/pr_event.rs::git_data_check` removes the placeholder \
+                     but does not run the mirror branch that `process_newly_available_git_data` \
+                     runs for event-first ordering.",
+                    pr_event_id,
+                    refname,
+                    standard_url,
+                    stderr.trim()
+                ));
+            }
+
+            let cat_out = run_git(&verify.path, &["cat-file", "-e", &commit_hash])
+                .map_err(|e| format!("Failed to execute git cat-file: {}", e))?;
+            if !cat_out.status.success() {
+                let stderr = String::from_utf8_lossy(&cat_out.stderr);
+                return Err(format!(
+                    "Mirror's commit object {} is not reachable in {}: {}",
+                    commit_hash,
+                    standard_url,
+                    stderr.trim()
+                ));
+            }
+
+            let rev_out = run_git(&verify.path, &["rev-parse", &refname])
+                .map_err(|e| format!("Failed to execute git rev-parse: {}", e))?;
+            if !rev_out.status.success() {
+                let stderr = String::from_utf8_lossy(&rev_out.stderr);
+                return Err(format!(
+                    "git rev-parse {} failed after fetch: {}",
+                    refname,
+                    stderr.trim()
+                ));
+            }
+            let mirrored_hash = String::from_utf8_lossy(&rev_out.stdout).trim().to_string();
+            if mirrored_hash != commit_hash {
+                return Err(format!(
+                    "Mirrored ref {} points at {} but expected {}",
+                    refname, mirrored_hash, commit_hash
+                ));
+            }
+
+            Ok(())
+        })
+        .await
+    }
+
     /// Test 8: a `refs/nostr/<event-id>` push to the standard
     /// `<npub>/<id>.git` endpoint MUST NOT appear under `/prs/`.
     ///
