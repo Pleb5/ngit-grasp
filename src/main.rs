@@ -234,16 +234,6 @@ async fn run_relay(config: Config) -> Result<()> {
         });
         info!("Audit event cleanup task started (30m interval, removes events >2h old)");
 
-        // Spawn the GRASP-06 /prs/ periodic cleanup sweep when the feature
-        // is enabled. Removes zero-ref /prs/ repos that have no active
-        // purgatory scope and an mtime older than the purgatory TTL.
-        if config.grasp06_enable {
-            ngit_grasp::grasp06::cleanup::spawn(
-                PathBuf::from(config.effective_git_data_path()),
-                purgatory.clone(),
-            );
-        }
-
         // Start purgatory sync loop for background git data fetching
         // Create naughty list tracker for git remote domains with persistent errors (12h expiration)
         let git_naughty_list = Arc::new(NaughtyListTracker::with_defaults());
