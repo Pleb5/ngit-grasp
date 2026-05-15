@@ -113,3 +113,24 @@ isolated_test_with_grasp_06!(
     test_prs_namespace_404_when_grasp06_not_advertised_with_grasp_06,
     PrsEndpointTests::test_prs_namespace_404_when_grasp06_not_advertised
 );
+
+// =============================================================================
+// Test 2: Empty-bare-repo fetch for any well-formed /prs/<npub>/<id>.git
+// =============================================================================
+//
+// Spec: GRASP-06 06.md line 13
+//
+// Contract: when GRASP-06 is advertised, a fetch against any well-formed
+// /prs/<npub>/<id>.git path that has no accepted refs/nostr/<event-id> MUST
+// respond as if serving an empty bare repository. In practice: `git clone`
+// must succeed and the resulting working copy must have zero refs.
+//
+// Only the `with_grasp_06` variant is wired: when GRASP-06 is disabled the
+// test trivially passes (the spec invariant doesn't apply), and that
+// "feature-off" case is already exercised by the discovery-gate test above.
+// Running an always-trivially-pass test adds noise without coverage.
+
+isolated_test_with_grasp_06!(
+    test_prs_fetch_unknown_path_serves_empty_repo_with_grasp_06,
+    PrsEndpointTests::test_prs_fetch_unknown_path_serves_empty_repo
+);
