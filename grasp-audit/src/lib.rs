@@ -53,8 +53,10 @@ pub use fixtures::{
     // Types and constants
     CommitVariant,
     ContextMode,
+    Fixture,
     FixtureKind,
     TestContext,
+    TypedFixtureCache,
     DETERMINISTIC_COMMIT_HASH,
     MAINTAINER_DETERMINISTIC_COMMIT_HASH,
     PR_TEST_COMMIT_HASH,

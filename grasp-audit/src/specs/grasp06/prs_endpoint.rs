@@ -5,8 +5,9 @@
 //! Each test here maps 1:1 to a MUST in the spec, or to an audit-derived
 //! invariant that follows directly from NIP-11 discovery semantics.
 
+use crate::specs::grasp06::fixtures::advertises_grasp;
 use crate::specs::grasp06::SpecRef;
-use crate::{AuditClient, TestResult};
+use crate::{AuditClient, TestContext, TestResult};
 use nostr_sdk::ToBech32;
 
 pub struct PrsEndpointTests;
@@ -32,48 +33,27 @@ impl PrsEndpointTests {
             "MUST return 404 on /prs/ when GRASP-06 is not advertised in NIP-11",
         )
         .run(|| async {
-            // 1. Resolve the HTTP base URL.
+            let ctx = TestContext::new(client);
+
+            // 1. Capability check via the shared NIP-11 fixture.
+            let advertised = advertises_grasp(&ctx, "GRASP-06")
+                .await
+                .map_err(|e| format!("Failed to determine GRASP-06 advertisement: {}", e))?;
+
+            if advertised {
+                // Precondition not met — the gate doesn't apply. Pass trivially;
+                // the "what /prs/ must do when advertised" behaviour is covered
+                // by other tests in this module.
+                return Ok(());
+            }
+
+            // 2. Resolve the HTTP base URL for the probe.
             let ws_url = client
                 .relay_url()
                 .await
                 .map_err(|e| format!("Failed to get relay URL: {}", e))?;
             let http_url = AuditClient::ws_to_http_url(&ws_url)
                 .map_err(|e| format!("Failed to convert WebSocket URL to HTTP: {}", e))?;
-
-            let http_client = reqwest::Client::new();
-
-            // 2. Fetch NIP-11 and see whether GRASP-06 is advertised.
-            let nip11 = http_client
-                .get(&http_url)
-                .header("Accept", "application/nostr+json")
-                .send()
-                .await
-                .map_err(|e| format!("Failed to fetch NIP-11 document: {}", e))?;
-
-            if !nip11.status().is_success() {
-                return Err(format!(
-                    "NIP-11 fetch returned non-success status: {}",
-                    nip11.status()
-                ));
-            }
-
-            let nip11_json: serde_json::Value = nip11
-                .json()
-                .await
-                .map_err(|e| format!("NIP-11 response is not valid JSON: {}", e))?;
-
-            let advertises_grasp06 = nip11_json
-                .get("supported_grasps")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().any(|v| v.as_str() == Some("GRASP-06")))
-                .unwrap_or(false);
-
-            if advertises_grasp06 {
-                // Precondition not met — the gate doesn't apply. Pass trivially;
-                // the "what /prs/ must do when advertised" behaviour is covered
-                // by other tests in this module.
-                return Ok(());
-            }
 
             // 3. Build a /prs/<valid-npub>/<id>.git/info/refs URL with a known-valid
             //    npub. Using a fresh random npub guarantees no implementation could
@@ -90,6 +70,7 @@ impl PrsEndpointTests {
                 probe_npub
             );
 
+            let http_client = reqwest::Client::new();
             let response = http_client
                 .get(&probe_url)
                 .send()
