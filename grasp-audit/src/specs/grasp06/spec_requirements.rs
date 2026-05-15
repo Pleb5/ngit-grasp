@@ -21,6 +21,10 @@ pub enum SpecRef {
     /// Audit-derived: if NIP-11 does not advertise GRASP-06, the /prs/ namespace
     /// must 404 so clients can rely on NIP-11 for capability discovery.
     Grasp06NotAdvertised404,
+    /// Audit-derived (implementation plan, Phase 9): when the relay is
+    /// configured with GRASP-06 enabled, NIP-11 `supported_grasps` MUST
+    /// include `"GRASP-06"` so clients can discover the capability.
+    Grasp06AdvertisedWhenEnabled,
     /// 06.md line 13 — MUST respond to upload-pack on any well-formed path as
     /// if serving an empty bare repository.
     Grasp06FetchEmptyRepo,
@@ -49,6 +53,7 @@ impl SpecRef {
     pub fn spec_ref_string(self) -> &'static str {
         match self {
             SpecRef::Grasp06NotAdvertised404 => "GRASP-06:audit:nip11-gate",
+            SpecRef::Grasp06AdvertisedWhenEnabled => "GRASP-06:nip11:when-enabled",
             SpecRef::Grasp06FetchEmptyRepo => "GRASP-06:git-http:13",
             SpecRef::Grasp06AcceptRefsNostrPush => "GRASP-06:git-http:15",
             SpecRef::Grasp06RejectNonNostrRefs => "GRASP-06:git-http:15",

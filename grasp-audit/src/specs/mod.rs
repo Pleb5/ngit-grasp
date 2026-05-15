@@ -12,4 +12,4 @@ pub use grasp01::{
 };
 
 // Re-export test structs from grasp06 module
-pub use grasp06::PrsEndpointTests;
+pub use grasp06::{Nip11Tests, PrsEndpointTests};
