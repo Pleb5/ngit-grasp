@@ -392,10 +392,29 @@ impl Nip34WritePolicy {
             _ => {} // continue
         }
 
-        // Reject PRs unrelated to stored repositories / events
+        // Reject PRs unrelated to stored repositories / events.
+        //
+        // GRASP-06 (06.md lines 21–24) relaxes this: a PR / PR-Update event
+        // whose `clone` tag names this relay's
+        // `/prs/<signer-npub>/<d>.git` endpoint (and which carries a
+        // matching `a` tag of the form `30617:<hex>:<d>`) MUST be accepted
+        // even when no announcement for the target coord is on this relay.
+        // Such events skip the related-event check and fall through to the
+        // git-data-check + purgatory branch below.
         match self.handle_related_event(event, "PR").await {
             WritePolicyResult::Accept => {} // continue
-            rejected => return rejected,
+            rejected => {
+                if !crate::grasp06::policy::event_qualifies_for_pr_relaxation(
+                    event,
+                    &self.ctx.config,
+                ) {
+                    return rejected;
+                }
+                tracing::info!(
+                    "Accepted orphan PR event {} under GRASP-06: clone tag names this relay's /prs/ endpoint",
+                    event_id_str,
+                );
+            }
         }
 
         // Check if git data exists (delete any incorrect commits at refs/nostr/<event-id>, copies correct data to relivant repositories)

@@ -14,11 +14,15 @@
 //! - `git-receive-pack` accepting pushes to `refs/nostr/<event-id>` and
 //!   rejecting any other ref namespace, with init-on-push and per-ref
 //!   post-push validation against the database / purgatory.
+//! - PR / PR-Update event acceptance relaxation for un-announced coords
+//!   whose `clone` tag names this relay's `/prs/<signer-npub>/<d>.git`
+//!   endpoint (06.md lines 21–24).
 //!
-//! Event-acceptance relaxation for un-announced coords and cross-service
-//! mirroring into matching announced repos are not yet implemented.
+//! Cross-service mirroring into matching announced repos is not yet
+//! implemented.
 
 pub mod endpoint;
 pub mod fetch;
 pub mod paths;
+pub mod policy;
 pub mod receive;
