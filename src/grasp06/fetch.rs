@@ -1,0 +1,163 @@
+//! GRASP-06 `/prs/` fetch handlers and receive-pack stub.
+//!
+//! Spec 06.md line 13:
+//!
+//! > MUST respond to upload-pack requests for any well-formed path as if
+//! > serving an empty bare repository.
+//!
+//! When a real `/prs/<submitter>/<identifier>.git` repo exists on disk
+//! we delegate to the standard handlers in [`crate::git::handlers`].
+//! Otherwise we synthesise a brand-new empty bare repo in a per-request
+//! temporary directory and run the standard upload-pack against that.
+//!
+//! Receive-pack is intentionally a stub for now: it returns an HTTP 200
+//! response carrying an `ERR` pkt-line. The real handler is not yet
+//! implemented.
+
+use http_body_util::Full;
+use hyper::body::Bytes;
+use hyper::{Response, StatusCode};
+use std::path::Path;
+use std::process::Command;
+use tempfile::TempDir;
+use tracing::{debug, warn};
+
+use crate::git::handlers::{handle_info_refs, handle_upload_pack, GitError};
+use crate::git::protocol::{GitService, PktLine};
+use crate::grasp06::endpoint::PrsUrl;
+use crate::grasp06::paths::prs_repo_path;
+
+/// Handle `GET /prs/<npub>/<id>.git/info/refs?service=...`.
+///
+/// Used for both `git-upload-pack` (clone/fetch) discovery and
+/// `git-receive-pack` discovery: in both cases we advertise the refs of
+/// an empty bare repo when no real repo exists at the requested path,
+/// so that `git push` can proceed to its POST step and be rejected by
+/// the receive-pack stub via an ERR pkt-line.
+pub async fn handle_prs_info_refs(
+    prs: &PrsUrl,
+    git_data_path: &str,
+    service: GitService,
+    git_protocol: Option<&str>,
+) -> Result<Response<Full<Bytes>>, GitError> {
+    let real_repo = prs_repo_path(
+        Path::new(git_data_path),
+        &prs.submitter.to_hex(),
+        &prs.identifier,
+    );
+
+    if real_repo.exists() {
+        debug!(
+            "/prs/ info/refs: real repo found at {} — delegating",
+            real_repo.display()
+        );
+        return handle_info_refs(real_repo, service, git_protocol).await;
+    }
+
+    debug!(
+        "/prs/ info/refs: synthesising empty bare repo for prs={}/{}",
+        prs.submitter.to_hex(),
+        prs.identifier
+    );
+    let temp = init_empty_bare_repo()?;
+    let repo_path = temp.path().to_path_buf();
+    let response = handle_info_refs(repo_path, service, git_protocol).await;
+    // `temp` is dropped here, deleting the directory. Git has already
+    // read everything it needs by the time `handle_info_refs` returns.
+    drop(temp);
+    response
+}
+
+/// Handle `POST /prs/<npub>/<id>.git/git-upload-pack`.
+///
+/// Same synthesise-or-delegate behaviour as [`handle_prs_info_refs`].
+pub async fn handle_prs_upload_pack(
+    prs: &PrsUrl,
+    git_data_path: &str,
+    body: Bytes,
+    git_protocol: Option<&str>,
+) -> Result<Response<Full<Bytes>>, GitError> {
+    let real_repo = prs_repo_path(
+        Path::new(git_data_path),
+        &prs.submitter.to_hex(),
+        &prs.identifier,
+    );
+
+    if real_repo.exists() {
+        debug!(
+            "/prs/ upload-pack: real repo found at {} — delegating",
+            real_repo.display()
+        );
+        return handle_upload_pack(real_repo, body, git_protocol).await;
+    }
+
+    debug!(
+        "/prs/ upload-pack: synthesising empty bare repo for prs={}/{}",
+        prs.submitter.to_hex(),
+        prs.identifier
+    );
+    let temp = init_empty_bare_repo()?;
+    let repo_path = temp.path().to_path_buf();
+    let response = handle_upload_pack(repo_path, body, git_protocol).await;
+    drop(temp);
+    response
+}
+
+/// Stub `POST /prs/<npub>/<id>.git/git-receive-pack`.
+///
+/// Returns HTTP 200 with an `ERR` pkt-line so that git clients display
+/// the message and exit non-zero. The real receive-pack handler (with
+/// ref-name validation, init-on-push, and purgatory wiring) is not yet
+/// implemented.
+pub fn handle_prs_receive_pack_stub() -> Response<Full<Bytes>> {
+    build_receive_pack_err("GRASP-06 receive-pack not yet implemented")
+}
+
+/// Build an HTTP 200 response carrying a `git-receive-pack` ERR pkt-line.
+///
+/// Per the git smart-HTTP protocol, application-level rejections are
+/// communicated as a single `PKT-LINE("ERR " <message>)` packet on a
+/// 200 response. A 4xx/5xx response would prevent the client from
+/// parsing and displaying the message. The shape here mirrors
+/// `build_git_protocol_error_response` in [`crate::git::handlers`].
+fn build_receive_pack_err(message: &str) -> Response<Full<Bytes>> {
+    let payload = format!("ERR {}\n", message.trim());
+    let pktline = PktLine::data(payload.as_bytes()).encode();
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(
+            "content-type",
+            GitService::ReceivePack.result_content_type(),
+        )
+        .header("cache-control", "no-cache")
+        .body(Full::new(Bytes::from(pktline)))
+        .unwrap()
+}
+
+/// Create a fresh empty bare repo in a temp directory.
+///
+/// Per-request temp dirs are deliberate. They are cheap on
+/// any reasonable filesystem (one `mkdir`, one `git init --bare`) and
+/// avoid any concurrency hazards a shared template would introduce. If
+/// profiling shows this is a bottleneck we can switch to a shared
+/// `<git_data_path>/prs/.empty-template.git`; do not optimise until
+/// measurable.
+fn init_empty_bare_repo() -> Result<TempDir, GitError> {
+    let temp = TempDir::new().map_err(GitError::IoError)?;
+    let path = temp.path();
+    let output = Command::new("git")
+        .args(["init", "--bare", "--quiet"])
+        .arg(path)
+        .output()
+        .map_err(GitError::ProcessSpawnFailed)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        warn!(
+            "/prs/ empty-repo synthesis: git init --bare failed in {}: {}",
+            path.display(),
+            stderr.trim()
+        );
+        return Err(GitError::GitFailed(output.status.code()));
+    }
+    Ok(temp)
+}

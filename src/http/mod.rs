@@ -164,6 +164,157 @@ impl Service<Request<Incoming>> for HttpService {
             });
         }
 
+        // GRASP-06: route /prs/<npub>/<id>.git/* before the standard git URL
+        // parser. When disabled, the path falls through to existing 404
+        // handling (preserving the discovery-gate contract).
+        if self.config.grasp06_enable {
+            if let Some(prs) = crate::grasp06::endpoint::parse_prs_url(&path) {
+                let git_protocol = req
+                    .headers()
+                    .get("git-protocol")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string());
+                let content_encoding = req
+                    .headers()
+                    .get("content-encoding")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_lowercase());
+
+                tracing::debug!(
+                    "/prs/ request: {} {} (submitter={}, id={}, subpath={}, protocol={:?})",
+                    method,
+                    path,
+                    prs.submitter.to_hex(),
+                    prs.identifier,
+                    prs.subpath,
+                    git_protocol
+                );
+
+                let subpath = prs.subpath.clone();
+                let method_clone = method.clone();
+                let metrics_clone = self.metrics.clone();
+
+                return Box::pin(async move {
+                    // Collect (and gunzip if needed) the request body just like
+                    // the standard git branch does.
+                    let raw_body = req
+                        .collect()
+                        .await
+                        .map(|collected| collected.to_bytes())
+                        .unwrap_or_else(|_| Bytes::new());
+                    let body_bytes = if content_encoding.as_deref() == Some("gzip") {
+                        use flate2::read::GzDecoder;
+                        use std::io::Read;
+                        let mut decoder = GzDecoder::new(&raw_body[..]);
+                        let mut decompressed = Vec::new();
+                        match decoder.read_to_end(&mut decompressed) {
+                            Ok(_) => Bytes::from(decompressed),
+                            Err(e) => {
+                                tracing::warn!("/prs/ gzip decompress failed: {}", e);
+                                raw_body
+                            }
+                        }
+                    } else {
+                        raw_body
+                    };
+
+                    let result: Result<Response<Full<Bytes>>, git::handlers::GitError> =
+                        match (method_clone.as_ref(), subpath.as_str()) {
+                            // GET /info/refs?service=git-{upload,receive}-pack
+                            (m, sp) if m == Method::GET && sp.starts_with("info/refs") => {
+                                let service = query
+                                    .as_deref()
+                                    .unwrap_or("")
+                                    .strip_prefix("service=")
+                                    .and_then(git::protocol::GitService::from_query_param);
+                                match service {
+                                    Some(svc) => {
+                                        let r = crate::grasp06::fetch::handle_prs_info_refs(
+                                            &prs,
+                                            &git_data_path,
+                                            svc,
+                                            git_protocol.as_deref(),
+                                        )
+                                        .await;
+                                        if let Some(ref m) = metrics_clone {
+                                            let status =
+                                                if r.is_ok() { "success" } else { "error" };
+                                            let op = match svc {
+                                                git::protocol::GitService::UploadPack => "fetch",
+                                                git::protocol::GitService::ReceivePack => "push",
+                                            };
+                                            m.record_git_operation(op, status);
+                                        }
+                                        r
+                                    }
+                                    None => Err(git::handlers::GitError::RepositoryNotFound),
+                                }
+                            }
+
+                            // POST /git-upload-pack — clone/fetch.
+                            (m, "git-upload-pack") if m == Method::POST => {
+                                let r = crate::grasp06::fetch::handle_prs_upload_pack(
+                                    &prs,
+                                    &git_data_path,
+                                    body_bytes,
+                                    git_protocol.as_deref(),
+                                )
+                                .await;
+                                if let Some(ref m) = metrics_clone {
+                                    let status = if r.is_ok() { "success" } else { "error" };
+                                    m.record_git_operation("clone", status);
+                                }
+                                r
+                            }
+
+                            // POST /git-receive-pack — stub for now.
+                            // Returns HTTP 200 with an ERR pkt-line; the
+                            // real handler is not yet implemented.
+                            (m, "git-receive-pack") if m == Method::POST => {
+                                if let Some(ref m) = metrics_clone {
+                                    m.record_git_operation("push", "error");
+                                }
+                                Ok(crate::grasp06::fetch::handle_prs_receive_pack_stub())
+                            }
+
+                            _ => Err(git::handlers::GitError::RepositoryNotFound),
+                        };
+
+                    match result {
+                        Ok(response) => {
+                            let (parts, body) = response.into_parts();
+                            Ok(add_cors_headers(Response::builder().status(parts.status))
+                                .header(
+                                    "content-type",
+                                    parts
+                                        .headers
+                                        .get("content-type")
+                                        .and_then(|v| v.to_str().ok())
+                                        .unwrap_or("application/octet-stream"),
+                                )
+                                .header(
+                                    "cache-control",
+                                    parts
+                                        .headers
+                                        .get("cache-control")
+                                        .and_then(|v| v.to_str().ok())
+                                        .unwrap_or("no-cache"),
+                                )
+                                .body(body)
+                                .unwrap())
+                        }
+                        Err(e) => {
+                            let error_msg = format!("Git error: {}", e);
+                            Ok(add_cors_headers(Response::builder())
+                                .status(e.status_code())
+                                .body(Full::new(Bytes::from(error_msg)))
+                                .unwrap())
+                        }
+                    }
+                });
+            }
+        }
+
         // Check for Git HTTP requests first
         if let Some((npub, identifier, subpath)) = git::parse_git_url(&path) {
             // Extract Git-Protocol header for protocol v2 support
