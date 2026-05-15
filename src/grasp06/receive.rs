@@ -12,29 +12,37 @@
 //!    exact shape `refs/nostr/<64-lowercase-hex>`. The repo on disk is not
 //!    touched in this path — probe pushes that would have been rejected
 //!    leave no trace.
-//! 2. Acquires the per-path coordination state from [`RepoInitLocks`]
+//! 2. Pre-validates every ref against the database and purgatory via the
+//!    **shared** [`crate::git::authorization::pre_validate_refs_nostr_push`]
+//!    helper. The check is parameterised with `PrsUrlConstraints` so signer
+//!    / `a`-tag identifier / `c`-tag commit mismatches against a known event
+//!    reject the whole push with an `ERR` pkt-line — matching the
+//!    standard-endpoint UX. Nothing on disk has been touched yet so failed
+//!    probes leave no state.
+//! 3. Acquires the per-path coordination state from [`RepoInitLocks`]
 //!    briefly: under its mutex it runs the on-demand `git init --bare`
 //!    and increments the `in_flight` counter, then releases the mutex.
-//!    Steps 3 and 4 run *without* the per-path lock so concurrent pushes
+//!    Steps 4 and 5 run *without* the per-path lock so concurrent pushes
 //!    to the same `(submitter, identifier)` proceed in parallel — git's
 //!    own ref locking handles intra-push concurrency, and the
 //!    `in_flight` counter is what off-push cleanup paths consult to know
 //!    a push is active.
-//! 3. Runs `git-receive-pack` against the repo, mirroring the subprocess
+//! 4. Runs `git-receive-pack` against the repo, mirroring the subprocess
 //!    plumbing in [`crate::git::handlers::handle_receive_pack`].
-//! 4. For each accepted `refs/nostr/<event-id>` ref, validates against the
-//!    database first, then purgatory. On signer / `a`-tag identifier /
-//!    `c`-tag commit mismatch the ref is deleted and (for purgatory
-//!    placeholders) the placeholder is discarded. When neither the database
-//!    nor purgatory knows about the event, a PR placeholder is added so the
-//!    standard 30-minute purgatory sweep can clean it up if the event never
+//! 5. For each accepted `refs/nostr/<event-id>` ref, re-runs the shared
+//!    pre-validation as a **race safety net** — an event for one of the
+//!    pushed ids may have arrived via WebSocket during the receive-pack
+//!    window. On mismatch the ref is deleted (and any populated purgatory
+//!    entry is dropped). When neither the DB nor purgatory knows about
+//!    the event a scoped PR placeholder is added so the standard
+//!    30-minute purgatory sweep can clean it up if the event never
 //!    arrives.
-//! 5. Re-acquires the per-path mutex briefly, decrements `in_flight`,
+//! 6. Re-acquires the per-path mutex briefly, decrements `in_flight`,
 //!    and — if no other push is in flight and the repo has zero refs
 //!    left — removes the bare directory. Always runs, including on
 //!    receive-pack protocol errors, so a failed push that has just
 //!    initialised an empty repo does not leak it.
-//! 6. Triggers the standard purgatory-release path via
+//! 7. Triggers the standard purgatory-release path via
 //!    [`crate::git::sync::process_newly_available_git_data`] so PR events
 //!    already in purgatory waiting for these commits get promoted.
 
@@ -53,11 +61,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
-use crate::git::authorization::{extract_commit_tag, get_pr_event_by_id, parse_pushed_refs};
+use crate::git::authorization::{
+    parse_pushed_refs, pre_validate_refs_nostr_push, NostrRefPreValidation, PrsUrlConstraints,
+};
 use crate::git::handlers::{build_git_protocol_error_response, is_git_protocol_error, GitError};
 use crate::git::protocol::GitService;
 use crate::git::subprocess::GitSubprocess;
-use crate::git::sync::{extract_identifier_from_pr_event, process_newly_available_git_data};
+use crate::git::sync::process_newly_available_git_data;
 use crate::git::{delete_ref, list_refs};
 use crate::grasp06::endpoint::PrsUrl;
 use crate::grasp06::paths::prs_repo_path;
@@ -177,7 +187,43 @@ pub async fn handle_prs_receive_pack(
         }
     }
 
-    // 2. Acquire the per-path coordination state and, under its mutex,
+    // 2. Pre-validate every ref against the DB + purgatory. Same logic the
+    //    standard endpoint uses in `authorize_push`, parameterised with the
+    //    `/prs/<npub>/<identifier>` URL constraints so signer / a-tag
+    //    identifier mismatches are caught alongside the commit mismatch.
+    //    Any rejection returns an ERR pkt-line *before* the bare repo is
+    //    initialised — failed probes leave no on-disk state.
+    let prs_constraints = PrsUrlConstraints {
+        submitter: &prs.submitter,
+        identifier: &prs.identifier,
+    };
+    for (_, new_oid, ref_name) in &pushed_refs {
+        match pre_validate_refs_nostr_push(
+            &database,
+            &purgatory,
+            new_oid,
+            ref_name,
+            Some(prs_constraints),
+        )
+        .await
+        {
+            NostrRefPreValidation::Rejected { reason } => {
+                warn!(
+                    "/prs/ receive-pack: rejecting push to {}/{} — {}",
+                    prs.submitter.to_hex(),
+                    prs.identifier,
+                    reason
+                );
+                return Ok(build_git_protocol_error_response(
+                    GitService::ReceivePack,
+                    &format!("GRASP-06: {}", reason),
+                ));
+            }
+            NostrRefPreValidation::Authorized { .. } | NostrRefPreValidation::Unknown => {}
+        }
+    }
+
+    // 3. Acquire the per-path coordination state and, under its mutex,
     //    initialise the bare repo on demand and register this request as
     //    in-flight. The mutex is then released — `git-receive-pack` and
     //    per-ref validation run WITHOUT the lock so concurrent pushes to
@@ -204,7 +250,7 @@ pub async fn handle_prs_receive_pack(
         state.in_flight.fetch_add(1, Ordering::Relaxed);
     }
 
-    // 3 + 4: run receive-pack and validate refs without the per-path
+    // 4 + 5: run receive-pack and re-validate refs without the per-path
     //        mutex held. Wrapping in an async block lets us catch every
     //        exit path with the same end-of-push cleanup below.
     let process_result: Result<Response<Full<Bytes>>, GitError> = async {
@@ -219,20 +265,27 @@ pub async fn handle_prs_receive_pack(
             return Ok(response);
         }
 
-        // 4. Per-ref post-push validation. Iterate over the same parsed
-        //    ref list — at this point every ref name is known to be
-        //    `refs/nostr/<event-id>`, so the strip is infallible.
+        // 5. Race safety net. The pre-validation in step 2 was performed
+        //    *before* `git-receive-pack` ran, so an event with one of the
+        //    pushed ids may have arrived via WebSocket during the
+        //    receive-pack window. Re-run the same shared check now and
+        //    delete the ref on any mismatch. The `Unknown` branch is the
+        //    common case — neither DB nor purgatory have heard of this
+        //    event yet — and creates a scoped placeholder so the
+        //    30-minute purgatory sweep can clean it up if the event
+        //    never arrives.
         for (_, new_oid, ref_name) in &pushed_refs {
             let event_id_hex = ref_name
                 .strip_prefix("refs/nostr/")
                 .expect("ref shape validated above");
-            validate_pushed_nostr_ref(
+            post_push_validate(
                 &database,
                 &purgatory,
                 &repo_path,
                 prs,
                 event_id_hex,
                 new_oid,
+                ref_name,
             )
             .await;
         }
@@ -241,7 +294,7 @@ pub async fn handle_prs_receive_pack(
     }
     .await;
 
-    // 5. End-of-push cleanup. Always runs — including on receive-pack
+    // 6. End-of-push cleanup. Always runs — including on receive-pack
     //    protocol errors and `?`-propagated transport errors — so a
     //    failed push that has just initialised an empty repo does not
     //    leak it. Decrements `in_flight`; if no other push is in flight
@@ -271,10 +324,10 @@ pub async fn handle_prs_receive_pack(
 
     let response = process_result?;
 
-    // 6. Drive the standard purgatory-release pipeline so PR events
+    // 7. Drive the standard purgatory-release pipeline so PR events
     //    already waiting on these commits can be promoted out of
     //    purgatory. Only fires on a successful push, and only if the
-    //    repo still exists (it may have been removed in step 5).
+    //    repo still exists (it may have been removed in step 6).
     if response.status() == StatusCode::OK && repo_path.exists() {
         let new_oids: HashSet<String> = pushed_refs
             .iter()
@@ -442,138 +495,85 @@ async fn run_receive_pack(
         .unwrap())
 }
 
-/// Validate one accepted `refs/nostr/<event-id>` ref against the database
-/// and purgatory, deleting the ref (and discarding the purgatory
-/// placeholder, where applicable) on any mismatch. If no event is known at
-/// all, register a placeholder so the 30-minute purgatory sweep can clean
-/// the ref up if the event never arrives.
-async fn validate_pushed_nostr_ref(
+/// Race safety net for the `/prs/` receive-pack post-push phase.
+///
+/// Pre-validation (step 2 of [`handle_prs_receive_pack`]) already gates
+/// every ref against the DB and purgatory *before* `git-receive-pack`
+/// runs, so the common case here is `Authorized` (event was found and
+/// matched at pre-validation, or matched again after a no-op race) or
+/// `Unknown` (no event known yet — register a scoped placeholder).
+///
+/// A `Rejected` outcome here means an event for this `event_id` arrived
+/// via WebSocket during the receive-pack window and either:
+///
+/// - mismatches commit / signer / a-tag identifier (delete the ref), or
+/// - was held in purgatory with a populated entry that also mismatches
+///   (delete the ref AND drop the purgatory entry — its event is wrong).
+///
+/// Anything left here is best-effort: errors deleting refs are logged
+/// and the push response is not changed. The end-of-push cleanup in
+/// [`handle_prs_receive_pack`] removes the bare repo if every ref ends
+/// up deleted.
+async fn post_push_validate(
     database: &SharedDatabase,
     purgatory: &Purgatory,
     repo_path: &Path,
     prs: &PrsUrl,
     event_id_hex: &str,
     pushed_commit: &str,
+    ref_name: &str,
 ) {
-    let ref_name = format!("refs/nostr/{}", event_id_hex);
-
-    // Parsing the event id this late ensures the on-disk ref shape and the
-    // in-memory key formats agree.
-    let event_id = match EventId::parse(event_id_hex) {
-        Ok(id) => id,
-        Err(e) => {
-            // Should be unreachable thanks to the pre-scan, but if it does
-            // happen we delete the ref defensively rather than leave an
-            // unparseable placeholder around.
-            warn!(
-                "/prs/ post-push: unexpected unparseable event id in ref {}: {}",
-                ref_name, e
-            );
-            let _ = delete_ref(repo_path, &ref_name);
-            return;
-        }
+    let prs_constraints = PrsUrlConstraints {
+        submitter: &prs.submitter,
+        identifier: &prs.identifier,
     };
 
-    // 4a. Database first.
-    match get_pr_event_by_id(database, &event_id).await {
-        Ok(Some(event)) => {
-            if let Some(reason) = describe_pr_event_mismatch(&event, prs, pushed_commit) {
-                warn!(
-                    "/prs/ post-push: deleting {} — DB event mismatch ({})",
-                    ref_name, reason
-                );
-                let _ = delete_ref(repo_path, &ref_name);
-            } else {
-                debug!("/prs/ post-push: {} validated against DB event", ref_name);
-            }
-            return;
-        }
-        Ok(None) => {}
-        Err(e) => {
+    match pre_validate_refs_nostr_push(
+        database,
+        purgatory,
+        pushed_commit,
+        ref_name,
+        Some(prs_constraints),
+    )
+    .await
+    {
+        NostrRefPreValidation::Rejected { reason } => {
             warn!(
-                "/prs/ post-push: DB query failed for {} (treating as not-found): {}",
-                ref_name, e
+                "/prs/ post-push: deleting {} — race-window mismatch ({})",
+                ref_name, reason
             );
-        }
-    }
-
-    // 4b. Purgatory.
-    if let Some(entry) = purgatory.find_pr(event_id_hex) {
-        match entry.event {
-            Some(event) => {
-                if let Some(reason) = describe_pr_event_mismatch(&event, prs, pushed_commit) {
-                    warn!(
-                        "/prs/ post-push: deleting {} — purgatory event mismatch ({})",
-                        ref_name, reason
-                    );
-                    let _ = delete_ref(repo_path, &ref_name);
+            let _ = delete_ref(repo_path, ref_name);
+            // If the rejection came from a populated purgatory entry whose
+            // event is itself wrong for this URL, drop it so the
+            // 30-minute sweep doesn't try to re-validate it again.
+            if let Some(entry) = purgatory.find_pr(event_id_hex) {
+                if entry.event.is_some() {
                     purgatory.remove_pr(event_id_hex);
-                } else {
-                    debug!(
-                        "/prs/ post-push: {} validated against purgatory event",
-                        ref_name
-                    );
                 }
             }
-            None => {
-                // Existing placeholder. The pushed commit fills in the
-                // commit half of the entry; the standard 30-minute sweep
-                // will discard it if the event never arrives.
-                debug!(
-                    "/prs/ post-push: {} matched existing purgatory placeholder",
-                    ref_name
-                );
-            }
         }
-        return;
-    }
-
-    // 4c. Neither DB nor purgatory know about this event. Register a
-    //     placeholder scoped to the URL's submitter + identifier so the
-    //     event-side validator can reject mismatched events (and an
-    //     attacker can't push to their own /prs/ namespace and have an
-    //     unrelated event of the same id later "claim" the ref). The
-    //     standard 30-minute sweep cleans the ref up if the corresponding
-    //     PR event never arrives.
-    purgatory.add_prs_pr_placeholder(
-        event_id_hex.to_string(),
-        pushed_commit.to_string(),
-        prs.submitter,
-        prs.identifier.clone(),
-    );
-    debug!(
-        "/prs/ post-push: added scoped PR placeholder for {} awaiting matching event",
-        ref_name
-    );
-}
-
-/// Cross-check a known PR/PR-Update event against the URL submitter and the
-/// pushed commit. Returns `None` if everything matches, or `Some(reason)`
-/// describing the first mismatch encountered.
-fn describe_pr_event_mismatch(event: &Event, prs: &PrsUrl, pushed_commit: &str) -> Option<String> {
-    if event.pubkey != prs.submitter {
-        return Some(format!(
-            "signer {} does not match URL submitter {}",
-            event.pubkey.to_hex(),
-            prs.submitter.to_hex()
-        ));
-    }
-    match extract_identifier_from_pr_event(event) {
-        Some(id) if id == prs.identifier => {}
-        Some(id) => {
-            return Some(format!(
-                "a-tag identifier {} does not match URL identifier {}",
-                id, prs.identifier
-            ))
+        NostrRefPreValidation::Authorized { .. } => {
+            debug!(
+                "/prs/ post-push: {} validated against DB/purgatory",
+                ref_name
+            );
         }
-        None => return Some("event has no parsable a-tag identifier".to_string()),
-    }
-    match extract_commit_tag(event) {
-        Some(c) if c == pushed_commit => None,
-        Some(c) => Some(format!(
-            "c-tag commit {} does not match pushed commit {}",
-            c, pushed_commit
-        )),
-        None => Some("event has no c-tag commit".to_string()),
+        NostrRefPreValidation::Unknown => {
+            // No event known. Register a scoped placeholder so the
+            // 30-minute purgatory sweep deletes the ref if the event
+            // never arrives, and so an unrelated event of the same id
+            // can't later claim this ref. See
+            // [`Purgatory::add_prs_pr_placeholder`].
+            purgatory.add_prs_pr_placeholder(
+                event_id_hex.to_string(),
+                pushed_commit.to_string(),
+                prs.submitter,
+                prs.identifier.clone(),
+            );
+            debug!(
+                "/prs/ post-push: added scoped PR placeholder for {} awaiting matching event",
+                ref_name
+            );
+        }
     }
 }
