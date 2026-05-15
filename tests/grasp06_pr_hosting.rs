@@ -128,15 +128,17 @@ isolated_test_with_grasp_06!(
 //
 // Spec: GRASP-06 06.md line 13
 //
-// Contract: when GRASP-06 is advertised, a fetch against any well-formed
-// /prs/<npub>/<id>.git path that has no accepted refs/nostr/<event-id> MUST
-// respond as if serving an empty bare repository. In practice: `git clone`
-// must succeed and the resulting working copy must have zero refs.
+// Contract: when GRASP-06 is enabled on the relay, a fetch against any
+// well-formed /prs/<npub>/<id>.git path that has no accepted
+// refs/nostr/<event-id> MUST respond as if serving an empty bare repository.
+// In practice: `git clone` must succeed and the resulting working copy must
+// have zero refs.
 //
-// Wired only as `with_grasp_06`. Pre-implementation NIP-11 doesn't advertise
-// GRASP-06 even with the env var set, so the test takes the trivial-pass
-// branch (precondition not met). Once the feature lands and NIP-11
-// advertises, this exercises the real clone-and-verify-empty assertion.
+// Wired only as `with_grasp_06`. The test asserts the invariant
+// unconditionally — gating on NIP-11 advertisement is a caller concern, not
+// part of the spec assertion. Pre-implementation this FAILS (TDD red): the
+// relay has no `/prs/` route, so the clone gets 404. Once the feature lands
+// and the empty-repo synthesis is implemented, this turns green.
 
 isolated_test_with_grasp_06!(
     test_prs_fetch_unknown_path_serves_empty_repo_with_grasp_06,

@@ -94,21 +94,28 @@ impl PrsEndpointTests {
         .await
     }
 
-    /// Test: when GRASP-06 is advertised, fetching any well-formed
-    /// `/prs/<npub>/<id>.git` path that has no accepted `refs/nostr/<event-id>`
-    /// MUST respond as if serving an empty bare repository.
+    /// Test: fetching any well-formed `/prs/<npub>/<id>.git` path that has no
+    /// accepted `refs/nostr/<event-id>` MUST respond as if serving an empty
+    /// bare repository.
     ///
     /// Spec: 06.md line 13 — "MUST respond to upload-pack requests for any
     /// well-formed path as if serving an empty bare repository until at least
     /// one `refs/nostr/<event-id>` has been accepted for that path."
     ///
-    /// Branches:
-    /// - NIP-11 does not list `GRASP-06` -> test trivially passes (precondition
-    ///   not met; the "off" contract is covered by
-    ///   `test_prs_namespace_404_when_grasp06_not_advertised`).
-    /// - NIP-11 lists `GRASP-06` -> `git clone` of a fresh random
-    ///   `/prs/<npub>/<id>.git` MUST succeed and produce a repository with
-    ///   zero refs.
+    /// The test asserts the spec invariant unconditionally — `git clone` of a
+    /// fresh random `/prs/<npub>/<id>.git` MUST succeed and produce a
+    /// repository with zero refs. Pre-implementation this fails as a TDD red:
+    /// the relay has no `/prs/` route, so the clone gets 404 and the test
+    /// reports the failure.
+    ///
+    /// Gating on NIP-11 advertisement is a caller concern, not part of the
+    /// assertion: this test is wired into `isolated_test_with_grasp_06!` only,
+    /// so the harness already encodes the expectation that GRASP-06 is
+    /// enabled on the target relay. For CLI use against an arbitrary relay
+    /// the caller would either skip this test when NIP-11 doesn't advertise
+    /// GRASP-06, or rely on the discovery-gate test
+    /// (`test_prs_namespace_404_when_grasp06_not_advertised`) to cover the
+    /// "off" case.
     pub async fn test_prs_fetch_unknown_path_serves_empty_repo(client: &AuditClient) -> TestResult {
         TestResult::new(
             "prs_fetch_unknown_path_serves_empty_repo",
@@ -117,21 +124,7 @@ impl PrsEndpointTests {
              until refs/nostr/<event-id> has been accepted",
         )
         .run(|| async {
-            let ctx = TestContext::new(client);
-
-            // 1. Capability check via the shared NIP-11 fixture.
-            let advertised = advertises_grasp(&ctx, "GRASP-06")
-                .await
-                .map_err(|e| format!("Failed to determine GRASP-06 advertisement: {}", e))?;
-
-            if !advertised {
-                // Precondition not met — the spec invariant only applies when
-                // the relay opts in. The "off" contract (404) is covered by
-                // the discovery-gate test in this module.
-                return Ok(());
-            }
-
-            // 2. Resolve the HTTP base URL.
+            // 1. Resolve the HTTP base URL.
             let ws_url = client
                 .relay_url()
                 .await
@@ -139,7 +132,7 @@ impl PrsEndpointTests {
             let http_url = AuditClient::ws_to_http_url(&ws_url)
                 .map_err(|e| format!("Failed to convert WebSocket URL to HTTP: {}", e))?;
 
-            // 3. Build a /prs/<valid-npub>/<random-id>.git URL. Using fresh
+            // 2. Build a /prs/<valid-npub>/<random-id>.git URL. Using fresh
             //    random keys and a UUID identifier guarantees no implementation
             //    could have prior state for this path.
             let probe_keys = nostr_sdk::Keys::generate();
@@ -156,7 +149,7 @@ impl PrsEndpointTests {
                 probe_id
             );
 
-            // 4. Clone into a fresh temp dir. Existing GitCloneTests follows
+            // 3. Clone into a fresh temp dir. Existing GitCloneTests follows
             //    the same temp_dir + UUID pattern; reused here for consistency.
             let temp_base = std::env::temp_dir();
             let clone_path =
@@ -186,7 +179,7 @@ impl PrsEndpointTests {
                 return Err(format!("git clone {} failed: {}", clone_url, stderr.trim()));
             }
 
-            // 5. Verify the cloned repo has zero refs. `for-each-ref` lists
+            // 4. Verify the cloned repo has zero refs. `for-each-ref` lists
             //    every ref one-per-line; empty stdout means no refs at all,
             //    which is the spec's "empty bare repository" invariant.
             let refs_output = Command::new("git")
