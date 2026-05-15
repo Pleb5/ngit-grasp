@@ -21,8 +21,8 @@ pub use helpers::{
     get_unpushed_refs,
 };
 pub use types::{
-    AnnouncementPurgatoryEntry, EventSource, PrPurgatoryEntry, RefPair, RefUpdate,
-    StatePurgatoryEntry,
+    AnnouncementPurgatoryEntry, EventSource, PrPurgatoryEntry, PrsPlaceholderScope, RefPair,
+    RefUpdate, StatePurgatoryEntry,
 };
 
 use dashmap::DashMap;
@@ -94,6 +94,11 @@ struct SerializablePrPurgatoryEntry {
     /// Source of this event (direct submission vs sync)
     #[serde(default)]
     source: types::EventSource,
+    /// GRASP-06 `/prs/` placeholder scope, if any. `#[serde(default)]`
+    /// keeps state files written before this field existed
+    /// deserialisable.
+    #[serde(default)]
+    prs_scope: Option<types::PrsPlaceholderScope>,
 }
 
 /// Serializable wrapper for `AnnouncementPurgatoryEntry` with time offsets.
@@ -424,6 +429,7 @@ impl Purgatory {
             created_at: now,
             expires_at: now + DEFAULT_EXPIRY,
             source,
+            prs_scope: None,
         };
 
         self.pr_events.insert(event_id, entry);
@@ -451,6 +457,47 @@ impl Purgatory {
             created_at: now,
             expires_at: now + DEFAULT_EXPIRY,
             source: types::EventSource::Direct, // Git pushes are direct user actions
+            prs_scope: None,
+        };
+
+        self.pr_events.insert(event_id, entry);
+    }
+
+    /// Add a PR placeholder created by a push to the GRASP-06 `/prs/`
+    /// endpoint (06.md line 14).
+    ///
+    /// Behaves like [`Self::add_pr_placeholder`] but additionally records
+    /// the URL's submitter and identifier on the entry. When the
+    /// corresponding PR event later arrives, the validator (see
+    /// [`crate::nostr::policy::pr_event`]) MUST cross-check the event's
+    /// signer against `submitter` and one of the event's `a`-tag d-tags
+    /// against `identifier`. Without this binding an attacker could push
+    /// any `refs/nostr/<event-id>` under their own `/prs/` namespace and
+    /// have it later "validated" by an unrelated event of the same id.
+    ///
+    /// # Arguments
+    /// * `event_id` - The expected event ID (from the pushed ref name)
+    /// * `commit` - The commit SHA that was pushed
+    /// * `submitter` - Pubkey from the `/prs/<npub>/...` URL segment
+    /// * `identifier` - Repository identifier from the URL (percent-decoded)
+    pub fn add_prs_pr_placeholder(
+        &self,
+        event_id: String,
+        commit: String,
+        submitter: PublicKey,
+        identifier: String,
+    ) {
+        let now = Instant::now();
+        let entry = PrPurgatoryEntry {
+            event: None,
+            commit,
+            created_at: now,
+            expires_at: now + DEFAULT_EXPIRY,
+            source: types::EventSource::Direct,
+            prs_scope: Some(types::PrsPlaceholderScope {
+                submitter,
+                identifier,
+            }),
         };
 
         self.pr_events.insert(event_id, entry);
@@ -1414,6 +1461,7 @@ impl Purgatory {
                 created_at_offset_secs: created_offset.as_secs(),
                 expires_at_offset_secs: expires_offset.as_secs(),
                 source: e.source,
+                prs_scope: e.prs_scope.clone(),
             };
             pr_events.insert(event_id, serializable);
         }
@@ -1583,6 +1631,7 @@ impl Purgatory {
                 created_at,
                 expires_at,
                 source: e.source,
+                prs_scope: e.prs_scope,
             };
 
             self.pr_events.insert(event_id, entry);

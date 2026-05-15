@@ -144,6 +144,29 @@ pub struct PrPurgatoryEntry {
     /// Source of this event (direct submission vs sync)
     #[serde(default)]
     pub source: EventSource,
+
+    /// If set, this placeholder was created by a push to the GRASP-06
+    /// `/prs/<submitter>/<identifier>.git` endpoint (06.md line 14). When
+    /// the corresponding PR event arrives, its signer MUST equal
+    /// `submitter` and it MUST carry an `a` tag with d-tag equal to
+    /// `identifier`. Mismatches cause the pushed ref + placeholder to be
+    /// discarded so an attacker cannot land an arbitrary
+    /// `refs/nostr/<event-id>` under their own `/prs/` namespace and
+    /// later "claim" it with an unrelated event published elsewhere.
+    ///
+    /// `None` for placeholders created via the standard endpoint.
+    #[serde(default)]
+    pub prs_scope: Option<PrsPlaceholderScope>,
+}
+
+/// Binding between a GRASP-06 `/prs/` placeholder and the submitter + repo
+/// identifier from the URL the push landed on. See [`PrPurgatoryEntry::prs_scope`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrsPlaceholderScope {
+    /// Submitter pubkey from the `/prs/<npub>/...` URL segment.
+    pub submitter: PublicKey,
+    /// Repository identifier (the URL's `<d>` value, percent-decoded).
+    pub identifier: String,
 }
 
 /// Entry for a repository announcement (kind 30617) waiting in purgatory.

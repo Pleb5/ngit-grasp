@@ -322,7 +322,7 @@ pub fn sync_pr_refs_to_tagged_owner_repos(
 }
 
 /// Copy a single commit from source repository to target repository
-fn copy_single_commit_between_repos(
+pub(crate) fn copy_single_commit_between_repos(
     source_repo: &Path,
     target_repo: &Path,
     commit_hash: &str,
@@ -734,26 +734,38 @@ pub fn align_repository_with_state(repo_path: &Path, state: &RepositoryState) ->
 
 /// Extract repository identifier from a repository path.
 ///
-/// Given a path like `{git_data_path}/{npub}/{identifier}.git`, extracts the identifier.
+/// Supports two on-disk layouts:
+///
+/// - Standard endpoint: `{git_data_path}/{npub}/{identifier}.git` — two
+///   components after `git_data_path`. The identifier is the last
+///   component minus the `.git` suffix.
+/// - GRASP-06 `/prs/` endpoint (06.md line 14): the `/prs/`
+///   contributor-submission subtree at
+///   `{git_data_path}/prs/{submitter-hex}/{identifier}.git` — three
+///   components, where the leading `prs` is the namespace marker (see
+///   [`crate::grasp06::paths`]). The identifier is again the last
+///   component minus `.git`.
+///
+/// Any other shape returns `None`.
 ///
 /// # Arguments
 /// * `repo_path` - Full path to the git repository
 /// * `git_data_path` - Base path for git repositories
-///
-/// # Returns
-/// The identifier if the path matches the expected pattern, None otherwise
 pub fn extract_identifier_from_repo_path(repo_path: &Path, git_data_path: &Path) -> Option<String> {
     // Get the relative path from git_data_path
     let relative = repo_path.strip_prefix(git_data_path).ok()?;
 
-    // Expected structure: {npub}/{identifier}.git
     let components: Vec<_> = relative.components().collect();
-    if components.len() != 2 {
-        return None;
-    }
 
-    // Get the repo directory name (e.g., "my-repo.git")
-    let repo_name = components[1].as_os_str().to_str()?;
+    // Standard layout: <npub>/<id>.git
+    // /prs/ layout (06.md): prs/<submitter-hex>/<id>.git
+    let repo_name = match components.len() {
+        2 => components[1].as_os_str().to_str()?,
+        3 if components[0].as_os_str().to_str() == Some(crate::grasp06::paths::PRS_DISK_PREFIX) => {
+            components[2].as_os_str().to_str()?
+        }
+        _ => return None,
+    };
 
     // Strip the .git suffix
     repo_name.strip_suffix(".git").map(|s| s.to_string())
@@ -872,7 +884,7 @@ pub async fn process_newly_available_git_data(
     result.merge(state_result);
 
     // Process PR events from purgatory
-    let pr_result = process_purgatory_pr_events(
+    let pr_outcome = process_purgatory_pr_events(
         &identifier,
         source_repo_path,
         database,
@@ -881,7 +893,30 @@ pub async fn process_newly_available_git_data(
         git_data_path,
     )
     .await;
-    result.merge(pr_result);
+    result.merge(pr_outcome.result);
+
+    // Cross-service mirror (design doc:
+    // docs/explanation/grasp-06-contributor-pr-submission.md, "Cross-service
+    // mirror" section). When the source repo lives under the `/prs/`
+    // subtree (06.md line 14), refs released from purgatory by this push
+    // must be copied into any matching announced repo on this relay so the
+    // PR is fetchable at the maintainer's canonical URL. The reverse
+    // direction is NOT supported — a push to `<owner>/<id>.git` must never
+    // write under `/prs/*`, so this branch is gated on the `/prs/` source
+    // check.
+    if crate::grasp06::paths::is_prs_repo_path(source_repo_path, git_data_path) {
+        for (event, commit) in &pr_outcome.released {
+            mirror_prs_pr_to_announced_repos(
+                source_repo_path,
+                event,
+                commit,
+                database,
+                git_data_path,
+                &mut result,
+            )
+            .await;
+        }
+    }
 
     if result.released_any() {
         info!(
@@ -1206,6 +1241,21 @@ pub fn is_latest_authorized_state_public(
     is_latest_authorized_state(state, maintainers, db_states)
 }
 
+/// Result of `process_purgatory_pr_events` — counts plus the list of
+/// (event, commit) pairs that were actually released from purgatory.
+///
+/// The released list is consumed by the cross-service mirror branch in
+/// [`process_newly_available_git_data`] so it can copy refs from a `/prs/`
+/// source into matching announced repos. Standard-endpoint callers can
+/// ignore the released list.
+struct PrProcessingOutcome {
+    result: ProcessResult,
+    /// Events that were saved to the DB and removed from purgatory in this
+    /// call, paired with their `c`-tag commit. Other entries (still
+    /// waiting, errored, or placeholders) are not included.
+    released: Vec<(Event, String)>,
+}
+
 /// Process PR events from purgatory that can now be satisfied.
 async fn process_purgatory_pr_events(
     identifier: &str,
@@ -1214,13 +1264,14 @@ async fn process_purgatory_pr_events(
     local_relay: Option<&nostr_relay_builder::LocalRelay>,
     purgatory: &Purgatory,
     git_data_path: &Path,
-) -> ProcessResult {
+) -> PrProcessingOutcome {
     let mut result = ProcessResult::default();
+    let mut released: Vec<(Event, String)> = Vec::new();
 
     // Find PR events in purgatory for this identifier
     let purgatory_prs = purgatory.find_prs_for_identifier(identifier);
     if purgatory_prs.is_empty() {
-        return result;
+        return PrProcessingOutcome { result, released };
     }
 
     debug!(
@@ -1244,7 +1295,7 @@ async fn process_purgatory_pr_events(
             result
                 .errors
                 .push(format!("Failed to fetch repo data: {}", e));
-            return result;
+            return PrProcessingOutcome { result, released };
         }
     };
 
@@ -1266,7 +1317,10 @@ async fn process_purgatory_pr_events(
             continue;
         }
 
-        // Extract owner pubkey
+        // Extract owner pubkey. For `/prs/` sources this returns None — the
+        // submitter in the URL is the contributor, not a maintainer of any
+        // announced repo. We pass an empty string so the tagged-owner sync
+        // loop doesn't accidentally skip a real owner.
         let owner_pubkey =
             extract_owner_from_repo_path(source_repo_path, git_data_path).unwrap_or_default();
 
@@ -1308,6 +1362,7 @@ async fn process_purgatory_pr_events(
                 let event_id_hex = event.id.to_hex();
                 purgatory.remove_pr(&event_id_hex);
                 result.prs_released += 1;
+                released.push((event.clone(), entry.commit.clone()));
 
                 info!(
                     identifier = %identifier,
@@ -1329,7 +1384,7 @@ async fn process_purgatory_pr_events(
         }
     }
 
-    result
+    PrProcessingOutcome { result, released }
 }
 
 /// Process announcements from purgatory that can now be promoted.
@@ -1522,17 +1577,158 @@ async fn process_purgatory_announcements(
     result
 }
 
-/// Extract owner pubkey from a repository path.
+/// Mirror a PR event's `refs/nostr/<event-id>` (and reachable objects)
+/// from a GRASP-06 `/prs/` source repo into every announced repo on this
+/// relay whose coord appears in the event's `a` tags.
 ///
-/// Given a path like `{git_data_path}/{npub}/{identifier}.git`, extracts the npub.
+/// Triggered only by [`process_newly_available_git_data`] when the source
+/// repo lives under [`crate::grasp06::paths::prs_base_path`]. The
+/// destination repo must (a) exist on disk and (b) have an accepted
+/// announcement in the database for that coord. Absent either, nothing
+/// is mirrored — the PR stays fetchable via the `clone` tag at `/prs/`.
+/// See the design doc `docs/explanation/grasp-06-contributor-pr-submission.md`,
+/// "Cross-service mirror" section.
+///
+/// Back-fill on a later announcement (i.e. an announcement accepted
+/// *after* a `/prs/` push) is intentionally not handled here; the design
+/// doc lists it as a follow-up.
+async fn mirror_prs_pr_to_announced_repos(
+    source_repo_path: &Path,
+    event: &Event,
+    commit: &str,
+    database: &SharedDatabase,
+    git_data_path: &Path,
+    result: &mut ProcessResult,
+) {
+    let event_id = event.id.to_hex();
+    let ref_name = format!("refs/nostr/{}", event_id);
+
+    for tag in event.tags.iter() {
+        let tag_vec = tag.clone().to_vec();
+        if tag_vec.len() < 2 || tag_vec[0] != "a" || !tag_vec[1].starts_with("30617:") {
+            continue;
+        }
+        let parts: Vec<&str> = tag_vec[1].splitn(3, ':').collect();
+        if parts.len() != 3 {
+            continue;
+        }
+        let maintainer_hex = parts[1];
+        let identifier = parts[2];
+
+        let maintainer = match nostr_sdk::PublicKey::parse(maintainer_hex) {
+            Ok(pk) => pk,
+            Err(e) => {
+                debug!(
+                    event_id = %event_id,
+                    a_tag = %tag_vec[1],
+                    error = %e,
+                    "Skipping a-tag for /prs/ mirror — maintainer pubkey unparseable"
+                );
+                continue;
+            }
+        };
+
+        // Require an accepted announcement (DB, not purgatory) at this
+        // coord. Without it we have no authoritative repo to mirror into.
+        let db_data = match fetch_repository_data_excluding_purgatory(database, identifier).await {
+            Ok(d) => d,
+            Err(e) => {
+                debug!(
+                    event_id = %event_id,
+                    identifier = %identifier,
+                    error = %e,
+                    "Skipping /prs/ mirror coord — failed to fetch announcement data"
+                );
+                continue;
+            }
+        };
+        let announcement = match db_data
+            .announcements
+            .iter()
+            .find(|a| a.event.pubkey == maintainer)
+        {
+            Some(a) => a,
+            None => {
+                debug!(
+                    event_id = %event_id,
+                    identifier = %identifier,
+                    maintainer = %maintainer.to_hex(),
+                    "No accepted announcement for /prs/ mirror coord — leaving PR at /prs/ only"
+                );
+                continue;
+            }
+        };
+
+        let target_repo_path = git_data_path.join(announcement.repo_path());
+        if !target_repo_path.exists() {
+            debug!(
+                event_id = %event_id,
+                target = %target_repo_path.display(),
+                "Announced repo path missing on disk — skipping /prs/ mirror"
+            );
+            continue;
+        }
+
+        if !oid_exists(&target_repo_path, commit) {
+            if let Err(e) =
+                copy_single_commit_between_repos(source_repo_path, &target_repo_path, commit)
+            {
+                warn!(
+                    event_id = %event_id,
+                    source = %source_repo_path.display(),
+                    target = %target_repo_path.display(),
+                    error = %e,
+                    "Failed to copy PR commit from /prs/ to announced repo"
+                );
+                result.errors.push(e);
+                continue;
+            }
+        }
+
+        match git::update_ref(&target_repo_path, &ref_name, commit) {
+            Ok(()) => {
+                info!(
+                    event_id = %event_id,
+                    commit = %commit,
+                    target = %target_repo_path.display(),
+                    "Mirrored /prs/ PR ref into announced repo"
+                );
+                result.repos_synced += 1;
+                result.refs_created += 1;
+            }
+            Err(e) => {
+                warn!(
+                    event_id = %event_id,
+                    target = %target_repo_path.display(),
+                    error = %e,
+                    "Failed to write mirrored /prs/ PR ref into announced repo"
+                );
+                result.errors.push(e);
+            }
+        }
+    }
+}
+
+///
+/// For the standard endpoint layout (`{git_data_path}/{npub}/{identifier}.git`)
+/// this returns the npub (as a string).
+///
+/// For the GRASP-06 `/prs/` layout
+/// (`{git_data_path}/prs/{submitter-hex}/{identifier}.git`) there is no
+/// "owner" in the announcement sense — the submitter is the contributor,
+/// not a maintainer of the announced repo. `None` is returned so callers
+/// can branch explicitly rather than treating the literal `"prs"` as a
+/// pubkey.
 pub fn extract_owner_from_repo_path(repo_path: &Path, git_data_path: &Path) -> Option<String> {
     let relative = repo_path.strip_prefix(git_data_path).ok()?;
     let components: Vec<_> = relative.components().collect();
-    if !components.is_empty() {
-        components[0].as_os_str().to_str().map(|s| s.to_string())
-    } else {
-        None
+    let first = components.first()?.as_os_str().to_str()?;
+    if first == crate::grasp06::paths::PRS_DISK_PREFIX {
+        // /prs/ has no owner-in-the-announcement-sense; callers must
+        // handle this case explicitly.
+        return None;
     }
+    Some(first.to_string())
 }
 
 #[cfg(test)]

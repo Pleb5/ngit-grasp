@@ -457,11 +457,20 @@ async fn validate_pushed_nostr_ref(
     }
 
     // 4c. Neither DB nor purgatory know about this event. Register a
-    //     placeholder so the standard sweep can clean the ref up if the
-    //     corresponding PR event never arrives.
-    purgatory.add_pr_placeholder(event_id_hex.to_string(), pushed_commit.to_string());
+    //     placeholder scoped to the URL's submitter + identifier so the
+    //     event-side validator can reject mismatched events (and an
+    //     attacker can't push to their own /prs/ namespace and have an
+    //     unrelated event of the same id later "claim" the ref). The
+    //     standard 30-minute sweep cleans the ref up if the corresponding
+    //     PR event never arrives.
+    purgatory.add_prs_pr_placeholder(
+        event_id_hex.to_string(),
+        pushed_commit.to_string(),
+        prs.submitter,
+        prs.identifier.clone(),
+    );
     debug!(
-        "/prs/ post-push: added PR placeholder for {} awaiting matching event",
+        "/prs/ post-push: added scoped PR placeholder for {} awaiting matching event",
         ref_name
     );
 }

@@ -57,24 +57,108 @@ impl PrEventPolicy {
 
         // Check for placeholder first (git-data-first scenario)
         if let Some(placeholder_commit) = self.ctx.purgatory.find_pr_placeholder(&event_id) {
-            if placeholder_commit == commit {
-                // Perfect match - git data arrived first with matching commit
+            // Read the full entry so we can inspect any GRASP-06 scope
+            // recorded when the placeholder was created from a /prs/ push.
+            let prs_scope = self
+                .ctx
+                .purgatory
+                .find_pr(&event_id)
+                .and_then(|entry| entry.prs_scope);
+
+            if let Some(scope) = prs_scope {
+                // The placeholder was created by a /prs/<submitter>/<id>.git
+                // push (06.md line 14). The arriving event MUST be signed by
+                // the URL submitter AND carry an `a` tag with d-tag equal to
+                // the URL identifier — otherwise this event was published by
+                // someone else and merely shares an id with a ref the
+                // submitter pre-staged. Discarding the placeholder + ref
+                // here is the security boundary; the event itself is left
+                // to continue through the normal acceptance flow (which may
+                // still legitimately accept it via the GRASP-06 relaxation
+                // in `src/nostr/builder.rs` or, if announced, the standard
+                // GRASP-01 path).
+                let event_d_tags: std::collections::HashSet<String> = event
+                    .tags
+                    .iter()
+                    .filter_map(|tag| {
+                        let tag_vec = tag.clone().to_vec();
+                        if tag_vec.len() >= 2
+                            && tag_vec[0] == "a"
+                            && tag_vec[1].starts_with("30617:")
+                        {
+                            let parts: Vec<&str> = tag_vec[1].splitn(3, ':').collect();
+                            if parts.len() == 3 {
+                                return Some(parts[2].to_string());
+                            }
+                        }
+                        None
+                    })
+                    .collect();
+
+                let signer_matches = event.pubkey == scope.submitter;
+                let identifier_matches = event_d_tags.contains(&scope.identifier);
+                let commit_matches = placeholder_commit == commit;
+
+                if !signer_matches || !identifier_matches || !commit_matches {
+                    tracing::warn!(
+                        event_id = %event_id,
+                        signer_matches,
+                        identifier_matches,
+                        commit_matches,
+                        submitter = %scope.submitter.to_hex(),
+                        identifier = %scope.identifier,
+                        "Discarding scoped /prs/ PR placeholder — incoming event does not match URL submitter + identifier",
+                    );
+
+                    // Delete the ref the original /prs/ push wrote.
+                    let prs_repo = crate::grasp06::paths::prs_repo_path(
+                        &self.ctx.git_data_path,
+                        &scope.submitter.to_hex(),
+                        &scope.identifier,
+                    );
+                    let ref_name = format!("refs/nostr/{}", event_id);
+                    if prs_repo.exists() {
+                        if let Err(e) = crate::git::delete_ref(&prs_repo, &ref_name) {
+                            tracing::warn!(
+                                event_id = %event_id,
+                                repo = %prs_repo.display(),
+                                error = %e,
+                                "Failed to delete /prs/ ref while discarding scoped placeholder",
+                            );
+                        }
+                    }
+                    self.ctx.purgatory.remove_pr(&event_id);
+
+                    // Fall through: this arriving event was NOT served by
+                    // the placeholder. The standard processing below treats
+                    // it like any other PR event (find_relevant_repo_paths,
+                    // commit lookup, etc).
+                } else {
+                    tracing::debug!(
+                        "Found matching scoped /prs/ placeholder for PR event {} with commit {}",
+                        event_id,
+                        commit
+                    );
+                    self.ctx.purgatory.remove_pr(&event_id);
+                }
+            } else if placeholder_commit == commit {
+                // Standard endpoint placeholder, matching commit — original
+                // behaviour.
                 tracing::debug!(
                     "Found matching placeholder for PR event {} with commit {}",
                     event_id,
                     commit
                 );
-                // Remove placeholder - event processing will continue normally
                 self.ctx.purgatory.remove_pr(&event_id);
             } else {
-                // Placeholder has different commit - incoming event supersedes
+                // Standard endpoint placeholder, mismatched commit — original
+                // behaviour: incoming event supersedes.
                 tracing::info!(
                     "PR event {} supersedes placeholder: event expects commit {}, placeholder has {}",
                     event_id,
                     commit,
                     placeholder_commit
                 );
-                // Remove incorrect placeholder
                 self.ctx.purgatory.remove_pr(&event_id);
                 // Delete incorrect git data (refs/nostr/<event-id>) will be handled below
             }
