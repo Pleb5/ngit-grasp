@@ -150,6 +150,19 @@ See [GRASP-02 Proactive Sync](docs/explanation/grasp-02-proactive-sync.md) for f
 
 **See**: [GRASP-05 Archive Mode](docs/explanation/grasp-05-archive.md)
 
+### GRASP-06 (Contributor PR Submission) — opt-in
+
+- ✅ Unauthenticated `git push` endpoint at `/prs/<npub>/<identifier>.git` for contributors
+- ✅ Accepts PR (kind 1618) and PR Update (kind 1619) `refs/nostr/<event-id>` refs for any repository, even without an accepted announcement
+- ✅ Validity established by the signed PR event (no HTTP auth required)
+- ✅ Inline zero-ref cleanup — no separate periodic sweep
+- ✅ Advertised in NIP-11 `supported_grasps` when enabled
+- ✅ Mirrored into accepted-announcement repos on the same relay when event and push match
+
+**Disabled by default** — enable with `NGIT_GRASP06_ENABLE=true`. `/prs/` repos are isolated from proactive sync and repo listings; they are a submission side-channel, not first-class hosted repos.
+
+**See**: [Enable GRASP-06](docs/how-to/enable-grasp-06.md) and [GRASP-06 Design](docs/explanation/grasp-06-contributor-pr-submission.md)
+
 ## Curation & Moderation
 
 ngit-grasp provides flexible tools for both curation (repository selection) and moderation (blocking spam/abuse):
@@ -671,6 +684,7 @@ ngit-grasp/
 | GRASP-01            | ✅ Complete                               | ✅ Complete                                          |
 | GRASP-02 Event Sync | ✅ Limited                                | ✅ Advanced (NIP-77 negentropy + fallback)           |
 | GRASP-02 Git Sync   | ✅ Basic                                  | ✅ Automatic purgatory hunting                       |
+| GRASP-06 PR Submit  | ❌                                        | ✅ Opt-in (`NGIT_GRASP06_ENABLE`)                   |
 | Multi-Maintainer    | ✅ Supported                              | ✅ First-class (auto-sync across repos)              |
 | Purgatory           | ✅ 24-hour expiry                         | ✅ 30-minute expiry + proactive git data fetching    |
 | Health Tracking     | Basic                                     | Advanced (exponential backoff, rate limit detection) |
