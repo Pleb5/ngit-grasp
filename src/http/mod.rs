@@ -48,6 +48,16 @@ const ICON_PNG: &[u8] = include_bytes!("../../static/icon.png");
 ///
 /// Returns (npub, identifier) if the path matches a repository URL pattern
 fn parse_repo_url(path: &str) -> Option<(String, String)> {
+    // Defensive guard: never match the GRASP-06 `/prs/` namespace as a
+    // standard repo URL. `HttpService::call` already intercepts `/prs/*`
+    // before reaching the landing branch when grasp06_enable is on, but
+    // this early-return ensures a future routing change cannot regress us
+    // into serving repo landing HTML at `/prs/<npub>/<id>.git` regardless
+    // of the feature flag.
+    if path.starts_with("/prs/") || path.starts_with("prs/") {
+        return None;
+    }
+
     // Remove leading slash
     let path = path.strip_prefix('/').unwrap_or(path);
 
