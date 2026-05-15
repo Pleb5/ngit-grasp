@@ -542,6 +542,13 @@ async fn find_orphan_repos(
         if !npub_path.is_dir() {
             continue;
         }
+        // Skip the GRASP-06 `/prs/` subtree: it does not follow the
+        // `<npub>/<identifier>.git` layout and is not described by 30617
+        // announcements, so every repo under it would otherwise look like
+        // an orphan to this scan.
+        if crate::grasp06::paths::is_prs_repo_path(&npub_path, git_data_path) {
+            continue;
+        }
         let npub = npub_entry.file_name().to_string_lossy().into_owned();
 
         // Iterate repo-level directories inside this npub dir
@@ -635,5 +642,78 @@ fn check_repo_empty(repo_path: &Path) -> (bool, bool) {
             // Could not run git — treat as empty to be safe (will be reported)
             (true, true)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn find_orphan_repos_skips_prs_subtree() {
+        // Layout under <git_data_path>:
+        //   prs/<hex>/<id>.git    <-- must be ignored (GRASP-06 endpoint)
+        //   <npub-shaped>/<id>.git <-- a real orphan to prove the scan still works
+        let tmp = tempdir().expect("tempdir");
+        let git_data_path = tmp.path();
+
+        // /prs/<hex>/<id>.git — bare repo so check_repo_empty doesn't complain
+        let prs_repo = crate::grasp06::paths::prs_repo_path(
+            git_data_path,
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            "my-pr-repo",
+        );
+        std::fs::create_dir_all(&prs_repo).expect("mkdir prs repo");
+        let init = Command::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&prs_repo)
+            .status()
+            .expect("git init prs repo");
+        assert!(init.success(), "git init must succeed for the test fixture");
+
+        // A standard-shaped orphan repo so we can assert the scan still finds
+        // real orphans after the /prs/ skip.
+        let orphan_owner = "npub1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz0000000";
+        let orphan_repo = git_data_path.join(orphan_owner).join("standard-orphan.git");
+        std::fs::create_dir_all(&orphan_repo).expect("mkdir orphan repo");
+        let init = Command::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&orphan_repo)
+            .status()
+            .expect("git init orphan");
+        assert!(init.success(), "git init must succeed for the test fixture");
+
+        // Empty LMDB DB so every disk repo is an "orphan" by definition.
+        let db_dir = tempdir().expect("tempdir db");
+        let database: Arc<dyn NostrDatabase> = Arc::new(
+            NostrLmdb::open(db_dir.path())
+                .await
+                .expect("open empty NostrLmdb"),
+        );
+
+        let orphans = find_orphan_repos(git_data_path, &database)
+            .await
+            .expect("scan succeeds");
+
+        assert!(
+            orphans.iter().all(|o| !o
+                .repo_path
+                .starts_with(prs_repo.parent().unwrap().parent().unwrap())
+                || !crate::grasp06::paths::is_prs_repo_path(&o.repo_path, git_data_path)),
+            "/prs/ repo must not be reported as orphan: got {:?}",
+            orphans
+                .iter()
+                .map(|o| o.repo_path.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            orphans.iter().any(|o| o.repo_path == orphan_repo),
+            "standard orphan must still be detected: got {:?}",
+            orphans
+                .iter()
+                .map(|o| o.repo_path.clone())
+                .collect::<Vec<_>>()
+        );
     }
 }
