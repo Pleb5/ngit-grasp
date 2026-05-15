@@ -34,10 +34,19 @@
 //!
 //! Mirroring is kicked off asynchronously from
 //! `process_newly_available_git_data` after the /prs/ receive-pack completes.
-//! Pre-implementation there is nothing to wait for; post-implementation a
-//! short fixed wait is sufficient because the work is local to the relay
-//! process (no network round-trip). We use 2 seconds — generous enough to
-//! avoid flake on CI, short enough to keep the test suite responsive.
+//! The same receive-pack also releases the PR event from purgatory, so two
+//! observable post-conditions follow the push:
+//!
+//! 1. The PR event becomes queryable (purgatory → served).
+//! 2. The mirrored ref + objects appear at the announced repo.
+//!
+//! We sanity-check (1) first — if the event is never released, asserting
+//! (2) is meaningless and would surface as a confusing "ref not found"
+//! instead of the true root cause. The pattern mirrors the existing
+//! fixtures (short fixed sleep + single `is_event_on_relay` check, e.g.
+//! [`FixturesContext::build_pr_event_2_served`]). Then a second fixed
+//! sleep before the ref-mirror probe — keeps the total wait close to
+//! the original 2 s while making the two failure modes attributable.
 
 use crate::specs::grasp06::SpecRef;
 use crate::{
@@ -78,12 +87,19 @@ impl MirroringTests {
     ///    contract under test is the mirror, not the acceptance path.
     /// 5. Push `HEAD:refs/nostr/<pr-event-id>` from the local repo to the
     ///    /prs/ URL.
-    /// 6. Wait 2 s for the relay's async mirror step to complete.
-    /// 7. Verify the mirror: fetch `refs/nostr/<pr-event-id>` from the
-    ///    standard `<owner>/<repo-id>.git` URL, then `git cat-file -e` on
-    ///    the expected commit hash — proves both that the ref is present AND
-    ///    that its commit object is reachable (the user's verification
-    ///    choice — "clone the maintainer repo and verify commit reachable").
+    /// 6. Short wait, then verify the PR event has been released from
+    ///    purgatory via `is_event_on_relay`. The same receive-pack that
+    ///    triggers the mirror also releases the event, so this is the
+    ///    first observable post-condition and the cleanest gate before
+    ///    asserting the mirror itself. Pattern matches existing fixtures
+    ///    (e.g. `build_pr_event_2_served`).
+    /// 7. Short wait, then fetch `refs/nostr/<pr-event-id>` from the
+    ///    standard `<owner>/<repo-id>.git` URL.
+    /// 8. Verify the mirror: `git cat-file -e` on the expected commit hash
+    ///    plus a `rev-parse` cross-check — proves both that the ref is
+    ///    present AND that its commit object is reachable (the user's
+    ///    verification choice — "clone the maintainer repo and verify
+    ///    commit reachable").
     ///
     /// ## TDD posture
     ///
@@ -166,7 +182,8 @@ impl MirroringTests {
                 .tag(Tag::custom(TagKind::custom("clone"), vec![prs_url.clone()]))
                 .build(client.pr_author_keys())
                 .map_err(|e| format!("Failed to build PR event: {}", e))?;
-            let pr_event_id = pr_event.id.to_hex();
+            let pr_event_id_typed = pr_event.id;
+            let pr_event_id = pr_event_id_typed.to_hex();
 
             // send_event_and_note_purgatory is OK both for served and
             // purgatory acceptance — it only Errs on relay rejection, which
@@ -191,36 +208,54 @@ impl MirroringTests {
                 ));
             }
 
-            // 6. Wait for the async mirror to run.
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            // 6. Verify the PR event has been released from purgatory.
+            //    The receive-pack on /prs/ releases the event and kicks off
+            //    the mirror; observing the release first gives a clear,
+            //    separately-attributable error if the relay accepted-into-
+            //    purgatory but never released, versus released-but-didn't-
+            //    mirror. Pattern matches existing fixtures (short fixed
+            //    sleep + single is_event_on_relay check).
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            if !client
+                .is_event_on_relay(pr_event_id_typed)
+                .await
+                .map_err(|e| format!("Failed to query relay for PR event served-status: {}", e))?
+            {
+                return Err(format!(
+                    "PR event {} was accepted but not released from purgatory after pushing \
+                     to {} — mirror precondition (purgatory release) did not hold",
+                    pr_event_id, prs_url
+                ));
+            }
 
-            // 7. Verify the ref appears at <owner>/<repo-id>.git AND its
-            //    commit object is reachable. This is the "clone the
-            //    maintainer repo and verify commit reachable" check.
+            // 7. Wait for the async mirror, then fetch the expected ref
+            //    from the standard endpoint. `is_event_on_relay` already
+            //    did a 1 s query, plus the 300 ms above, so the mirror has
+            //    had >1 s of runway; an extra 1 s here keeps total wait
+            //    around the previous 2 s budget while making the served
+            //    check a distinct gate.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+
             let verify = TempPath::new("grasp06-mirror-fwd-verify-");
             init_local_repo(&verify.path, &standard_url)
                 .map_err(|e| format!("Failed to init verify workspace: {}", e))?;
 
-            // Fetch exactly the ref we expect to have been mirrored. If the
-            // mirror didn't run the fetch fails (or returns nothing); if it
-            // did, the ref lands locally pointing at the expected commit.
             let fetch_refspec = format!("{}:{}", refname, refname);
-            let fetch_out = run_git(&verify.path, &["fetch", "origin", &fetch_refspec]);
-            match fetch_out {
-                Ok(out) if out.status.success() => {}
-                Ok(out) => {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    return Err(format!(
-                        "Failed to fetch {} from {}: {} — mirror does not appear to have run",
-                        refname,
-                        standard_url,
-                        stderr.trim()
-                    ));
-                }
-                Err(e) => return Err(format!("Failed to execute git fetch: {}", e)),
+            let fetch_out = run_git(&verify.path, &["fetch", "origin", &fetch_refspec])
+                .map_err(|e| format!("Failed to execute git fetch: {}", e))?;
+            if !fetch_out.status.success() {
+                let stderr = String::from_utf8_lossy(&fetch_out.stderr);
+                return Err(format!(
+                    "PR event {} was served but ref {} did not appear at {}: {} — mirror does \
+                     not appear to have run",
+                    pr_event_id,
+                    refname,
+                    standard_url,
+                    stderr.trim()
+                ));
             }
 
-            // Object-reachability: cat-file -e exits 0 iff the object exists
+            // 8. Object-reachability: cat-file -e exits 0 iff the object exists
             // in the local object store (which now includes whatever the
             // mirror copied over).
             let cat_out = run_git(&verify.path, &["cat-file", "-e", &commit_hash])
