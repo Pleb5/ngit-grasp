@@ -21,9 +21,9 @@ pub use state::{StatePolicy, StateResult};
 pub use crate::git::sync::AlignmentResult;
 
 use super::SharedDatabase;
-use crate::grasp06::receive::RepoInitLocks;
 #[cfg(test)]
 use crate::grasp06::receive::new_repo_init_locks;
+use crate::grasp06::receive::RepoInitLocks;
 use crate::purgatory::Purgatory;
 use nostr_relay_builder::LocalRelay;
 use std::sync::Arc;

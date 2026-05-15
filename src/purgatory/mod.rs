@@ -1305,19 +1305,15 @@ impl Purgatory {
             // what distinguishes "no push active" from "push mid-receive
             // but the mutex is briefly free between init and end-of-push"
             // — only the former is safe to follow with a `rm -rf`.
-            if let (Some(scope), Some(ctx)) =
-                (prs_scope.as_ref(), self.prs_cleanup_ctx.get())
-            {
+            if let (Some(scope), Some(ctx)) = (prs_scope.as_ref(), self.prs_cleanup_ctx.get()) {
                 let repo_path = crate::grasp06::paths::prs_repo_path(
                     &ctx.git_data_path,
                     &scope.submitter.to_hex(),
                     &scope.identifier,
                 );
                 if repo_path.exists() {
-                    let state = crate::grasp06::receive::path_state(
-                        &ctx.repo_init_locks,
-                        &repo_path,
-                    );
+                    let state =
+                        crate::grasp06::receive::path_state(&ctx.repo_init_locks, &repo_path);
                     match state.mu.try_lock() {
                         Ok(_guard) => {
                             let ref_name = format!("refs/nostr/{}", event_id_str);
@@ -1328,9 +1324,7 @@ impl Purgatory {
                                     error = %e,
                                     "Failed to delete dangling /prs/ ref during purgatory expiry",
                                 );
-                            } else if state
-                                .in_flight
-                                .load(std::sync::atomic::Ordering::Relaxed)
+                            } else if state.in_flight.load(std::sync::atomic::Ordering::Relaxed)
                                 == 0
                                 && matches!(
                                     crate::git::list_refs(&repo_path),

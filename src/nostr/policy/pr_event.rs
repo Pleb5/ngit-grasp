@@ -138,10 +138,7 @@ impl PrEventPolicy {
                                 error = %e,
                                 "Failed to delete /prs/ ref while discarding scoped placeholder",
                             );
-                        } else if state
-                            .in_flight
-                            .load(std::sync::atomic::Ordering::Relaxed)
-                            == 0
+                        } else if state.in_flight.load(std::sync::atomic::Ordering::Relaxed) == 0
                             && matches!(
                                 crate::git::list_refs(&prs_repo),
                                 Ok(refs) if refs.is_empty()

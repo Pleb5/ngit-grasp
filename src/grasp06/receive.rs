@@ -278,9 +278,7 @@ pub async fn handle_prs_receive_pack(
     if response.status() == StatusCode::OK && repo_path.exists() {
         let new_oids: HashSet<String> = pushed_refs
             .iter()
-            .filter(|(_, new_oid, _)| {
-                new_oid != "0000000000000000000000000000000000000000"
-            })
+            .filter(|(_, new_oid, _)| new_oid != "0000000000000000000000000000000000000000")
             .map(|(_, new_oid, _)| new_oid.clone())
             .collect();
 
