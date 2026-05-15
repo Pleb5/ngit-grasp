@@ -5,6 +5,8 @@
 //!
 //! This is the single source of truth for spec text displayed in audit reports.
 
+use crate::specs::grasp01::RequirementLevel;
+
 /// GRASP spec repository commit ID this version is based on.
 ///
 /// Update this when bumping to a newer spec revision so reports indicate
@@ -48,19 +50,31 @@ pub enum SpecRef {
     Grasp06NoReverseMirror,
 }
 
+/// Synthetic "line numbers" used for the audit report grouping.
+///
+/// The two audit-derived requirements (`Grasp06NotAdvertised404` and
+/// `Grasp06AdvertisedWhenEnabled`) follow from the spec but do not map to a
+/// single spec line. They are grouped under the "NIP-11 Discovery" section
+/// with negative synthetic line numbers (`-1`, `-2`) so they sort to the top
+/// of the report and remain visually distinct from real spec lines.
+mod synthetic_lines {
+    pub const NOT_ADVERTISED_404: i32 = -1;
+    pub const ADVERTISED_WHEN_ENABLED: i32 = -2;
+}
+
 impl SpecRef {
     /// Get the spec reference string in format "GRASP-06:section:line".
     pub fn spec_ref_string(self) -> &'static str {
         match self {
-            SpecRef::Grasp06NotAdvertised404 => "GRASP-06:audit:nip11-gate",
-            SpecRef::Grasp06AdvertisedWhenEnabled => "GRASP-06:nip11:when-enabled",
+            SpecRef::Grasp06NotAdvertised404 => "GRASP-06:nip-11-discovery:-1",
+            SpecRef::Grasp06AdvertisedWhenEnabled => "GRASP-06:nip-11-discovery:-2",
             SpecRef::Grasp06FetchEmptyRepo => "GRASP-06:git-http:13",
             SpecRef::Grasp06AcceptRefsNostrPush => "GRASP-06:git-http:15",
             SpecRef::Grasp06RejectNonNostrRefs => "GRASP-06:git-http:15",
             SpecRef::Grasp06RelaxAcceptPrEvent => "GRASP-06:event-acceptance:21",
             SpecRef::Grasp06RelaxRequiresCloneTag => "GRASP-06:event-acceptance:23",
-            SpecRef::Grasp06MirrorToAnnouncedRepo => "GRASP-06:design:mirror-forward",
-            SpecRef::Grasp06NoReverseMirror => "GRASP-06:design:mirror-no-reverse",
+            SpecRef::Grasp06MirrorToAnnouncedRepo => "GRASP-06:mirror:design",
+            SpecRef::Grasp06NoReverseMirror => "GRASP-06:mirror:design",
         }
     }
 }
@@ -68,5 +82,163 @@ impl SpecRef {
 impl crate::result::SpecRefStr for SpecRef {
     fn spec_ref_string(&self) -> &'static str {
         SpecRef::spec_ref_string(*self)
+    }
+}
+
+/// A single GRASP-06 specification requirement.
+///
+/// Mirrors the GRASP-01 `SpecRequirement` shape but uses `i32` for `line`
+/// so audit-derived requirements can use negative synthetic line numbers
+/// without conflicting with real spec lines.
+#[derive(Debug, Clone)]
+pub struct SpecRequirement {
+    pub spec_ref: SpecRef,
+    pub line: i32,
+    pub section: &'static str,
+    pub text: &'static str,
+    pub level: RequirementLevel,
+}
+
+/// All GRASP-06 specification requirements (and audit-derived invariants).
+pub const GRASP_06_REQUIREMENTS: &[SpecRequirement] = &[
+    // NIP-11 Discovery (audit-derived: bridges NIP-11 capability advertisement
+    // with /prs/ endpoint availability — clients must be able to rely on NIP-11
+    // alone for capability discovery).
+    SpecRequirement {
+        spec_ref: SpecRef::Grasp06NotAdvertised404,
+        line: synthetic_lines::NOT_ADVERTISED_404,
+        section: "NIP-11 Discovery",
+        text: "When NIP-11 supported_grasps does NOT include 'GRASP-06', the /prs/<npub>/<id>.git namespace MUST return 404 (audit-derived from NIP-11 capability discovery semantics)",
+        level: RequirementLevel::Must,
+    },
+    SpecRequirement {
+        spec_ref: SpecRef::Grasp06AdvertisedWhenEnabled,
+        line: synthetic_lines::ADVERTISED_WHEN_ENABLED,
+        section: "NIP-11 Discovery",
+        text: "When the relay is configured with GRASP-06 enabled, NIP-11 supported_grasps MUST include 'GRASP-06' so clients can discover the capability (implementation plan Phase 9)",
+        level: RequirementLevel::Must,
+    },
+    // Git Smart HTTP Service
+    SpecRequirement {
+        spec_ref: SpecRef::Grasp06FetchEmptyRepo,
+        line: 13,
+        section: "Git Smart HTTP Service",
+        text: "MUST respond to upload-pack requests for any well-formed path as if serving an empty bare repository until at least one `refs/nostr/<event-id>` has been accepted for that path.",
+        level: RequirementLevel::Must,
+    },
+    SpecRequirement {
+        spec_ref: SpecRef::Grasp06AcceptRefsNostrPush,
+        line: 15,
+        section: "Git Smart HTTP Service",
+        text: "MUST accept pushes to `refs/nostr/<event-id>`. MAY reject based on size, SPAM prevention, allowlists, pre-payment, PoW, or similar policy.",
+        level: RequirementLevel::Must,
+    },
+    SpecRequirement {
+        spec_ref: SpecRef::Grasp06RejectNonNostrRefs,
+        line: 15,
+        section: "Git Smart HTTP Service",
+        text: "MUST reject pushes to any other ref namespace (only `refs/nostr/<event-id>` is accepted).",
+        level: RequirementLevel::Must,
+    },
+    // Event Acceptance
+    SpecRequirement {
+        spec_ref: SpecRef::Grasp06RelaxAcceptPrEvent,
+        line: 21,
+        section: "Event Acceptance",
+        text: "MUST accept PRs and PR Updates that would otherwise be rejected under GRASP-01 for not referencing an accepted repository announcement, provided the event has an `a` tag of the form `30617:<pubkey>:<identifier>` AND a `clone` tag naming this service's /prs/<signer-npub>/<identifier>.git endpoint.",
+        level: RequirementLevel::Must,
+    },
+    SpecRequirement {
+        spec_ref: SpecRef::Grasp06RelaxRequiresCloneTag,
+        line: 23,
+        section: "Event Acceptance",
+        text: "The relaxation applies ONLY when the event's `clone` tag names this relay's /prs/ endpoint. PR events without a matching clone tag remain subject to GRASP-01 rejection.",
+        level: RequirementLevel::Must,
+    },
+    // Cross-service mirror (design-doc derived — not in the spec, but follows
+    // from the design choice that PR refs at /prs/ become discoverable at the
+    // announced repo on the same relay).
+    SpecRequirement {
+        spec_ref: SpecRef::Grasp06MirrorToAnnouncedRepo,
+        line: 100, // synthetic — design-doc requirement, no spec line
+        section: "Cross-Service Mirror",
+        text: "Refs accepted via /prs/ MUST be mirrored into any matching accepted-announcement repos on this relay (design-doc: docs/explanation/grasp-06-contributor-pr-submission.md \"Cross-service mirror\").",
+        level: RequirementLevel::Must,
+    },
+    SpecRequirement {
+        spec_ref: SpecRef::Grasp06NoReverseMirror,
+        line: 101, // synthetic
+        section: "Cross-Service Mirror",
+        text: "The reverse direction MUST NOT mirror: a push to the standard /<npub>/<id>.git endpoint must not appear under /prs/.",
+        level: RequirementLevel::Must,
+    },
+];
+
+/// Parse line number from a "GRASP-06:section:line" spec_ref string.
+///
+/// Returns `None` if the spec_ref is not a GRASP-06 ref or the line component
+/// can't be parsed as an integer.
+pub fn parse_spec_line(spec_ref: &str) -> Option<i32> {
+    if !spec_ref.starts_with("GRASP-06:") {
+        return None;
+    }
+    let parts: Vec<&str> = spec_ref.split(':').collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    parts.last().and_then(|s| s.parse::<i32>().ok())
+}
+
+/// Get all unique section names in the order they first appear.
+pub fn get_sections() -> Vec<&'static str> {
+    let mut sections = Vec::new();
+    for req in GRASP_06_REQUIREMENTS {
+        if !sections.contains(&req.section) {
+            sections.push(req.section);
+        }
+    }
+    sections
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_spec_ref_unique() {
+        let mut refs = std::collections::HashSet::new();
+        for req in GRASP_06_REQUIREMENTS {
+            assert!(
+                refs.insert(req.spec_ref),
+                "Duplicate SpecRef found: {:?}",
+                req.spec_ref
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_spec_line_real() {
+        assert_eq!(parse_spec_line("GRASP-06:git-http:13"), Some(13));
+        assert_eq!(parse_spec_line("GRASP-06:git-http:15"), Some(15));
+    }
+
+    #[test]
+    fn test_parse_spec_line_synthetic() {
+        assert_eq!(parse_spec_line("GRASP-06:nip-11-discovery:-1"), Some(-1));
+    }
+
+    #[test]
+    fn test_parse_spec_line_non_grasp06() {
+        assert_eq!(parse_spec_line("GRASP-01:nostr-relay:7"), None);
+        assert_eq!(parse_spec_line("NIP-01:basic:1"), None);
+    }
+
+    #[test]
+    fn test_sections_order() {
+        let sections = get_sections();
+        assert_eq!(sections[0], "NIP-11 Discovery");
+        assert!(sections.contains(&"Git Smart HTTP Service"));
+        assert!(sections.contains(&"Event Acceptance"));
+        assert!(sections.contains(&"Cross-Service Mirror"));
     }
 }

@@ -11,5 +11,5 @@ pub use grasp01::{
     Nip11DocumentTests, PurgatoryTests, PushAuthorizationTests, RepositoryCreationTests,
 };
 
-// Re-export test structs from grasp06 module
-pub use grasp06::{Nip11Tests, PrsEndpointTests};
+// Re-export GRASP-06 test structs
+pub use grasp06::{Grasp06Tests, Nip11Tests, PrsEndpointTests};

@@ -57,7 +57,7 @@ enum Commands {
         #[arg(short, long, default_value = "shared")]
         mode: String,
 
-        /// Spec to test (nip01-smoke, nip11, event-acceptance, cors, git-clone, git-filter, push-auth, repo-creation, purgatory, all)
+        /// Spec to test (nip01-smoke, nip11, event-acceptance, cors, git-clone, git-filter, push-auth, repo-creation, purgatory, grasp06, all)
         #[arg(short, long, default_value = "all")]
         spec: String,
 
@@ -252,6 +252,21 @@ async fn main() -> Result<()> {
                     println!("Running purgatory tests...\n");
                     specs::PurgatoryTests::run_all(&client).await
                 }
+                "grasp06" => {
+                    println!("Running GRASP-06 tests...\n");
+                    // GRASP-06 has its own report renderer (sections differ
+                    // from GRASP-01). Print it directly and short-circuit the
+                    // shared print_report path below.
+                    let grasp06_results = specs::Grasp06Tests::run_all(&client).await;
+                    specs::Grasp06Tests::print_report(&grasp06_results);
+                    if !grasp06_results.all_passed() {
+                        println!("❌ Some tests failed");
+                        std::process::exit(1);
+                    } else {
+                        println!("✅ All tests passed!");
+                    }
+                    return Ok(());
+                }
                 "all" => {
                     println!("Running all tests...\n");
                     let mut all_results = AuditResult::new("All GRASP-01 Tests");
@@ -306,12 +321,30 @@ async fn main() -> Result<()> {
                     let push_results = specs::PushAuthorizationTests::run_all(&client, &relay_domain).await;
                     all_results.merge(push_results);
 
+                    // GRASP-06 tests live in their own spec family with their
+                    // own report renderer. Print the GRASP-01 block first
+                    // (via the default `print_report` below), then the
+                    // GRASP-06 block separately.
+                    println!("  → GRASP-06 tests...");
+                    let grasp06_results = specs::Grasp06Tests::run_all(&client).await;
+
                     println!();
-                    all_results
+                    all_results.print_report();
+                    specs::Grasp06Tests::print_report(&grasp06_results);
+
+                    let combined_ok =
+                        all_results.all_passed() && grasp06_results.all_passed();
+                    if !combined_ok {
+                        println!("❌ Some tests failed");
+                        std::process::exit(1);
+                    } else {
+                        println!("✅ All tests passed!");
+                    }
+                    return Ok(());
                 }
                 _ => {
                     return Err(anyhow!(
-                        "Unknown spec: {}. Use 'nip01-smoke', 'nip11', 'event-acceptance', 'cors', 'git-clone', 'git-filter', 'push-auth', 'repo-creation', 'purgatory', or 'all'",
+                        "Unknown spec: {}. Use 'nip01-smoke', 'nip11', 'event-acceptance', 'cors', 'git-clone', 'git-filter', 'push-auth', 'repo-creation', 'purgatory', 'grasp06', or 'all'",
                         spec
                     ))
                 }
