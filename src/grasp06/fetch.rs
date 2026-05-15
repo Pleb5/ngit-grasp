@@ -1,4 +1,4 @@
-//! GRASP-06 `/prs/` fetch handlers and receive-pack stub.
+//! GRASP-06 `/prs/` fetch handlers.
 //!
 //! Spec 06.md line 13:
 //!
@@ -10,20 +10,18 @@
 //! Otherwise we synthesise a brand-new empty bare repo in a per-request
 //! temporary directory and run the standard upload-pack against that.
 //!
-//! Receive-pack is intentionally a stub for now: it returns an HTTP 200
-//! response carrying an `ERR` pkt-line. The real handler is not yet
-//! implemented.
+//! Receive-pack lives in [`crate::grasp06::receive`].
 
 use http_body_util::Full;
 use hyper::body::Bytes;
-use hyper::{Response, StatusCode};
+use hyper::Response;
 use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
 use tracing::{debug, warn};
 
 use crate::git::handlers::{handle_info_refs, handle_upload_pack, GitError};
-use crate::git::protocol::{GitService, PktLine};
+use crate::git::protocol::GitService;
 use crate::grasp06::endpoint::PrsUrl;
 use crate::grasp06::paths::prs_repo_path;
 
@@ -32,8 +30,9 @@ use crate::grasp06::paths::prs_repo_path;
 /// Used for both `git-upload-pack` (clone/fetch) discovery and
 /// `git-receive-pack` discovery: in both cases we advertise the refs of
 /// an empty bare repo when no real repo exists at the requested path,
-/// so that `git push` can proceed to its POST step and be rejected by
-/// the receive-pack stub via an ERR pkt-line.
+/// so that `git push` can proceed to its POST step (where
+/// [`crate::grasp06::receive::handle_prs_receive_pack`] validates the
+/// ref-update list and initialises the repo on demand if appropriate).
 pub async fn handle_prs_info_refs(
     prs: &PrsUrl,
     git_data_path: &str,
@@ -101,37 +100,6 @@ pub async fn handle_prs_upload_pack(
     let response = handle_upload_pack(repo_path, body, git_protocol).await;
     drop(temp);
     response
-}
-
-/// Stub `POST /prs/<npub>/<id>.git/git-receive-pack`.
-///
-/// Returns HTTP 200 with an `ERR` pkt-line so that git clients display
-/// the message and exit non-zero. The real receive-pack handler (with
-/// ref-name validation, init-on-push, and purgatory wiring) is not yet
-/// implemented.
-pub fn handle_prs_receive_pack_stub() -> Response<Full<Bytes>> {
-    build_receive_pack_err("GRASP-06 receive-pack not yet implemented")
-}
-
-/// Build an HTTP 200 response carrying a `git-receive-pack` ERR pkt-line.
-///
-/// Per the git smart-HTTP protocol, application-level rejections are
-/// communicated as a single `PKT-LINE("ERR " <message>)` packet on a
-/// 200 response. A 4xx/5xx response would prevent the client from
-/// parsing and displaying the message. The shape here mirrors
-/// `build_git_protocol_error_response` in [`crate::git::handlers`].
-fn build_receive_pack_err(message: &str) -> Response<Full<Bytes>> {
-    let payload = format!("ERR {}\n", message.trim());
-    let pktline = PktLine::data(payload.as_bytes()).encode();
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(
-            "content-type",
-            GitService::ReceivePack.result_content_type(),
-        )
-        .header("cache-control", "no-cache")
-        .body(Full::new(Bytes::from(pktline)))
-        .unwrap()
 }
 
 /// Create a fresh empty bare repo in a temp directory.

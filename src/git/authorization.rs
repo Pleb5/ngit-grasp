@@ -1161,7 +1161,25 @@ pub async fn get_event_commit_tag(
     database: &SharedDatabase,
     event_id: &EventId,
 ) -> Result<Option<String>> {
-    // Query for PR (1618) and PR Update (1619) events with this ID
+    match get_pr_event_by_id(database, event_id).await? {
+        Some(event) => Ok(extract_commit_tag(&event)),
+        None => {
+            debug!("No PR/PR Update event found with ID {}", event_id);
+            Ok(None)
+        }
+    }
+}
+
+/// Fetch a PR (kind 1617) or PR-Update (kind 1618) event by its ID.
+///
+/// Returns the first matching event, or `None` if no such event has been
+/// accepted into the database. Used by both `get_event_commit_tag` and the
+/// `/prs/` receive-pack handler — the latter needs the full event so it can
+/// verify the signer pubkey and the `a`-tag identifier, not just the `c` tag.
+pub async fn get_pr_event_by_id(
+    database: &SharedDatabase,
+    event_id: &EventId,
+) -> Result<Option<Event>> {
     let filter = Filter::new()
         .ids([*event_id])
         .kinds([Kind::GitPullRequest, Kind::GitPullRequestUpdate]);
@@ -1173,29 +1191,19 @@ pub async fn get_event_commit_tag(
         .into_iter()
         .collect();
 
-    if events.is_empty() {
-        debug!("No PR/PR Update event found with ID {}", event_id);
-        return Ok(None);
-    }
+    Ok(events.into_iter().next())
+}
 
-    // Get the first (should be only) event
-    let event = &events[0];
-
-    // Extract the `c` tag (commit hash)
-    // Per NIP-34, PR events have a `c` tag with the head commit
-    let commit = event
+/// Extract the `c` (commit) tag value from a NIP-34 PR/PR-Update event.
+///
+/// Per NIP-34, PR events carry a `c` tag whose second element is the head
+/// commit being proposed. Returns `None` if the tag is missing or malformed.
+pub fn extract_commit_tag(event: &Event) -> Option<String> {
+    event
         .tags
         .iter()
         .find(|tag| tag.as_slice().first().map(|s| s.as_str()) == Some("c"))
-        .and_then(|tag| tag.as_slice().get(1).map(|s| s.to_string()));
-
-    debug!(
-        "Found PR event {} with commit tag: {:?}",
-        event_id,
-        commit.as_ref()
-    );
-
-    Ok(commit)
+        .and_then(|tag| tag.as_slice().get(1).map(|s| s.to_string()))
 }
 
 /// Validate refs/nostr/ pushes against existing PR/PR Update events

@@ -107,7 +107,11 @@ pub async fn handle_info_refs(
 /// `PKT-LINE("ERR" SP explanation-text)`
 ///
 /// This allows git clients to properly parse and display the error message.
-fn build_git_protocol_error_response(
+///
+/// `pub(crate)` so the `/prs/` receive-pack handler in `crate::grasp06::receive`
+/// can return identically-shaped rejections without duplicating the pkt-line
+/// framing.
+pub(crate) fn build_git_protocol_error_response(
     service: GitService,
     error_message: &str,
 ) -> Response<Full<Bytes>> {
@@ -130,7 +134,10 @@ fn build_git_protocol_error_response(
 ///
 /// Transport errors (process spawn failures, I/O errors, signals) should
 /// remain as HTTP 500 errors.
-fn is_git_protocol_error(exit_code: Option<i32>, stderr: &[u8]) -> bool {
+///
+/// `pub(crate)` so the `/prs/` receive-pack handler in `crate::grasp06::receive`
+/// can classify subprocess failures the same way without duplicating the rule.
+pub(crate) fn is_git_protocol_error(exit_code: Option<i32>, stderr: &[u8]) -> bool {
     // Git uses exit code 128 for protocol/usage errors
     // If there's stderr content, it's a protocol error message
     exit_code == Some(128) && !stderr.is_empty()

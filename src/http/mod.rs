@@ -25,6 +25,7 @@ use tokio::net::TcpListener;
 
 use crate::config::Config;
 use crate::git;
+use crate::grasp06::receive::{new_repo_init_locks, RepoInitLocks};
 use crate::metrics::Metrics;
 use crate::nostr::builder::{Nip34WritePolicy, SharedDatabase};
 use crate::purgatory::Purgatory;
@@ -108,6 +109,9 @@ struct HttpService {
     write_policy: Arc<Nip34WritePolicy>,
     /// Rejected events index for hot-cache re-processing after git push promotion
     rejected_events_index: Arc<RejectedEventsIndex>,
+    /// Per-path init mutexes for GRASP-06 `/prs/` on-demand bare-repo
+    /// creation. See [`crate::grasp06::receive::RepoInitLocks`].
+    repo_init_locks: RepoInitLocks,
 }
 
 impl HttpService {
@@ -121,6 +125,7 @@ impl HttpService {
         purgatory: Arc<Purgatory>,
         write_policy: Arc<Nip34WritePolicy>,
         rejected_events_index: Arc<RejectedEventsIndex>,
+        repo_init_locks: RepoInitLocks,
     ) -> Self {
         Self {
             relay,
@@ -131,6 +136,7 @@ impl HttpService {
             purgatory,
             write_policy,
             rejected_events_index,
+            repo_init_locks,
         }
     }
 }
@@ -150,6 +156,7 @@ impl Service<Request<Incoming>> for HttpService {
         let purgatory = self.purgatory.clone();
         let write_policy = self.write_policy.clone();
         let rejected_events_index = self.rejected_events_index.clone();
+        let repo_init_locks = self.repo_init_locks.clone();
 
         // Handle OPTIONS preflight requests (CORS)
         // GRASP-01 spec line 47: Respond to OPTIONS with 204 No Content
@@ -193,6 +200,7 @@ impl Service<Request<Incoming>> for HttpService {
                 let subpath = prs.subpath.clone();
                 let method_clone = method.clone();
                 let metrics_clone = self.metrics.clone();
+                let relay_clone = self.relay.clone();
 
                 return Box::pin(async move {
                     // Collect (and gunzip if needed) the request body just like
@@ -267,14 +275,28 @@ impl Service<Request<Incoming>> for HttpService {
                                 r
                             }
 
-                            // POST /git-receive-pack — stub for now.
-                            // Returns HTTP 200 with an ERR pkt-line; the
-                            // real handler is not yet implemented.
+                            // POST /git-receive-pack — accept pushes to
+                            // refs/nostr/<event-id>, reject anything else,
+                            // per GRASP-06 06.md line 15.
                             (m, "git-receive-pack") if m == Method::POST => {
+                                let r = crate::grasp06::receive::handle_prs_receive_pack(
+                                    &prs,
+                                    body_bytes,
+                                    database.clone(),
+                                    relay_clone.clone(),
+                                    purgatory.clone(),
+                                    write_policy.clone(),
+                                    rejected_events_index.clone(),
+                                    &git_data_path,
+                                    git_protocol.as_deref(),
+                                    repo_init_locks.clone(),
+                                )
+                                .await;
                                 if let Some(ref m) = metrics_clone {
-                                    m.record_git_operation("push", "error");
+                                    let status = if r.is_ok() { "success" } else { "error" };
+                                    m.record_git_operation("push", status);
                                 }
-                                Ok(crate::grasp06::fetch::handle_prs_receive_pack_stub())
+                                r
                             }
 
                             _ => Err(git::handlers::GitError::RepositoryNotFound),
@@ -742,6 +764,12 @@ pub async fn run_server(
 
     let listener = TcpListener::bind(&bind_addr).await?;
 
+    // Shared per-path init mutexes for the GRASP-06 `/prs/` endpoint. Lives
+    // for the lifetime of the server so concurrent pushes to the same
+    // `/prs/<submitter>/<id>.git` path serialise their on-demand
+    // `git init --bare` step.
+    let repo_init_locks = new_repo_init_locks();
+
     loop {
         let (socket, addr) = listener.accept().await?;
         let io = TokioIo::new(socket);
@@ -754,6 +782,7 @@ pub async fn run_server(
             purgatory.clone(),
             write_policy.clone(),
             rejected_events_index.clone(),
+            repo_init_locks.clone(),
         );
 
         tokio::spawn(async move {
