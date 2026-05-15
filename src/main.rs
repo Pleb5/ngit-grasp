@@ -131,12 +131,34 @@ async fn run_relay(config: Config) -> Result<()> {
         }
     }
 
-    // Shared per-path init mutexes for the GRASP-06 `/prs/` endpoint. Lives
+    // Shared per-path state for the GRASP-06 `/prs/` endpoint (mutex +
+    // in-flight counter, see [`grasp06::receive::PrsPathState`]). Lives
     // for the lifetime of the process so concurrent pushes to the same
-    // `/prs/<submitter>/<id>.git` path — and policy / purgatory code paths
-    // that may delete a `/prs/` bare repo — serialise against in-flight
-    // pushes via the same DashMap.
+    // `/prs/<submitter>/<id>.git` path — and policy / purgatory code
+    // paths that may delete a `/prs/` bare repo — coordinate through
+    // the same DashMap.
     let repo_init_locks = grasp06::receive::new_repo_init_locks();
+
+    // Startup recovery for the GRASP-06 `/prs/` subtree: remove any
+    // zero-ref bare repos and empty submitter dirs left behind by a
+    // previous run (crashes mid-push, mid-cleanup, or shutdowns with
+    // unresolved scoped placeholders). Inline cleanup paths only fire
+    // while the process is running, so without this scan abandoned
+    // dirs persist indefinitely — the `cleanup-empty-repos` CLI tool
+    // explicitly skips `/prs/`. Gated on `grasp06_enable` so an
+    // operator who has turned the feature off does not start removing
+    // their existing `/prs/` data on the next restart. Runs before
+    // anything that could write to `/prs/` so no locking is needed.
+    if config.grasp06_enable {
+        let git_data_path = PathBuf::from(config.effective_git_data_path());
+        let (repos, dirs) = grasp06::cleanup::scan_on_startup(&git_data_path);
+        if repos > 0 || dirs > 0 {
+            info!(
+                "GRASP-06 /prs/ startup recovery: removed {} zero-ref repo(s), {} empty submitter dir(s)",
+                repos, dirs
+            );
+        }
+    }
 
     // Create Nostr relay with NIP-34 validation
     // Returns both the relay and database for direct queries in handlers

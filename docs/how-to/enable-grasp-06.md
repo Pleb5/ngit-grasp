@@ -59,11 +59,12 @@ The push succeeds, the relay creates `<git_data_path>/prs/<signer-hex>/<d>.git` 
 
 ## Storage cost
 
-One bare repo per `(submitter, identifier)` combination under `<git_data_path>/prs/<submitter-hex>/<identifier>.git`. Repos are garbage-collected inline at the three sites that can leave one empty — there is no separate periodic sweep over `<git_data_path>/prs/`:
+One bare repo per `(submitter, identifier)` combination under `<git_data_path>/prs/<submitter-hex>/<identifier>.git`. Repos are garbage-collected inline at the three runtime sites that can leave one empty, plus a startup scan that recovers anything left behind by a previous run — there is no separate periodic sweep over `<git_data_path>/prs/`:
 
 - After receive-pack, the repo is removed immediately if it has zero refs left (probe pushes that produced no valid state).
 - When a PR event arrives that fails validation against a scoped `/prs/` placeholder, the corresponding `refs/nostr/<event-id>` ref is deleted; if that leaves the repo with zero refs the directory is removed in the same step.
 - When a scoped placeholder expires from purgatory without a matching PR event (default 30 minutes), the standard purgatory sweep deletes the dangling ref and, if it leaves the repo zero-ref, the bare repo itself.
+- On startup, before the HTTP server accepts requests, the `/prs/` subtree is scanned once and any zero-ref bare repos (left by a crash mid-push, crash mid-cleanup, or shutdown with in-memory state lost) are removed.
 
 All three sites coordinate through a per-`(submitter, identifier)` mutex and an `in_flight` counter; cleanup paths only `rm -rf` the bare repo while `in_flight == 0`, so an in-flight push cannot have its repo deleted out from under it. The mutex is held only briefly at each site — pack uploads and per-ref validation run lock-free, so concurrent pushes by multiple agents using the same identity do not serialise behind each other.
 
