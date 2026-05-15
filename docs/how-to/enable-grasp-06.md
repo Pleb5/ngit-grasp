@@ -65,7 +65,7 @@ One bare repo per `(submitter, identifier)` combination under `<git_data_path>/p
 - When a PR event arrives that fails validation against a scoped `/prs/` placeholder, the corresponding `refs/nostr/<event-id>` ref is deleted; if that leaves the repo with zero refs the directory is removed in the same step.
 - When a scoped placeholder expires from purgatory without a matching PR event (default 30 minutes), the standard purgatory sweep deletes the dangling ref and, if it leaves the repo zero-ref, the bare repo itself.
 
-All three sites share the same per-`(submitter, identifier)` mutex so they cannot race with an in-flight push.
+All three sites coordinate through a per-`(submitter, identifier)` mutex and an `in_flight` counter; cleanup paths only `rm -rf` the bare repo while `in_flight == 0`, so an in-flight push cannot have its repo deleted out from under it. The mutex is held only briefly at each site — pack uploads and per-ref validation run lock-free, so concurrent pushes by multiple agents using the same identity do not serialise behind each other.
 
 There is no quota in this release. Disk consumption is bounded only by the rate at which contributors push valid PR refs.
 

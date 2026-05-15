@@ -111,11 +111,13 @@ impl PrEventPolicy {
                     );
 
                     // Delete the ref the original /prs/ push wrote, and if
-                    // that leaves the bare repo with zero refs, delete the
-                    // directory too. Held under the same per-path lock the
-                    // /prs/ receive handler uses so a concurrent push to
-                    // this `(submitter, identifier)` cannot have its work
-                    // wiped mid-receive.
+                    // that leaves the bare repo with zero refs *and no
+                    // push is in flight to this path*, delete the
+                    // directory too. The per-path mutex is held only for
+                    // the brief delete-and-check window — concurrent
+                    // pushes increment `in_flight` under the same mutex,
+                    // so seeing `in_flight == 0` while holding the lock
+                    // is a safe signal that no push is mid-receive.
                     let prs_repo = crate::grasp06::paths::prs_repo_path(
                         &self.ctx.git_data_path,
                         &scope.submitter.to_hex(),
@@ -123,16 +125,11 @@ impl PrEventPolicy {
                     );
                     let ref_name = format!("refs/nostr/{}", event_id);
                     if prs_repo.exists() {
-                        let lock = self
-                            .ctx
-                            .repo_init_locks
-                            .entry(prs_repo.clone())
-                            .or_insert_with(|| {
-                                std::sync::Arc::new(tokio::sync::Mutex::new(()))
-                            })
-                            .value()
-                            .clone();
-                        let _guard = lock.lock().await;
+                        let state = crate::grasp06::receive::path_state(
+                            &self.ctx.repo_init_locks,
+                            &prs_repo,
+                        );
+                        let _guard = state.mu.lock().await;
 
                         if let Err(e) = crate::git::delete_ref(&prs_repo, &ref_name) {
                             tracing::warn!(
@@ -141,15 +138,20 @@ impl PrEventPolicy {
                                 error = %e,
                                 "Failed to delete /prs/ ref while discarding scoped placeholder",
                             );
-                        } else if matches!(
-                            crate::git::list_refs(&prs_repo),
-                            Ok(refs) if refs.is_empty()
-                        ) {
-                            // No refs left — the repo is now an empty
-                            // husk. Drop the bare dir so /prs/ doesn't
-                            // accumulate abandoned repos. Equivalent to
-                            // the cleanup the receive handler already
-                            // does on push completion.
+                        } else if state
+                            .in_flight
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                            == 0
+                            && matches!(
+                                crate::git::list_refs(&prs_repo),
+                                Ok(refs) if refs.is_empty()
+                            )
+                        {
+                            // No refs left and no push in flight — the
+                            // repo is now an empty husk. Drop the bare
+                            // dir so /prs/ doesn't accumulate abandoned
+                            // repos. Equivalent to the cleanup the
+                            // receive handler does on push completion.
                             if let Err(e) = std::fs::remove_dir_all(&prs_repo) {
                                 tracing::warn!(
                                     repo = %prs_repo.display(),

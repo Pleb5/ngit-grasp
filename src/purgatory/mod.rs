@@ -212,9 +212,11 @@ pub struct Purgatory {
 /// best-effort empty-repo cleanup the `/prs/` receive handler does, for
 /// placeholders that expire because no matching PR event ever arrived.
 ///
-/// The lock map is the same one held by the receive handler, so a sync
-/// `try_lock` here is enough to know whether a push is in flight; if it
-/// is, the cleanup is deferred to the next [`Purgatory::cleanup`] cycle.
+/// The lock map is the same one held by the receive handler. The
+/// cleanup loop is synchronous, so it `try_lock`s the per-path mutex —
+/// holding it across an async point would block the runtime — and
+/// reads the `in_flight` counter under that mutex to decide whether a
+/// push is mid-receive.
 #[derive(Clone)]
 pub struct PrsCleanupCtx {
     pub git_data_path: PathBuf,
@@ -1294,16 +1296,15 @@ impl Purgatory {
 
             // For GRASP-06 `/prs/`-scoped placeholders, best-effort
             // filesystem cleanup of the dangling refs/nostr/<event-id>
-            // ref and (if it leaves the bare repo with zero refs) the
-            // repo directory itself. The cleanup is gated on a
-            // `try_lock` of the same per-path mutex the receive handler
-            // uses, so it can never race with an in-flight push: if a
-            // push to this `(submitter, identifier)` is currently
-            // holding the lock, the cleanup is skipped this cycle and
-            // the dangling ref is simply left on disk. The receive
-            // handler will re-evaluate cleanup at the end of its
-            // current push, and any future push to the same path will
-            // ignore the dangling ref.
+            // ref and (if it leaves the bare repo with zero refs *and
+            // no push is in flight*) the repo directory itself. The
+            // cleanup is gated on a `try_lock` of the per-path mutex:
+            // if a push is currently holding the lock the cleanup is
+            // skipped this cycle and the dangling ref is simply left
+            // on disk. With the lock held, the `in_flight` check is
+            // what distinguishes "no push active" from "push mid-receive
+            // but the mutex is briefly free between init and end-of-push"
+            // — only the former is safe to follow with a `rm -rf`.
             if let (Some(scope), Some(ctx)) =
                 (prs_scope.as_ref(), self.prs_cleanup_ctx.get())
             {
@@ -1313,14 +1314,11 @@ impl Purgatory {
                     &scope.identifier,
                 );
                 if repo_path.exists() {
-                    let lock = ctx
-                        .repo_init_locks
-                        .entry(repo_path.clone())
-                        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                        .value()
-                        .clone();
-                    let guard = lock.try_lock();
-                    match guard {
+                    let state = crate::grasp06::receive::path_state(
+                        &ctx.repo_init_locks,
+                        &repo_path,
+                    );
+                    match state.mu.try_lock() {
                         Ok(_guard) => {
                             let ref_name = format!("refs/nostr/{}", event_id_str);
                             if let Err(e) = crate::git::delete_ref(&repo_path, &ref_name) {
@@ -1330,10 +1328,15 @@ impl Purgatory {
                                     error = %e,
                                     "Failed to delete dangling /prs/ ref during purgatory expiry",
                                 );
-                            } else if matches!(
-                                crate::git::list_refs(&repo_path),
-                                Ok(refs) if refs.is_empty()
-                            ) {
+                            } else if state
+                                .in_flight
+                                .load(std::sync::atomic::Ordering::Relaxed)
+                                == 0
+                                && matches!(
+                                    crate::git::list_refs(&repo_path),
+                                    Ok(refs) if refs.is_empty()
+                                )
+                            {
                                 if let Err(e) = std::fs::remove_dir_all(&repo_path) {
                                     tracing::warn!(
                                         repo = %repo_path.display(),
@@ -1354,7 +1357,7 @@ impl Purgatory {
                                 "/prs/ repo lock contended during purgatory expiry — skipping filesystem cleanup this cycle",
                             );
                         }
-                    }
+                    };
                 }
             }
 

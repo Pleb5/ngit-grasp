@@ -12,12 +12,14 @@
 //!    exact shape `refs/nostr/<64-lowercase-hex>`. The repo on disk is not
 //!    touched in this path — probe pushes that would have been rejected
 //!    leave no trace.
-//! 2. Acquires the per-path lock from [`RepoInitLocks`] for the rest of
-//!    the request, then creates the bare repo on demand at the GRASP-06
-//!    path. Holding the lock for the whole pipeline guarantees a
-//!    concurrent push to the same `(submitter, identifier)` cannot delete
-//!    the bare repo out from under this one in step 5. Different paths
-//!    still run in parallel.
+//! 2. Acquires the per-path coordination state from [`RepoInitLocks`]
+//!    briefly: under its mutex it runs the on-demand `git init --bare`
+//!    and increments the `in_flight` counter, then releases the mutex.
+//!    Steps 3 and 4 run *without* the per-path lock so concurrent pushes
+//!    to the same `(submitter, identifier)` proceed in parallel — git's
+//!    own ref locking handles intra-push concurrency, and the
+//!    `in_flight` counter is what off-push cleanup paths consult to know
+//!    a push is active.
 //! 3. Runs `git-receive-pack` against the repo, mirroring the subprocess
 //!    plumbing in [`crate::git::handlers::handle_receive_pack`].
 //! 4. For each accepted `refs/nostr/<event-id>` ref, validates against the
@@ -27,15 +29,18 @@
 //!    nor purgatory knows about the event, a PR placeholder is added so the
 //!    standard 30-minute purgatory sweep can clean it up if the event never
 //!    arrives.
-//! 5. After validation, the repo is removed if it has zero refs left —
-//!    discarding probe pushes that produced no valid state. Safe to do
-//!    under the lock acquired in step 2.
+//! 5. Re-acquires the per-path mutex briefly, decrements `in_flight`,
+//!    and — if no other push is in flight and the repo has zero refs
+//!    left — removes the bare directory. Always runs, including on
+//!    receive-pack protocol errors, so a failed push that has just
+//!    initialised an empty repo does not leak it.
 //! 6. Triggers the standard purgatory-release path via
 //!    [`crate::git::sync::process_newly_available_git_data`] so PR events
 //!    already in purgatory waiting for these commits get promoted.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -60,20 +65,46 @@ use crate::nostr::builder::{Nip34WritePolicy, SharedDatabase};
 use crate::purgatory::Purgatory;
 use crate::sync::rejected_index::RejectedEventsIndex;
 
-/// Shared lock map serialising the full `/prs/<submitter>/<identifier>.git`
-/// receive-pack pipeline.
+/// Per-`(submitter, identifier)` coordination state shared between
+/// `/prs/` receive-pack pushes and the cleanup paths that may delete the
+/// bare repo.
 ///
-/// The lock is held for the entire request — `git init --bare`,
-/// `git-receive-pack`, per-ref validation, and the post-validation
-/// "remove if zero refs" cleanup — so that two simultaneous pushes to the
-/// same path cannot have one push delete the bare repo while the other is
-/// mid-receive. Pushes to *different* paths still proceed in parallel.
+/// `mu` is held only briefly:
 ///
-/// The same lock is taken by code paths outside the receive handler
-/// (purgatory expiry, scoped-placeholder mismatch handling) before they
-/// inspect or delete the bare repo, so all callers serialise against
-/// in-flight pushes.
-pub type RepoInitLocks = Arc<DashMap<PathBuf, Arc<Mutex<()>>>>;
+/// * by the receive handler to perform `git init --bare` and register
+///   the request as in-flight (`fetch_add` on `in_flight`),
+/// * by the receive handler again at end-of-push to decrement
+///   `in_flight` and, if no other push is in flight and the repo has
+///   zero refs, remove the bare directory,
+/// * by off-push cleanup paths (PR-event validation discard, purgatory
+///   expiry) for the duration of one `delete_ref` + optional
+///   `remove_dir_all`.
+///
+/// `git-receive-pack` itself and per-ref validation run *without* the
+/// mutex held, so two pushes to the same path proceed in parallel; git's
+/// own ref locking handles intra-push concurrency.
+///
+/// Off-push cleanup paths only `rm -rf` the bare repo when both
+/// `in_flight.load() == 0` *and* `list_refs` returns empty while they
+/// hold `mu` — the same mutex that gates `in_flight` updates — so a
+/// repo can never be deleted while a push is mid-receive.
+pub struct PrsPathState {
+    pub mu: Mutex<()>,
+    pub in_flight: AtomicUsize,
+}
+
+impl PrsPathState {
+    fn new() -> Self {
+        Self {
+            mu: Mutex::new(()),
+            in_flight: AtomicUsize::new(0),
+        }
+    }
+}
+
+/// Shared per-path state map for the GRASP-06 `/prs/` endpoint. See
+/// [`PrsPathState`] for the locking discipline.
+pub type RepoInitLocks = Arc<DashMap<PathBuf, Arc<PrsPathState>>>;
 
 /// Create a fresh, empty [`RepoInitLocks`] for use as an [`HttpService`]
 /// field.
@@ -81,6 +112,17 @@ pub type RepoInitLocks = Arc<DashMap<PathBuf, Arc<Mutex<()>>>>;
 /// [`HttpService`]: crate::http
 pub fn new_repo_init_locks() -> RepoInitLocks {
     Arc::new(DashMap::new())
+}
+
+/// Look up (or insert) the [`PrsPathState`] for `repo_path` in `locks`.
+/// Used by off-push cleanup paths so they take the same Arc the receive
+/// handler will see.
+pub fn path_state(locks: &RepoInitLocks, repo_path: &Path) -> Arc<PrsPathState> {
+    locks
+        .entry(repo_path.to_path_buf())
+        .or_insert_with(|| Arc::new(PrsPathState::new()))
+        .value()
+        .clone()
 }
 
 /// Handle `POST /prs/<npub>/<identifier>.git/git-receive-pack`.
@@ -135,95 +177,113 @@ pub async fn handle_prs_receive_pack(
         }
     }
 
-    // 2. Acquire the per-path lock for the rest of the request. The lock
-    //    covers `git init --bare`, `git-receive-pack`, per-ref validation
-    //    and the zero-ref cleanup so a concurrent push to the same
-    //    `(submitter, identifier)` cannot have one push delete the bare
-    //    repo while the other is mid-receive. Different paths still run
-    //    in parallel — the DashMap entry is per `repo_path`.
+    // 2. Acquire the per-path coordination state and, under its mutex,
+    //    initialise the bare repo on demand and register this request as
+    //    in-flight. The mutex is then released — `git-receive-pack` and
+    //    per-ref validation run WITHOUT the lock so concurrent pushes to
+    //    the same `(submitter, identifier)` proceed in parallel. Cleanup
+    //    paths consult `in_flight` (under the same mutex) before
+    //    deleting the bare repo, so a repo can never vanish mid-receive.
     let repo_path = prs_repo_path(
         Path::new(git_data_path),
         &prs.submitter.to_hex(),
         &prs.identifier,
     );
-    let path_lock = repo_init_locks
-        .entry(repo_path.clone())
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .value()
-        .clone();
-    let _path_guard = path_lock.lock().await;
+    let state = path_state(&repo_init_locks, &repo_path);
 
-    if let Err(e) = ensure_repo_initialised(&repo_path).await {
-        error!(
-            "/prs/ receive-pack: failed to initialise repo at {}: {}",
-            repo_path.display(),
-            e
-        );
-        return Err(e);
+    {
+        let _g = state.mu.lock().await;
+        if let Err(e) = ensure_repo_initialised(&repo_path).await {
+            error!(
+                "/prs/ receive-pack: failed to initialise repo at {}: {}",
+                repo_path.display(),
+                e
+            );
+            return Err(e);
+        }
+        state.in_flight.fetch_add(1, Ordering::Relaxed);
     }
 
-    // 3. Run git-receive-pack against the now-existing repo.
-    let response = run_receive_pack(&repo_path, &request_body, git_protocol).await?;
+    // 3 + 4: run receive-pack and validate refs without the per-path
+    //        mutex held. Wrapping in an async block lets us catch every
+    //        exit path with the same end-of-push cleanup below.
+    let process_result: Result<Response<Full<Bytes>>, GitError> = async {
+        let response = run_receive_pack(&repo_path, &request_body, git_protocol).await?;
 
-    // If the push itself failed with a protocol error (e.g. a stale OID or
-    // a corrupt pack) we return that ERR pkt-line straight back to the
-    // client without doing any post-push validation. The pre-scan in step 1
-    // already gated ref-name shape, so we only land here for git-level
-    // failures.
-    if response.status() != StatusCode::OK {
-        return Ok(response);
+        // If the push itself failed with a protocol error (e.g. a stale
+        // OID or a corrupt pack) we return that ERR pkt-line straight
+        // back to the client without doing any post-push validation. The
+        // pre-scan in step 1 already gated ref-name shape, so we only
+        // land here for git-level failures.
+        if response.status() != StatusCode::OK {
+            return Ok(response);
+        }
+
+        // 4. Per-ref post-push validation. Iterate over the same parsed
+        //    ref list — at this point every ref name is known to be
+        //    `refs/nostr/<event-id>`, so the strip is infallible.
+        for (_, new_oid, ref_name) in &pushed_refs {
+            let event_id_hex = ref_name
+                .strip_prefix("refs/nostr/")
+                .expect("ref shape validated above");
+            validate_pushed_nostr_ref(
+                &database,
+                &purgatory,
+                &repo_path,
+                prs,
+                event_id_hex,
+                new_oid,
+            )
+            .await;
+        }
+
+        Ok(response)
     }
+    .await;
 
-    // 4. Per-ref post-push validation. Iterate over the same parsed ref
-    //    list — at this point every ref name is known to be
-    //    `refs/nostr/<event-id>`, so the strip is infallible.
-    for (_, new_oid, ref_name) in &pushed_refs {
-        let event_id_hex = ref_name
-            .strip_prefix("refs/nostr/")
-            .expect("ref shape validated above");
-        validate_pushed_nostr_ref(
-            &database,
-            &purgatory,
-            &repo_path,
-            prs,
-            event_id_hex,
-            new_oid,
-        )
-        .await;
-    }
-
-    // 5. If validation removed every ref, the repo is empty: a probe push
-    //    that left no valid state. Delete the directory so we don't
-    //    accumulate empty repos.
-    if let Ok(refs) = list_refs(&repo_path) {
-        if refs.is_empty() {
-            if let Err(e) = std::fs::remove_dir_all(&repo_path) {
-                warn!(
-                    "/prs/ receive-pack: failed to clean up empty repo {}: {}",
-                    repo_path.display(),
-                    e
-                );
-            } else {
-                debug!(
-                    "/prs/ receive-pack: removed empty repo {} (probe push left no valid refs)",
-                    repo_path.display()
-                );
+    // 5. End-of-push cleanup. Always runs — including on receive-pack
+    //    protocol errors and `?`-propagated transport errors — so a
+    //    failed push that has just initialised an empty repo does not
+    //    leak it. Decrements `in_flight`; if no other push is in flight
+    //    and the repo has zero refs left, removes the bare directory.
+    {
+        let _g = state.mu.lock().await;
+        state.in_flight.fetch_sub(1, Ordering::Relaxed);
+        if state.in_flight.load(Ordering::Relaxed) == 0 {
+            if let Ok(refs) = list_refs(&repo_path) {
+                if refs.is_empty() {
+                    if let Err(e) = std::fs::remove_dir_all(&repo_path) {
+                        warn!(
+                            "/prs/ receive-pack: failed to clean up empty repo {}: {}",
+                            repo_path.display(),
+                            e
+                        );
+                    } else {
+                        debug!(
+                            "/prs/ receive-pack: removed empty repo {} (no refs after push)",
+                            repo_path.display()
+                        );
+                    }
+                }
             }
         }
     }
 
+    let response = process_result?;
+
     // 6. Drive the standard purgatory-release pipeline so PR events
     //    already waiting on these commits can be promoted out of
-    //    purgatory. We pass the `/prs/` repo path through unchanged —
-    //    the cross-service mirror lives elsewhere and is a future
-    //    addition.
-    let new_oids: HashSet<String> = pushed_refs
-        .iter()
-        .filter(|(_, new_oid, _)| new_oid != "0000000000000000000000000000000000000000")
-        .map(|(_, new_oid, _)| new_oid.clone())
-        .collect();
+    //    purgatory. Only fires on a successful push, and only if the
+    //    repo still exists (it may have been removed in step 5).
+    if response.status() == StatusCode::OK && repo_path.exists() {
+        let new_oids: HashSet<String> = pushed_refs
+            .iter()
+            .filter(|(_, new_oid, _)| {
+                new_oid != "0000000000000000000000000000000000000000"
+            })
+            .map(|(_, new_oid, _)| new_oid.clone())
+            .collect();
 
-    if repo_path.exists() {
         if let Err(e) = process_newly_available_git_data(
             &repo_path,
             &new_oids,
@@ -280,7 +340,7 @@ fn invalid_ref_reason(ref_name: &str) -> Option<String> {
 /// `mkdir -p` the parent and `git init --bare --initial-branch=main
 /// --quiet` into `repo_path` if it does not already exist.
 ///
-/// The caller must hold the per-path lock from [`RepoInitLocks`] for
+/// The caller must hold the per-path mutex from [`PrsPathState`] for
 /// `repo_path` before invoking this function.
 async fn ensure_repo_initialised(repo_path: &Path) -> Result<(), GitError> {
     if repo_path.exists() {
