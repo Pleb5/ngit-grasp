@@ -1581,8 +1581,12 @@ async fn process_purgatory_announcements(
 /// from a GRASP-06 `/prs/` source repo into every announced repo on this
 /// relay whose coord appears in the event's `a` tags.
 ///
-/// Triggered only by [`process_newly_available_git_data`] when the source
-/// repo lives under [`crate::grasp06::paths::prs_base_path`]. The
+/// Triggered both by [`process_newly_available_git_data`] (event-first
+/// ordering: push releases an event already waiting in purgatory) and by
+/// [`crate::nostr::policy::pr_event::PrEventPolicy::git_data_check`]
+/// (git-first ordering: event arrives matching a scoped placeholder that
+/// an earlier `/prs/` push created). Both call sites require the source
+/// repo to live under [`crate::grasp06::paths::prs_base_path`]. The
 /// destination repo must (a) exist on disk and (b) have an accepted
 /// announcement in the database for that coord. Absent either, nothing
 /// is mirrored — the PR stays fetchable via the `clone` tag at `/prs/`.
@@ -1592,7 +1596,7 @@ async fn process_purgatory_announcements(
 /// Back-fill on a later announcement (i.e. an announcement accepted
 /// *after* a `/prs/` push) is intentionally not handled here; the design
 /// doc lists it as a follow-up.
-async fn mirror_prs_pr_to_announced_repos(
+pub(crate) async fn mirror_prs_pr_to_announced_repos(
     source_repo_path: &Path,
     event: &Event,
     commit: &str,
