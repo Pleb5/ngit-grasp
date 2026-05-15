@@ -554,9 +554,8 @@ Optional endpoint at `/prs/<npub>/<identifier>.git`, gated on `NGIT_GRASP06_ENAB
 - [`src/grasp06/endpoint.rs`](../../src/grasp06/endpoint.rs) — URL parsing.
 - [`src/grasp06/paths.rs`](../../src/grasp06/paths.rs) — on-disk path conventions under `<git_data_path>/prs/<hex>/<identifier>.git`.
 - [`src/grasp06/fetch.rs`](../../src/grasp06/fetch.rs) — empty-repo synthesis for `info/refs` and `git-upload-pack` against repos that don't yet exist on disk.
-- [`src/grasp06/receive.rs`](../../src/grasp06/receive.rs) — `git-receive-pack` with init-on-push, strict `refs/nostr/<event-id>` ref-name validation, and per-ref post-push validation against the database and purgatory.
+- [`src/grasp06/receive.rs`](../../src/grasp06/receive.rs) — `git-receive-pack` with init-on-push, strict `refs/nostr/<event-id>` ref-name validation, and per-ref post-push validation against the database and purgatory. Holds a per-`(submitter, identifier)` lock for the whole pipeline (init → receive-pack → validation → zero-ref cleanup) so a concurrent push to the same path cannot delete the bare repo mid-receive. The same lock is taken (with `try_lock` in synchronous contexts) by the PR-event policy and the purgatory expiry sweep before either of them deletes a `/prs/` ref or removes a zero-ref bare repo.
 - [`src/grasp06/policy.rs`](../../src/grasp06/policy.rs) — strict clone-tag URL comparator used by the PR-event acceptance relaxation.
-- [`src/grasp06/cleanup.rs`](../../src/grasp06/cleanup.rs) — periodic sweep that removes zero-ref `/prs/` repos older than the purgatory TTL.
 
 `/prs/` repos are intentionally isolated from other subsystems: empty-repo cleanup skips the `/prs/` subtree, the proactive-sync subsystem never discovers them because subscriptions are built from DB-resident announcements, and the standard repo landing page guards against ever matching a `/prs/` path. Full design: [GRASP-06 Contributor Pull Request Submission](grasp-06-contributor-pr-submission.md). Operator how-to: [Enable GRASP-06](../how-to/enable-grasp-06.md).
 

@@ -25,7 +25,7 @@ use tokio::net::TcpListener;
 
 use crate::config::Config;
 use crate::git;
-use crate::grasp06::receive::{new_repo_init_locks, RepoInitLocks};
+use crate::grasp06::receive::RepoInitLocks;
 use crate::metrics::Metrics;
 use crate::nostr::builder::{Nip34WritePolicy, SharedDatabase};
 use crate::purgatory::Purgatory;
@@ -757,6 +757,7 @@ fn derive_accept_key(request_key: &[u8]) -> String {
 /// * `purgatory` - Purgatory for event/git coordination
 /// * `write_policy` - Write policy for re-processing hot-cache events after git push promotion
 /// * `rejected_events_index` - Rejected events index for hot-cache re-processing
+#[allow(clippy::too_many_arguments)]
 pub async fn run_server(
     config: Config,
     relay: LocalRelay,
@@ -765,6 +766,7 @@ pub async fn run_server(
     purgatory: Arc<Purgatory>,
     write_policy: Arc<Nip34WritePolicy>,
     rejected_events_index: Arc<RejectedEventsIndex>,
+    repo_init_locks: RepoInitLocks,
 ) -> anyhow::Result<()> {
     let bind_addr: SocketAddr = config.bind_address.parse()?;
 
@@ -773,12 +775,6 @@ pub async fn run_server(
     tracing::info!("Domain: {}", config.domain);
 
     let listener = TcpListener::bind(&bind_addr).await?;
-
-    // Shared per-path init mutexes for the GRASP-06 `/prs/` endpoint. Lives
-    // for the lifetime of the server so concurrent pushes to the same
-    // `/prs/<submitter>/<id>.git` path serialise their on-demand
-    // `git init --bare` step.
-    let repo_init_locks = new_repo_init_locks();
 
     loop {
         let (socket, addr) = listener.accept().await?;

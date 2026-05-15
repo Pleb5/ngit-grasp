@@ -199,6 +199,26 @@ pub struct Purgatory {
     expired_events: Arc<DashMap<EventId, Instant>>,
 
     _git_data_path: PathBuf,
+
+    /// Set once at startup by [`Purgatory::set_prs_cleanup_ctx`] to give
+    /// [`Purgatory::cleanup`] enough information to remove abandoned
+    /// `/prs/<submitter>/<identifier>.git` refs and bare repos when their
+    /// scoped placeholders expire without an arriving PR event. Left
+    /// `None` in tests and any caller that does not need this behaviour.
+    prs_cleanup_ctx: std::sync::OnceLock<PrsCleanupCtx>,
+}
+
+/// Context shared with [`Purgatory::cleanup`] so it can perform the same
+/// best-effort empty-repo cleanup the `/prs/` receive handler does, for
+/// placeholders that expire because no matching PR event ever arrived.
+///
+/// The lock map is the same one held by the receive handler, so a sync
+/// `try_lock` here is enough to know whether a push is in flight; if it
+/// is, the cleanup is deferred to the next [`Purgatory::cleanup`] cycle.
+#[derive(Clone)]
+pub struct PrsCleanupCtx {
+    pub git_data_path: PathBuf,
+    pub repo_init_locks: crate::grasp06::receive::RepoInitLocks,
 }
 
 impl Purgatory {
@@ -211,7 +231,18 @@ impl Purgatory {
             sync_queue: Arc::new(DashMap::new()),
             expired_events: Arc::new(DashMap::new()),
             _git_data_path: git_data_path.into(),
+            prs_cleanup_ctx: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Wire the cleanup-time `/prs/` filesystem context. Called once at
+    /// startup by `main`; tests and code paths that do not exercise
+    /// scoped `/prs/` placeholders leave it unset and the cleanup loop
+    /// then only removes the in-memory entry, leaving any on-disk refs
+    /// in place.
+    pub fn set_prs_cleanup_ctx(&self, ctx: PrsCleanupCtx) {
+        // Ignore a second set — there is exactly one server-wide context.
+        let _ = self.prs_cleanup_ctx.set(ctx);
     }
 
     /// Enqueue an identifier for background git data sync.
@@ -1171,12 +1202,13 @@ impl Purgatory {
                 let event_opt = pr_entry.event.clone();
                 let commit = pr_entry.commit.clone();
                 let source = pr_entry.source;
-                (event_id_str, event_opt, commit, source)
+                let prs_scope = pr_entry.prs_scope.clone();
+                (event_id_str, event_opt, commit, source, prs_scope)
             })
             .collect();
 
         let pr_removed = expired_prs.len();
-        for (event_id_str, event_opt, commit, source) in expired_prs {
+        for (event_id_str, event_opt, commit, source, prs_scope) in expired_prs {
             // Log structured entry for PR events (not placeholders)
             if let Some(ref event) = event_opt {
                 let npub = event
@@ -1259,6 +1291,73 @@ impl Purgatory {
                     &commit[..commit.len().min(12)]
                 );
             }
+
+            // For GRASP-06 `/prs/`-scoped placeholders, best-effort
+            // filesystem cleanup of the dangling refs/nostr/<event-id>
+            // ref and (if it leaves the bare repo with zero refs) the
+            // repo directory itself. The cleanup is gated on a
+            // `try_lock` of the same per-path mutex the receive handler
+            // uses, so it can never race with an in-flight push: if a
+            // push to this `(submitter, identifier)` is currently
+            // holding the lock, the cleanup is skipped this cycle and
+            // the dangling ref is simply left on disk. The receive
+            // handler will re-evaluate cleanup at the end of its
+            // current push, and any future push to the same path will
+            // ignore the dangling ref.
+            if let (Some(scope), Some(ctx)) =
+                (prs_scope.as_ref(), self.prs_cleanup_ctx.get())
+            {
+                let repo_path = crate::grasp06::paths::prs_repo_path(
+                    &ctx.git_data_path,
+                    &scope.submitter.to_hex(),
+                    &scope.identifier,
+                );
+                if repo_path.exists() {
+                    let lock = ctx
+                        .repo_init_locks
+                        .entry(repo_path.clone())
+                        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                        .value()
+                        .clone();
+                    let guard = lock.try_lock();
+                    match guard {
+                        Ok(_guard) => {
+                            let ref_name = format!("refs/nostr/{}", event_id_str);
+                            if let Err(e) = crate::git::delete_ref(&repo_path, &ref_name) {
+                                tracing::warn!(
+                                    repo = %repo_path.display(),
+                                    ref_name = %ref_name,
+                                    error = %e,
+                                    "Failed to delete dangling /prs/ ref during purgatory expiry",
+                                );
+                            } else if matches!(
+                                crate::git::list_refs(&repo_path),
+                                Ok(refs) if refs.is_empty()
+                            ) {
+                                if let Err(e) = std::fs::remove_dir_all(&repo_path) {
+                                    tracing::warn!(
+                                        repo = %repo_path.display(),
+                                        error = %e,
+                                        "Failed to remove zero-ref /prs/ repo during purgatory expiry",
+                                    );
+                                } else {
+                                    tracing::debug!(
+                                        repo = %repo_path.display(),
+                                        "Removed zero-ref /prs/ repo during purgatory expiry",
+                                    );
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            tracing::debug!(
+                                repo = %repo_path.display(),
+                                "/prs/ repo lock contended during purgatory expiry — skipping filesystem cleanup this cycle",
+                            );
+                        }
+                    }
+                }
+            }
+
             self.pr_events.remove(&event_id_str);
         }
 

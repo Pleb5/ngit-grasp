@@ -59,10 +59,13 @@ The push succeeds, the relay creates `<git_data_path>/prs/<signer-hex>/<d>.git` 
 
 ## Storage cost
 
-One bare repo per `(submitter, identifier)` combination under `<git_data_path>/prs/<submitter-hex>/<identifier>.git`. Repos are garbage-collected automatically:
+One bare repo per `(submitter, identifier)` combination under `<git_data_path>/prs/<submitter-hex>/<identifier>.git`. Repos are garbage-collected inline at the three sites that can leave one empty — there is no separate periodic sweep over `<git_data_path>/prs/`:
 
 - After receive-pack, the repo is removed immediately if it has zero refs left (probe pushes that produced no valid state).
-- A periodic sweep (every 10 minutes) removes any zero-ref `/prs/` repo with no active purgatory entry, older than the purgatory TTL.
+- When a PR event arrives that fails validation against a scoped `/prs/` placeholder, the corresponding `refs/nostr/<event-id>` ref is deleted; if that leaves the repo with zero refs the directory is removed in the same step.
+- When a scoped placeholder expires from purgatory without a matching PR event (default 30 minutes), the standard purgatory sweep deletes the dangling ref and, if it leaves the repo zero-ref, the bare repo itself.
+
+All three sites share the same per-`(submitter, identifier)` mutex so they cannot race with an in-flight push.
 
 There is no quota in this release. Disk consumption is bounded only by the rate at which contributors push valid PR refs.
 
@@ -72,9 +75,8 @@ The current release relies entirely on:
 
 - the signed PR / PR Update event (no NIP-98 or other HTTP auth on push),
 - the requirement that the event's `clone` tag names this relay's `/prs/<signer>/<d>.git` endpoint,
-- the standard 30-minute purgatory TTL,
-- post-push zero-ref cleanup, and
-- the periodic `/prs/` sweep.
+- the standard 30-minute purgatory TTL, and
+- the inline zero-ref cleanups described under "Storage cost".
 
 The following knobs are **future** additions and are not yet wired:
 

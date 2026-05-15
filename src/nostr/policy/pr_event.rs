@@ -110,7 +110,12 @@ impl PrEventPolicy {
                         "Discarding scoped /prs/ PR placeholder — incoming event does not match URL submitter + identifier",
                     );
 
-                    // Delete the ref the original /prs/ push wrote.
+                    // Delete the ref the original /prs/ push wrote, and if
+                    // that leaves the bare repo with zero refs, delete the
+                    // directory too. Held under the same per-path lock the
+                    // /prs/ receive handler uses so a concurrent push to
+                    // this `(submitter, identifier)` cannot have its work
+                    // wiped mid-receive.
                     let prs_repo = crate::grasp06::paths::prs_repo_path(
                         &self.ctx.git_data_path,
                         &scope.submitter.to_hex(),
@@ -118,6 +123,17 @@ impl PrEventPolicy {
                     );
                     let ref_name = format!("refs/nostr/{}", event_id);
                     if prs_repo.exists() {
+                        let lock = self
+                            .ctx
+                            .repo_init_locks
+                            .entry(prs_repo.clone())
+                            .or_insert_with(|| {
+                                std::sync::Arc::new(tokio::sync::Mutex::new(()))
+                            })
+                            .value()
+                            .clone();
+                        let _guard = lock.lock().await;
+
                         if let Err(e) = crate::git::delete_ref(&prs_repo, &ref_name) {
                             tracing::warn!(
                                 event_id = %event_id,
@@ -125,6 +141,27 @@ impl PrEventPolicy {
                                 error = %e,
                                 "Failed to delete /prs/ ref while discarding scoped placeholder",
                             );
+                        } else if matches!(
+                            crate::git::list_refs(&prs_repo),
+                            Ok(refs) if refs.is_empty()
+                        ) {
+                            // No refs left — the repo is now an empty
+                            // husk. Drop the bare dir so /prs/ doesn't
+                            // accumulate abandoned repos. Equivalent to
+                            // the cleanup the receive handler already
+                            // does on push completion.
+                            if let Err(e) = std::fs::remove_dir_all(&prs_repo) {
+                                tracing::warn!(
+                                    repo = %prs_repo.display(),
+                                    error = %e,
+                                    "Failed to remove zero-ref /prs/ repo after discarding scoped placeholder",
+                                );
+                            } else {
+                                tracing::debug!(
+                                    repo = %prs_repo.display(),
+                                    "Removed zero-ref /prs/ repo after discarding scoped placeholder",
+                                );
+                            }
                         }
                     }
                     self.ctx.purgatory.remove_pr(&event_id);

@@ -10,7 +10,7 @@ use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use ngit_grasp::{
     audit_cleanup, cleanup_empty_repos,
     config::{Config, DatabaseBackend},
-    git, http,
+    git, grasp06, http,
     metrics::Metrics,
     nostr,
     purgatory::{sync::RealSyncContext, sync::ThrottleManager, Purgatory},
@@ -131,9 +131,18 @@ async fn run_relay(config: Config) -> Result<()> {
         }
     }
 
+    // Shared per-path init mutexes for the GRASP-06 `/prs/` endpoint. Lives
+    // for the lifetime of the process so concurrent pushes to the same
+    // `/prs/<submitter>/<id>.git` path — and policy / purgatory code paths
+    // that may delete a `/prs/` bare repo — serialise against in-flight
+    // pushes via the same DashMap.
+    let repo_init_locks = grasp06::receive::new_repo_init_locks();
+
     // Create Nostr relay with NIP-34 validation
     // Returns both the relay and database for direct queries in handlers
-    if let Ok(relay_with_db) = nostr::builder::create_relay(&config, purgatory.clone()).await {
+    if let Ok(relay_with_db) =
+        nostr::builder::create_relay(&config, purgatory.clone(), repo_init_locks.clone()).await
+    {
         info!(
             "Relay created with NIP-34 validation for domain: {}",
             config.domain
@@ -144,6 +153,17 @@ async fn run_relay(config: Config) -> Result<()> {
         relay_with_db
             .write_policy
             .set_local_relay(relay_with_db.relay.clone());
+
+        // Wire the GRASP-06 `/prs/` filesystem cleanup context into
+        // purgatory so the standard expiry sweep can delete dangling
+        // refs/nostr/<event-id> refs (and zero-ref bare repos) when a
+        // scoped placeholder expires without a matching PR event. Held
+        // under the same per-path lock the receive handler uses so the
+        // cleanup can never race with an in-flight push.
+        purgatory.set_prs_cleanup_ctx(ngit_grasp::purgatory::PrsCleanupCtx {
+            git_data_path: PathBuf::from(config.effective_git_data_path()),
+            repo_init_locks: repo_init_locks.clone(),
+        });
 
         // Start SyncManager for proactive sync (Phase 2: multi-relay support, Phase 3: health tracking)
         // Even without bootstrap relay, SyncManager discovers relays from stored announcements
@@ -285,6 +305,7 @@ async fn run_relay(config: Config) -> Result<()> {
                     purgatory,
                     http_write_policy,
                     http_rejected_index,
+                    repo_init_locks,
                 ) => {
                     result?
                 }
@@ -308,6 +329,7 @@ async fn run_relay(config: Config) -> Result<()> {
                     purgatory,
                     http_write_policy,
                     http_rejected_index,
+                    repo_init_locks,
                 ) => {
                     result?
                 }

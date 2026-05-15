@@ -303,7 +303,7 @@ mod tests {
         }));
         let purgatory = Arc::new(Purgatory::new(PathBuf::new()));
         let config = crate::config::Config::for_testing();
-        PolicyContext::new("test.example.com", db, PathBuf::new(), purgatory, config)
+        PolicyContext::new_for_test("test.example.com", db, PathBuf::new(), purgatory, config)
     }
 
     fn make_announcement_event(keys: &Keys, identifier: &str) -> Event {

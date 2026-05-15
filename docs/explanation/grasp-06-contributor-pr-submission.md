@@ -107,7 +107,7 @@ The flow mirrors the existing `refs/nostr/<event-id>` path at the standard endpo
 
 #### On-demand bare repo creation
 
-The first push to `/prs/<submitter>/<identifier>.git` creates the bare repo on disk. A per-`(submitter, identifier)` `tokio::sync::Mutex` (kept in a `DashMap` on the `HttpService`, see [`crate::grasp06::receive::RepoInitLocks`](../../src/grasp06/receive.rs)) serialises only the `git init --bare` step. Once init has succeeded, git's own ref locking handles intra-push concurrency, so simultaneous pushes to the same path proceed in parallel.
+The first push to `/prs/<submitter>/<identifier>.git` creates the bare repo on disk. A per-`(submitter, identifier)` `tokio::sync::Mutex` (kept in a `DashMap` on the `HttpService`, see [`crate::grasp06::receive::RepoInitLocks`](../../src/grasp06/receive.rs)) is held for the entire push pipeline — on-demand `git init --bare`, `git-receive-pack`, per-ref validation, and the zero-ref cleanup at the end. Pushes to different `(submitter, identifier)` paths still run in parallel. The same lock map is also taken (via `try_lock` from synchronous contexts) by the PR-event policy and the purgatory expiry sweep before either of them inspects or removes a `/prs/` repo, so no off-push code path can delete the bare repo while a push is in flight.
 
 ### Event acceptance relaxation
 
@@ -154,15 +154,21 @@ Placeholder entries created at `/prs/` should be validated against `(submitter =
 - **Proactive sync** (GRASP-02): `/prs/` repos are not replicated between relays. The proactive-sync subsystem derives every subscription from the DB-resident announcement set; `/prs/` repos have no announcement and so are excluded by construction. No filesystem walk discovers them. A GRASP-06 relay is authoritative for the PRs it accepts. Clients that need a PR should fetch it from the relay the event's `clone` tag names.
 - **Repo listings / NIP-11**: `/prs/` repos are not advertised as repositories. They are a submission side-channel, not first-class hosted repos. GRASP-06 itself is advertised in the relay's NIP-11 `supported_grasps` list when the flag is on.
 
-### Periodic `/prs/` cleanup
+### Zero-ref `/prs/` cleanup
 
-In addition to the receive-handler's post-push zero-ref cleanup, a periodic sweep ([`src/grasp06/cleanup.rs`](../../src/grasp06/cleanup.rs)) walks `<git_data_path>/prs/` every ten minutes (one second under `NGIT_TEST=1`) and removes any `<hex>/<id>.git` directory that:
+A `/prs/<submitter>/<identifier>.git` bare repo can become zero-ref through three independent paths. Each is cleaned up inline at the site where the last ref is removed; there is no separate periodic sweep over `<git_data_path>/prs/`:
 
-1. has zero refs,
-2. has no active `PrPurgatoryEntry` scoped to `(submitter=<hex>, identifier=<id>)`, and
-3. has a directory mtime older than the purgatory TTL ([`purgatory::DEFAULT_EXPIRY`](../../src/purgatory/mod.rs), 30 minutes).
+1. **Probe push leaves no valid refs.** The `/prs/` receive handler validates each pushed `refs/nostr/<event-id>` against the database and purgatory. If every ref fails validation, the bare repo is empty at the end of the push. The handler removes it before returning, under the per-path lock it has been holding since `git init --bare`.
+2. **Scoped placeholder fails validation against a later-arriving event.** When a PR event arrives whose `(signer, identifier, commit)` does not match the placeholder a `/prs/` push registered, the PR-event policy ([`src/nostr/policy/pr_event.rs`](../../src/nostr/policy/pr_event.rs)) deletes the corresponding `refs/nostr/<event-id>` ref and discards the placeholder. If that leaves the bare repo with zero refs, the policy also removes the directory. It takes the same per-path lock as the receive handler first, so it can never race with an in-flight push that is still writing other refs to the same path.
+3. **Scoped placeholder expires without a matching event.** The standard purgatory sweep ([`src/purgatory/mod.rs`](../../src/purgatory/mod.rs), every 60 seconds) walks expiring `PrPurgatoryEntry` rows. For entries with a `prs_scope`, the sweep best-effort deletes the dangling `refs/nostr/<event-id>` ref and, if that leaves the repo with zero refs, the bare repo itself. The sweep is synchronous, so it uses `try_lock` on the per-path mutex: if a push is currently in flight to that path the cleanup is skipped this cycle. In the worst case (sustained lock contention from rapid pushes) a dangling ref is left on disk; this is harmless because the repo is never zero-ref while the contended push is making progress, and any future push to the same path simply ignores the dangling ref.
 
-The mtime check defends against deleting a repo out from under an in-flight push. Empty submitter directories are removed when the sweep empties them.
+The shared lock map is wired through:
+
+- [`HttpService`](../../src/http/mod.rs) holds it as `repo_init_locks` and passes it into every `/prs/` request.
+- [`PolicyContext`](../../src/nostr/policy/mod.rs) holds the same `Arc<DashMap<…>>` so the PR-event policy can lock without going through HTTP.
+- [`Purgatory::set_prs_cleanup_ctx`](../../src/purgatory/mod.rs) wires the lock map (plus `git_data_path`) into purgatory at startup so the expiry sweep has everything it needs to act on a scoped placeholder.
+
+Off-push deletion paths and the receive handler therefore share a single source of truth for "is a push currently in flight to this `(submitter, identifier)`".
 
 ## Flow examples
 

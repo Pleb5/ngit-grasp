@@ -57,6 +57,7 @@ impl Nip34WritePolicy {
         git_data_path: impl Into<std::path::PathBuf>,
         purgatory: std::sync::Arc<crate::purgatory::Purgatory>,
         config: crate::config::Config,
+        repo_init_locks: crate::grasp06::receive::RepoInitLocks,
     ) -> Self {
         let ctx = PolicyContext::new(
             &config.domain,
@@ -64,6 +65,7 @@ impl Nip34WritePolicy {
             git_data_path,
             purgatory,
             config.clone(),
+            repo_init_locks,
         );
         Self {
             announcement_policy: AnnouncementPolicy::new(ctx.clone(), config.clone()),
@@ -692,6 +694,7 @@ pub struct RelayWithDatabase {
 pub async fn create_relay(
     config: &Config,
     purgatory: Arc<crate::purgatory::Purgatory>,
+    repo_init_locks: crate::grasp06::receive::RepoInitLocks,
 ) -> Result<RelayWithDatabase> {
     tracing::info!("Configuring nostr relay with GRASP-01 validation...");
 
@@ -752,8 +755,13 @@ pub async fn create_relay(
     }
 
     // Create write policy with purgatory integration
-    let write_policy =
-        Nip34WritePolicy::new(database.clone(), &git_data_path, purgatory, config.clone());
+    let write_policy = Nip34WritePolicy::new(
+        database.clone(),
+        &git_data_path,
+        purgatory,
+        config.clone(),
+        repo_init_locks,
+    );
 
     let mut builder = LocalRelayBuilder::default()
         .database(database.clone())

@@ -12,10 +12,12 @@
 //!    exact shape `refs/nostr/<64-lowercase-hex>`. The repo on disk is not
 //!    touched in this path — probe pushes that would have been rejected
 //!    leave no trace.
-//! 2. Creates the bare repo on demand at the GRASP-06 path. A
-//!    per-`(submitter, identifier)` mutex (lazily inserted into a `DashMap`)
-//!    serialises only the `git init --bare` step; ref locking inside the
-//!    repo is left to git itself for the actual push.
+//! 2. Acquires the per-path lock from [`RepoInitLocks`] for the rest of
+//!    the request, then creates the bare repo on demand at the GRASP-06
+//!    path. Holding the lock for the whole pipeline guarantees a
+//!    concurrent push to the same `(submitter, identifier)` cannot delete
+//!    the bare repo out from under this one in step 5. Different paths
+//!    still run in parallel.
 //! 3. Runs `git-receive-pack` against the repo, mirroring the subprocess
 //!    plumbing in [`crate::git::handlers::handle_receive_pack`].
 //! 4. For each accepted `refs/nostr/<event-id>` ref, validates against the
@@ -26,7 +28,8 @@
 //!    standard 30-minute purgatory sweep can clean it up if the event never
 //!    arrives.
 //! 5. After validation, the repo is removed if it has zero refs left —
-//!    discarding probe pushes that produced no valid state.
+//!    discarding probe pushes that produced no valid state. Safe to do
+//!    under the lock acquired in step 2.
 //! 6. Triggers the standard purgatory-release path via
 //!    [`crate::git::sync::process_newly_available_git_data`] so PR events
 //!    already in purgatory waiting for these commits get promoted.
@@ -57,13 +60,19 @@ use crate::nostr::builder::{Nip34WritePolicy, SharedDatabase};
 use crate::purgatory::Purgatory;
 use crate::sync::rejected_index::RejectedEventsIndex;
 
-/// Shared lock map ensuring a single `git init --bare` runs per
-/// `/prs/<submitter>/<identifier>.git` path at a time.
+/// Shared lock map serialising the full `/prs/<submitter>/<identifier>.git`
+/// receive-pack pipeline.
 ///
-/// The lock is only held across the directory-creation + `git init` step.
-/// Once the repo exists, git's own ref locking handles intra-push
-/// concurrency, so simultaneous pushes to the same path proceed in parallel
-/// after init.
+/// The lock is held for the entire request — `git init --bare`,
+/// `git-receive-pack`, per-ref validation, and the post-validation
+/// "remove if zero refs" cleanup — so that two simultaneous pushes to the
+/// same path cannot have one push delete the bare repo while the other is
+/// mid-receive. Pushes to *different* paths still proceed in parallel.
+///
+/// The same lock is taken by code paths outside the receive handler
+/// (purgatory expiry, scoped-placeholder mismatch handling) before they
+/// inspect or delete the bare repo, so all callers serialise against
+/// in-flight pushes.
 pub type RepoInitLocks = Arc<DashMap<PathBuf, Arc<Mutex<()>>>>;
 
 /// Create a fresh, empty [`RepoInitLocks`] for use as an [`HttpService`]
@@ -126,15 +135,25 @@ pub async fn handle_prs_receive_pack(
         }
     }
 
-    // 2. Create the bare repo on demand under a per-path mutex. Only the
-    //    init step is serialised; the push itself relies on git's ref
-    //    locking.
+    // 2. Acquire the per-path lock for the rest of the request. The lock
+    //    covers `git init --bare`, `git-receive-pack`, per-ref validation
+    //    and the zero-ref cleanup so a concurrent push to the same
+    //    `(submitter, identifier)` cannot have one push delete the bare
+    //    repo while the other is mid-receive. Different paths still run
+    //    in parallel — the DashMap entry is per `repo_path`.
     let repo_path = prs_repo_path(
         Path::new(git_data_path),
         &prs.submitter.to_hex(),
         &prs.identifier,
     );
-    if let Err(e) = ensure_repo_initialised(&repo_path, &repo_init_locks).await {
+    let path_lock = repo_init_locks
+        .entry(repo_path.clone())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .value()
+        .clone();
+    let _path_guard = path_lock.lock().await;
+
+    if let Err(e) = ensure_repo_initialised(&repo_path).await {
         error!(
             "/prs/ receive-pack: failed to initialise repo at {}: {}",
             repo_path.display(),
@@ -258,17 +277,12 @@ fn invalid_ref_reason(ref_name: &str) -> Option<String> {
     None
 }
 
-/// Acquire the per-path init mutex, then `mkdir -p` the parent and
-/// `git init --bare --initial-branch=main --quiet` into `repo_path` if it
-/// does not already exist.
-async fn ensure_repo_initialised(repo_path: &Path, locks: &RepoInitLocks) -> Result<(), GitError> {
-    let lock = locks
-        .entry(repo_path.to_path_buf())
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .value()
-        .clone();
-    let _guard = lock.lock().await;
-
+/// `mkdir -p` the parent and `git init --bare --initial-branch=main
+/// --quiet` into `repo_path` if it does not already exist.
+///
+/// The caller must hold the per-path lock from [`RepoInitLocks`] for
+/// `repo_path` before invoking this function.
+async fn ensure_repo_initialised(repo_path: &Path) -> Result<(), GitError> {
     if repo_path.exists() {
         return Ok(());
     }
