@@ -9,9 +9,9 @@
 //! - [`Nip11Tests`] - NIP-11 advertisement of GRASP-06 capability
 //! - [`EventAcceptanceTests`] - PR/PR-Update event-acceptance relaxation
 //!   (06.md lines 21–24)
-//!
-//! Additional suites for mirroring will be added as the implementation
-//! lands.
+//! - [`MirroringTests`] - cross-service mirror: `/prs/` → announced repo
+//!   (forward), and announced repo ↛ `/prs/` (reverse must not fire).
+//!   Design-doc derived.
 //!
 //! ## Shared fixtures
 //!
@@ -37,11 +37,13 @@
 
 pub mod event_acceptance;
 pub mod fixtures;
+pub mod mirroring;
 pub mod nip11;
 pub mod prs_endpoint;
 pub mod spec_requirements;
 
 pub use event_acceptance::EventAcceptanceTests;
+pub use mirroring::MirroringTests;
 pub use nip11::Nip11Tests;
 pub use prs_endpoint::PrsEndpointTests;
 pub use spec_requirements::{SpecRef, GRASP_06_COMMIT_ID};
@@ -111,6 +113,11 @@ impl Grasp06Tests {
                 )
                 .await,
             );
+            // Cross-service mirror — design-doc derived contract. Forward
+            // direction (test 7) verifies /prs/ → announced repo. Reverse
+            // direction (test 8) verifies the inverse must NOT mirror.
+            results.add(MirroringTests::test_prs_push_mirrors_to_announced_repo(client).await);
+            results.add(MirroringTests::test_standard_push_does_not_mirror_to_prs(client).await);
         } else {
             // (3b) Visible skipped stubs — same SpecRef and requirement text
             //      as the real tests, so they show up in the report under the
@@ -173,6 +180,31 @@ impl Grasp06Tests {
                     SpecRef::Grasp06RelaxRequiresCloneTag,
                     "MUST NOT relax PR acceptance when the event's clone tag does not name \
                      this relay's /prs/<signer-npub>/<identifier>.git endpoint",
+                )
+                .skip(reason),
+            );
+            // Mirror tests are also skipped when GRASP-06 isn't advertised.
+            // The forward direction (test 7) cannot fire without the
+            // feature. The reverse direction (test 8) would pass trivially
+            // — a non-existent /prs/ ENDPOINT is necessarily an absent
+            // mirror — but that says nothing about whether the
+            // implementation correctly DECLINES to mirror in reverse once
+            // /prs/ exists. Skipping keeps the report honest.
+            results.add(
+                TestResult::new(
+                    "prs_push_mirrors_to_announced_repo",
+                    SpecRef::Grasp06MirrorToAnnouncedRepo,
+                    "refs accepted via /prs/ MUST be mirrored into any matching \
+                     accepted-announcement repos on this relay",
+                )
+                .skip(reason),
+            );
+            results.add(
+                TestResult::new(
+                    "standard_push_does_not_mirror_to_prs",
+                    SpecRef::Grasp06NoReverseMirror,
+                    "the reverse direction MUST NOT mirror: a push to /<npub>/<id>.git must \
+                     not appear under /prs/",
                 )
                 .skip(reason),
             );

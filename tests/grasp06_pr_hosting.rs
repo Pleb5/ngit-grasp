@@ -240,3 +240,46 @@ isolated_test_with_grasp_06!(
     test_pr_event_rejected_when_clone_tag_does_not_name_prs_endpoint_with_grasp_06,
     EventAcceptanceTests::test_pr_event_rejected_when_clone_tag_does_not_name_prs_endpoint
 );
+
+// =============================================================================
+// Test 8: /prs/ push MUST be mirrored into the announced repo
+// =============================================================================
+//
+// Spec: design-doc "Cross-service mirror" — refs accepted via /prs/<...>/<id>.git
+// MUST be mirrored into any accepted-announcement repos on this relay whose
+// coord appears in the PR event's `a` tag. The mirror is what makes a
+// contributor PR submitted via /prs/ visible at the maintainer's URL.
+//
+// Wired only as `with_grasp_06`. Pre-implementation this FAILS — the /prs/
+// push gets 404 so there's nothing to mirror. Once Phases 4 + 7 land
+// (receive-pack + mirror hook), the test goes green.
+
+isolated_test_with_grasp_06!(
+    test_prs_push_mirrors_to_announced_repo_with_grasp_06,
+    MirroringTests::test_prs_push_mirrors_to_announced_repo
+);
+
+// =============================================================================
+// Test 9: Standard endpoint push MUST NOT mirror into /prs/
+// =============================================================================
+//
+// Spec: design-doc "Cross-service mirror", reverse direction. /prs/ is a
+// contributor-submission side-channel; it must never carry refs that the
+// maintainer pushed to their own standard `<npub>/<id>.git` endpoint.
+//
+// Reuses the existing PREvent2Served fixture — that fixture already drives
+// the full standard-endpoint PR cycle (event published, refs/nostr/<id>
+// pushed via `<owner>/<repo-id>.git`, event served). All this test does on
+// top of that is `git ls-remote` the contributor's /prs/ URL with a
+// refname filter and assert empty.
+//
+// Wired only as `with_grasp_06`. Pre-implementation this can't make its
+// assertion (the /prs/ endpoint 404s) and reports a setup failure with a
+// pointer to the 06.md line 13 endpoint-reachability requirement. Once
+// /prs/ becomes reachable, the test goes green and stays green as long as
+// no one adds a reverse-mirror branch.
+
+isolated_test_with_grasp_06!(
+    test_standard_push_does_not_mirror_to_prs_with_grasp_06,
+    MirroringTests::test_standard_push_does_not_mirror_to_prs
+);
