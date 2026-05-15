@@ -10,6 +10,7 @@ use crate::specs::grasp06::SpecRef;
 use crate::{AuditClient, TestContext, TestResult};
 use nostr_sdk::ToBech32;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub struct PrsEndpointTests;
@@ -218,4 +219,281 @@ impl PrsEndpointTests {
         })
         .await
     }
+
+    /// Test: a `git push` of `refs/nostr/<event-id>` to a fresh
+    /// `/prs/<npub>/<id>.git` path MUST succeed.
+    ///
+    /// Spec: 06.md line 15 — "MUST accept pushes to `refs/nostr/<event-id>`."
+    ///
+    /// Setup is intentionally minimal:
+    /// - Fresh contributor keys → `<npub>` for the URL.
+    /// - Random UUID `<id>` for the URL (guarantees a path with no prior state).
+    /// - Random 64-hex string for `<event-id>` (event-id shape — no matching
+    ///   event is required for the push itself to be accepted; the spec's
+    ///   20-minute "delete if no matching event" rule is a separate SHOULD and
+    ///   is out of scope for this audit).
+    /// - A throwaway local git repo with a single commit to push.
+    ///
+    /// Pre-implementation this test FAILS (TDD red) — the relay has no /prs/
+    /// route, so the push gets 404. Once Phase 3+4 land (routing + receive
+    /// handler with the ref-name validator), this turns green.
+    pub async fn test_prs_push_refs_nostr_event_id_accepted(client: &AuditClient) -> TestResult {
+        TestResult::new(
+            "prs_push_refs_nostr_event_id_accepted",
+            SpecRef::Grasp06AcceptRefsNostrPush,
+            "MUST accept pushes to refs/nostr/<event-id> on /prs/<npub>/<id>.git",
+        )
+        .run(|| async {
+            // 1. Resolve the HTTP base URL.
+            let ws_url = client
+                .relay_url()
+                .await
+                .map_err(|e| format!("Failed to get relay URL: {}", e))?;
+            let http_url = AuditClient::ws_to_http_url(&ws_url)
+                .map_err(|e| format!("Failed to convert WebSocket URL to HTTP: {}", e))?;
+
+            // 2. Build the /prs/ URL. Fresh random keys + UUID guarantee an
+            //    empty path on the relay.
+            let prs_url = build_fresh_prs_url(&http_url)?;
+
+            // 3. Build a local repo with one commit to push. The commit's
+            //    content doesn't matter — only the ref name being pushed to.
+            let workspace = LocalWorkspace::init()?;
+
+            // 4. Synthesize an event-id-shaped string: 64-char lower hex.
+            //    Using a fresh pubkey's hex form is a convenient way to get
+            //    64-hex without pulling in a `rand` dep. No matching event
+            //    will ever exist; that's fine — the spec's contract here is
+            //    push acceptance, not purgatory release.
+            let event_id_hex = nostr_sdk::Keys::generate().public_key().to_hex();
+            let refname = format!("refs/nostr/{}", event_id_hex);
+
+            // 5. Push. Success means: relay routes /prs/, accepts our ref
+            //    name, runs git-receive-pack, and writes the ref.
+            let push_output = git_push(&workspace.path, &prs_url, &refname);
+
+            // Workspace cleans itself on drop, but we want to format any
+            // error before the drop runs to keep messages readable.
+            match push_output {
+                Ok(out) if out.status.success() => Ok(()),
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    Err(format!(
+                        "git push HEAD:{} to {} failed (exit {}): {}",
+                        refname,
+                        prs_url,
+                        out.status.code().unwrap_or(-1),
+                        stderr.trim()
+                    ))
+                }
+                Err(e) => Err(format!("Failed to execute git push: {}", e)),
+            }
+        })
+        .await
+    }
+
+    /// Test: pushes to ref namespaces other than `refs/nostr/<64-hex-event-id>`
+    /// MUST be rejected.
+    ///
+    /// Spec: 06.md line 15 — "MUST reject pushes to any other ref namespace."
+    /// Implementation plan Phase 4 clarifies that the validator requires
+    /// `refs/nostr/<64-hex>`, so non-hex values under `refs/nostr/*` are also
+    /// "other ref namespace" for the purposes of this contract.
+    ///
+    /// Two sub-assertions exercised against fresh /prs/ paths each (so a
+    /// rejected push to one URL can't possibly affect the other):
+    /// - `refs/heads/main` — wrong top-level namespace.
+    /// - `refs/nostr/<not-64-hex>` — right top-level namespace but invalid
+    ///   event-id shape (clearly non-hex, clearly wrong length).
+    ///
+    /// ## Why a "not found" stderr is treated as a test failure
+    ///
+    /// Spec line 13 requires that any well-formed `/prs/<npub>/<id>.git` path
+    /// respond as an empty bare repo (i.e. the endpoint must be reachable).
+    /// If a push gets a 404, the endpoint doesn't exist — the rejection is
+    /// trivial and tells us nothing about the ref-name validator. To stay
+    /// useful as TDD red pre-implementation AND as a regression guard
+    /// post-implementation, the test distinguishes:
+    /// - push fails with HTTP 404 ("repository ... not found") → **test
+    ///   fails** with "endpoint not implemented".
+    /// - push fails any other way (typically ERR pkt-line from
+    ///   git-receive-pack) → **test passes**: rejection is from the
+    ///   validator, which is what the spec requires.
+    pub async fn test_prs_push_other_refs_rejected(client: &AuditClient) -> TestResult {
+        TestResult::new(
+            "prs_push_other_refs_rejected",
+            SpecRef::Grasp06RejectNonNostrRefs,
+            "MUST reject pushes to anything other than refs/nostr/<64-hex-event-id> \
+             on /prs/<npub>/<id>.git",
+        )
+        .run(|| async {
+            // 1. Resolve the HTTP base URL once — reused for both sub-pushes.
+            let ws_url = client
+                .relay_url()
+                .await
+                .map_err(|e| format!("Failed to get relay URL: {}", e))?;
+            let http_url = AuditClient::ws_to_http_url(&ws_url)
+                .map_err(|e| format!("Failed to convert WebSocket URL to HTTP: {}", e))?;
+
+            // 2. One local repo with one commit is enough — `git push`
+            //    accepts the destination URL per invocation, so we can drive
+            //    both sub-cases from the same workspace.
+            let workspace = LocalWorkspace::init()?;
+
+            // Sub-case (a): refs/heads/main — wrong top-level namespace.
+            //   Fresh /prs/ URL so the path can't have any prior state from
+            //   earlier tests in the same run.
+            let prs_url_a = build_fresh_prs_url(&http_url)?;
+            let refname_a = "refs/heads/main".to_string();
+            check_push_rejected_not_404(&workspace.path, &prs_url_a, &refname_a)?;
+
+            // Sub-case (b): refs/nostr/<not-hex> — right top-level prefix,
+            //   wrong event-id shape. Non-hex characters and wrong length.
+            let prs_url_b = build_fresh_prs_url(&http_url)?;
+            let refname_b = "refs/nostr/not-a-valid-event-id".to_string();
+            check_push_rejected_not_404(&workspace.path, &prs_url_b, &refname_b)?;
+
+            Ok(())
+        })
+        .await
+    }
+}
+
+// =============================================================================
+// Helpers (test-local — kept here rather than promoted to the audit lib until
+// a second consumer wants them).
+// =============================================================================
+
+/// Build a fresh, guaranteed-unused `/prs/<npub>/<id>.git` URL on `http_url`.
+///
+/// Fresh random keys + UUID ensure the path has no prior state and no
+/// implementation could have a repo there by accident.
+fn build_fresh_prs_url(http_url: &str) -> Result<String, String> {
+    let probe_keys = nostr_sdk::Keys::generate();
+    let probe_npub = probe_keys
+        .public_key()
+        .to_bech32()
+        .map_err(|e| format!("Failed to bech32-encode probe npub: {}", e))?;
+    let probe_id = format!("audit-probe-{}", uuid::Uuid::new_v4());
+    Ok(format!(
+        "{}/prs/{}/{}.git",
+        http_url.trim_end_matches('/'),
+        probe_npub,
+        probe_id
+    ))
+}
+
+/// A throwaway local git repo with one commit, suitable as the source of
+/// a `git push` to a /prs/ endpoint under test.
+///
+/// All git configuration is set locally (`-c user.name=...`) rather than
+/// through global config, so the test never touches the running user's
+/// `~/.gitconfig`. Drops the directory on `Drop`.
+struct LocalWorkspace {
+    path: PathBuf,
+}
+
+impl LocalWorkspace {
+    fn init() -> Result<Self, String> {
+        let path = std::env::temp_dir().join(format!("grasp06-prs-push-{}", uuid::Uuid::new_v4()));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).map_err(|e| format!("Failed to create temp dir: {}", e))?;
+
+        // git init with a fixed initial branch so behaviour matches across
+        // host git versions (some default to `master`, some to `main`).
+        run_git(&path, &["init", "--initial-branch=main"])?;
+
+        // Local-only identity — does not touch global config.
+        run_git(&path, &["config", "user.email", "audit@grasp-audit.local"])?;
+        run_git(&path, &["config", "user.name", "GRASP Audit"])?;
+        // Disable GPG signing for hermetic behaviour even if the host has
+        // commit.gpgsign=true in global config.
+        run_git(&path, &["config", "commit.gpgsign", "false"])?;
+
+        // One trivial commit. Contents don't matter for push acceptance.
+        fs::write(path.join("README"), "grasp-06 audit push test\n")
+            .map_err(|e| format!("Failed to write README: {}", e))?;
+        run_git(&path, &["add", "README"])?;
+        run_git(&path, &["commit", "-m", "audit"])?;
+
+        Ok(Self { path })
+    }
+}
+
+impl Drop for LocalWorkspace {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Run a `git` command in `cwd` and require success. Returns the stderr text
+/// on failure so the caller's error message contains the actual git output.
+fn run_git(cwd: &Path, args: &[&str]) -> Result<(), String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|e| format!("Failed to execute git {:?}: {}", args, e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git {:?} failed: {}", args, stderr.trim()));
+    }
+    Ok(())
+}
+
+/// Run `git push <url> HEAD:<refname>` in `cwd`. Does not assert anything
+/// about the exit code — the caller decides whether success or failure is
+/// the spec-correct outcome.
+fn git_push(cwd: &Path, url: &str, refname: &str) -> std::io::Result<std::process::Output> {
+    Command::new("git")
+        .args(["push", url, &format!("HEAD:{}", refname)])
+        .current_dir(cwd)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+}
+
+/// Drive a `git push` and require that it is rejected — but not with a 404.
+///
+/// A 404 means the `/prs/<npub>/<id>.git` endpoint doesn't exist at all,
+/// which is itself a spec violation (line 13 requires the endpoint to be
+/// reachable as an empty bare repo). Treating a 404 as "rejected" would let
+/// this test pass against an unimplemented relay, defeating the purpose.
+///
+/// Spec-correct rejection looks like:
+/// - exit non-zero, AND
+/// - stderr does NOT contain `not found` / `Not Found` / similar 404 hints.
+///
+/// In practice this means the rejection came from `git-receive-pack` on the
+/// server side (typically an `ERR` pkt-line such as
+/// `remote: refusing to push refs/heads/main ...`).
+fn check_push_rejected_not_404(cwd: &Path, url: &str, refname: &str) -> Result<(), String> {
+    let out = git_push(cwd, url, refname)
+        .map_err(|e| format!("Failed to execute git push to {}: {}", url, e))?;
+
+    if out.status.success() {
+        return Err(format!(
+            "Expected push to {} (ref={}) to be REJECTED, but it succeeded: relay accepted \
+             a ref outside `refs/nostr/<event-id>` which violates GRASP-06 06.md line 15",
+            url, refname
+        ));
+    }
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // Match git's two common 404 phrasings. `to_lowercase` keeps it robust to
+    // future git releases tweaking capitalisation; the substrings are stable.
+    let lower = stderr.to_lowercase();
+    if lower.contains("not found") || lower.contains("404") {
+        return Err(format!(
+            "Push to {} (ref={}) failed with a 404 — the /prs/ endpoint is not implemented. \
+             GRASP-06 06.md line 13 requires the endpoint to be reachable as an empty bare \
+             repo, so this test cannot meaningfully assert the line 15 rejection contract. \
+             stderr was: {}",
+            url,
+            refname,
+            stderr.trim()
+        ));
+    }
+
+    Ok(())
 }

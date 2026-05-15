@@ -64,17 +64,24 @@ mod synthetic_lines {
 
 impl SpecRef {
     /// Get the spec reference string in format "GRASP-06:section:line".
+    ///
+    /// When two requirements share a spec line (e.g. 06.md line 15 carries
+    /// BOTH "MUST accept refs/nostr/<event-id>" AND "MUST reject other ref
+    /// namespaces"), they MUST still produce distinct strings here — the
+    /// report renderer keys tests by the full string. Use a `-<sibling>`
+    /// suffix on the section token to disambiguate; [`parse_spec_line`]
+    /// still recovers the integer line from the third component.
     pub fn spec_ref_string(self) -> &'static str {
         match self {
             SpecRef::Grasp06NotAdvertised404 => "GRASP-06:nip-11-discovery:-1",
             SpecRef::Grasp06AdvertisedWhenEnabled => "GRASP-06:nip-11-discovery:-2",
             SpecRef::Grasp06FetchEmptyRepo => "GRASP-06:git-http:13",
-            SpecRef::Grasp06AcceptRefsNostrPush => "GRASP-06:git-http:15",
-            SpecRef::Grasp06RejectNonNostrRefs => "GRASP-06:git-http:15",
+            SpecRef::Grasp06AcceptRefsNostrPush => "GRASP-06:git-http-accept:15",
+            SpecRef::Grasp06RejectNonNostrRefs => "GRASP-06:git-http-reject:15",
             SpecRef::Grasp06RelaxAcceptPrEvent => "GRASP-06:event-acceptance:21",
             SpecRef::Grasp06RelaxRequiresCloneTag => "GRASP-06:event-acceptance:23",
-            SpecRef::Grasp06MirrorToAnnouncedRepo => "GRASP-06:mirror:design",
-            SpecRef::Grasp06NoReverseMirror => "GRASP-06:mirror:design",
+            SpecRef::Grasp06MirrorToAnnouncedRepo => "GRASP-06:mirror-forward:design",
+            SpecRef::Grasp06NoReverseMirror => "GRASP-06:mirror-reverse:design",
         }
     }
 }

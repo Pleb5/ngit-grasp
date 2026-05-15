@@ -144,3 +144,45 @@ isolated_test_with_grasp_06!(
     test_prs_fetch_unknown_path_serves_empty_repo_with_grasp_06,
     PrsEndpointTests::test_prs_fetch_unknown_path_serves_empty_repo
 );
+
+// =============================================================================
+// Test 4: /prs/ MUST accept pushes to refs/nostr/<event-id>
+// =============================================================================
+//
+// Spec: GRASP-06 06.md line 15
+//
+// Contract: a `git push` of refs/nostr/<event-id> to /prs/<npub>/<id>.git
+// MUST succeed, even when there is no prior state on the path and no matching
+// PR/PR-Update event in the relay's DB. (Whether the ref later gets GC'd by
+// the spec's 20-minute SHOULD is out of scope here — only the push acceptance
+// contract is asserted.)
+//
+// Wired only as `with_grasp_06`. Pre-implementation this FAILS — the relay
+// has no /prs/ receive-pack handler, so the push gets 404. Once Phase 3+4
+// land (routing + receive handler) it goes green.
+
+isolated_test_with_grasp_06!(
+    test_prs_push_refs_nostr_event_id_accepted_with_grasp_06,
+    PrsEndpointTests::test_prs_push_refs_nostr_event_id_accepted
+);
+
+// =============================================================================
+// Test 5: /prs/ MUST reject pushes to anything else
+// =============================================================================
+//
+// Spec: GRASP-06 06.md line 15
+//
+// Contract: pushes to ref names that don't match refs/nostr/<64-hex-event-id>
+// MUST be rejected. Two sub-assertions inside one test:
+//   - refs/heads/main             (wrong top-level namespace)
+//   - refs/nostr/<not-a-valid-id> (right prefix, wrong event-id shape)
+//
+// Wired only as `with_grasp_06`. Pre-implementation this also FAILS as a 404,
+// but the test stays meaningful once /prs/ exists: it catches a regression
+// where the receive handler exists but the ref-name validator is missing or
+// over-permissive.
+
+isolated_test_with_grasp_06!(
+    test_prs_push_other_refs_rejected_with_grasp_06,
+    PrsEndpointTests::test_prs_push_other_refs_rejected
+);

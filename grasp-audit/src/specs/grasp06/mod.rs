@@ -43,7 +43,7 @@ pub use prs_endpoint::PrsEndpointTests;
 pub use spec_requirements::{SpecRef, GRASP_06_COMMIT_ID};
 
 use crate::{AuditClient, AuditResult, TestContext, TestResult};
-use spec_requirements::{get_sections, parse_spec_line, GRASP_06_REQUIREMENTS};
+use spec_requirements::{get_sections, GRASP_06_REQUIREMENTS};
 use std::collections::BTreeMap;
 
 // ANSI colour codes — duplicated locally (same constants as result.rs) rather
@@ -93,6 +93,8 @@ impl Grasp06Tests {
             results.add(Nip11Tests::test_nip11_advertises_grasp_06_when_enabled(client).await);
             results
                 .add(PrsEndpointTests::test_prs_fetch_unknown_path_serves_empty_repo(client).await);
+            results.add(PrsEndpointTests::test_prs_push_refs_nostr_event_id_accepted(client).await);
+            results.add(PrsEndpointTests::test_prs_push_other_refs_rejected(client).await);
         } else {
             // (3b) Visible skipped stubs — same SpecRef and requirement text
             //      as the real tests, so they show up in the report under the
@@ -112,6 +114,23 @@ impl Grasp06Tests {
                     SpecRef::Grasp06FetchEmptyRepo,
                     "MUST serve empty bare repo on fetch for any well-formed /prs/ path \
                      until refs/nostr/<event-id> has been accepted",
+                )
+                .skip(reason),
+            );
+            results.add(
+                TestResult::new(
+                    "prs_push_refs_nostr_event_id_accepted",
+                    SpecRef::Grasp06AcceptRefsNostrPush,
+                    "MUST accept pushes to refs/nostr/<event-id> on /prs/<npub>/<id>.git",
+                )
+                .skip(reason),
+            );
+            results.add(
+                TestResult::new(
+                    "prs_push_other_refs_rejected",
+                    SpecRef::Grasp06RejectNonNostrRefs,
+                    "MUST reject pushes to anything other than refs/nostr/<64-hex-event-id> \
+                     on /prs/<npub>/<id>.git",
                 )
                 .skip(reason),
             );
@@ -145,13 +164,28 @@ impl Grasp06Tests {
             BOLD, RESET
         );
 
-        // Group tests by spec line, ignoring any non-GRASP-06 spec refs.
-        let mut tests_by_line: BTreeMap<i32, Vec<&TestResult>> = BTreeMap::new();
+        // Group tests by their full spec_ref string, not just by line.
+        //
+        // Two GRASP-06 requirements can legitimately share a spec line — for
+        // example 06.md line 15 carries both "MUST accept refs/nostr/<event-id>"
+        // and "MUST reject other ref namespaces". Grouping by line would
+        // duplicate tests under every same-line requirement, which is
+        // misleading. Grouping by the full spec_ref string matches each test
+        // 1:1 against its declared requirement; same-line siblings get
+        // disambiguated via the section component (see
+        // [`SpecRef::spec_ref_string`]).
+        //
+        // "Is this a GRASP-06 ref?" is just a prefix check — we don't need
+        // [`parse_spec_line`] to succeed, since some legitimate refs (mirror
+        // requirements) use synthetic non-numeric "line" tokens like
+        // `"design"`.
+        let mut tests_by_ref: BTreeMap<&str, Vec<&TestResult>> = BTreeMap::new();
         let mut unknown_refs: Vec<&TestResult> = Vec::new();
         for r in &results.results {
-            match parse_spec_line(&r.spec_ref) {
-                Some(line) => tests_by_line.entry(line).or_default().push(r),
-                None => unknown_refs.push(r),
+            if r.spec_ref.starts_with("GRASP-06:") {
+                tests_by_ref.entry(r.spec_ref.as_str()).or_default().push(r);
+            } else {
+                unknown_refs.push(r);
             }
         }
 
@@ -169,7 +203,7 @@ impl Grasp06Tests {
                 println!();
                 println!("{}📘 {}{}", BLUE, req.text, RESET);
 
-                if let Some(tests) = tests_by_line.get(&req.line) {
+                if let Some(tests) = tests_by_ref.get(req.spec_ref.spec_ref_string()) {
                     tested_requirements += 1;
                     for test in tests {
                         render_test(test);
