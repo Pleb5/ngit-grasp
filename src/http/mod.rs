@@ -166,7 +166,6 @@ impl Service<Request<Incoming>> for HttpService {
 
         // Check for Git HTTP requests first
         if let Some((npub, identifier, subpath)) = git::parse_git_url(&path) {
-
             // Extract Git-Protocol header for protocol v2 support
             let git_protocol = req
                 .headers()

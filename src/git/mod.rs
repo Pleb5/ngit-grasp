@@ -466,8 +466,16 @@ pub fn percent_encode(s: &str) -> String {
             }
             _ => {
                 out.push('%');
-                out.push(char::from_digit((byte >> 4) as u32, 16).unwrap().to_ascii_uppercase());
-                out.push(char::from_digit((byte & 0xf) as u32, 16).unwrap().to_ascii_uppercase());
+                out.push(
+                    char::from_digit((byte >> 4) as u32, 16)
+                        .unwrap()
+                        .to_ascii_uppercase(),
+                );
+                out.push(
+                    char::from_digit((byte & 0xf) as u32, 16)
+                        .unwrap()
+                        .to_ascii_uppercase(),
+                );
             }
         }
     }
@@ -700,7 +708,10 @@ mod tests {
         assert_eq!(percent_encode("my_repo"), "my_repo");
         assert_eq!(percent_encode("repo123"), "repo123");
         assert_eq!(percent_encode("hello world"), "hello%20world");
-        assert_eq!(percent_encode("kuboslopp by Shakespeare"), "kuboslopp%20by%20Shakespeare");
+        assert_eq!(
+            percent_encode("kuboslopp by Shakespeare"),
+            "kuboslopp%20by%20Shakespeare"
+        );
     }
 
     #[test]
@@ -712,7 +723,13 @@ mod tests {
 
     #[test]
     fn test_percent_encode_decode_roundtrip() {
-        let identifiers = ["my-repo", "my repo", "kuboslopp by Shakespeare", "a/b", "foo\0bar"];
+        let identifiers = [
+            "my-repo",
+            "my repo",
+            "kuboslopp by Shakespeare",
+            "a/b",
+            "foo\0bar",
+        ];
         for id in &identifiers {
             assert_eq!(percent_decode(&percent_encode(id)), *id);
         }

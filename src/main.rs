@@ -8,8 +8,7 @@ use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 use ngit_grasp::{
-    audit_cleanup,
-    cleanup_empty_repos,
+    audit_cleanup, cleanup_empty_repos,
     config::{Config, DatabaseBackend},
     git, http,
     metrics::Metrics,
@@ -56,9 +55,7 @@ async fn main() -> Result<()> {
     }
 
     match Cli::parse_from(args) {
-        Cli::CleanupEmptyRepos(cleanup_args) => {
-            cleanup_empty_repos::run(&cleanup_args).await
-        }
+        Cli::CleanupEmptyRepos(cleanup_args) => cleanup_empty_repos::run(&cleanup_args).await,
         Cli::Serve(mut config) => {
             // Finish initialising the Config (load relay owner key if not provided).
             if config.relay_owner_nsec.is_none() {
@@ -73,7 +70,6 @@ async fn main() -> Result<()> {
 }
 
 async fn run_relay(config: Config) -> Result<()> {
-
     // Initialize tracing with configured log level
     let subscriber = FmtSubscriber::builder()
         .with_env_filter(EnvFilter::new(&config.log_level))

@@ -393,10 +393,7 @@ pub fn validate_identifier(identifier: &str) -> Result<(), String> {
             ));
         }
         if ch == '\0' {
-            return Err(format!(
-                "identifier '{}' contains a null byte",
-                identifier
-            ));
+            return Err(format!("identifier '{}' contains a null byte", identifier));
         }
     }
     Ok(())
