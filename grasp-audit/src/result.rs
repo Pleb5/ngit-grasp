@@ -1,8 +1,14 @@
 //! Test result types
 
-use crate::specs::grasp01::{get_sections, SpecRef, GRASP_01_REQUIREMENTS, GRASP_COMMIT_ID};
+use crate::specs::grasp01::{get_sections, GRASP_01_REQUIREMENTS, GRASP_COMMIT_ID};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
+
+/// Trait implemented by per-spec SpecRef enums so `TestResult::new` can accept
+/// requirements from any GRASP spec module (grasp01, grasp06, ...).
+pub trait SpecRefStr {
+    fn spec_ref_string(&self) -> &'static str;
+}
 
 // ANSI color codes
 const GREEN: &str = "\x1b[1;92m"; // Bold bright green - ANSI standard for high visibility
@@ -72,9 +78,10 @@ impl TestResult {
     /// # Arguments
     /// * `name` - Test name identifier
     /// * `spec_ref` - Reference to the spec requirement being tested
+    ///   (any type implementing `SpecRefStr`, e.g. `grasp01::SpecRef`)
     /// * `requirement` - Human-readable description of what this test validates
     ///   (can be more specific than the general spec text)
-    pub fn new(name: &str, spec_ref: SpecRef, requirement: &str) -> Self {
+    pub fn new<R: SpecRefStr>(name: &str, spec_ref: R, requirement: &str) -> Self {
         TestResult {
             name: name.to_string(),
             spec_ref: spec_ref.spec_ref_string().to_string(),
@@ -296,6 +303,7 @@ impl AuditResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::specs::grasp01::SpecRef;
 
     #[tokio::test]
     async fn test_result_pass() {

@@ -92,6 +92,12 @@ impl SpecRef {
     }
 }
 
+impl crate::result::SpecRefStr for SpecRef {
+    fn spec_ref_string(&self) -> &'static str {
+        SpecRef::spec_ref_string(*self)
+    }
+}
+
 /// All GRASP-01 specification requirements
 pub const GRASP_01_REQUIREMENTS: &[SpecRequirement] = &[
     // Nostr Relay section
