@@ -449,6 +449,20 @@ pub struct Config {
     #[arg(long, env = "NGIT_ARCHIVE_READ_ONLY")]
     pub archive_read_only: Option<bool>,
 
+    /// Enable GRASP-06 contributor PR submission endpoint at /prs/<npub>/<identifier>.git
+    ///
+    /// When enabled, the relay exposes an unauthenticated PR submission endpoint
+    /// at `/prs/<npub>/<identifier>.git` that accepts pushes of `refs/nostr/<event-id>`
+    /// from any contributor. Security relies on the signed PR/PR-Update events
+    /// the refs reference, not on HTTP-level auth.
+    ///
+    /// Default: false. This is an opt-in feature that adds an unauthenticated
+    /// write surface; operators must understand the tradeoffs (see GRASP-06 spec
+    /// and `docs/explanation/grasp-06-contributor-pr-submission.md`) before
+    /// enabling it.
+    #[arg(long, env = "NGIT_GRASP06_ENABLE", default_value_t = false)]
+    pub grasp06_enable: bool,
+
     /// Repository whitelist: comma-separated list of npub/identifier/npub/identifier entries
     /// Formats: "npub1...", "npub1.../identifier", "identifier"
     /// When set, only announcements matching the whitelist AND listing the service are accepted
@@ -751,6 +765,7 @@ impl Config {
             archive_whitelist: String::new(),
             archive_grasp_services: String::new(),
             archive_read_only: None,
+            grasp06_enable: false,
             repository_whitelist: String::new(),
             repository_blacklist: String::new(),
             event_blacklist: String::new(),

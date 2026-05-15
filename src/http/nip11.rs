@@ -67,6 +67,9 @@ impl RelayInformationDocument {
             supported_grasps.push("GRASP-05".to_string());
         }
         supported_grasps.push("GRASP-02".to_string());
+        if config.grasp06_enable {
+            supported_grasps.push("GRASP-06".to_string());
+        }
 
         // Build curation field for archive read-only mode or repository whitelist
         let repository_config = config.repository_config();
@@ -280,5 +283,30 @@ mod tests {
         let curation = doc.curation.unwrap();
         assert!(curation.contains("whitelisted repositories"));
         assert!(curation.contains("with or without service listing"));
+    }
+
+    #[test]
+    fn test_nip11_grasp_06_disabled_by_default() {
+        let config = Config::for_testing();
+        let doc = RelayInformationDocument::from_config(&config);
+
+        // GRASP-06 must not be advertised when the flag is off.
+        assert!(!doc.supported_grasps.iter().any(|g| g == "GRASP-06"));
+    }
+
+    #[test]
+    fn test_nip11_advertises_grasp_06_when_enabled() {
+        let mut config = Config::for_testing();
+        config.grasp06_enable = true;
+
+        let doc = RelayInformationDocument::from_config(&config);
+
+        // GRASP-06 must be advertised when the flag is on, alongside the
+        // standard GRASP-01 / GRASP-02 entries. Order is "GRASP-06 last"
+        // to match the insertion order in from_config().
+        assert_eq!(
+            doc.supported_grasps,
+            vec!["GRASP-01", "GRASP-02", "GRASP-06"]
+        );
     }
 }

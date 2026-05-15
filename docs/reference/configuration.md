@@ -720,6 +720,51 @@ NGIT_ARCHIVE_READ_ONLY=true  # Default
 
 ---
 
+### GRASP-06 Contributor PR Submission
+
+These options control the optional `/prs/<npub>/<identifier>.git` contributor pull-request submission endpoint per the [GRASP-06 specification](https://github.com/DanConwayDev/grasp/blob/main/06.md).
+
+#### `NGIT_GRASP06_ENABLE`
+
+**Description:** Enable the GRASP-06 contributor PR submission endpoint at `/prs/<npub>/<identifier>.git`  
+**Type:** Boolean  
+**Default:** `false`  
+**Required:** No
+
+**Examples:**
+
+```bash
+# Enable GRASP-06 (opt-in)
+NGIT_GRASP06_ENABLE=true
+
+# Disable (default)
+NGIT_GRASP06_ENABLE=false
+```
+
+**Behavior:**
+
+- When `true`:
+  - `/prs/<npub>/<identifier>.git` accepts unauthenticated pushes of `refs/nostr/<event-id>`
+  - NIP-11 `supported_grasps` includes `"GRASP-06"`
+  - PR / PR-Update events naming this relay's `/prs/` endpoint in their `clone` tag are accepted to purgatory even without a matching accepted repository announcement
+  - Standard `<npub>/<identifier>.git` endpoint behaviour is unchanged
+- When `false` (default):
+  - `/prs/*` returns HTTP 404
+  - Event-acceptance is unchanged (standard GRASP-01 rules apply)
+
+**Security Model:**
+
+The `/prs/` endpoint is intentionally unauthenticated — there is no NIP-98 auth, no allowlist, no quota, and no proof-of-work in v1. Validity is enforced by:
+
+- The signed PR / PR-Update Nostr event the pushed `refs/nostr/<event-id>` references
+- Per-submitter / per-identifier scoping enforced when the event arrives
+- Inline ref-name validation (only `refs/nostr/<64-hex-event-id>` accepted)
+- Periodic cleanup of orphan repositories with zero refs
+
+Operators should review the design tradeoffs in [`docs/explanation/grasp-06-contributor-pr-submission.md`](../explanation/grasp-06-contributor-pr-submission.md) before enabling.
+
+---
+
 ### Repository Whitelist
 
 #### `NGIT_REPOSITORY_WHITELIST`
