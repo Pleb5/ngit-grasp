@@ -21,6 +21,7 @@
 //! Cross-service mirroring into matching announced repos is not yet
 //! implemented.
 
+pub mod cleanup;
 pub mod endpoint;
 pub mod fetch;
 pub mod paths;

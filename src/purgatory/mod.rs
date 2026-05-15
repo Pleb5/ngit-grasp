@@ -37,8 +37,12 @@ use std::time::{Duration, Instant, SystemTime};
 
 pub use sync::SyncQueueEntry;
 
-/// Default expiry duration for purgatory entries (30 minutes)
-const DEFAULT_EXPIRY: Duration = Duration::from_secs(1800);
+/// Default expiry duration for purgatory entries (30 minutes).
+///
+/// Exposed for periodic cleanup tasks (see [`crate::grasp06::cleanup`]) that
+/// must use the same window when deciding whether a freshly-touched `/prs/`
+/// repo is still potentially in-flight versus safe to garbage-collect.
+pub const DEFAULT_EXPIRY: Duration = Duration::from_secs(1800);
 
 /// Extended expiry for soft-expired announcements (24 hours).
 ///
@@ -547,6 +551,21 @@ impl Purgatory {
                 Some(entry.commit.clone())
             } else {
                 None
+            }
+        })
+    }
+
+    /// Return true if any PR purgatory entry (placeholder or event-bearing)
+    /// is currently scoped to the GRASP-06 `(submitter, identifier)` tuple.
+    ///
+    /// Used by the periodic `/prs/` sweep to avoid removing a bare repo
+    /// while an in-purgatory entry could still bind to it.
+    pub fn has_prs_scope(&self, submitter: &PublicKey, identifier: &str) -> bool {
+        self.pr_events.iter().any(|entry| {
+            if let Some(scope) = &entry.value().prs_scope {
+                scope.submitter == *submitter && scope.identifier == identifier
+            } else {
+                false
             }
         })
     }
