@@ -108,6 +108,12 @@ impl Grasp06Tests {
                 .await,
             );
             results.add(
+                EventAcceptanceTests::test_pr_event_accepted_via_relaxation_is_held_in_purgatory(
+                    client,
+                )
+                .await,
+            );
+            results.add(
                 EventAcceptanceTests::test_pr_event_rejected_when_clone_tag_does_not_name_prs_endpoint(
                     client,
                 )
@@ -171,6 +177,15 @@ impl Grasp06Tests {
                     SpecRef::Grasp06RelaxAcceptPrEvent,
                     "MUST accept PR event for un-announced coord when its clone tag names \
                      this relay's /prs/<signer-npub>/<identifier>.git endpoint",
+                )
+                .skip(reason),
+            );
+            results.add(
+                TestResult::new(
+                    "pr_event_accepted_via_relaxation_is_held_in_purgatory",
+                    SpecRef::Grasp06RelaxAcceptPrEvent,
+                    "PR event accepted under the GRASP-06 relaxation MUST be held in purgatory \
+                     until matching git data arrives",
                 )
                 .skip(reason),
             );

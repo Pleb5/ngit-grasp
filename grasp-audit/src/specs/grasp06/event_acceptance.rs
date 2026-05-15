@@ -135,6 +135,124 @@ impl EventAcceptanceTests {
         .await
     }
 
+    /// Test: an orphan PR event accepted via the GRASP-06 relaxation MUST be
+    /// placed in purgatory and MUST NOT be broadcast until matching git data
+    /// arrives.
+    ///
+    /// Spec: 06.md lines 21–24 say "MUST accept" — accept here means "accept
+    /// as the standard PR pipeline would". GRASP-01 line 22 (the purgatory
+    /// rule) then governs visibility: an accepted PR event with no matching
+    /// git data is held in purgatory, not served, until either the matching
+    /// `refs/nostr/<event-id>` push arrives or the 30-minute TTL expires.
+    ///
+    /// ## Why this test
+    ///
+    /// `test_pr_event_accepted_when_clone_tag_names_prs_endpoint` already
+    /// pins the acceptance contract but discards the purgatory bit returned
+    /// by `send_event_and_note_purgatory`. That leaves a gap: a future bug
+    /// that accidentally short-circuits the relaxation into
+    /// `WritePolicyResult::Accept` (immediate serve) would still pass the
+    /// "accept" test but quietly violate the purgatory contract — leaking
+    /// the orphan PR event before its commit object exists anywhere on
+    /// this relay. This test closes that gap.
+    ///
+    /// Mirrors the pattern of GRASP-01's
+    /// `test_pr_event_accepted_into_purgatory_and_isnt_served`: send,
+    /// short wait, query by id and assert empty.
+    ///
+    /// ## TDD posture
+    ///
+    /// Pre-implementation this FAILS by rejection (test 5's failure path).
+    /// Once the relaxation lands correctly it turns green and stays green
+    /// as long as the relaxation routes through purgatory rather than
+    /// short-circuiting to accept.
+    pub async fn test_pr_event_accepted_via_relaxation_is_held_in_purgatory(
+        client: &AuditClient,
+    ) -> TestResult {
+        TestResult::new(
+            "pr_event_accepted_via_relaxation_is_held_in_purgatory",
+            SpecRef::Grasp06RelaxAcceptPrEvent,
+            "PR event accepted under the GRASP-06 relaxation MUST be held in purgatory \
+             until matching git data arrives",
+        )
+        .run(|| async {
+            // Setup mirrors test 5 exactly — same shape of orphan PR event
+            // for the same reasons. The only behavioural difference is that
+            // we additionally assert non-broadcast after acceptance.
+            let ws_url = client
+                .relay_url()
+                .await
+                .map_err(|e| format!("Failed to get relay URL: {}", e))?;
+            let http_url = AuditClient::ws_to_http_url(&ws_url)
+                .map_err(|e| format!("Failed to convert WebSocket URL to HTTP: {}", e))?;
+
+            let target_pubkey_hex = Keys::generate().public_key().to_hex();
+            let identifier = format!("audit-grasp06-{}", uuid::Uuid::new_v4());
+            let a_tag_value = format!("30617:{}:{}", target_pubkey_hex, identifier);
+
+            let pr_author_npub = client
+                .pr_author_keys()
+                .public_key()
+                .to_bech32()
+                .map_err(|e| format!("Failed to bech32-encode pr_author npub: {}", e))?;
+            let clone_url = format!(
+                "{}/prs/{}/{}.git",
+                http_url.trim_end_matches('/'),
+                pr_author_npub,
+                identifier
+            );
+
+            let commit_hex = Keys::generate().public_key().to_hex();
+
+            let event = client
+                .event_builder(
+                    Kind::GitPullRequest,
+                    "grasp-06 audit: orphan PR must land in purgatory, not be served",
+                )
+                .tag(Tag::custom(TagKind::custom("a"), vec![a_tag_value]))
+                .tag(Tag::custom(TagKind::custom("c"), vec![commit_hex]))
+                .tag(Tag::custom(TagKind::custom("clone"), vec![clone_url]))
+                .build(client.pr_author_keys())
+                .map_err(|e| format!("Failed to build PR event: {}", e))?;
+            let event_id = event.id;
+
+            // Acceptance is a precondition for this test, not the thing
+            // being asserted — that's test 5's job. If the relay rejects
+            // here, this test cannot make its assertion; surface the cause
+            // rather than silently misreporting.
+            let (_, in_purgatory) =
+                client
+                    .send_event_and_note_purgatory(event)
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "Relay rejected the PR event during test setup (test 5 \
+                         covers the acceptance contract; this test assumes it \
+                         passes). Relay error: {}",
+                            e
+                        )
+                    })?;
+
+            // `send_event_and_note_purgatory` already does a 300ms wait and a
+            // single `is_event_on_relay` probe; trust its result rather than
+            // re-probing.
+            if !in_purgatory {
+                return Err(format!(
+                    "Orphan PR event {} accepted via GRASP-06 relaxation was \
+                     served immediately. The relaxation must route un-announced \
+                     PRs through purgatory (06.md lines 21–24 + GRASP-01 line 22), \
+                     not directly to accept. A common cause is a \
+                     `WritePolicyResult::Accept` short-circuit in the relaxation \
+                     branch.",
+                    event_id
+                ));
+            }
+
+            Ok(())
+        })
+        .await
+    }
+
     /// Test: a PR event for a coord this relay has no announcement for, with
     /// a `clone` tag pointing somewhere OTHER than this relay's `/prs/`
     /// endpoint, MUST remain rejected.

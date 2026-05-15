@@ -212,6 +212,33 @@ isolated_test_with_grasp_06!(
 );
 
 // =============================================================================
+// Test 6b: Relaxation-accepted PR MUST stay in purgatory until git data arrives
+// =============================================================================
+//
+// Spec: GRASP-06 06.md lines 21–24, in combination with GRASP-01 line 22
+// (the purgatory rule).
+//
+// Contract: a PR event accepted under the GRASP-06 relaxation (un-announced
+// coord, clone tag names this relay's /prs/ endpoint) MUST be held in
+// purgatory and MUST NOT be broadcast until the matching `refs/nostr/<id>`
+// push arrives. The acceptance message must be `OK true "purgatory: ..."`,
+// not `OK true` for an immediately served event.
+//
+// Why a separate test from 6: test 6 only asserts the relay returned OK,
+// discarding the served-vs-purgatory bit. A future regression that
+// short-circuited the relaxation to `WritePolicyResult::Accept` would still
+// pass test 6 but quietly leak orphan PR events without their git data.
+// This test guards that boundary.
+//
+// Wired only as `with_grasp_06`. Once the relaxation is in place this is
+// green and stays green as long as the relaxation routes through purgatory.
+
+isolated_test_with_grasp_06!(
+    test_pr_event_accepted_via_relaxation_is_held_in_purgatory_with_grasp_06,
+    EventAcceptanceTests::test_pr_event_accepted_via_relaxation_is_held_in_purgatory
+);
+
+// =============================================================================
 // Test 7: Relaxation MUST NOT apply when clone tag does not name this relay
 // =============================================================================
 //
