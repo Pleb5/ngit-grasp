@@ -7,9 +7,11 @@
 //! - [`PrsEndpointTests`] - `/prs/<npub>/<id>.git` endpoint behaviour
 //!   (discovery gate, empty-repo fetch, push acceptance/rejection)
 //! - [`Nip11Tests`] - NIP-11 advertisement of GRASP-06 capability
+//! - [`EventAcceptanceTests`] - PR/PR-Update event-acceptance relaxation
+//!   (06.md lines 21–24)
 //!
-//! Additional suites for event-acceptance relaxation and mirroring will be
-//! added as the implementation lands.
+//! Additional suites for mirroring will be added as the implementation
+//! lands.
 //!
 //! ## Shared fixtures
 //!
@@ -33,11 +35,13 @@
 //! The CLI prints it separately from the GRASP-01 block (when running
 //! `--spec all`), so each spec family gets its own header and section walk.
 
+pub mod event_acceptance;
 pub mod fixtures;
 pub mod nip11;
 pub mod prs_endpoint;
 pub mod spec_requirements;
 
+pub use event_acceptance::EventAcceptanceTests;
 pub use nip11::Nip11Tests;
 pub use prs_endpoint::PrsEndpointTests;
 pub use spec_requirements::{SpecRef, GRASP_06_COMMIT_ID};
@@ -95,6 +99,18 @@ impl Grasp06Tests {
                 .add(PrsEndpointTests::test_prs_fetch_unknown_path_serves_empty_repo(client).await);
             results.add(PrsEndpointTests::test_prs_push_refs_nostr_event_id_accepted(client).await);
             results.add(PrsEndpointTests::test_prs_push_other_refs_rejected(client).await);
+            results.add(
+                EventAcceptanceTests::test_pr_event_accepted_when_clone_tag_names_prs_endpoint(
+                    client,
+                )
+                .await,
+            );
+            results.add(
+                EventAcceptanceTests::test_pr_event_rejected_when_clone_tag_does_not_name_prs_endpoint(
+                    client,
+                )
+                .await,
+            );
         } else {
             // (3b) Visible skipped stubs — same SpecRef and requirement text
             //      as the real tests, so they show up in the report under the
@@ -131,6 +147,32 @@ impl Grasp06Tests {
                     SpecRef::Grasp06RejectNonNostrRefs,
                     "MUST reject pushes to anything other than refs/nostr/<64-hex-event-id> \
                      on /prs/<npub>/<id>.git",
+                )
+                .skip(reason),
+            );
+            // Event-acceptance tests are also skipped when GRASP-06 isn't
+            // advertised. The "accept" side (test 5) is obvious: the
+            // relaxation cannot fire without the feature. The "reject" side
+            // (test 6) is subtler — a rejection would happen today via the
+            // baseline GRASP-01 PR policy, so the test would pass trivially
+            // and tell us nothing about the GRASP-06 host-check invariant.
+            // Reporting it as skipped keeps the audit honest about what is
+            // and isn't being verified.
+            results.add(
+                TestResult::new(
+                    "pr_event_accepted_when_clone_tag_names_prs_endpoint",
+                    SpecRef::Grasp06RelaxAcceptPrEvent,
+                    "MUST accept PR event for un-announced coord when its clone tag names \
+                     this relay's /prs/<signer-npub>/<identifier>.git endpoint",
+                )
+                .skip(reason),
+            );
+            results.add(
+                TestResult::new(
+                    "pr_event_rejected_when_clone_tag_does_not_name_prs_endpoint",
+                    SpecRef::Grasp06RelaxRequiresCloneTag,
+                    "MUST NOT relax PR acceptance when the event's clone tag does not name \
+                     this relay's /prs/<signer-npub>/<identifier>.git endpoint",
                 )
                 .skip(reason),
             );

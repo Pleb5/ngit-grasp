@@ -186,3 +186,57 @@ isolated_test_with_grasp_06!(
     test_prs_push_other_refs_rejected_with_grasp_06,
     PrsEndpointTests::test_prs_push_other_refs_rejected
 );
+
+// =============================================================================
+// Test 6: PR for un-announced coord MUST be accepted when clone tag names /prs/
+// =============================================================================
+//
+// Spec: GRASP-06 06.md lines 21–24
+//
+// Contract: a PR event (kind 1618) for a coord this relay has NO accepted
+// announcement for MUST be accepted (purgatory or served) when the event
+// carries:
+//   - an `a` tag of the form `30617:<pubkey>:<identifier>`, AND
+//   - a `clone` tag naming this relay's /prs/<signer-npub>/<identifier>.git
+//     endpoint.
+//
+// Wired only as `with_grasp_06`. Pre-implementation this FAILS (TDD red) —
+// the relay's GRASP-01 PR policy rejects PR events without a matching
+// accepted announcement, and the relaxation branch (Phase 6) is not yet
+// implemented. Once that branch lands and the relaxation correctly fires
+// for matching `clone` tags, this turns green.
+
+isolated_test_with_grasp_06!(
+    test_pr_event_accepted_when_clone_tag_names_prs_endpoint_with_grasp_06,
+    EventAcceptanceTests::test_pr_event_accepted_when_clone_tag_names_prs_endpoint
+);
+
+// =============================================================================
+// Test 7: Relaxation MUST NOT apply when clone tag does not name this relay
+// =============================================================================
+//
+// Spec: GRASP-06 06.md lines 23–24
+//
+// Contract: the same un-announced-coord PR event, but with a `clone` tag
+// pointing at a foreign host, MUST remain rejected. The relaxation is gated
+// on the `clone` tag naming this specific relay's /prs/ endpoint — without
+// that check, every GRASP-06 relay would accept every matching PR event,
+// fanning out abuse across the network.
+//
+// Wired only as `with_grasp_06`. Today this test PASSES trivially —
+// GRASP-01's PR policy already rejects PR events without a matching
+// accepted announcement, regardless of clone-tag content. Once Phase 6's
+// relaxation branch lands the test stays green: the relaxation must check
+// the clone tag's host and decline to fire when it doesn't match. If a
+// future change accidentally widens the relaxation, this test will catch
+// it.
+//
+// In the audit CLI report this test is reported as Skipped when GRASP-06
+// isn't advertised: a rejection there can only mean GRASP-01 rejected, not
+// that the GRASP-06 host-check is wired correctly. Only meaningful with
+// the feature enabled.
+
+isolated_test_with_grasp_06!(
+    test_pr_event_rejected_when_clone_tag_does_not_name_prs_endpoint_with_grasp_06,
+    EventAcceptanceTests::test_pr_event_rejected_when_clone_tag_does_not_name_prs_endpoint
+);

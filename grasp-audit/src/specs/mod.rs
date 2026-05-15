@@ -12,4 +12,4 @@ pub use grasp01::{
 };
 
 // Re-export GRASP-06 test structs
-pub use grasp06::{Grasp06Tests, Nip11Tests, PrsEndpointTests};
+pub use grasp06::{EventAcceptanceTests, Grasp06Tests, Nip11Tests, PrsEndpointTests};
