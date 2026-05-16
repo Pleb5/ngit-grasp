@@ -57,8 +57,8 @@ use hyper::body::Bytes;
 use hyper::{Response, StatusCode};
 use nostr_relay_builder::LocalRelay;
 use nostr_sdk::prelude::*;
+use std::sync::Mutex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 use crate::git::authorization::{
@@ -98,6 +98,12 @@ use crate::sync::rejected_index::RejectedEventsIndex;
 /// `in_flight.load() == 0` *and* `list_refs` returns empty while they
 /// hold `mu` — the same mutex that gates `in_flight` updates — so a
 /// repo can never be deleted while a push is mid-receive.
+///
+/// `mu` is a `std::sync::Mutex` (not `tokio::sync::Mutex`) because every
+/// critical section is purely synchronous (git I/O, no `.await`). This
+/// lets the purgatory sweep call `lock()` directly from sync context
+/// instead of `try_lock()`, eliminating the leak-on-contention bug where
+/// a purgatory entry was dropped even when the lock was busy.
 pub struct PrsPathState {
     pub mu: Mutex<()>,
     pub in_flight: AtomicUsize,
@@ -240,8 +246,8 @@ pub async fn handle_prs_receive_pack(
     let state = path_state(&repo_init_locks, &repo_path);
 
     {
-        let _g = state.mu.lock().await;
-        if let Err(e) = ensure_repo_initialised(&repo_path).await {
+        let _g = state.mu.lock().expect("prs path mutex poisoned");
+        if let Err(e) = ensure_repo_initialised(&repo_path) {
             error!(
                 "/prs/ receive-pack: failed to initialise repo at {}: {}",
                 repo_path.display(),
@@ -307,7 +313,7 @@ pub async fn handle_prs_receive_pack(
     //    leak it. Decrements `in_flight`; if no other push is in flight
     //    and the repo has zero refs left, removes the bare directory.
     {
-        let _g = state.mu.lock().await;
+        let _g = state.mu.lock().expect("prs path mutex poisoned");
         state.in_flight.fetch_sub(1, Ordering::Relaxed);
         if state.in_flight.load(Ordering::Relaxed) == 0 {
             if let Ok(refs) = list_refs(&repo_path) {
@@ -400,7 +406,7 @@ fn invalid_ref_reason(ref_name: &str) -> Option<String> {
 ///
 /// The caller must hold the per-path mutex from [`PrsPathState`] for
 /// `repo_path` before invoking this function.
-async fn ensure_repo_initialised(repo_path: &Path) -> Result<(), GitError> {
+fn ensure_repo_initialised(repo_path: &Path) -> Result<(), GitError> {
     if repo_path.exists() {
         return Ok(());
     }

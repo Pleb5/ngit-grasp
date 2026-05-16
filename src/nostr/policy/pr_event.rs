@@ -129,7 +129,7 @@ impl PrEventPolicy {
                             &self.ctx.repo_init_locks,
                             &prs_repo,
                         );
-                        let _guard = state.mu.lock().await;
+                        let _guard = state.mu.lock().expect("prs path mutex poisoned");
 
                         if let Err(e) = crate::git::delete_ref(&prs_repo, &ref_name) {
                             tracing::warn!(

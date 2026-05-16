@@ -1297,14 +1297,15 @@ impl Purgatory {
             // For GRASP-06 `/prs/`-scoped placeholders, best-effort
             // filesystem cleanup of the dangling refs/nostr/<event-id>
             // ref and (if it leaves the bare repo with zero refs *and
-            // no push is in flight*) the repo directory itself. The
-            // cleanup is gated on a `try_lock` of the per-path mutex:
-            // if a push is currently holding the lock the cleanup is
-            // skipped this cycle and the dangling ref is simply left
-            // on disk. With the lock held, the `in_flight` check is
-            // what distinguishes "no push active" from "push mid-receive
-            // but the mutex is briefly free between init and end-of-push"
-            // — only the former is safe to follow with a `rm -rf`.
+            // no push is in flight*) the repo directory itself.
+            //
+            // We hold the per-path mutex for the duration of the
+            // filesystem operations. Because `mu` is a `std::sync::Mutex`
+            // (all critical sections are sync-only), we can call `lock()`
+            // directly here without a runtime hazard. The purgatory entry
+            // is only removed from `pr_events` after the filesystem work
+            // succeeds; if the lock is poisoned we skip cleanup this cycle
+            // and let the entry expire on the next sweep.
             if let (Some(scope), Some(ctx)) = (prs_scope.as_ref(), self.prs_cleanup_ctx.get()) {
                 let repo_path = crate::grasp06::paths::prs_repo_path(
                     &ctx.git_data_path,
@@ -1314,44 +1315,34 @@ impl Purgatory {
                 if repo_path.exists() {
                     let state =
                         crate::grasp06::receive::path_state(&ctx.repo_init_locks, &repo_path);
-                    match state.mu.try_lock() {
-                        Ok(_guard) => {
-                            let ref_name = format!("refs/nostr/{}", event_id_str);
-                            if let Err(e) = crate::git::delete_ref(&repo_path, &ref_name) {
-                                tracing::warn!(
-                                    repo = %repo_path.display(),
-                                    ref_name = %ref_name,
-                                    error = %e,
-                                    "Failed to delete dangling /prs/ ref during purgatory expiry",
-                                );
-                            } else if state.in_flight.load(std::sync::atomic::Ordering::Relaxed)
-                                == 0
-                                && matches!(
-                                    crate::git::list_refs(&repo_path),
-                                    Ok(refs) if refs.is_empty()
-                                )
-                            {
-                                if let Err(e) = std::fs::remove_dir_all(&repo_path) {
-                                    tracing::warn!(
-                                        repo = %repo_path.display(),
-                                        error = %e,
-                                        "Failed to remove zero-ref /prs/ repo during purgatory expiry",
-                                    );
-                                } else {
-                                    tracing::debug!(
-                                        repo = %repo_path.display(),
-                                        "Removed zero-ref /prs/ repo during purgatory expiry",
-                                    );
-                                }
-                            }
-                        }
-                        Err(_) => {
+                    let _guard = state.mu.lock().expect("prs path mutex poisoned");
+                    let ref_name = format!("refs/nostr/{}", event_id_str);
+                    if let Err(e) = crate::git::delete_ref(&repo_path, &ref_name) {
+                        tracing::warn!(
+                            repo = %repo_path.display(),
+                            ref_name = %ref_name,
+                            error = %e,
+                            "Failed to delete dangling /prs/ ref during purgatory expiry",
+                        );
+                    } else if state.in_flight.load(std::sync::atomic::Ordering::Relaxed) == 0
+                        && matches!(
+                            crate::git::list_refs(&repo_path),
+                            Ok(refs) if refs.is_empty()
+                        )
+                    {
+                        if let Err(e) = std::fs::remove_dir_all(&repo_path) {
+                            tracing::warn!(
+                                repo = %repo_path.display(),
+                                error = %e,
+                                "Failed to remove zero-ref /prs/ repo during purgatory expiry",
+                            );
+                        } else {
                             tracing::debug!(
                                 repo = %repo_path.display(),
-                                "/prs/ repo lock contended during purgatory expiry — skipping filesystem cleanup this cycle",
+                                "Removed zero-ref /prs/ repo during purgatory expiry",
                             );
                         }
-                    };
+                    }
                 }
             }
 
