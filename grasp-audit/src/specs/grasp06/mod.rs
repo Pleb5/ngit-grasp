@@ -43,9 +43,9 @@ pub mod prs_endpoint;
 pub mod spec_requirements;
 
 pub use event_acceptance::EventAcceptanceTests;
-pub use mirroring::{MirroringTests, PushValidationTests};
+pub use mirroring::MirroringTests;
 pub use nip11::Nip11Tests;
-pub use prs_endpoint::PrsEndpointTests;
+pub use prs_endpoint::{PrsEndpointTests, PushValidationTests};
 pub use spec_requirements::{SpecRef, GRASP_06_COMMIT_ID};
 
 use crate::{AuditClient, AuditResult, TestContext, TestResult};
