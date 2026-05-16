@@ -3247,6 +3247,14 @@ fn add_prs_pr_placeholder_does_not_overwrite_existing_scoped_placeholder() {
     // calling, so this test documents what happens if the gate is bypassed.
     // Direct `insert` via add_prs_pr_placeholder would overwrite; the guard in
     // post_push_validate prevents that from happening in practice.
+    //
+    // NOTE on the apparent TOCTOU: the two-step check-then-insert looks like a
+    // race between two concurrent /prs/ pushes from *different* submitters for
+    // the same event_id. In practice this cannot happen: an event_id is a hash
+    // of the event content, which includes the signer's pubkey. Two different
+    // signers therefore cannot share an event_id, so only one submitter can ever
+    // legitimately push a given refs/nostr/<event-id>. No atomic upgrade is
+    // needed; the guard is sufficient.
     let purgatory = Purgatory::new(PathBuf::new());
     let submitter_a = Keys::generate();
     let submitter_b = Keys::generate();
