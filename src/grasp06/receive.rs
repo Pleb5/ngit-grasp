@@ -152,6 +152,7 @@ pub async fn handle_prs_receive_pack(
     git_data_path: &str,
     git_protocol: Option<&str>,
     repo_init_locks: RepoInitLocks,
+    domain: &str,
 ) -> Result<Response<Full<Bytes>>, GitError> {
     // 1. Pre-scan refs and reject the whole push if any ref name is not
     //    `refs/nostr/<64-lowercase-hex>`. We use the same parser as the
@@ -196,6 +197,7 @@ pub async fn handle_prs_receive_pack(
     let prs_constraints = PrsUrlConstraints {
         submitter: &prs.submitter,
         identifier: &prs.identifier,
+        domain,
     };
     for (_, new_oid, ref_name) in &pushed_refs {
         match pre_validate_refs_nostr_push(
@@ -274,6 +276,11 @@ pub async fn handle_prs_receive_pack(
         //    event yet — and creates a scoped placeholder so the
         //    30-minute purgatory sweep can clean it up if the event
         //    never arrives.
+        let post_push_constraints = PrsUrlConstraints {
+            submitter: &prs.submitter,
+            identifier: &prs.identifier,
+            domain,
+        };
         for (_, new_oid, ref_name) in &pushed_refs {
             let event_id_hex = ref_name
                 .strip_prefix("refs/nostr/")
@@ -282,7 +289,7 @@ pub async fn handle_prs_receive_pack(
                 &database,
                 &purgatory,
                 &repo_path,
-                prs,
+                post_push_constraints,
                 event_id_hex,
                 new_oid,
                 ref_name,
@@ -518,16 +525,11 @@ async fn post_push_validate(
     database: &SharedDatabase,
     purgatory: &Purgatory,
     repo_path: &Path,
-    prs: &PrsUrl,
+    prs_constraints: PrsUrlConstraints<'_>,
     event_id_hex: &str,
     pushed_commit: &str,
     ref_name: &str,
 ) {
-    let prs_constraints = PrsUrlConstraints {
-        submitter: &prs.submitter,
-        identifier: &prs.identifier,
-    };
-
     match pre_validate_refs_nostr_push(
         database,
         purgatory,
@@ -567,8 +569,8 @@ async fn post_push_validate(
             purgatory.add_prs_pr_placeholder(
                 event_id_hex.to_string(),
                 pushed_commit.to_string(),
-                prs.submitter,
-                prs.identifier.clone(),
+                *prs_constraints.submitter,
+                prs_constraints.identifier.to_string(),
             );
             debug!(
                 "/prs/ post-push: added scoped PR placeholder for {} awaiting matching event",

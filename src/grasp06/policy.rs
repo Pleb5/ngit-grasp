@@ -112,7 +112,7 @@ fn collect_a_tag_d_values(event: &Event) -> Vec<String> {
 /// - `<npub-segment>` decodes via [`PublicKey::from_bech32`] to `signer`,
 /// - the percent-decoded part of `<repo-segment>` before `.git` matches one
 ///   of `d_tags`.
-fn clone_url_names_relays_prs_endpoint(
+pub fn clone_url_names_relays_prs_endpoint(
     url: &str,
     domain: &str,
     signer: &PublicKey,

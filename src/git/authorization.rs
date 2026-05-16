@@ -1163,9 +1163,13 @@ pub fn extract_commit_tag(event: &Event) -> Option<String> {
 ///
 /// When present, a known event found in the DB or purgatory MUST have:
 ///
-/// - `event.pubkey == submitter`, and
+/// - `event.pubkey == submitter`,
 /// - at least one `a`-tag of the form `30617:<hex>:<d>` where `d ==
-///   identifier`.
+///   identifier`, AND
+/// - at least one `clone` tag naming this relay's
+///   `/prs/<submitter-npub>/<identifier>.git` endpoint (the opt-in
+///   signal that prevents every GRASP-06 relay from accepting every PR
+///   event that happens to match its URL shape).
 ///
 /// Standard `/<npub>/<id>.git` pushes pass `None` here — they rely on the
 /// surrounding `authorize_push` flow to gate by the maintainer set
@@ -1174,6 +1178,8 @@ pub fn extract_commit_tag(event: &Event) -> Option<String> {
 pub struct PrsUrlConstraints<'a> {
     pub submitter: &'a PublicKey,
     pub identifier: &'a str,
+    /// The relay's own domain (host[:port]) used to verify the `clone` tag.
+    pub domain: &'a str,
 }
 
 /// Outcome of [`pre_validate_refs_nostr_push`] for one ref.
@@ -1359,6 +1365,35 @@ fn describe_known_event_mismatch(
                 ))
             }
             None => return Some("has no parsable a-tag identifier".to_string()),
+        }
+        // The event must explicitly opt in to this relay's /prs/ endpoint via
+        // a `clone` tag. Without this check any PR event whose signer and
+        // identifier happen to match the URL could be pushed here, turning
+        // every GRASP-06 relay into an unsolicited mirror for every PR event
+        // on the network.
+        let d_tags = vec![prs.identifier.to_string()];
+        let has_clone_tag = event.tags.iter().any(|tag| {
+            let parts = tag.clone().to_vec();
+            if parts.first().map(String::as_str) != Some("clone") {
+                return false;
+            }
+            parts.iter().skip(1).any(|url| {
+                crate::grasp06::policy::clone_url_names_relays_prs_endpoint(
+                    url,
+                    prs.domain,
+                    prs.submitter,
+                    &d_tags,
+                )
+            })
+        });
+        if !has_clone_tag {
+            return Some(format!(
+                "has no `clone` tag naming this relay's /prs/{}/{}.git endpoint",
+                prs.submitter
+                    .to_bech32()
+                    .unwrap_or_else(|_| prs.submitter.to_hex()),
+                prs.identifier,
+            ));
         }
     }
 

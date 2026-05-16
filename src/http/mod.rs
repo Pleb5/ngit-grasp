@@ -211,6 +211,7 @@ impl Service<Request<Incoming>> for HttpService {
                 let method_clone = method.clone();
                 let metrics_clone = self.metrics.clone();
                 let relay_clone = self.relay.clone();
+                let config_clone = self.config.clone();
 
                 return Box::pin(async move {
                     // Collect (and gunzip if needed) the request body just like
@@ -300,6 +301,7 @@ impl Service<Request<Incoming>> for HttpService {
                                     &git_data_path,
                                     git_protocol.as_deref(),
                                     repo_init_locks.clone(),
+                                    &config_clone.domain,
                                 )
                                 .await;
                                 if let Some(ref m) = metrics_clone {
