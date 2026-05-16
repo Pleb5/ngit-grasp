@@ -575,19 +575,16 @@ async fn post_push_validate(
             // PrEventPolicy::git_data_check, find commit Y in the /prs/
             // repo, and mirror it (overwriting the incorrect ref) into
             // every matching announced repo.
-            if let Some(entry) = purgatory.find_pr(event_id_hex) {
-                if entry.event.is_none() && entry.prs_scope.is_none() {
-                    purgatory.add_prs_pr_placeholder(
-                        event_id_hex.to_string(),
-                        pushed_commit.to_string(),
-                        *prs_constraints.submitter,
-                        prs_constraints.identifier.to_string(),
-                    );
-                    debug!(
-                        "/prs/ post-push: upgraded un-scoped placeholder to scoped for {} (commit {})",
-                        ref_name, pushed_commit
-                    );
-                }
+            if purgatory.try_upgrade_to_scoped(
+                event_id_hex,
+                pushed_commit.to_string(),
+                *prs_constraints.submitter,
+                prs_constraints.identifier.to_string(),
+            ) {
+                debug!(
+                    "/prs/ post-push: upgraded un-scoped placeholder to scoped for {} (commit {})",
+                    ref_name, pushed_commit
+                );
             }
         }
         NostrRefPreValidation::Unknown => {
