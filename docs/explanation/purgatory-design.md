@@ -102,8 +102,6 @@ For PR events, **either side can arrive first**:
 
 Placeholders are identified by `PrPurgatoryEntry.event == None`.
 
-**GRASP-06 scoped placeholders:** A push to `/prs/<npub>/<id>.git` creates a *scoped* placeholder that additionally records `(submitter, identifier)` from the URL. When the PR event arrives, its signer and a-tag d-value are cross-checked against the scope. An un-scoped placeholder (created by a standard-endpoint push) can be upgraded to a scoped one via `try_upgrade_to_scoped`, which performs the check-and-modify atomically under a single DashMap shard lock — preventing a TOCTOU race where two concurrent `/prs/` pushes for the same `event_id` could otherwise both see "un-scoped" and the second write would silently overwrite the first.
-
 ### 5. Authorization During Push (Not After)
 
 **Critical for avoiding deadlock:** Authorization checks **both database and purgatory** during push validation.
@@ -229,15 +227,10 @@ pub struct PrPurgatoryEntry {
 
     /// Expiry deadline (30 min from creation)
     pub expires_at: Instant,
-
-    /// GRASP-06 /prs/ scope, if the placeholder was created by a /prs/ push.
-    /// When set, the arriving PR event must have signer == submitter and
-    /// one of its a-tag d-values == identifier.
-    pub prs_scope: Option<PrsPlaceholderScope>,
 }
 ```
 
-**Key:** `event: None` indicates a placeholder (git-data-first scenario). `prs_scope: Some(…)` means the placeholder was created by a `/prs/` push and carries the URL's `(submitter, identifier)` binding.
+**Key:** `event: None` indicates a placeholder (git-data-first scenario).
 
 ### Purgatory Stores
 
@@ -740,32 +733,8 @@ impl Purgatory {
     /// Automatically enqueues for sync with 3min delay
     pub fn add_pr(&self, event: Event, event_id: String, commit: String);
     
-    /// Add a PR placeholder (git-data-first scenario, standard endpoint)
+    /// Add a PR placeholder (git-data-first scenario)
     pub fn add_pr_placeholder(&self, event_id: String, commit: String);
-
-    /// Add a scoped PR placeholder (git-data-first scenario, /prs/ endpoint)
-    pub fn add_prs_pr_placeholder(
-        &self,
-        event_id: String,
-        commit: String,
-        submitter: PublicKey,
-        identifier: String,
-    );
-
-    /// Atomically upgrade an un-scoped placeholder to a scoped one.
-    ///
-    /// Used by the /prs/ post-push path (edge case B2) when a standard-endpoint
-    /// push created an un-scoped placeholder before the /prs/ push arrived.
-    /// The check-and-modify happen under a single DashMap shard lock, so two
-    /// concurrent /prs/ pushes for the same event_id cannot both win the upgrade.
-    /// Returns true if the upgrade was applied, false otherwise.
-    pub fn try_upgrade_to_scoped(
-        &self,
-        event_id: &str,
-        commit: String,
-        submitter: PublicKey,
-        identifier: String,
-    ) -> bool;
 
     /// Find state events waiting for an identifier
     pub fn find_state(&self, identifier: &str) -> Vec<StatePurgatoryEntry>;

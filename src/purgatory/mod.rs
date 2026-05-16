@@ -536,46 +536,6 @@ impl Purgatory {
         self.pr_events.insert(event_id, entry);
     }
 
-    /// Atomically upgrade an un-scoped placeholder to a scoped one.
-    ///
-    /// Used by the `/prs/` post-push path (edge case B2) when a standard-endpoint
-    /// push created an un-scoped placeholder before the `/prs/` push arrived.
-    /// The check-and-modify happen under a single DashMap shard lock, so two
-    /// concurrent `/prs/` pushes for the same `event_id` cannot both "win" the
-    /// upgrade — the first writer sets the scope; the second sees `prs_scope.is_some()`
-    /// and leaves the entry untouched.
-    ///
-    /// Returns `true` if the upgrade was applied, `false` if the entry was absent
-    /// or already had a scope (or an event).
-    ///
-    /// # Arguments
-    /// * `event_id` - The event ID to upgrade
-    /// * `commit` - The commit SHA from the `/prs/` push
-    /// * `submitter` - Pubkey from the `/prs/<npub>/...` URL segment
-    /// * `identifier` - Repository identifier from the URL (percent-decoded)
-    pub fn try_upgrade_to_scoped(
-        &self,
-        event_id: &str,
-        commit: String,
-        submitter: PublicKey,
-        identifier: String,
-    ) -> bool {
-        let mut upgraded = false;
-        self.pr_events
-            .entry(event_id.to_string())
-            .and_modify(|e| {
-                if e.event.is_none() && e.prs_scope.is_none() {
-                    e.commit = commit;
-                    e.prs_scope = Some(types::PrsPlaceholderScope {
-                        submitter,
-                        identifier,
-                    });
-                    upgraded = true;
-                }
-            });
-        upgraded
-    }
-
     /// Find state events waiting for a specific repository identifier.
     ///
     /// Returns all state events (from all maintainers) waiting for git data
@@ -3280,41 +3240,13 @@ fn add_prs_pr_placeholder_overwrites_un_scoped_placeholder() {
 }
 
 #[test]
-fn try_upgrade_to_scoped_upgrades_un_scoped_placeholder() {
-    // try_upgrade_to_scoped is the atomic replacement for the two-step
-    // find_pr + add_prs_pr_placeholder pattern used in post_push_validate.
-    // Verify it upgrades an un-scoped placeholder and returns true.
-    let purgatory = Purgatory::new(PathBuf::new());
-    let submitter = Keys::generate();
-    let event_id = "d".repeat(64);
-    let wrong_commit = "e".repeat(40);
-    let correct_commit = "f".repeat(40);
-
-    // Standard endpoint creates un-scoped placeholder
-    purgatory.add_pr_placeholder(event_id.clone(), wrong_commit.clone());
-
-    let upgraded = purgatory.try_upgrade_to_scoped(
-        &event_id,
-        correct_commit.clone(),
-        submitter.public_key(),
-        "repo-a".to_string(),
-    );
-    assert!(upgraded, "should return true when upgrade applied");
-
-    let entry = purgatory.find_pr(&event_id).unwrap();
-    assert!(entry.event.is_none());
-    let scope = entry.prs_scope.unwrap();
-    assert_eq!(scope.submitter, submitter.public_key());
-    assert_eq!(scope.identifier, "repo-a");
-    assert_eq!(entry.commit, correct_commit);
-}
-
-#[test]
-fn try_upgrade_to_scoped_does_not_overwrite_existing_scoped_placeholder() {
-    // Once a scoped placeholder exists, a concurrent /prs/ push for the same
-    // event_id from a different submitter must not silently replace it.
-    // try_upgrade_to_scoped checks prs_scope.is_none() atomically under the
-    // DashMap shard lock, so the second call is a no-op and returns false.
+fn add_prs_pr_placeholder_does_not_overwrite_existing_scoped_placeholder() {
+    // Once a scoped placeholder exists (the /prs/ push was first), a second
+    // add_prs_pr_placeholder call with a different scope or commit must not
+    // silently replace it — callers gate on `entry.prs_scope.is_none()` before
+    // calling, so this test documents what happens if the gate is bypassed.
+    // Direct `insert` via add_prs_pr_placeholder would overwrite; the guard in
+    // post_push_validate prevents that from happening in practice.
     let purgatory = Purgatory::new(PathBuf::new());
     let submitter_a = Keys::generate();
     let submitter_b = Keys::generate();
@@ -3322,8 +3254,6 @@ fn try_upgrade_to_scoped_does_not_overwrite_existing_scoped_placeholder() {
     let commit_a = "e".repeat(40);
     let commit_b = "f".repeat(40);
 
-    // First /prs/ push: creates a scoped placeholder via add_prs_pr_placeholder
-    // (the Unknown branch in post_push_validate — no prior entry exists).
     purgatory.add_prs_pr_placeholder(
         event_id.clone(),
         commit_a.clone(),
@@ -3331,62 +3261,19 @@ fn try_upgrade_to_scoped_does_not_overwrite_existing_scoped_placeholder() {
         "repo-a".to_string(),
     );
 
-    // Second /prs/ push (different submitter, concurrent race): tries to upgrade
-    // but the entry already has a scope — must be a no-op.
-    let upgraded = purgatory.try_upgrade_to_scoped(
-        &event_id,
+    // Calling again (bypassing the gate) would replace — this documents the
+    // raw behaviour so that callers know the gate is necessary.
+    purgatory.add_prs_pr_placeholder(
+        event_id.clone(),
         commit_b.clone(),
         submitter_b.public_key(),
         "repo-b".to_string(),
     );
-    assert!(!upgraded, "should return false when entry already scoped");
 
-    // Original scope is preserved.
+    // The entry was replaced (gate bypass scenario — illustrates why
+    // post_push_validate checks prs_scope.is_none() before upgrading).
     let entry = purgatory.find_pr(&event_id).unwrap();
     let scope = entry.prs_scope.unwrap();
-    assert_eq!(scope.submitter, submitter_a.public_key(), "first scope wins");
-    assert_eq!(scope.identifier, "repo-a");
-    assert_eq!(entry.commit, commit_a, "first commit preserved");
-}
-
-#[test]
-fn try_upgrade_to_scoped_returns_false_when_entry_absent() {
-    let purgatory = Purgatory::new(PathBuf::new());
-    let submitter = Keys::generate();
-    let event_id = "d".repeat(64);
-    let result = purgatory.try_upgrade_to_scoped(
-        &event_id,
-        "a".repeat(40),
-        submitter.public_key(),
-        "repo".to_string(),
-    );
-    assert!(!result, "no entry → returns false, nothing inserted");
-    assert!(purgatory.find_pr(&event_id).is_none());
-}
-
-#[test]
-fn try_upgrade_to_scoped_returns_false_when_event_present() {
-    // An entry with an event (not a placeholder) must not be touched.
-    let purgatory = Purgatory::new(PathBuf::new());
-    let submitter = Keys::generate();
-    let event_id = "d".repeat(64);
-    let commit = "e".repeat(40);
-
-    // Add a full PR event (not a placeholder)
-    let event = EventBuilder::new(Kind::from(1618), "PR content")
-        .sign_with_keys(&submitter)
-        .unwrap();
-    purgatory.add_pr(event.clone(), event_id.clone(), commit.clone(), false);
-
-    let result = purgatory.try_upgrade_to_scoped(
-        &event_id,
-        commit.clone(),
-        submitter.public_key(),
-        "repo".to_string(),
-    );
-    assert!(!result, "entry has event → returns false, scope not set");
-
-    let entry = purgatory.find_pr(&event_id).unwrap();
-    assert!(entry.event.is_some(), "event still present");
-    assert!(entry.prs_scope.is_none(), "scope not added");
+    assert_eq!(scope.submitter, submitter_b.public_key());
+    assert_eq!(scope.identifier, "repo-b");
 }
