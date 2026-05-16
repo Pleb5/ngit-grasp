@@ -38,7 +38,7 @@ use tracing::{debug, info, warn};
 use crate::nostr::builder::SharedDatabase;
 use crate::nostr::events::{RepositoryAnnouncement, RepositoryState};
 use crate::purgatory::Purgatory;
-use nostr_sdk::Kind;
+use nostr_sdk::{Kind, PublicKey};
 
 /// Perform GRASP authorization for a push operation
 ///
@@ -84,59 +84,33 @@ pub async fn authorize_push(
         );
 
         for (_, new_oid, ref_name) in &nostr_refs {
-            // Extract event ID from ref name
-            if let Some(event_id_hex) = ref_name.strip_prefix("refs/nostr/") {
-                // Validate event ID format
-                if EventId::parse(event_id_hex).is_err() {
-                    warn!("Invalid event ID format in ref: {}", ref_name);
-                    return Ok(AuthorizationResult::denied(format!(
-                        "Invalid event ID format in ref: {}",
-                        ref_name
-                    )));
+            // Standard endpoint passes `None` for prs_url: signer / a-tag
+            // identifier are enforced by the surrounding maintainer-set
+            // authorization, not by the URL.
+            match pre_validate_refs_nostr_push(database, purgatory, new_oid, ref_name, None).await {
+                NostrRefPreValidation::Rejected { reason } => {
+                    warn!("refs/nostr/ validation failed: {}", reason);
+                    return Ok(AuthorizationResult::denied(reason));
                 }
-
-                // Check purgatory for PR event
-                if let Some(entry) = purgatory.find_pr(event_id_hex) {
-                    if let Some(event) = entry.event {
-                        // Verify commit matches
-                        if entry.commit == *new_oid {
-                            debug!(
-                                "Found matching PR event {} in purgatory for ref {}",
-                                event_id_hex, ref_name
-                            );
-                            purgatory_events.push(event);
-                        } else {
-                            warn!(
-                                "PR event {} in purgatory has commit mismatch: expected {}, got {}",
-                                event_id_hex, entry.commit, new_oid
-                            );
-                            return Ok(AuthorizationResult::denied(format!(
-                                "PR event {} commit mismatch: expected {}, got {}",
-                                event_id_hex, entry.commit, new_oid
-                            )));
-                        }
+                NostrRefPreValidation::Authorized {
+                    event_from_purgatory,
+                } => {
+                    if let Some(event) = event_from_purgatory {
+                        debug!("Found matching PR event in purgatory for ref {}", ref_name);
+                        purgatory_events.push(event);
                     } else {
-                        // Placeholder exists - allow push (git-data-first scenario)
-                        debug!(
-                            "Found placeholder already for PR event {} in purgatory - as we dont have the event and therefore dont know the required commit_id we allow overwriting with a different commit_id",
-                            event_id_hex
-                        );
+                        debug!("Ref {} validated against existing record", ref_name);
                     }
-                } else {
-                    // No entry in purgatory - check database for existing event
-                    let nostr_refs_owned = vec![(String::new(), new_oid.clone(), ref_name.clone())];
-                    if let Err(e) = validate_nostr_ref_pushes(database, &nostr_refs_owned).await {
-                        warn!("refs/nostr/ validation failed: {}", e);
-                        return Ok(AuthorizationResult::denied(format!(
-                            "refs/nostr/ validation failed: {}",
-                            e
-                        )));
-                    }
-
-                    // Create placeholder for git-data-first scenario
-                    // This allows cleanup if the PR event never arrives
+                }
+                NostrRefPreValidation::Unknown => {
+                    // No entry in DB or purgatory — create placeholder so
+                    // the 30-minute sweep can clean the ref up if the PR
+                    // event never arrives. Standard-endpoint placeholders
+                    // carry no /prs/ scope.
+                    let event_id_hex = ref_name
+                        .strip_prefix("refs/nostr/")
+                        .expect("shape validated in pre_validate_refs_nostr_push");
                     purgatory.add_pr_placeholder(event_id_hex.to_string(), new_oid.clone());
-
                     debug!(
                         "Created placeholder for {} - awaiting PR event (will expire in 30min if event doesn't arrive)",
                         event_id_hex
@@ -1147,21 +1121,16 @@ pub fn npub_to_pubkey(npub: &str) -> Result<String> {
     Ok(pk.to_hex())
 }
 
-/// Fetch an event by ID from the database and extract the `c` tag commit hash
+/// Fetch a PR (kind 1617) or PR-Update (kind 1618) event by its ID.
 ///
-/// This is used for validating pushes to refs/nostr/<event-id>. Per GRASP-01,
-/// if a PR or PR Update event with this ID exists in the database, the pushed
-/// commit must match the commit in the event's `c` tag.
-///
-/// # Returns
-/// - `Ok(Some(commit))` if the event exists and has a valid `c` tag
-/// - `Ok(None)` if the event doesn't exist (push should be allowed)
-/// - `Err(_)` on database errors
-pub async fn get_event_commit_tag(
+/// Returns the first matching event, or `None` if no such event has been
+/// accepted into the database. Used by [`pre_validate_refs_nostr_push`]
+/// — which needs the full event so it can verify the signer pubkey and
+/// the `a`-tag identifier on top of the `c` tag.
+pub async fn get_pr_event_by_id(
     database: &SharedDatabase,
     event_id: &EventId,
-) -> Result<Option<String>> {
-    // Query for PR (1618) and PR Update (1619) events with this ID
+) -> Result<Option<Event>> {
     let filter = Filter::new()
         .ids([*event_id])
         .kinds([Kind::GitPullRequest, Kind::GitPullRequestUpdate]);
@@ -1173,91 +1142,262 @@ pub async fn get_event_commit_tag(
         .into_iter()
         .collect();
 
-    if events.is_empty() {
-        debug!("No PR/PR Update event found with ID {}", event_id);
-        return Ok(None);
-    }
+    Ok(events.into_iter().next())
+}
 
-    // Get the first (should be only) event
-    let event = &events[0];
-
-    // Extract the `c` tag (commit hash)
-    // Per NIP-34, PR events have a `c` tag with the head commit
-    let commit = event
+/// Extract the `c` (commit) tag value from a NIP-34 PR/PR-Update event.
+///
+/// Per NIP-34, PR events carry a `c` tag whose second element is the head
+/// commit being proposed. Returns `None` if the tag is missing or malformed.
+pub fn extract_commit_tag(event: &Event) -> Option<String> {
+    event
         .tags
         .iter()
         .find(|tag| tag.as_slice().first().map(|s| s.as_str()) == Some("c"))
-        .and_then(|tag| tag.as_slice().get(1).map(|s| s.to_string()));
-
-    debug!(
-        "Found PR event {} with commit tag: {:?}",
-        event_id,
-        commit.as_ref()
-    );
-
-    Ok(commit)
+        .and_then(|tag| tag.as_slice().get(1).map(|s| s.to_string()))
 }
 
-/// Validate refs/nostr/ pushes against existing PR/PR Update events
+/// Constraints imposed by the GRASP-06 `/prs/<npub>/<identifier>` URL on
+/// any event resolved while pre-validating a `refs/nostr/<event-id>`
+/// push.
 ///
-/// For each ref being pushed to refs/nostr/<event-id>:
-/// 1. Validate the event ID format (error if invalid)
-/// 2. Check if a corresponding event exists in the database
-/// 3. If event exists, verify the pushed commit matches the `c` tag
+/// When present, a known event found in the DB or purgatory MUST have:
 ///
-/// # Arguments
-/// * `database` - The nostr database to query
-/// * `pushed_refs` - List of (old_oid, new_oid, ref_name) tuples
+/// - `event.pubkey == submitter`,
+/// - at least one `a`-tag of the form `30617:<hex>:<d>` where `d ==
+///   identifier`, AND
+/// - at least one `clone` tag naming this relay's
+///   `/prs/<submitter-npub>/<identifier>.git` endpoint (the opt-in
+///   signal that prevents every GRASP-06 relay from accepting every PR
+///   event that happens to match its URL shape).
 ///
-/// # Returns
-/// * `Ok(())` if all refs/nostr/ pushes are valid
-/// * `Err(_)` if any ref has invalid event ID format or fails commit validation
-pub async fn validate_nostr_ref_pushes(
-    database: &SharedDatabase,
-    pushed_refs: &[(String, String, String)],
-) -> Result<()> {
-    for (_, new_oid, ref_name) in pushed_refs {
-        // Only check refs/nostr/ refs
-        if let Some(event_id_str) = ref_name.strip_prefix("refs/nostr/") {
-            // Parse the event ID - error on invalid format
-            let event_id = EventId::parse(event_id_str).map_err(|_| {
-                anyhow!(
-                    "Invalid event ID format '{}' in ref: {}",
-                    event_id_str,
-                    ref_name
-                )
-            })?;
+/// Standard `/<npub>/<id>.git` pushes pass `None` here — they rely on the
+/// surrounding `authorize_push` flow to gate by the maintainer set
+/// instead.
+#[derive(Debug, Clone, Copy)]
+pub struct PrsUrlConstraints<'a> {
+    pub submitter: &'a PublicKey,
+    pub identifier: &'a str,
+    /// The relay's own domain (host[:port]) used to verify the `clone` tag.
+    pub domain: &'a str,
+}
 
-            // Check if event exists and get commit tag
-            match get_event_commit_tag(database, &event_id).await? {
-                Some(expected_commit) => {
-                    // Event exists - verify commit matches
-                    if new_oid != &expected_commit {
-                        return Err(anyhow!(
-                            "Push to {} rejected: event {} specifies commit {}, but push contains {}",
-                            ref_name,
-                            event_id_str,
-                            expected_commit,
-                            new_oid
-                        ));
+/// Outcome of [`pre_validate_refs_nostr_push`] for one ref.
+///
+/// The function is **pure** — no DB writes, no purgatory mutations, no
+/// disk I/O. Callers decide whether to reject the push, proceed, and
+/// whether to create a placeholder.
+#[derive(Debug)]
+pub enum NostrRefPreValidation {
+    /// The ref is allowed to proceed.
+    ///
+    /// `event_from_purgatory` carries the matched event when the match
+    /// came from a populated purgatory entry, so the caller (the standard
+    /// `authorize_push`) can collect it into `purgatory_events`. `None`
+    /// means the match came from the DB or from a placeholder-only
+    /// purgatory entry — nothing to collect.
+    Authorized { event_from_purgatory: Option<Event> },
+    /// No event with that id is known to the relay yet. The caller may
+    /// create a placeholder (with or without a `/prs/` scope) so the
+    /// purgatory sweep can clean up the ref if the event never arrives.
+    Unknown,
+    /// The push must be rejected. `reason` is suitable for both an
+    /// authorization-denied response and a `git-receive-pack` ERR
+    /// pkt-line.
+    Rejected { reason: String },
+}
+
+/// Pre-validate one `refs/nostr/<event-id>` push against the database and
+/// purgatory.
+///
+/// Shared by both the standard endpoint
+/// ([`authorize_push`]) and the GRASP-06 `/prs/` receive-pack handler
+/// (`crate::grasp06::receive::handle_prs_receive_pack`). The two endpoints
+/// have different mismatch UX (pre-reject vs post-delete) but the
+/// underlying mismatch *criteria* are the same — gathering them here
+/// keeps the criteria in one place.
+///
+/// Checks performed:
+///
+/// 1. `ref_name` is exactly `refs/nostr/<64-lowercase-hex>` and parses as
+///    an [`EventId`].
+/// 2. DB lookup via [`get_pr_event_by_id`]. If found, the event's `c` tag
+///    MUST match `new_oid`; with `prs_url` set, the event's signer MUST
+///    match `submitter` and one of its `a`-tag d-values MUST match
+///    `identifier`.
+/// 3. Purgatory lookup. Same checks as (2) for populated entries. For
+///    placeholder-only entries with a `prs_scope`, the scope MUST match
+///    `prs_url` when one is supplied (this catches the case where one
+///    `/prs/<A>/<id>` push tries to claim a ref previously staged at
+///    `/prs/<B>/<id>` under the same event id).
+/// 4. Otherwise the function returns [`NostrRefPreValidation::Unknown`].
+pub async fn pre_validate_refs_nostr_push(
+    database: &SharedDatabase,
+    purgatory: &Purgatory,
+    new_oid: &str,
+    ref_name: &str,
+    prs_url: Option<PrsUrlConstraints<'_>>,
+) -> NostrRefPreValidation {
+    // 1. Ref-name shape.
+    let event_id_hex = match ref_name.strip_prefix("refs/nostr/") {
+        Some(s) => s,
+        None => {
+            return NostrRefPreValidation::Rejected {
+                reason: format!("ref {} is outside refs/nostr/", ref_name),
+            }
+        }
+    };
+    let event_id = match EventId::parse(event_id_hex) {
+        Ok(id) => id,
+        Err(_) => {
+            return NostrRefPreValidation::Rejected {
+                reason: format!("Invalid event ID format in ref: {}", ref_name),
+            }
+        }
+    };
+
+    // 2. DB first.
+    match get_pr_event_by_id(database, &event_id).await {
+        Ok(Some(event)) => {
+            if let Some(reason) = describe_known_event_mismatch(&event, new_oid, prs_url) {
+                return NostrRefPreValidation::Rejected {
+                    reason: format!("PR event {} {}", event_id_hex, reason),
+                };
+            }
+            return NostrRefPreValidation::Authorized {
+                event_from_purgatory: None,
+            };
+        }
+        Ok(None) => {}
+        Err(e) => {
+            // Treat DB error as not-found for permissive behaviour. The
+            // standard endpoint preserves the historical behaviour of
+            // creating a placeholder; the /prs/ handler likewise creates
+            // one and lets the sweep clean up if the event never arrives.
+            warn!(
+                "DB query for {} failed (treating as not-found): {}",
+                ref_name, e
+            );
+        }
+    }
+
+    // 3. Purgatory.
+    if let Some(entry) = purgatory.find_pr(event_id_hex) {
+        match entry.event {
+            Some(event) => {
+                if let Some(reason) = describe_known_event_mismatch(&event, new_oid, prs_url) {
+                    return NostrRefPreValidation::Rejected {
+                        reason: format!("PR event {} (purgatory) {}", event_id_hex, reason),
+                    };
+                }
+                return NostrRefPreValidation::Authorized {
+                    event_from_purgatory: Some(event),
+                };
+            }
+            None => {
+                // Placeholder-only entry. Standard endpoint historically
+                // allows overwriting (no event → no c-tag to validate
+                // against). The /prs/ endpoint additionally requires that
+                // any recorded scope matches the URL — otherwise one
+                // `/prs/<A>/<id>` push could claim a ref previously
+                // staged at `/prs/<B>/<id>` under the same event id.
+                if let (Some(scope), Some(prs)) = (entry.prs_scope.as_ref(), prs_url) {
+                    if scope.submitter != *prs.submitter || scope.identifier != prs.identifier {
+                        return NostrRefPreValidation::Rejected {
+                            reason: format!(
+                                "ref refs/nostr/{} pre-registered under a different /prs/ scope ({}/{})",
+                                event_id_hex,
+                                scope.submitter.to_hex(),
+                                scope.identifier
+                            ),
+                        };
                     }
-                    debug!(
-                        "Push to {} validated: commit {} matches event's c tag",
-                        ref_name, new_oid
-                    );
                 }
-                None => {
-                    // No event exists yet - allow push
-                    debug!(
-                        "Push to {} allowed: no PR/PR Update event with ID {} found yet",
-                        ref_name, event_id_str
-                    );
-                }
+                return NostrRefPreValidation::Authorized {
+                    event_from_purgatory: None,
+                };
             }
         }
     }
 
-    Ok(())
+    // 4. Nothing known yet.
+    NostrRefPreValidation::Unknown
+}
+
+/// Cross-check a known PR / PR-Update event against the pushed commit
+/// and (optionally) the `/prs/<npub>/<identifier>` URL constraints.
+///
+/// Returns `None` if everything matches, or `Some(reason)` describing the
+/// first mismatch encountered. The reason is intended to be embedded into
+/// a user-facing authorization-denied / ERR pkt-line message.
+fn describe_known_event_mismatch(
+    event: &Event,
+    pushed_commit: &str,
+    prs: Option<PrsUrlConstraints<'_>>,
+) -> Option<String> {
+    // `c` tag must match the pushed commit.
+    match extract_commit_tag(event) {
+        Some(c) if c == pushed_commit => {}
+        Some(c) => {
+            return Some(format!(
+                "specifies commit {}, but push contains {}",
+                c, pushed_commit
+            ))
+        }
+        None => return Some("has no `c` tag".to_string()),
+    }
+
+    // /prs/ extra constraints.
+    if let Some(prs) = prs {
+        if event.pubkey != *prs.submitter {
+            return Some(format!(
+                "is signed by {} which does not match /prs/ submitter {}",
+                event.pubkey.to_hex(),
+                prs.submitter.to_hex(),
+            ));
+        }
+        match crate::git::sync::extract_identifier_from_pr_event(event) {
+            Some(id) if id == prs.identifier => {}
+            Some(id) => {
+                return Some(format!(
+                    "has a-tag identifier {} which does not match /prs/ identifier {}",
+                    id, prs.identifier
+                ))
+            }
+            None => return Some("has no parsable a-tag identifier".to_string()),
+        }
+        // The event must explicitly opt in to this relay's /prs/ endpoint via
+        // a `clone` tag. Without this check any PR event whose signer and
+        // identifier happen to match the URL could be pushed here, turning
+        // every GRASP-06 relay into an unsolicited mirror for every PR event
+        // on the network.
+        let d_tags = vec![prs.identifier.to_string()];
+        let has_clone_tag = event.tags.iter().any(|tag| {
+            let parts = tag.clone().to_vec();
+            if parts.first().map(String::as_str) != Some("clone") {
+                return false;
+            }
+            parts.iter().skip(1).any(|url| {
+                crate::grasp06::policy::clone_url_names_relays_prs_endpoint(
+                    url,
+                    prs.domain,
+                    prs.submitter,
+                    &d_tags,
+                )
+            })
+        });
+        if !has_clone_tag {
+            return Some(format!(
+                "has no `clone` tag naming this relay's /prs/{}/{}.git endpoint",
+                prs.submitter
+                    .to_bech32()
+                    .unwrap_or_else(|_| prs.submitter.to_hex()),
+                prs.identifier,
+            ));
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]

@@ -58,7 +58,7 @@ async fn test_layer2_sync_with_lowercase_a_tag() {
     // 2. Create and send repository announcement to both relays with git data
     // (purgatory requires git data before announcements are accepted)
     let repo_id = "test-repo-tag-8a";
-    let domains = vec![relay_a.domain(), relay_b.domain()];
+    let domains = [relay_a.domain(), relay_b.domain()];
     let domain_refs: Vec<&str> = domains.iter().map(|s| s.as_str()).collect();
 
     let (_announcement, _git_dir_a) =
@@ -145,7 +145,7 @@ async fn test_layer2_sync_with_uppercase_a_tag() {
 
     // 2. Create and send repository announcement to both relays with git data
     let repo_id = "test-repo-tag-8b";
-    let domains = vec![relay_a.domain(), relay_b.domain()];
+    let domains = [relay_a.domain(), relay_b.domain()];
     let domain_refs: Vec<&str> = domains.iter().map(|s| s.as_str()).collect();
 
     let (_announcement, _git_dir_a) =
@@ -234,7 +234,7 @@ async fn test_layer2_sync_with_q_tag() {
 
     // 2. Create and send repository announcement to both relays with git data
     let repo_id = "test-repo-tag-8c";
-    let domains = vec![relay_a.domain(), relay_b.domain()];
+    let domains = [relay_a.domain(), relay_b.domain()];
     let domain_refs: Vec<&str> = domains.iter().map(|s| s.as_str()).collect();
 
     let (_announcement, _git_dir_a) =
@@ -329,7 +329,7 @@ async fn test_layer3_sync_with_lowercase_e_tag() {
 
     // 2. Create and send repository announcement to both relays with git data
     let repo_id = "test-repo-tag-9a";
-    let domains = vec![relay_a.domain(), relay_b.domain()];
+    let domains = [relay_a.domain(), relay_b.domain()];
     let domain_refs: Vec<&str> = domains.iter().map(|s| s.as_str()).collect();
 
     let (_announcement, _git_dir_a) =
@@ -436,7 +436,7 @@ async fn test_layer3_sync_with_uppercase_e_tag() {
 
     // 2. Create and send repository announcement to both relays with git data
     let repo_id = "test-repo-tag-9b";
-    let domains = vec![relay_a.domain(), relay_b.domain()];
+    let domains = [relay_a.domain(), relay_b.domain()];
     let domain_refs: Vec<&str> = domains.iter().map(|s| s.as_str()).collect();
 
     let (_announcement, _git_dir_a) =
@@ -547,7 +547,7 @@ async fn test_layer3_sync_with_q_tag() {
 
     // 2. Create and send repository announcement to both relays with git data
     let repo_id = "test-repo-tag-9c";
-    let domains = vec![relay_a.domain(), relay_b.domain()];
+    let domains = [relay_a.domain(), relay_b.domain()];
     let domain_refs: Vec<&str> = domains.iter().map(|s| s.as_str()).collect();
 
     let (_announcement, _git_dir_a) =

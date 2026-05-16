@@ -25,6 +25,7 @@ use tokio::net::TcpListener;
 
 use crate::config::Config;
 use crate::git;
+use crate::grasp06::receive::RepoInitLocks;
 use crate::metrics::Metrics;
 use crate::nostr::builder::{Nip34WritePolicy, SharedDatabase};
 use crate::purgatory::Purgatory;
@@ -47,6 +48,16 @@ const ICON_PNG: &[u8] = include_bytes!("../../static/icon.png");
 ///
 /// Returns (npub, identifier) if the path matches a repository URL pattern
 fn parse_repo_url(path: &str) -> Option<(String, String)> {
+    // Defensive guard: never match the GRASP-06 `/prs/` namespace as a
+    // standard repo URL. `HttpService::call` already intercepts `/prs/*`
+    // before reaching the landing branch when grasp06_enable is on, but
+    // this early-return ensures a future routing change cannot regress us
+    // into serving repo landing HTML at `/prs/<npub>/<id>.git` regardless
+    // of the feature flag.
+    if path.starts_with("/prs/") || path.starts_with("prs/") {
+        return None;
+    }
+
     // Remove leading slash
     let path = path.strip_prefix('/').unwrap_or(path);
 
@@ -108,6 +119,9 @@ struct HttpService {
     write_policy: Arc<Nip34WritePolicy>,
     /// Rejected events index for hot-cache re-processing after git push promotion
     rejected_events_index: Arc<RejectedEventsIndex>,
+    /// Per-path init mutexes for GRASP-06 `/prs/` on-demand bare-repo
+    /// creation. See [`crate::grasp06::receive::RepoInitLocks`].
+    repo_init_locks: RepoInitLocks,
 }
 
 impl HttpService {
@@ -121,6 +135,7 @@ impl HttpService {
         purgatory: Arc<Purgatory>,
         write_policy: Arc<Nip34WritePolicy>,
         rejected_events_index: Arc<RejectedEventsIndex>,
+        repo_init_locks: RepoInitLocks,
     ) -> Self {
         Self {
             relay,
@@ -131,6 +146,7 @@ impl HttpService {
             purgatory,
             write_policy,
             rejected_events_index,
+            repo_init_locks,
         }
     }
 }
@@ -150,6 +166,7 @@ impl Service<Request<Incoming>> for HttpService {
         let purgatory = self.purgatory.clone();
         let write_policy = self.write_policy.clone();
         let rejected_events_index = self.rejected_events_index.clone();
+        let repo_init_locks = self.repo_init_locks.clone();
 
         // Handle OPTIONS preflight requests (CORS)
         // GRASP-01 spec line 47: Respond to OPTIONS with 204 No Content
@@ -164,9 +181,176 @@ impl Service<Request<Incoming>> for HttpService {
             });
         }
 
+        // GRASP-06: route /prs/<npub>/<id>.git/* before the standard git URL
+        // parser. When disabled, the path falls through to existing 404
+        // handling (preserving the discovery-gate contract).
+        if self.config.grasp06_enable {
+            if let Some(prs) = crate::grasp06::endpoint::parse_prs_url(&path) {
+                let git_protocol = req
+                    .headers()
+                    .get("git-protocol")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string());
+                let content_encoding = req
+                    .headers()
+                    .get("content-encoding")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_lowercase());
+
+                tracing::debug!(
+                    "/prs/ request: {} {} (submitter={}, id={}, subpath={}, protocol={:?})",
+                    method,
+                    path,
+                    prs.submitter.to_hex(),
+                    prs.identifier,
+                    prs.subpath,
+                    git_protocol
+                );
+
+                let subpath = prs.subpath.clone();
+                let method_clone = method.clone();
+                let metrics_clone = self.metrics.clone();
+                let relay_clone = self.relay.clone();
+                let config_clone = self.config.clone();
+
+                return Box::pin(async move {
+                    // Collect (and gunzip if needed) the request body just like
+                    // the standard git branch does.
+                    let raw_body = req
+                        .collect()
+                        .await
+                        .map(|collected| collected.to_bytes())
+                        .unwrap_or_else(|_| Bytes::new());
+                    let body_bytes = if content_encoding.as_deref() == Some("gzip") {
+                        use flate2::read::GzDecoder;
+                        use std::io::Read;
+                        let mut decoder = GzDecoder::new(&raw_body[..]);
+                        let mut decompressed = Vec::new();
+                        match decoder.read_to_end(&mut decompressed) {
+                            Ok(_) => Bytes::from(decompressed),
+                            Err(e) => {
+                                tracing::warn!("/prs/ gzip decompress failed: {}", e);
+                                raw_body
+                            }
+                        }
+                    } else {
+                        raw_body
+                    };
+
+                    let result: Result<Response<Full<Bytes>>, git::handlers::GitError> =
+                        match (method_clone.as_ref(), subpath.as_str()) {
+                            // GET /info/refs?service=git-{upload,receive}-pack
+                            (m, sp) if m == Method::GET && sp.starts_with("info/refs") => {
+                                let service = query
+                                    .as_deref()
+                                    .unwrap_or("")
+                                    .strip_prefix("service=")
+                                    .and_then(git::protocol::GitService::from_query_param);
+                                match service {
+                                    Some(svc) => {
+                                        let r = crate::grasp06::fetch::handle_prs_info_refs(
+                                            &prs,
+                                            &git_data_path,
+                                            svc,
+                                            git_protocol.as_deref(),
+                                        )
+                                        .await;
+                                        if let Some(ref m) = metrics_clone {
+                                            let status =
+                                                if r.is_ok() { "success" } else { "error" };
+                                            let op = match svc {
+                                                git::protocol::GitService::UploadPack => "fetch",
+                                                git::protocol::GitService::ReceivePack => "push",
+                                            };
+                                            m.record_git_operation(op, status);
+                                        }
+                                        r
+                                    }
+                                    None => Err(git::handlers::GitError::RepositoryNotFound),
+                                }
+                            }
+
+                            // POST /git-upload-pack — clone/fetch.
+                            (m, "git-upload-pack") if m == Method::POST => {
+                                let r = crate::grasp06::fetch::handle_prs_upload_pack(
+                                    &prs,
+                                    &git_data_path,
+                                    body_bytes,
+                                    git_protocol.as_deref(),
+                                )
+                                .await;
+                                if let Some(ref m) = metrics_clone {
+                                    let status = if r.is_ok() { "success" } else { "error" };
+                                    m.record_git_operation("clone", status);
+                                }
+                                r
+                            }
+
+                            // POST /git-receive-pack — accept pushes to
+                            // refs/nostr/<event-id>, reject anything else,
+                            // per GRASP-06 06.md line 15.
+                            (m, "git-receive-pack") if m == Method::POST => {
+                                let r = crate::grasp06::receive::handle_prs_receive_pack(
+                                    &prs,
+                                    body_bytes,
+                                    database.clone(),
+                                    relay_clone.clone(),
+                                    purgatory.clone(),
+                                    write_policy.clone(),
+                                    rejected_events_index.clone(),
+                                    &git_data_path,
+                                    git_protocol.as_deref(),
+                                    repo_init_locks.clone(),
+                                    &config_clone.domain,
+                                )
+                                .await;
+                                if let Some(ref m) = metrics_clone {
+                                    let status = if r.is_ok() { "success" } else { "error" };
+                                    m.record_git_operation("push", status);
+                                }
+                                r
+                            }
+
+                            _ => Err(git::handlers::GitError::RepositoryNotFound),
+                        };
+
+                    match result {
+                        Ok(response) => {
+                            let (parts, body) = response.into_parts();
+                            Ok(add_cors_headers(Response::builder().status(parts.status))
+                                .header(
+                                    "content-type",
+                                    parts
+                                        .headers
+                                        .get("content-type")
+                                        .and_then(|v| v.to_str().ok())
+                                        .unwrap_or("application/octet-stream"),
+                                )
+                                .header(
+                                    "cache-control",
+                                    parts
+                                        .headers
+                                        .get("cache-control")
+                                        .and_then(|v| v.to_str().ok())
+                                        .unwrap_or("no-cache"),
+                                )
+                                .body(body)
+                                .unwrap())
+                        }
+                        Err(e) => {
+                            let error_msg = format!("Git error: {}", e);
+                            Ok(add_cors_headers(Response::builder())
+                                .status(e.status_code())
+                                .body(Full::new(Bytes::from(error_msg)))
+                                .unwrap())
+                        }
+                    }
+                });
+            }
+        }
+
         // Check for Git HTTP requests first
         if let Some((npub, identifier, subpath)) = git::parse_git_url(&path) {
-
             // Extract Git-Protocol header for protocol v2 support
             let git_protocol = req
                 .headers()
@@ -575,6 +759,7 @@ fn derive_accept_key(request_key: &[u8]) -> String {
 /// * `purgatory` - Purgatory for event/git coordination
 /// * `write_policy` - Write policy for re-processing hot-cache events after git push promotion
 /// * `rejected_events_index` - Rejected events index for hot-cache re-processing
+#[allow(clippy::too_many_arguments)]
 pub async fn run_server(
     config: Config,
     relay: LocalRelay,
@@ -583,6 +768,7 @@ pub async fn run_server(
     purgatory: Arc<Purgatory>,
     write_policy: Arc<Nip34WritePolicy>,
     rejected_events_index: Arc<RejectedEventsIndex>,
+    repo_init_locks: RepoInitLocks,
 ) -> anyhow::Result<()> {
     let bind_addr: SocketAddr = config.bind_address.parse()?;
 
@@ -604,6 +790,7 @@ pub async fn run_server(
             purgatory.clone(),
             write_policy.clone(),
             rejected_events_index.clone(),
+            repo_init_locks.clone(),
         );
 
         tokio::spawn(async move {

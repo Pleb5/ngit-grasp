@@ -2,6 +2,7 @@ pub mod audit_cleanup;
 pub mod cleanup_empty_repos;
 pub mod config;
 pub mod git;
+pub mod grasp06;
 pub mod http;
 pub mod metrics;
 pub mod nostr;

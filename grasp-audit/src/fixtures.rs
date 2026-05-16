@@ -55,6 +55,7 @@
 use crate::{AuditClient, AuditMode};
 use anyhow::{Context, Result};
 use nostr_sdk::prelude::Event;
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -113,6 +114,74 @@ pub const PR_TEST_COMMIT_HASH: &str = "5a51b30e4615b572dcd5b9e487861b58605a5c21"
 /// - User: "GRASP Audit Test <test@grasp-audit.local>"
 /// - Parent: none (root commit)
 pub const PR_TEST_COMMIT_HASH_2: &str = "99420bc57835f5bc8ca20ab21a8d12850043920e";
+
+// =============================================================================
+// Generic `Fixture` trait (non-Event fixtures)
+// =============================================================================
+
+/// Type-erased cache for non-Event fixtures.
+///
+/// Keys are the `&'static str` returned by [`Fixture::cache_key`]. Two distinct
+/// `Fixture` impls MUST NOT share a cache key unless they share an `Output`
+/// type — the cache stores `Arc<dyn Any + Send + Sync>` and downcasts on read.
+/// A key/type mismatch surfaces at runtime as a clear error from `TestContext::get`.
+pub type TypedFixtureCache = Arc<Mutex<HashMap<&'static str, Arc<dyn Any + Send + Sync>>>>;
+
+/// Generic fixture: a cached, possibly-asynchronously-built prerequisite that
+/// is NOT a Nostr event.
+///
+/// Use this for things like the NIP-11 document, derived booleans, fetched
+/// HTTP resources, etc. For Event-shaped fixtures with deep dependency chains
+/// (repo announcements, state events, PRs, …) use [`FixtureKind`] and
+/// [`TestContext::get_fixture`] — that system has dedicated dependency
+/// resolution and is not going away.
+///
+/// # Caching
+///
+/// [`TestContext::get`] is mode-aware, matching the Event fixture system:
+///
+/// - **Shared mode**: cached on the [`AuditClient`] via
+///   [`AuditClient::typed_fixture_cache`]. Reused across all `TestContext`
+///   instances created from the same client.
+/// - **Isolated mode**: cached per-`TestContext`. Fresh for each test.
+///
+/// # Implementing
+///
+/// ```no_run
+/// use grasp_audit::*;
+/// use anyhow::Result;
+///
+/// pub struct MyFixture;
+///
+/// impl Fixture for MyFixture {
+///     type Output = String;
+///     fn cache_key(&self) -> &'static str { "my_fixture" }
+///     async fn build(&self, _ctx: &TestContext<'_>) -> Result<String> {
+///         Ok("hello".to_string())
+///     }
+/// }
+/// ```
+///
+/// # Cache-key contract
+///
+/// `cache_key` MUST be globally unique across all `Fixture` impls used in
+/// this process, AND two impls sharing a key MUST share an `Output` type.
+/// Violations surface as a clear anyhow error on the first cache hit of the
+/// conflicting type. Convention: snake_case string derived from the impl's
+/// module path, e.g. `"grasp06.nip11_document"`.
+#[allow(async_fn_in_trait)]
+pub trait Fixture: Send + Sync {
+    /// The value this fixture produces. Must be `Clone` because each
+    /// `TestContext::get` call clones the cached value out.
+    type Output: Clone + Send + Sync + 'static;
+
+    /// Stable, unique cache key. See the trait-level contract.
+    fn cache_key(&self) -> &'static str;
+
+    /// Build the value. Called at most once per cache scope (per-client in
+    /// Shared mode, per-`TestContext` in Isolated mode).
+    async fn build(&self, ctx: &TestContext<'_>) -> Result<Self::Output>;
+}
 
 /// Types of test fixtures available
 ///
@@ -530,6 +599,9 @@ pub struct TestContext<'a> {
     /// while maintaining isolation between tests.
     /// In Shared mode, this cache is not used - we use the client's cache instead.
     local_cache: Arc<Mutex<HashMap<FixtureKind, Event>>>,
+    /// Per-TestContext typed cache for non-Event fixtures (Isolated mode only).
+    /// In Shared mode this is unused; the client's `typed_fixture_cache` holds values.
+    typed_local_cache: TypedFixtureCache,
 }
 
 impl<'a> TestContext<'a> {
@@ -545,6 +617,7 @@ impl<'a> TestContext<'a> {
             client,
             mode,
             local_cache: Arc::new(Mutex::new(HashMap::new())),
+            typed_local_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -557,6 +630,7 @@ impl<'a> TestContext<'a> {
             client,
             mode,
             local_cache: Arc::new(Mutex::new(HashMap::new())),
+            typed_local_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -579,6 +653,86 @@ impl<'a> TestContext<'a> {
     /// ```
     pub async fn get_fixture(&self, kind: FixtureKind) -> Result<Event> {
         self.ensure_fixture(kind).await
+    }
+
+    /// Get a non-Event fixture via the generic [`Fixture`] trait.
+    ///
+    /// Mode-aware caching: reads/writes the client's `typed_fixture_cache` in
+    /// Shared mode, or this context's `typed_local_cache` in Isolated mode.
+    /// On cache miss, calls `fixture.build(self).await` exactly once and
+    /// stores the result.
+    ///
+    /// # Errors
+    ///
+    /// - Propagates errors from `Fixture::build`.
+    /// - Returns an error (does not panic) if two different `Fixture` impls
+    ///   share a `cache_key` but produce different `Output` types and the
+    ///   second hits the cache.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use grasp_audit::*;
+    /// # use anyhow::Result;
+    /// # struct MyFixture;
+    /// # impl Fixture for MyFixture {
+    /// #     type Output = String;
+    /// #     fn cache_key(&self) -> &'static str { "my_fixture" }
+    /// #     async fn build(&self, _ctx: &TestContext<'_>) -> Result<String> { Ok(String::new()) }
+    /// # }
+    /// # async fn example(ctx: &TestContext<'_>) -> Result<()> {
+    /// let value = ctx.get(&MyFixture).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get<F: Fixture>(&self, fixture: &F) -> Result<F::Output> {
+        let key = fixture.cache_key();
+
+        // 1. Read cache.
+        let cached: Option<Arc<dyn Any + Send + Sync>> = match self.mode {
+            ContextMode::Isolated => self.typed_local_cache.lock().unwrap().get(key).cloned(),
+            ContextMode::Shared => self
+                .client
+                .typed_fixture_cache()
+                .lock()
+                .unwrap()
+                .get(key)
+                .cloned(),
+        };
+
+        if let Some(any_arc) = cached {
+            let typed: Arc<F::Output> = any_arc.downcast::<F::Output>().map_err(|_| {
+                anyhow::anyhow!(
+                    "fixture cache type mismatch for key '{}' — two Fixture impls \
+                     using the same cache_key with different Output types?",
+                    key
+                )
+            })?;
+            tracing::debug!("get(<Fixture key='{}'>) found in cache", key);
+            return Ok((*typed).clone());
+        }
+
+        // 2. Build.
+        let value = fixture.build(self).await?;
+
+        // 3. Store. Note: we don't hold the lock across `await`.
+        let any_arc: Arc<dyn Any + Send + Sync> = Arc::new(value.clone());
+        match self.mode {
+            ContextMode::Isolated => {
+                self.typed_local_cache.lock().unwrap().insert(key, any_arc);
+                tracing::debug!("get(<Fixture key='{}'>) stored in local cache", key);
+            }
+            ContextMode::Shared => {
+                self.client
+                    .typed_fixture_cache()
+                    .lock()
+                    .unwrap()
+                    .insert(key, any_arc);
+                tracing::debug!("get(<Fixture key='{}'>) stored in client cache", key);
+            }
+        }
+
+        Ok(value)
     }
 
     /// Get the underlying client for direct access
@@ -1965,14 +2119,13 @@ impl<'a> TestContext<'a> {
             .output();
 
         // Step 3: Remove all working directory files for clean state (except .git)
-        for entry in
-            fs::read_dir(&clone_path).map_err(|e| anyhow::anyhow!("Failed to read dir: {}", e))?
+        for entry in fs::read_dir(&clone_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read dir: {}", e))?
+            .flatten()
         {
-            if let Ok(entry) = entry {
-                let path = entry.path();
-                if path.file_name() != Some(std::ffi::OsStr::new(".git")) {
-                    let _ = fs::remove_file(&path).or_else(|_| fs::remove_dir_all(&path));
-                }
+            let path = entry.path();
+            if path.file_name() != Some(std::ffi::OsStr::new(".git")) {
+                let _ = fs::remove_file(&path).or_else(|_| fs::remove_dir_all(&path));
             }
         }
 

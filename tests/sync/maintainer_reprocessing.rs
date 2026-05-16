@@ -302,7 +302,7 @@ async fn test_multiple_maintainers_all_reprocessed() {
     // tests run in parallel (each test gets its own namespace on relay_a).
     let identifier = &format!(
         "multi-maintainer-repo-{}",
-        owner_keys.public_key().to_hex()[..8].to_string()
+        &owner_keys.public_key().to_hex()[..8]
     );
 
     // Step 1: Send each maintainer announcement to relay_a then push git data so all three

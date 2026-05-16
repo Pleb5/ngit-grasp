@@ -57,6 +57,9 @@ anyhow = "1.0"
 # Async traits
 async-trait = "0.1"
 
+# Temporary directories (used for GRASP-06 empty-repo synthesis)
+tempfile = "3"
+
 # Git (for future use)
 # git-http-backend = "0.3"
 

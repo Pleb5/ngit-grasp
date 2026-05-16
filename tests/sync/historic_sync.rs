@@ -226,7 +226,7 @@ async fn test_history_sync_without_negentropy() {
 
     // Set up announcement on source with git data
     // (purgatory requires git data before announcements are accepted)
-    let domains = vec![source.domain(), syncing_domain.clone()];
+    let domains = [source.domain(), syncing_domain.clone()];
     let domain_refs: Vec<&str> = domains.iter().map(|s| s.as_str()).collect();
     let (announcement, _git_dir) = setup_announcement_on_relay(
         &source,

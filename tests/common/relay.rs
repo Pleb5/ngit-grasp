@@ -135,6 +135,16 @@ impl TestRelay {
         .await
     }
 
+    /// Start relay with GRASP-06 contributor PR submission enabled.
+    ///
+    /// Sets `NGIT_GRASP06_ENABLE=true` on the relay process. When the relay
+    /// does not yet support this flag (e.g. before the feature is implemented),
+    /// the env var is ignored — this is harmless and lets the same test file
+    /// drive both the pre- and post-implementation contracts.
+    pub async fn start_with_grasp_06_enabled() -> Self {
+        Self::start_with_all_options(Self::find_free_port(), None, false, false, false, true).await
+    }
+
     /// Start relay with options (internal, maintains backward compatibility)
     async fn start_with_options(port: u16, bootstrap_relay_url: Option<String>) -> Self {
         Self::start_with_full_options(port, bootstrap_relay_url, false).await
@@ -173,6 +183,30 @@ impl TestRelay {
         disable_negentropy: bool,
         archive_all: bool,
         archive_read_only: bool,
+    ) -> Self {
+        Self::start_with_all_options(
+            port,
+            bootstrap_relay_url,
+            disable_negentropy,
+            archive_all,
+            archive_read_only,
+            false,
+        )
+        .await
+    }
+
+    /// Start relay with every configurable option, including GRASP-06.
+    ///
+    /// Prefer the narrower constructors (`start`, `start_with_grasp_06_enabled`,
+    /// `start_with_archive_config`, etc.) — this exists so the option matrix has
+    /// a single place to grow.
+    pub async fn start_with_all_options(
+        port: u16,
+        bootstrap_relay_url: Option<String>,
+        disable_negentropy: bool,
+        archive_all: bool,
+        archive_read_only: bool,
+        grasp06_enable: bool,
     ) -> Self {
         let bind_address = format!("127.0.0.1:{}", port);
         let url = format!("ws://127.0.0.1:{}", port);
@@ -239,6 +273,12 @@ impl TestRelay {
         }
         if archive_read_only {
             cmd.env("NGIT_ARCHIVE_READ_ONLY", "true");
+        }
+
+        // Enable GRASP-06 if requested. If the binary does not yet recognise
+        // this env var (pre-implementation), clap simply ignores it.
+        if grasp06_enable {
+            cmd.env("NGIT_GRASP06_ENABLE", "true");
         }
 
         let process = cmd.spawn().expect("Failed to start relay process");

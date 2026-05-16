@@ -61,7 +61,7 @@ async fn test_discovers_layer3_via_layer2() {
     // 4. Set up repository announcement on relay_a with git data
     // (purgatory requires git data before announcements are accepted)
     let repo_id = "test-repo-discovery";
-    let domains = vec![relay_a.domain(), relay_b.domain()];
+    let domains = [relay_a.domain(), relay_b.domain()];
     let domain_refs: Vec<&str> = domains.iter().map(|s| s.as_str()).collect();
 
     let (announcement, _git_dir_a) =
@@ -176,7 +176,7 @@ async fn test_relay_discovery_via_announcements_with_historic_sync() {
     // 4. Set up repository on relay_a with git data and a Layer 2 issue
 
     // Layer 1: Set up announcement with git data
-    let domains = vec![relay_a.domain(), relay_b.domain()];
+    let domains = [relay_a.domain(), relay_b.domain()];
     let domain_refs: Vec<&str> = domains.iter().map(|s| s.as_str()).collect();
     let repo_id = "test-repo-chain";
 

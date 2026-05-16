@@ -1,7 +1,7 @@
 //! Audit client for testing GRASP implementations
 
 use crate::audit::{AuditConfig, AuditEventBuilder, AuditMode};
-use crate::fixtures::FixtureKind;
+use crate::fixtures::{FixtureKind, TypedFixtureCache};
 use anyhow::{anyhow, Context, Result};
 use nostr_sdk::prelude::*;
 use std::collections::HashMap;
@@ -29,6 +29,9 @@ pub struct AuditClient {
     pr_author_keys: Keys,
     /// Fixture cache for TestContext instances - shared across all contexts using this client
     fixture_cache: FixtureCache,
+    /// Typed fixture cache for non-Event fixtures implementing the `Fixture` trait.
+    /// Shared across all `TestContext` instances using this client (used in Shared mode).
+    typed_fixture_cache: TypedFixtureCache,
 }
 
 impl AuditClient {
@@ -48,6 +51,7 @@ impl AuditClient {
             recursive_maintainer_keys,
             pr_author_keys,
             fixture_cache: Arc::new(Mutex::new(HashMap::new())),
+            typed_fixture_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -109,6 +113,7 @@ impl AuditClient {
             recursive_maintainer_keys,
             pr_author_keys,
             fixture_cache: Arc::new(Mutex::new(HashMap::new())),
+            typed_fixture_cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -176,6 +181,7 @@ impl AuditClient {
             recursive_maintainer_keys,
             pr_author_keys,
             fixture_cache: Arc::new(Mutex::new(HashMap::new())),
+            typed_fixture_cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -186,6 +192,16 @@ impl AuditClient {
     /// In test mode (one client per test), fixtures are isolated.
     pub fn fixture_cache(&self) -> &FixtureCache {
         &self.fixture_cache
+    }
+
+    /// Get the typed fixture cache for non-Event fixtures implementing the
+    /// [`crate::fixtures::Fixture`] trait.
+    ///
+    /// Used by `TestContext::get` in Shared mode. Same lifecycle rules as
+    /// `fixture_cache`: shared across all `TestContext` instances for this
+    /// client.
+    pub fn typed_fixture_cache(&self) -> &TypedFixtureCache {
+        &self.typed_fixture_cache
     }
 
     /// Get the public key for this audit client
@@ -668,6 +684,7 @@ mod tests {
             recursive_maintainer_keys,
             pr_author_keys,
             fixture_cache: Arc::new(Mutex::new(HashMap::new())),
+            typed_fixture_cache: Arc::new(Mutex::new(HashMap::new())),
         };
 
         let _builder = client.event_builder(Kind::TextNote, "test content");
@@ -691,6 +708,7 @@ mod tests {
             recursive_maintainer_keys,
             pr_author_keys,
             fixture_cache: Arc::new(Mutex::new(HashMap::new())),
+            typed_fixture_cache: Arc::new(Mutex::new(HashMap::new())),
         };
 
         // Create an event with a custom tag

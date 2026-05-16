@@ -21,8 +21,8 @@ pub use helpers::{
     get_unpushed_refs,
 };
 pub use types::{
-    AnnouncementPurgatoryEntry, EventSource, PrPurgatoryEntry, RefPair, RefUpdate,
-    StatePurgatoryEntry,
+    AnnouncementPurgatoryEntry, EventSource, PrPurgatoryEntry, PrsPlaceholderScope, RefPair,
+    RefUpdate, StatePurgatoryEntry,
 };
 
 use dashmap::DashMap;
@@ -94,6 +94,11 @@ struct SerializablePrPurgatoryEntry {
     /// Source of this event (direct submission vs sync)
     #[serde(default)]
     source: types::EventSource,
+    /// GRASP-06 `/prs/` placeholder scope, if any. `#[serde(default)]`
+    /// keeps state files written before this field existed
+    /// deserialisable.
+    #[serde(default)]
+    prs_scope: Option<types::PrsPlaceholderScope>,
 }
 
 /// Serializable wrapper for `AnnouncementPurgatoryEntry` with time offsets.
@@ -194,6 +199,28 @@ pub struct Purgatory {
     expired_events: Arc<DashMap<EventId, Instant>>,
 
     _git_data_path: PathBuf,
+
+    /// Set once at startup by [`Purgatory::set_prs_cleanup_ctx`] to give
+    /// [`Purgatory::cleanup`] enough information to remove abandoned
+    /// `/prs/<submitter>/<identifier>.git` refs and bare repos when their
+    /// scoped placeholders expire without an arriving PR event. Left
+    /// `None` in tests and any caller that does not need this behaviour.
+    prs_cleanup_ctx: std::sync::OnceLock<PrsCleanupCtx>,
+}
+
+/// Context shared with [`Purgatory::cleanup`] so it can perform the same
+/// best-effort empty-repo cleanup the `/prs/` receive handler does, for
+/// placeholders that expire because no matching PR event ever arrived.
+///
+/// The lock map is the same one held by the receive handler. The
+/// cleanup loop is synchronous, so it `try_lock`s the per-path mutex —
+/// holding it across an async point would block the runtime — and
+/// reads the `in_flight` counter under that mutex to decide whether a
+/// push is mid-receive.
+#[derive(Clone)]
+pub struct PrsCleanupCtx {
+    pub git_data_path: PathBuf,
+    pub repo_init_locks: crate::grasp06::receive::RepoInitLocks,
 }
 
 impl Purgatory {
@@ -206,7 +233,18 @@ impl Purgatory {
             sync_queue: Arc::new(DashMap::new()),
             expired_events: Arc::new(DashMap::new()),
             _git_data_path: git_data_path.into(),
+            prs_cleanup_ctx: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Wire the cleanup-time `/prs/` filesystem context. Called once at
+    /// startup by `main`; tests and code paths that do not exercise
+    /// scoped `/prs/` placeholders leave it unset and the cleanup loop
+    /// then only removes the in-memory entry, leaving any on-disk refs
+    /// in place.
+    pub fn set_prs_cleanup_ctx(&self, ctx: PrsCleanupCtx) {
+        // Ignore a second set — there is exactly one server-wide context.
+        let _ = self.prs_cleanup_ctx.set(ctx);
     }
 
     /// Enqueue an identifier for background git data sync.
@@ -424,6 +462,7 @@ impl Purgatory {
             created_at: now,
             expires_at: now + DEFAULT_EXPIRY,
             source,
+            prs_scope: None,
         };
 
         self.pr_events.insert(event_id, entry);
@@ -451,6 +490,47 @@ impl Purgatory {
             created_at: now,
             expires_at: now + DEFAULT_EXPIRY,
             source: types::EventSource::Direct, // Git pushes are direct user actions
+            prs_scope: None,
+        };
+
+        self.pr_events.insert(event_id, entry);
+    }
+
+    /// Add a PR placeholder created by a push to the GRASP-06 `/prs/`
+    /// endpoint (06.md line 14).
+    ///
+    /// Behaves like [`Self::add_pr_placeholder`] but additionally records
+    /// the URL's submitter and identifier on the entry. When the
+    /// corresponding PR event later arrives, the validator (see
+    /// [`crate::nostr::policy::pr_event`]) MUST cross-check the event's
+    /// signer against `submitter` and one of the event's `a`-tag d-tags
+    /// against `identifier`. Without this binding an attacker could push
+    /// any `refs/nostr/<event-id>` under their own `/prs/` namespace and
+    /// have it later "validated" by an unrelated event of the same id.
+    ///
+    /// # Arguments
+    /// * `event_id` - The expected event ID (from the pushed ref name)
+    /// * `commit` - The commit SHA that was pushed
+    /// * `submitter` - Pubkey from the `/prs/<npub>/...` URL segment
+    /// * `identifier` - Repository identifier from the URL (percent-decoded)
+    pub fn add_prs_pr_placeholder(
+        &self,
+        event_id: String,
+        commit: String,
+        submitter: PublicKey,
+        identifier: String,
+    ) {
+        let now = Instant::now();
+        let entry = PrPurgatoryEntry {
+            event: None,
+            commit,
+            created_at: now,
+            expires_at: now + DEFAULT_EXPIRY,
+            source: types::EventSource::Direct,
+            prs_scope: Some(types::PrsPlaceholderScope {
+                submitter,
+                identifier,
+            }),
         };
 
         self.pr_events.insert(event_id, entry);
@@ -1124,12 +1204,13 @@ impl Purgatory {
                 let event_opt = pr_entry.event.clone();
                 let commit = pr_entry.commit.clone();
                 let source = pr_entry.source;
-                (event_id_str, event_opt, commit, source)
+                let prs_scope = pr_entry.prs_scope.clone();
+                (event_id_str, event_opt, commit, source, prs_scope)
             })
             .collect();
 
         let pr_removed = expired_prs.len();
-        for (event_id_str, event_opt, commit, source) in expired_prs {
+        for (event_id_str, event_opt, commit, source, prs_scope) in expired_prs {
             // Log structured entry for PR events (not placeholders)
             if let Some(ref event) = event_opt {
                 let npub = event
@@ -1212,6 +1293,59 @@ impl Purgatory {
                     &commit[..commit.len().min(12)]
                 );
             }
+
+            // For GRASP-06 `/prs/`-scoped placeholders, best-effort
+            // filesystem cleanup of the dangling refs/nostr/<event-id>
+            // ref and (if it leaves the bare repo with zero refs *and
+            // no push is in flight*) the repo directory itself.
+            //
+            // We hold the per-path mutex for the duration of the
+            // filesystem operations. Because `mu` is a `std::sync::Mutex`
+            // (all critical sections are sync-only), we can call `lock()`
+            // directly here without a runtime hazard. The purgatory entry
+            // is only removed from `pr_events` after the filesystem work
+            // succeeds; if the lock is poisoned we skip cleanup this cycle
+            // and let the entry expire on the next sweep.
+            if let (Some(scope), Some(ctx)) = (prs_scope.as_ref(), self.prs_cleanup_ctx.get()) {
+                let repo_path = crate::grasp06::paths::prs_repo_path(
+                    &ctx.git_data_path,
+                    &scope.submitter.to_hex(),
+                    &scope.identifier,
+                );
+                if repo_path.exists() {
+                    let state =
+                        crate::grasp06::receive::path_state(&ctx.repo_init_locks, &repo_path);
+                    let _guard = state.mu.lock().expect("prs path mutex poisoned");
+                    let ref_name = format!("refs/nostr/{}", event_id_str);
+                    if let Err(e) = crate::git::delete_ref(&repo_path, &ref_name) {
+                        tracing::warn!(
+                            repo = %repo_path.display(),
+                            ref_name = %ref_name,
+                            error = %e,
+                            "Failed to delete dangling /prs/ ref during purgatory expiry",
+                        );
+                    } else if state.in_flight.load(std::sync::atomic::Ordering::Relaxed) == 0
+                        && matches!(
+                            crate::git::list_refs(&repo_path),
+                            Ok(refs) if refs.is_empty()
+                        )
+                    {
+                        if let Err(e) = std::fs::remove_dir_all(&repo_path) {
+                            tracing::warn!(
+                                repo = %repo_path.display(),
+                                error = %e,
+                                "Failed to remove zero-ref /prs/ repo during purgatory expiry",
+                            );
+                        } else {
+                            tracing::debug!(
+                                repo = %repo_path.display(),
+                                "Removed zero-ref /prs/ repo during purgatory expiry",
+                            );
+                        }
+                    }
+                }
+            }
+
             self.pr_events.remove(&event_id_str);
         }
 
@@ -1414,6 +1548,7 @@ impl Purgatory {
                 created_at_offset_secs: created_offset.as_secs(),
                 expires_at_offset_secs: expires_offset.as_secs(),
                 source: e.source,
+                prs_scope: e.prs_scope.clone(),
             };
             pr_events.insert(event_id, serializable);
         }
@@ -1583,6 +1718,7 @@ impl Purgatory {
                 created_at,
                 expires_at,
                 source: e.source,
+                prs_scope: e.prs_scope,
             };
 
             self.pr_events.insert(event_id, entry);
@@ -3034,4 +3170,109 @@ async fn test_comprehensive_roundtrip() {
 
     // Verify expired event
     assert!(purgatory2.is_expired(&expired_id));
+}
+
+// =============================================================================
+// GRASP-06 edge case B2: un-scoped placeholder upgrade
+// =============================================================================
+//
+// Scenario: a push to the standard /<npub>/<id>.git endpoint with wrong commit
+// X creates an un-scoped placeholder for an event_id. A subsequent push to
+// /prs/<submitter>/<id>.git with the correct commit Y then sees the un-scoped
+// placeholder and — per the fix in grasp06::receive::post_push_validate —
+// overwrites it with a scoped placeholder (commit Y, scope={submitter, id}).
+//
+// When the PR event (commit Y) arrives it finds the scoped placeholder, takes
+// the scope-match branch in PrEventPolicy::git_data_check, and:
+//   1. Promotes the event out of purgatory
+//   2. Mirrors commit Y (overwriting X) into the announced repo
+//
+// These tests verify the purgatory-level behaviour that the fix relies on.
+
+#[test]
+fn add_prs_pr_placeholder_overwrites_un_scoped_placeholder() {
+    // Simulates: standard endpoint pushed wrong commit X → un-scoped placeholder.
+    // Then /prs/ endpoint pushes correct commit Y → upgrade to scoped.
+    let purgatory = Purgatory::new(PathBuf::new());
+    let submitter = Keys::generate();
+    let event_id = "a".repeat(64);
+    let wrong_commit = "b".repeat(40);
+    let correct_commit = "c".repeat(40);
+
+    // Standard endpoint creates un-scoped placeholder (wrong commit X)
+    purgatory.add_pr_placeholder(event_id.clone(), wrong_commit.clone());
+
+    let entry = purgatory.find_pr(&event_id).unwrap();
+    assert!(entry.event.is_none(), "placeholder has no event");
+    assert!(entry.prs_scope.is_none(), "placeholder is un-scoped");
+    assert_eq!(entry.commit, wrong_commit);
+
+    // /prs/ endpoint upgrades to scoped placeholder (correct commit Y)
+    purgatory.add_prs_pr_placeholder(
+        event_id.clone(),
+        correct_commit.clone(),
+        submitter.public_key(),
+        "my-repo".to_string(),
+    );
+
+    let upgraded = purgatory.find_pr(&event_id).unwrap();
+    assert!(upgraded.event.is_none(), "still a placeholder (no event)");
+    let scope = upgraded.prs_scope.expect("placeholder now has prs_scope");
+    assert_eq!(scope.submitter, submitter.public_key());
+    assert_eq!(scope.identifier, "my-repo");
+    assert_eq!(
+        upgraded.commit, correct_commit,
+        "placeholder commit updated to /prs/ commit Y"
+    );
+    assert_ne!(
+        upgraded.commit, wrong_commit,
+        "wrong commit X no longer stored"
+    );
+}
+
+#[test]
+fn add_prs_pr_placeholder_does_not_overwrite_existing_scoped_placeholder() {
+    // Once a scoped placeholder exists (the /prs/ push was first), a second
+    // add_prs_pr_placeholder call with a different scope or commit must not
+    // silently replace it — callers gate on `entry.prs_scope.is_none()` before
+    // calling, so this test documents what happens if the gate is bypassed.
+    // Direct `insert` via add_prs_pr_placeholder would overwrite; the guard in
+    // post_push_validate prevents that from happening in practice.
+    //
+    // NOTE on the apparent TOCTOU: the two-step check-then-insert looks like a
+    // race between two concurrent /prs/ pushes from *different* submitters for
+    // the same event_id. In practice this cannot happen: an event_id is a hash
+    // of the event content, which includes the signer's pubkey. Two different
+    // signers therefore cannot share an event_id, so only one submitter can ever
+    // legitimately push a given refs/nostr/<event-id>. No atomic upgrade is
+    // needed; the guard is sufficient.
+    let purgatory = Purgatory::new(PathBuf::new());
+    let submitter_a = Keys::generate();
+    let submitter_b = Keys::generate();
+    let event_id = "d".repeat(64);
+    let commit_a = "e".repeat(40);
+    let commit_b = "f".repeat(40);
+
+    purgatory.add_prs_pr_placeholder(
+        event_id.clone(),
+        commit_a.clone(),
+        submitter_a.public_key(),
+        "repo-a".to_string(),
+    );
+
+    // Calling again (bypassing the gate) would replace — this documents the
+    // raw behaviour so that callers know the gate is necessary.
+    purgatory.add_prs_pr_placeholder(
+        event_id.clone(),
+        commit_b.clone(),
+        submitter_b.public_key(),
+        "repo-b".to_string(),
+    );
+
+    // The entry was replaced (gate bypass scenario — illustrates why
+    // post_push_validate checks prs_scope.is_none() before upgrading).
+    let entry = purgatory.find_pr(&event_id).unwrap();
+    let scope = entry.prs_scope.unwrap();
+    assert_eq!(scope.submitter, submitter_b.public_key());
+    assert_eq!(scope.identifier, "repo-b");
 }

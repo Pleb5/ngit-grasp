@@ -228,6 +228,25 @@ let
         '';
       };
 
+      grasp06Enable = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Enable the GRASP-06 contributor PR submission endpoint at
+          /prs/<npub>/<identifier>.git.
+
+          When enabled, the relay exposes an unauthenticated PR submission
+          endpoint that accepts pushes of refs/nostr/<event-id> from any
+          contributor. Security relies on the signed PR/PR-Update events the
+          refs reference, not on HTTP-level auth.
+
+          When disabled (default), /prs/* returns 404 and event acceptance is
+          unchanged.
+
+          See: https://github.com/DanConwayDev/grasp/blob/main/06.md
+        '';
+      };
+
       repositoryWhitelist = mkOption {
         type = types.listOf types.str;
         default = [ ];
@@ -339,6 +358,7 @@ let
       NGIT_REPOSITORY_BLACKLIST = concatStringsSep "," cfg.repositoryBlacklist;
       NGIT_EVENT_BLACKLIST = concatStringsSep "," cfg.eventBlacklist;
       NGIT_LOG_LEVEL = cfg.logLevel;
+      NGIT_GRASP06_ENABLE = if cfg.grasp06Enable then "true" else "false";
     } // optionalAttrs (cfg.maxConnections != null) {
       NGIT_MAX_CONNECTIONS = toString cfg.maxConnections;
     } // optionalAttrs (cfg.relayName != null) {

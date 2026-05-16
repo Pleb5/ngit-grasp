@@ -545,6 +545,21 @@ Negentropy Sync
 
 **Source Code:** [`src/sync/rejected_index.rs`](../../src/sync/rejected_index.rs)
 
+## Contributor PR Submission (GRASP-06)
+
+Optional endpoint at `/prs/<npub>/<identifier>.git`, gated on `NGIT_GRASP06_ENABLE` (default off). Contributors push `refs/nostr/<event-id>` for PR and PR Update events targeting any repository — even repos this relay has no accepted announcement for. The endpoint is unauthenticated at the HTTP level; validity is established by the signed PR / PR Update event and inline acceptance rules.
+
+**Module layout:**
+
+- [`src/grasp06/endpoint.rs`](../../src/grasp06/endpoint.rs) — URL parsing.
+- [`src/grasp06/paths.rs`](../../src/grasp06/paths.rs) — on-disk path conventions under `<git_data_path>/prs/<hex>/<identifier>.git`.
+- [`src/grasp06/fetch.rs`](../../src/grasp06/fetch.rs) — empty-repo synthesis for `info/refs` and `git-upload-pack` against repos that don't yet exist on disk.
+- [`src/grasp06/receive.rs`](../../src/grasp06/receive.rs) — `git-receive-pack` with init-on-push, strict `refs/nostr/<event-id>` ref-name validation, and per-ref post-push validation against the database and purgatory. Uses a per-`(submitter, identifier)` `PrsPathState` (mutex + `in_flight` counter) so concurrent pushes to the same path proceed in parallel: the mutex is held only for init+register and decrement+end-of-push cleanup, not across `git-receive-pack` itself. The same state is consulted (with `try_lock` in synchronous contexts) by the PR-event policy and the purgatory expiry sweep, which only remove a `/prs/` ref or zero-ref bare repo when `in_flight == 0`.
+- [`src/grasp06/policy.rs`](../../src/grasp06/policy.rs) — strict clone-tag URL comparator used by the PR-event acceptance relaxation.
+- [`src/grasp06/cleanup.rs`](../../src/grasp06/cleanup.rs) — one-shot startup scan over `<git_data_path>/prs/` that removes zero-ref bare repos left behind by a previous run (crash mid-push, crash mid-cleanup, or shutdown with unresolved scoped placeholders). Runs before the HTTP server starts accepting requests; no locking is needed because nothing else is touching `/prs/` yet.
+
+`/prs/` repos are intentionally isolated from other subsystems: empty-repo cleanup skips the `/prs/` subtree, the proactive-sync subsystem never discovers them because subscriptions are built from DB-resident announcements, and the standard repo landing page guards against ever matching a `/prs/` path. Full design: [GRASP-06 Contributor Pull Request Submission](grasp-06-contributor-pr-submission.md). Operator how-to: [Enable GRASP-06](../how-to/enable-grasp-06.md).
+
 ## Future Extensions
 
 ### GRASP-02: Proactive Sync

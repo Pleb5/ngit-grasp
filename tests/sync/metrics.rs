@@ -227,7 +227,7 @@ async fn test_startup_sync_event_count() {
     // 4. Set up announcement on SOURCE relay with git data
     // (purgatory requires git data before announcements are accepted)
     let repo_id = "test-repo-metrics";
-    let domains = vec![source_relay.domain(), syncing_relay.domain()];
+    let domains = [source_relay.domain(), syncing_relay.domain()];
     let domain_refs: Vec<&str> = domains.iter().map(|s| s.as_str()).collect();
 
     let (announcement, _git_dir_source) =
@@ -409,7 +409,7 @@ async fn test_live_sync_event_count() {
     // This allows discovery when syncing relay connects
     let keys = Keys::generate();
     let repo_id = "live-metrics-repo";
-    let domains = vec![source_relay.domain(), sync_domain.clone()];
+    let domains = [source_relay.domain(), sync_domain.clone()];
     let domain_refs: Vec<&str> = domains.iter().map(|s| s.as_str()).collect();
 
     let (_announcement, _git_dir) =

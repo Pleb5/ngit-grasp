@@ -148,7 +148,10 @@ pub async fn run(args: &CleanupArgs) -> Result<()> {
         .await
         .context("Failed to query kind 30617 events")?;
 
-    println!("Found {} kind 30617 announcement(s) in database.", announcements.len());
+    println!(
+        "Found {} kind 30617 announcement(s) in database.",
+        announcements.len()
+    );
     println!();
 
     // Identify empty repos
@@ -169,7 +172,7 @@ pub async fn run(args: &CleanupArgs) -> Result<()> {
 
         let npub = announcement.owner_npub();
         let identifier = announcement.identifier.clone();
-        let repo_path = git_data_path.join(&announcement.repo_path());
+        let repo_path = git_data_path.join(announcement.repo_path());
 
         let (repo_exists, is_empty) = check_repo_empty(&repo_path);
 
@@ -187,12 +190,7 @@ pub async fn run(args: &CleanupArgs) -> Result<()> {
         let state_events = database
             .query(state_filter)
             .await
-            .with_context(|| {
-                format!(
-                    "Failed to query kind 30618 for {}/{}",
-                    npub, identifier
-                )
-            })?;
+            .with_context(|| format!("Failed to query kind 30618 for {}/{}", npub, identifier))?;
 
         empty_repos.push(EmptyRepo {
             announcement: event.clone(),
@@ -237,10 +235,7 @@ pub async fn run(args: &CleanupArgs) -> Result<()> {
             repo.identifier,
             repo_status,
         );
-        println!(
-            "         30617 event : {}",
-            repo.announcement.id.to_hex()
-        );
+        println!("         30617 event : {}", repo.announcement.id.to_hex());
         if repo.state_events.is_empty() {
             println!("         30618 events: none in local DB");
         } else {
@@ -248,10 +243,7 @@ pub async fn run(args: &CleanupArgs) -> Result<()> {
                 println!("         30618 event : {}", se.id.to_hex());
             }
         }
-        println!(
-            "         repo path   : {}",
-            repo.repo_path.display()
-        );
+        println!("         repo path   : {}", repo.repo_path.display());
     }
 
     // Print orphan report
@@ -303,10 +295,7 @@ pub async fn run(args: &CleanupArgs) -> Result<()> {
             } else {
                 0
             };
-        println!(
-            "DRY-RUN: {} item(s) would be cleaned up.",
-            would_delete
-        );
+        println!("DRY-RUN: {} item(s) would be cleaned up.", would_delete);
         if orphan_repos.iter().any(|r| r.has_data) && !args.purge_orphans {
             println!(
                 "  (non-empty orphan repos flagged above would be skipped; add --purge-orphans to include them)"
@@ -495,7 +484,10 @@ pub async fn run(args: &CleanupArgs) -> Result<()> {
     println!();
     println!("=== Cleanup complete ===");
     println!("  Git repos deleted (stale events)  : {}", deleted_repos);
-    println!("  Git repos deleted (orphans)        : {}", deleted_orphan_repos);
+    println!(
+        "  Git repos deleted (orphans)        : {}",
+        deleted_orphan_repos
+    );
     if skipped_nonempty_orphans > 0 {
         println!(
             "  Non-empty orphans skipped          : {} (re-run with --purge-orphans to delete)",
@@ -503,10 +495,19 @@ pub async fn run(args: &CleanupArgs) -> Result<()> {
         );
     }
     if failed_repos > 0 {
-        println!("  Git repos failed                   : {} (see errors above)", failed_repos);
+        println!(
+            "  Git repos failed                   : {} (see errors above)",
+            failed_repos
+        );
     }
-    println!("  30617 events removed               : {}", deleted_announcements);
-    println!("  30618 events removed               : {}", deleted_state_events);
+    println!(
+        "  30617 events removed               : {}",
+        deleted_announcements
+    );
+    println!(
+        "  30618 events removed               : {}",
+        deleted_state_events
+    );
 
     Ok(())
 }
@@ -539,6 +540,13 @@ async fn find_orphan_repos(
         let npub_entry = npub_entry.context("Failed to read git data directory entry")?;
         let npub_path = npub_entry.path();
         if !npub_path.is_dir() {
+            continue;
+        }
+        // Skip the GRASP-06 `/prs/` subtree: it does not follow the
+        // `<npub>/<identifier>.git` layout and is not described by 30617
+        // announcements, so every repo under it would otherwise look like
+        // an orphan to this scan.
+        if crate::grasp06::paths::is_prs_repo_path(&npub_path, git_data_path) {
             continue;
         }
         let npub = npub_entry.file_name().to_string_lossy().into_owned();
@@ -583,12 +591,9 @@ async fn find_orphan_repos(
                 .with_context(|| format!("Failed to query 30617 for identifier {}", identifier))?;
 
             // Verify at least one event's owner npub matches the directory name
-            let has_event = matching.iter().any(|ev| {
-                ev.pubkey
-                    .to_bech32()
-                    .map(|n| n == npub)
-                    .unwrap_or(false)
-            });
+            let has_event = matching
+                .iter()
+                .any(|ev| ev.pubkey.to_bech32().map(|n| n == npub).unwrap_or(false));
 
             if has_event {
                 continue;
@@ -637,5 +642,78 @@ fn check_repo_empty(repo_path: &Path) -> (bool, bool) {
             // Could not run git — treat as empty to be safe (will be reported)
             (true, true)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn find_orphan_repos_skips_prs_subtree() {
+        // Layout under <git_data_path>:
+        //   prs/<hex>/<id>.git    <-- must be ignored (GRASP-06 endpoint)
+        //   <npub-shaped>/<id>.git <-- a real orphan to prove the scan still works
+        let tmp = tempdir().expect("tempdir");
+        let git_data_path = tmp.path();
+
+        // /prs/<hex>/<id>.git — bare repo so check_repo_empty doesn't complain
+        let prs_repo = crate::grasp06::paths::prs_repo_path(
+            git_data_path,
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            "my-pr-repo",
+        );
+        std::fs::create_dir_all(&prs_repo).expect("mkdir prs repo");
+        let init = Command::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&prs_repo)
+            .status()
+            .expect("git init prs repo");
+        assert!(init.success(), "git init must succeed for the test fixture");
+
+        // A standard-shaped orphan repo so we can assert the scan still finds
+        // real orphans after the /prs/ skip.
+        let orphan_owner = "npub1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz0000000";
+        let orphan_repo = git_data_path.join(orphan_owner).join("standard-orphan.git");
+        std::fs::create_dir_all(&orphan_repo).expect("mkdir orphan repo");
+        let init = Command::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&orphan_repo)
+            .status()
+            .expect("git init orphan");
+        assert!(init.success(), "git init must succeed for the test fixture");
+
+        // Empty LMDB DB so every disk repo is an "orphan" by definition.
+        let db_dir = tempdir().expect("tempdir db");
+        let database: Arc<dyn NostrDatabase> = Arc::new(
+            NostrLmdb::open(db_dir.path())
+                .await
+                .expect("open empty NostrLmdb"),
+        );
+
+        let orphans = find_orphan_repos(git_data_path, &database)
+            .await
+            .expect("scan succeeds");
+
+        assert!(
+            orphans.iter().all(|o| !o
+                .repo_path
+                .starts_with(prs_repo.parent().unwrap().parent().unwrap())
+                || !crate::grasp06::paths::is_prs_repo_path(&o.repo_path, git_data_path)),
+            "/prs/ repo must not be reported as orphan: got {:?}",
+            orphans
+                .iter()
+                .map(|o| o.repo_path.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            orphans.iter().any(|o| o.repo_path == orphan_repo),
+            "standard orphan must still be detected: got {:?}",
+            orphans
+                .iter()
+                .map(|o| o.repo_path.clone())
+                .collect::<Vec<_>>()
+        );
     }
 }

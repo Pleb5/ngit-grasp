@@ -8,10 +8,9 @@ use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 use ngit_grasp::{
-    audit_cleanup,
-    cleanup_empty_repos,
+    audit_cleanup, cleanup_empty_repos,
     config::{Config, DatabaseBackend},
-    git, http,
+    git, grasp06, http,
     metrics::Metrics,
     nostr,
     purgatory::{sync::RealSyncContext, sync::ThrottleManager, Purgatory},
@@ -28,7 +27,7 @@ use ngit_grasp::{
 enum Cli {
     /// Run the GRASP relay server (default when no subcommand is given).
     #[command(name = "serve")]
-    Serve(Config),
+    Serve(Box<Config>),
 
     /// Remove kind 30617/30618 events whose bare git repository is empty or missing.
     ///
@@ -47,7 +46,7 @@ async fn main() -> Result<()> {
     // and all relay flags are parsed normally (preserving backward compatibility).
     let mut args: Vec<String> = std::env::args().collect();
     let known_subcommands = ["serve", "cleanup-empty-repos", "help"];
-    let has_subcommand = args.get(1).map_or(false, |a| {
+    let has_subcommand = args.get(1).is_some_and(|a| {
         known_subcommands.contains(&a.as_str())
             || matches!(a.as_str(), "-h" | "--help" | "-V" | "--version")
     });
@@ -56,10 +55,9 @@ async fn main() -> Result<()> {
     }
 
     match Cli::parse_from(args) {
-        Cli::CleanupEmptyRepos(cleanup_args) => {
-            cleanup_empty_repos::run(&cleanup_args).await
-        }
-        Cli::Serve(mut config) => {
+        Cli::CleanupEmptyRepos(cleanup_args) => cleanup_empty_repos::run(&cleanup_args).await,
+        Cli::Serve(config) => {
+            let mut config = *config;
             // Finish initialising the Config (load relay owner key if not provided).
             if config.relay_owner_nsec.is_none() {
                 config.relay_owner_nsec = Some(Config::load_or_generate_relay_owner_key()?);
@@ -73,7 +71,6 @@ async fn main() -> Result<()> {
 }
 
 async fn run_relay(config: Config) -> Result<()> {
-
     // Initialize tracing with configured log level
     let subscriber = FmtSubscriber::builder()
         .with_env_filter(EnvFilter::new(&config.log_level))
@@ -134,9 +131,40 @@ async fn run_relay(config: Config) -> Result<()> {
         }
     }
 
+    // Shared per-path state for the GRASP-06 `/prs/` endpoint (mutex +
+    // in-flight counter, see [`grasp06::receive::PrsPathState`]). Lives
+    // for the lifetime of the process so concurrent pushes to the same
+    // `/prs/<submitter>/<id>.git` path — and policy / purgatory code
+    // paths that may delete a `/prs/` bare repo — coordinate through
+    // the same DashMap.
+    let repo_init_locks = grasp06::receive::new_repo_init_locks();
+
+    // Startup recovery for the GRASP-06 `/prs/` subtree: remove any
+    // zero-ref bare repos and empty submitter dirs left behind by a
+    // previous run (crashes mid-push, mid-cleanup, or shutdowns with
+    // unresolved scoped placeholders). Inline cleanup paths only fire
+    // while the process is running, so without this scan abandoned
+    // dirs persist indefinitely — the `cleanup-empty-repos` CLI tool
+    // explicitly skips `/prs/`. Gated on `grasp06_enable` so an
+    // operator who has turned the feature off does not start removing
+    // their existing `/prs/` data on the next restart. Runs before
+    // anything that could write to `/prs/` so no locking is needed.
+    if config.grasp06_enable {
+        let git_data_path = PathBuf::from(config.effective_git_data_path());
+        let (repos, dirs) = grasp06::cleanup::scan_on_startup(&git_data_path);
+        if repos > 0 || dirs > 0 {
+            info!(
+                "GRASP-06 /prs/ startup recovery: removed {} zero-ref repo(s), {} empty submitter dir(s)",
+                repos, dirs
+            );
+        }
+    }
+
     // Create Nostr relay with NIP-34 validation
     // Returns both the relay and database for direct queries in handlers
-    if let Ok(relay_with_db) = nostr::builder::create_relay(&config, purgatory.clone()).await {
+    if let Ok(relay_with_db) =
+        nostr::builder::create_relay(&config, purgatory.clone(), repo_init_locks.clone()).await
+    {
         info!(
             "Relay created with NIP-34 validation for domain: {}",
             config.domain
@@ -147,6 +175,17 @@ async fn run_relay(config: Config) -> Result<()> {
         relay_with_db
             .write_policy
             .set_local_relay(relay_with_db.relay.clone());
+
+        // Wire the GRASP-06 `/prs/` filesystem cleanup context into
+        // purgatory so the standard expiry sweep can delete dangling
+        // refs/nostr/<event-id> refs (and zero-ref bare repos) when a
+        // scoped placeholder expires without a matching PR event. Held
+        // under the same per-path lock the receive handler uses so the
+        // cleanup can never race with an in-flight push.
+        purgatory.set_prs_cleanup_ctx(ngit_grasp::purgatory::PrsCleanupCtx {
+            git_data_path: PathBuf::from(config.effective_git_data_path()),
+            repo_init_locks: repo_init_locks.clone(),
+        });
 
         // Start SyncManager for proactive sync (Phase 2: multi-relay support, Phase 3: health tracking)
         // Even without bootstrap relay, SyncManager discovers relays from stored announcements
@@ -288,6 +327,7 @@ async fn run_relay(config: Config) -> Result<()> {
                     purgatory,
                     http_write_policy,
                     http_rejected_index,
+                    repo_init_locks,
                 ) => {
                     result?
                 }
@@ -311,6 +351,7 @@ async fn run_relay(config: Config) -> Result<()> {
                     purgatory,
                     http_write_policy,
                     http_rejected_index,
+                    repo_init_locks,
                 ) => {
                     result?
                 }

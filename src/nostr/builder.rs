@@ -57,6 +57,7 @@ impl Nip34WritePolicy {
         git_data_path: impl Into<std::path::PathBuf>,
         purgatory: std::sync::Arc<crate::purgatory::Purgatory>,
         config: crate::config::Config,
+        repo_init_locks: crate::grasp06::receive::RepoInitLocks,
     ) -> Self {
         let ctx = PolicyContext::new(
             &config.domain,
@@ -64,6 +65,7 @@ impl Nip34WritePolicy {
             git_data_path,
             purgatory,
             config.clone(),
+            repo_init_locks,
         );
         Self {
             announcement_policy: AnnouncementPolicy::new(ctx.clone(), config.clone()),
@@ -392,10 +394,29 @@ impl Nip34WritePolicy {
             _ => {} // continue
         }
 
-        // Reject PRs unrelated to stored repositories / events
+        // Reject PRs unrelated to stored repositories / events.
+        //
+        // GRASP-06 (06.md lines 21–24) relaxes this: a PR / PR-Update event
+        // whose `clone` tag names this relay's
+        // `/prs/<signer-npub>/<d>.git` endpoint (and which carries a
+        // matching `a` tag of the form `30617:<hex>:<d>`) MUST be accepted
+        // even when no announcement for the target coord is on this relay.
+        // Such events skip the related-event check and fall through to the
+        // git-data-check + purgatory branch below.
         match self.handle_related_event(event, "PR").await {
             WritePolicyResult::Accept => {} // continue
-            rejected => return rejected,
+            rejected => {
+                if !crate::grasp06::policy::event_qualifies_for_pr_relaxation(
+                    event,
+                    &self.ctx.config,
+                ) {
+                    return rejected;
+                }
+                tracing::info!(
+                    "Accepted orphan PR event {} under GRASP-06: clone tag names this relay's /prs/ endpoint",
+                    event_id_str,
+                );
+            }
         }
 
         // Check if git data exists (delete any incorrect commits at refs/nostr/<event-id>, copies correct data to relivant repositories)
@@ -673,6 +694,7 @@ pub struct RelayWithDatabase {
 pub async fn create_relay(
     config: &Config,
     purgatory: Arc<crate::purgatory::Purgatory>,
+    repo_init_locks: crate::grasp06::receive::RepoInitLocks,
 ) -> Result<RelayWithDatabase> {
     tracing::info!("Configuring nostr relay with GRASP-01 validation...");
 
@@ -733,8 +755,13 @@ pub async fn create_relay(
     }
 
     // Create write policy with purgatory integration
-    let write_policy =
-        Nip34WritePolicy::new(database.clone(), &git_data_path, purgatory, config.clone());
+    let write_policy = Nip34WritePolicy::new(
+        database.clone(),
+        &git_data_path,
+        purgatory,
+        config.clone(),
+        repo_init_locks,
+    );
 
     let mut builder = LocalRelayBuilder::default()
         .database(database.clone())

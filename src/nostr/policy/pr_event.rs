@@ -57,24 +57,218 @@ impl PrEventPolicy {
 
         // Check for placeholder first (git-data-first scenario)
         if let Some(placeholder_commit) = self.ctx.purgatory.find_pr_placeholder(&event_id) {
-            if placeholder_commit == commit {
-                // Perfect match - git data arrived first with matching commit
+            // Read the full entry so we can inspect any GRASP-06 scope
+            // recorded when the placeholder was created from a /prs/ push.
+            let prs_scope = self
+                .ctx
+                .purgatory
+                .find_pr(&event_id)
+                .and_then(|entry| entry.prs_scope);
+
+            if let Some(scope) = prs_scope {
+                // The placeholder was created by a /prs/<submitter>/<id>.git
+                // push (06.md line 14). The arriving event MUST be signed by
+                // the URL submitter AND carry an `a` tag with d-tag equal to
+                // the URL identifier — otherwise this event was published by
+                // someone else and merely shares an id with a ref the
+                // submitter pre-staged. Discarding the placeholder + ref
+                // here is the security boundary; the event itself is left
+                // to continue through the normal acceptance flow (which may
+                // still legitimately accept it via the GRASP-06 relaxation
+                // in `src/nostr/builder.rs` or, if announced, the standard
+                // GRASP-01 path).
+                let event_d_tags: std::collections::HashSet<String> = event
+                    .tags
+                    .iter()
+                    .filter_map(|tag| {
+                        let tag_vec = tag.clone().to_vec();
+                        if tag_vec.len() >= 2
+                            && tag_vec[0] == "a"
+                            && tag_vec[1].starts_with("30617:")
+                        {
+                            let parts: Vec<&str> = tag_vec[1].splitn(3, ':').collect();
+                            if parts.len() == 3 {
+                                return Some(parts[2].to_string());
+                            }
+                        }
+                        None
+                    })
+                    .collect();
+
+                let signer_matches = event.pubkey == scope.submitter;
+                let identifier_matches = event_d_tags.contains(&scope.identifier);
+                let commit_matches = placeholder_commit == commit;
+
+                if !signer_matches || !identifier_matches || !commit_matches {
+                    tracing::warn!(
+                        event_id = %event_id,
+                        signer_matches,
+                        identifier_matches,
+                        commit_matches,
+                        submitter = %scope.submitter.to_hex(),
+                        identifier = %scope.identifier,
+                        "Discarding scoped /prs/ PR placeholder — incoming event does not match URL submitter + identifier",
+                    );
+
+                    // Delete the ref the original /prs/ push wrote, and if
+                    // that leaves the bare repo with zero refs *and no
+                    // push is in flight to this path*, delete the
+                    // directory too. The per-path mutex is held only for
+                    // the brief delete-and-check window — concurrent
+                    // pushes increment `in_flight` under the same mutex,
+                    // so seeing `in_flight == 0` while holding the lock
+                    // is a safe signal that no push is mid-receive.
+                    let prs_repo = crate::grasp06::paths::prs_repo_path(
+                        &self.ctx.git_data_path,
+                        &scope.submitter.to_hex(),
+                        &scope.identifier,
+                    );
+                    let ref_name = format!("refs/nostr/{}", event_id);
+                    if prs_repo.exists() {
+                        let state = crate::grasp06::receive::path_state(
+                            &self.ctx.repo_init_locks,
+                            &prs_repo,
+                        );
+                        let _guard = state.mu.lock().expect("prs path mutex poisoned");
+
+                        if let Err(e) = crate::git::delete_ref(&prs_repo, &ref_name) {
+                            tracing::warn!(
+                                event_id = %event_id,
+                                repo = %prs_repo.display(),
+                                error = %e,
+                                "Failed to delete /prs/ ref while discarding scoped placeholder",
+                            );
+                        } else if state.in_flight.load(std::sync::atomic::Ordering::Relaxed) == 0
+                            && matches!(
+                                crate::git::list_refs(&prs_repo),
+                                Ok(refs) if refs.is_empty()
+                            )
+                        {
+                            // No refs left and no push in flight — the
+                            // repo is now an empty husk. Drop the bare
+                            // dir so /prs/ doesn't accumulate abandoned
+                            // repos. Equivalent to the cleanup the
+                            // receive handler does on push completion.
+                            if let Err(e) = std::fs::remove_dir_all(&prs_repo) {
+                                tracing::warn!(
+                                    repo = %prs_repo.display(),
+                                    error = %e,
+                                    "Failed to remove zero-ref /prs/ repo after discarding scoped placeholder",
+                                );
+                            } else {
+                                tracing::debug!(
+                                    repo = %prs_repo.display(),
+                                    "Removed zero-ref /prs/ repo after discarding scoped placeholder",
+                                );
+                            }
+                        }
+                    }
+                    self.ctx.purgatory.remove_pr(&event_id);
+
+                    // Fall through: this arriving event was NOT served by
+                    // the placeholder. The standard processing below treats
+                    // it like any other PR event (find_relevant_repo_paths,
+                    // commit lookup, etc).
+                } else {
+                    // Scope match. The /prs/ push's ref is locked by the
+                    // signed event, and the event must be promoted now —
+                    // not re-purgatorised — so subscribers see it
+                    // immediately and the cross-service mirror fires
+                    // while the source repo is still on disk.
+                    //
+                    // This branch is the git-first counterpart to the
+                    // promotion that `process_newly_available_git_data`
+                    // performs on the event-first ordering (called from
+                    // [`crate::grasp06::receive::handle_prs_receive_pack`]).
+                    // Both code paths must converge on the same observable
+                    // outcome: event saved to the DB, broadcast to
+                    // subscribers, and `refs/nostr/<event-id>` mirrored
+                    // into every accepted announcement on this relay
+                    // whose coord appears in the event's `a` tags.
+                    let prs_repo = crate::grasp06::paths::prs_repo_path(
+                        &self.ctx.git_data_path,
+                        &scope.submitter.to_hex(),
+                        &scope.identifier,
+                    );
+
+                    // `process_pr_with_git_data` handles the tagged-owner
+                    // sync path (a `/prs/` contributor who *also* happens
+                    // to be a tagged maintainer of some other announced
+                    // repo on this relay). For typical contributor pushes
+                    // this is a no-op; we run it for symmetry with the
+                    // event-first path in `process_newly_available_git_data`.
+                    let db_repo_data = fetch_repository_data_excluding_purgatory(
+                        &self.ctx.database,
+                        &scope.identifier,
+                    )
+                    .await?;
+
+                    let process_result = crate::git::process::process_pr_with_git_data(
+                        event,
+                        &commit,
+                        &prs_repo,
+                        &db_repo_data,
+                        &self.ctx.git_data_path,
+                        // /prs/ has no owner-in-the-maintainer-sense; pass
+                        // empty so the tagged-owner sync doesn't skip a
+                        // real maintainer by accident (see
+                        // [`crate::git::sync::extract_owner_from_repo_path`]
+                        // which returns None for /prs/).
+                        "",
+                    );
+
+                    // GRASP-06 cross-service mirror: copy the ref + commit
+                    // into every accepted-announcement repo whose coord
+                    // appears in the event's `a` tags. No-op when no such
+                    // announcement exists locally — the PR is then served
+                    // only from `/prs/`, which the spec allows.
+                    let mut mirror_result = crate::git::sync::ProcessResult::default();
+                    crate::git::sync::mirror_prs_pr_to_announced_repos(
+                        &prs_repo,
+                        event,
+                        &commit,
+                        &self.ctx.database,
+                        &self.ctx.git_data_path,
+                        &mut mirror_result,
+                    )
+                    .await;
+
+                    self.ctx.purgatory.remove_pr(&event_id);
+
+                    tracing::info!(
+                        event_id = %event_id,
+                        commit = %commit,
+                        submitter = %scope.submitter.to_hex(),
+                        identifier = %scope.identifier,
+                        tagged_repos_synced = process_result.repos_synced,
+                        mirrored_to_announced_repos = mirror_result.repos_synced,
+                        "Promoted GRASP-06 PR event matching scoped /prs/ placeholder (git-first)",
+                    );
+
+                    // Ok(true) makes the write policy Accept this event,
+                    // which routes through the nostr-relay-builder
+                    // framework's normal save+broadcast path. We do not
+                    // re-add the event to purgatory.
+                    return Ok(true);
+                }
+            } else if placeholder_commit == commit {
+                // Standard endpoint placeholder, matching commit — original
+                // behaviour.
                 tracing::debug!(
                     "Found matching placeholder for PR event {} with commit {}",
                     event_id,
                     commit
                 );
-                // Remove placeholder - event processing will continue normally
                 self.ctx.purgatory.remove_pr(&event_id);
             } else {
-                // Placeholder has different commit - incoming event supersedes
+                // Standard endpoint placeholder, mismatched commit — original
+                // behaviour: incoming event supersedes.
                 tracing::info!(
                     "PR event {} supersedes placeholder: event expects commit {}, placeholder has {}",
                     event_id,
                     commit,
                     placeholder_commit
                 );
-                // Remove incorrect placeholder
                 self.ctx.purgatory.remove_pr(&event_id);
                 // Delete incorrect git data (refs/nostr/<event-id>) will be handled below
             }
