@@ -48,6 +48,10 @@ pub enum SpecRef {
     /// Design-doc derived — the reverse direction does NOT mirror: a push to
     /// the standard `/<npub>/<id>.git` endpoint must not appear under /prs/.
     Grasp06NoReverseMirror,
+    /// Design-doc push semantics (line 96): when a push arrives at /prs/ and
+    /// the matching event's `c` tag does not equal the pushed commit, the ref
+    /// MUST be deleted and the event MUST NOT be promoted out of purgatory.
+    Grasp06CommitMismatchDeletesRef,
 }
 
 /// Synthetic "line numbers" used for the audit report grouping.
@@ -82,6 +86,7 @@ impl SpecRef {
             SpecRef::Grasp06RelaxRequiresCloneTag => "GRASP-06:event-acceptance:23",
             SpecRef::Grasp06MirrorToAnnouncedRepo => "GRASP-06:mirror-forward:design",
             SpecRef::Grasp06NoReverseMirror => "GRASP-06:mirror-reverse:design",
+            SpecRef::Grasp06CommitMismatchDeletesRef => "GRASP-06:commit-mismatch:design",
         }
     }
 }
@@ -179,6 +184,16 @@ pub const GRASP_06_REQUIREMENTS: &[SpecRequirement] = &[
         text: "The reverse direction MUST NOT mirror: a push to the standard /<npub>/<id>.git endpoint must not appear under /prs/.",
         level: RequirementLevel::Must,
     },
+    // Push validation (design-doc derived — line 96 of the push semantics table)
+    SpecRequirement {
+        spec_ref: SpecRef::Grasp06CommitMismatchDeletesRef,
+        line: 102, // synthetic
+        section: "Push Validation",
+        text: "When a push arrives at /prs/ and the matching event's `c` tag does not equal \
+               the pushed commit, the ref MUST be deleted and the event MUST NOT be promoted \
+               out of purgatory (design-doc push semantics: \"commit ≠ event's c tag → delete ref\").",
+        level: RequirementLevel::Must,
+    },
 ];
 
 /// Parse line number from a "GRASP-06:section:line" spec_ref string.
@@ -247,5 +262,6 @@ mod tests {
         assert!(sections.contains(&"Git Smart HTTP Service"));
         assert!(sections.contains(&"Event Acceptance"));
         assert!(sections.contains(&"Cross-Service Mirror"));
+        assert!(sections.contains(&"Push Validation"));
     }
 }

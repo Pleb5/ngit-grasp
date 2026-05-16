@@ -43,7 +43,7 @@ pub mod prs_endpoint;
 pub mod spec_requirements;
 
 pub use event_acceptance::EventAcceptanceTests;
-pub use mirroring::MirroringTests;
+pub use mirroring::{MirroringTests, PushValidationTests};
 pub use nip11::Nip11Tests;
 pub use prs_endpoint::PrsEndpointTests;
 pub use spec_requirements::{SpecRef, GRASP_06_COMMIT_ID};
@@ -127,6 +127,10 @@ impl Grasp06Tests {
                 MirroringTests::test_prs_push_then_pr_event_promotes_and_mirrors(client).await,
             );
             results.add(MirroringTests::test_standard_push_does_not_mirror_to_prs(client).await);
+            results.add(
+                PushValidationTests::test_commit_mismatch_deletes_ref_and_blocks_promotion(client)
+                    .await,
+            );
         } else {
             // (3b) Visible skipped stubs — same SpecRef and requirement text
             //      as the real tests, so they show up in the report under the
@@ -233,6 +237,15 @@ impl Grasp06Tests {
                     SpecRef::Grasp06NoReverseMirror,
                     "the reverse direction MUST NOT mirror: a push to /<npub>/<id>.git must \
                      not appear under /prs/",
+                )
+                .skip(reason),
+            );
+            results.add(
+                TestResult::new(
+                    "commit_mismatch_deletes_ref_and_blocks_promotion",
+                    SpecRef::Grasp06CommitMismatchDeletesRef,
+                    "when the pushed commit does not match the PR event's `c` tag, the ref \
+                     MUST be deleted and the event MUST NOT be promoted out of purgatory",
                 )
                 .skip(reason),
             );

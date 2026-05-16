@@ -340,3 +340,32 @@ isolated_test_with_grasp_06!(
     test_standard_push_does_not_mirror_to_prs_with_grasp_06,
     MirroringTests::test_standard_push_does_not_mirror_to_prs
 );
+
+// =============================================================================
+// Test 10: commit mismatch MUST delete the ref and MUST NOT promote the event
+// =============================================================================
+//
+// Spec: design-doc push semantics table, line 96:
+//   "commit ≠ event's c tag → delete ref"
+//
+// Contract: when a push arrives at /prs/<npub>/<id>.git with a commit that
+// does NOT match the `c` tag of the matching PR event, the relay MUST:
+//   1. Delete the ref (refs/nostr/<event-id> must be absent afterwards).
+//   2. NOT promote the event out of purgatory.
+//
+// This is the correctness invariant that makes refs/nostr/<event-id>
+// self-verifying: the ref name is the event-id, the event's `c` tag pins
+// the commit, and the relay enforces the binding. Without this check an
+// attacker could substitute arbitrary commits under a foreign event-id.
+//
+// Wired only as `with_grasp_06`. Pre-implementation this fails in one of
+// two ways: if the /prs/ endpoint doesn't exist the push fails and the
+// ls-remote check trivially passes (but the test surfaces a setup error);
+// if the endpoint exists but the mismatch check is missing, the ref
+// survives and the test fails. Once the mismatch branch is implemented
+// correctly, the test goes green and stays green as the regression guard.
+
+isolated_test_with_grasp_06!(
+    test_commit_mismatch_deletes_ref_and_blocks_promotion_with_grasp_06,
+    PushValidationTests::test_commit_mismatch_deletes_ref_and_blocks_promotion
+);

@@ -14,4 +14,5 @@ pub use grasp01::{
 // Re-export GRASP-06 test structs
 pub use grasp06::{
     EventAcceptanceTests, Grasp06Tests, MirroringTests, Nip11Tests, PrsEndpointTests,
+    PushValidationTests,
 };

@@ -670,6 +670,222 @@ impl MirroringTests {
 }
 
 // =============================================================================
+// Push validation tests
+// =============================================================================
+
+pub struct PushValidationTests;
+
+impl PushValidationTests {
+    /// Test: when a push arrives at `/prs/` and the matching PR event's `c` tag
+    /// does not equal the pushed commit, the ref MUST be deleted and the event
+    /// MUST NOT be promoted out of purgatory.
+    ///
+    /// Spec ref: [`SpecRef::Grasp06CommitMismatchDeletesRef`] (design-doc push
+    /// semantics table, line 96: "commit ≠ event's c tag → delete ref").
+    ///
+    /// ## Why this matters
+    ///
+    /// The `c` tag is the binding between a signed PR event and the git objects
+    /// it claims to represent. If the relay accepted a mismatched push, a
+    /// contributor could push arbitrary commits under a foreign event-id, or an
+    /// attacker could substitute a different commit for a signed PR. The delete
+    /// path is the correctness invariant that makes `refs/nostr/<event-id>`
+    /// self-verifying.
+    ///
+    /// ## Setup
+    ///
+    /// 1. Materialise commit A locally (the "wrong" commit — will be pushed).
+    /// 2. Build and publish a PR event whose `c` tag names commit B (a
+    ///    different, synthetic 64-hex hash that does not exist anywhere). The
+    ///    event is accepted into purgatory via the GRASP-06 relaxation (no
+    ///    announced coord, clone tag names our /prs/ endpoint).
+    /// 3. Push commit A to `refs/nostr/<pr-event-id>` at the /prs/ URL.
+    ///    The relay finds the event in purgatory, compares the pushed commit
+    ///    against the event's `c` tag, detects a mismatch, and MUST delete
+    ///    the ref.
+    ///
+    /// ## Pass conditions
+    ///
+    /// - After a short wait, `git ls-remote` for `refs/nostr/<pr-event-id>`
+    ///   at the /prs/ URL returns empty (ref was deleted).
+    /// - The PR event is still NOT served (not promoted out of purgatory).
+    ///
+    /// ## TDD posture
+    ///
+    /// Pre-implementation this FAILS in one of two ways:
+    /// - If the receive handler doesn't exist yet (404), the push fails and
+    ///   the ls-remote check trivially passes (no ref to find) — but the
+    ///   test surfaces this as a setup failure rather than a false pass.
+    /// - If the handler exists but the mismatch check is missing, the ref
+    ///   survives and the ls-remote check fails.
+    ///
+    /// Once the mismatch branch is implemented correctly, the test goes green
+    /// and stays green as the regression guard for the delete path.
+    pub async fn test_commit_mismatch_deletes_ref_and_blocks_promotion(
+        client: &AuditClient,
+    ) -> TestResult {
+        TestResult::new(
+            "commit_mismatch_deletes_ref_and_blocks_promotion",
+            SpecRef::Grasp06CommitMismatchDeletesRef,
+            "when the pushed commit does not match the PR event's `c` tag, the ref MUST be \
+             deleted and the event MUST NOT be promoted out of purgatory",
+        )
+        .run(|| async {
+            // 1. Resolve the relay's HTTP base URL.
+            let ws_url = client
+                .relay_url()
+                .await
+                .map_err(|e| format!("Failed to get relay URL: {}", e))?;
+            let http_base = AuditClient::ws_to_http_url(&ws_url)
+                .map_err(|e| format!("Failed to convert WebSocket URL to HTTP: {}", e))?;
+            let http_base = http_base.trim_end_matches('/').to_string();
+
+            // 2. Build a fresh, never-announced coordinate so the event goes
+            //    through the GRASP-06 relaxation path (not GRASP-01). Using a
+            //    random pubkey + UUID identifier guarantees no accepted
+            //    announcement for this coord.
+            let target_pubkey_hex = Keys::generate().public_key().to_hex();
+            let identifier = format!("audit-grasp06-mismatch-{}", uuid::Uuid::new_v4());
+            let a_tag_value = format!("30617:{}:{}", target_pubkey_hex, identifier);
+
+            let pr_author_npub = client
+                .pr_author_keys()
+                .public_key()
+                .to_bech32()
+                .map_err(|e| format!("Failed to bech32-encode pr_author npub: {}", e))?;
+            let prs_url = format!("{}/prs/{}/{}.git", http_base, pr_author_npub, identifier);
+
+            // 3. Materialise commit A locally — this is the commit we will
+            //    push. The PR event's `c` tag will name a DIFFERENT hash.
+            let workspace = TempPath::new("grasp06-mismatch-");
+            init_local_repo(&workspace.path, &prs_url)
+                .map_err(|e| format!("Failed to init local workspace: {}", e))?;
+
+            let commit_a =
+                create_commit(&workspace.path, "grasp-06 audit: commit A (the pushed commit)")
+                    .map_err(|e| format!("Failed to create local commit: {}", e))?;
+
+            // 4. Commit B is a synthetic 64-hex hash that does not correspond
+            //    to any real git object. Using a fresh pubkey's hex is a
+            //    convenient source of 64-hex without pulling in extra deps.
+            let commit_b = Keys::generate().public_key().to_hex();
+            assert_ne!(
+                commit_a, commit_b,
+                "commit_a and commit_b must differ for this test to be meaningful"
+            );
+
+            // 5. Build and publish the PR event with `c` tag = commit B.
+            //    The clone tag names our /prs/ endpoint so the GRASP-06
+            //    relaxation accepts it into purgatory.
+            let pr_event = client
+                .event_builder(
+                    Kind::GitPullRequest,
+                    "grasp-06 audit: PR with c tag pointing at commit B (not the pushed commit A)",
+                )
+                .tag(Tag::custom(TagKind::custom("a"), vec![a_tag_value]))
+                .tag(Tag::custom(TagKind::custom("c"), vec![commit_b.clone()]))
+                .tag(Tag::custom(TagKind::custom("clone"), vec![prs_url.clone()]))
+                .build(client.pr_author_keys())
+                .map_err(|e| format!("Failed to build PR event: {}", e))?;
+            let pr_event_id_typed = pr_event.id;
+            let pr_event_id = pr_event_id_typed.to_hex();
+
+            // Acceptance is a precondition — if the relaxation isn't wired
+            // yet, this test can't make its assertion. Surface the cause.
+            client
+                .send_event_and_note_purgatory(pr_event)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Relay rejected the PR event during test setup (GRASP-06 relaxation \
+                         must accept it into purgatory before the mismatch check can fire): {}",
+                        e
+                    )
+                })?;
+
+            // 6. Push commit A to refs/nostr/<pr-event-id>. The relay finds
+            //    the event in purgatory, compares the pushed commit (A) against
+            //    the event's `c` tag (B), detects a mismatch, and MUST delete
+            //    the ref. The push itself may succeed at the transport level
+            //    (git-receive-pack accepts the pack) — the delete happens
+            //    post-receive, so a non-zero push exit is not required here.
+            let refname = format!("refs/nostr/{}", pr_event_id);
+            try_push_to_ref(&workspace.path, &refname).map_err(|e| {
+                format!(
+                    "git push HEAD:{} to {} failed to execute: {}",
+                    refname, prs_url, e
+                )
+            })?;
+            // Note: we do NOT assert push_ok here. The relay may accept the
+            // pack and then delete the ref post-receive (push exit 0, ref
+            // gone), or it may reject at receive time (push exit non-zero).
+            // Either is spec-compliant; what matters is the ref is absent
+            // afterwards.
+
+            // 7. Short wait for the post-receive processing to complete.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            // 8. Assert the ref is absent. ls-remote with a refname filter:
+            //    empty stdout means the ref was deleted (or never written).
+            //    A failed ls-remote (404 / connection error) is a setup
+            //    failure — the /prs/ endpoint must be reachable.
+            let ls_out = Command::new("git")
+                .args(["ls-remote", &prs_url, &refname])
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .output()
+                .map_err(|e| format!("Failed to execute git ls-remote {}: {}", prs_url, e))?;
+
+            if !ls_out.status.success() {
+                let stderr = String::from_utf8_lossy(&ls_out.stderr);
+                return Err(format!(
+                    "git ls-remote {} {} failed (exit {}): {} — /prs/ endpoint must be \
+                     reachable for this test to assert the mismatch-delete contract",
+                    prs_url,
+                    refname,
+                    ls_out.status.code().unwrap_or(-1),
+                    stderr.trim()
+                ));
+            }
+
+            let stdout = String::from_utf8_lossy(&ls_out.stdout);
+            let lines: Vec<&str> = stdout
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect();
+            if !lines.is_empty() {
+                return Err(format!(
+                    "Commit-mismatch ref was NOT deleted: {} is still present at {} after \
+                     pushing commit {} against a PR event whose `c` tag names {}. The \
+                     receive handler must delete the ref when commit ≠ c tag \
+                     (design-doc push semantics line 96).",
+                    refname, prs_url, commit_a, commit_b
+                ));
+            }
+
+            // 9. Assert the event was NOT promoted. If the relay incorrectly
+            //    promoted the event despite the mismatch, is_event_on_relay
+            //    returns true — that's the second half of the invariant.
+            if client
+                .is_event_on_relay(pr_event_id_typed)
+                .await
+                .map_err(|e| format!("Failed to query relay for PR event served-status: {}", e))?
+            {
+                return Err(format!(
+                    "PR event {} was promoted out of purgatory despite a commit mismatch \
+                     (pushed commit {} ≠ c tag {}). The relay MUST NOT promote the event \
+                     when the pushed commit does not match the event's `c` tag.",
+                    pr_event_id, commit_a, commit_b
+                ));
+            }
+
+            Ok(())
+        })
+        .await
+    }
+}
+
+// =============================================================================
 // Helpers — kept module-local; promote to the audit lib if a second consumer
 // wants them.
 // =============================================================================
