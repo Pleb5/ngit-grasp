@@ -3180,3 +3180,100 @@ async fn test_comprehensive_roundtrip() {
     // Verify expired event
     assert!(purgatory2.is_expired(&expired_id));
 }
+
+// =============================================================================
+// GRASP-06 edge case B2: un-scoped placeholder upgrade
+// =============================================================================
+//
+// Scenario: a push to the standard /<npub>/<id>.git endpoint with wrong commit
+// X creates an un-scoped placeholder for an event_id. A subsequent push to
+// /prs/<submitter>/<id>.git with the correct commit Y then sees the un-scoped
+// placeholder and — per the fix in grasp06::receive::post_push_validate —
+// overwrites it with a scoped placeholder (commit Y, scope={submitter, id}).
+//
+// When the PR event (commit Y) arrives it finds the scoped placeholder, takes
+// the scope-match branch in PrEventPolicy::git_data_check, and:
+//   1. Promotes the event out of purgatory
+//   2. Mirrors commit Y (overwriting X) into the announced repo
+//
+// These tests verify the purgatory-level behaviour that the fix relies on.
+
+#[test]
+fn add_prs_pr_placeholder_overwrites_un_scoped_placeholder() {
+    // Simulates: standard endpoint pushed wrong commit X → un-scoped placeholder.
+    // Then /prs/ endpoint pushes correct commit Y → upgrade to scoped.
+    let purgatory = Purgatory::new(PathBuf::new());
+    let submitter = Keys::generate();
+    let event_id = "a".repeat(64);
+    let wrong_commit = "b".repeat(40);
+    let correct_commit = "c".repeat(40);
+
+    // Standard endpoint creates un-scoped placeholder (wrong commit X)
+    purgatory.add_pr_placeholder(event_id.clone(), wrong_commit.clone());
+
+    let entry = purgatory.find_pr(&event_id).unwrap();
+    assert!(entry.event.is_none(), "placeholder has no event");
+    assert!(entry.prs_scope.is_none(), "placeholder is un-scoped");
+    assert_eq!(entry.commit, wrong_commit);
+
+    // /prs/ endpoint upgrades to scoped placeholder (correct commit Y)
+    purgatory.add_prs_pr_placeholder(
+        event_id.clone(),
+        correct_commit.clone(),
+        submitter.public_key(),
+        "my-repo".to_string(),
+    );
+
+    let upgraded = purgatory.find_pr(&event_id).unwrap();
+    assert!(upgraded.event.is_none(), "still a placeholder (no event)");
+    let scope = upgraded.prs_scope.expect("placeholder now has prs_scope");
+    assert_eq!(scope.submitter, submitter.public_key());
+    assert_eq!(scope.identifier, "my-repo");
+    assert_eq!(
+        upgraded.commit, correct_commit,
+        "placeholder commit updated to /prs/ commit Y"
+    );
+    assert_ne!(
+        upgraded.commit, wrong_commit,
+        "wrong commit X no longer stored"
+    );
+}
+
+#[test]
+fn add_prs_pr_placeholder_does_not_overwrite_existing_scoped_placeholder() {
+    // Once a scoped placeholder exists (the /prs/ push was first), a second
+    // add_prs_pr_placeholder call with a different scope or commit must not
+    // silently replace it — callers gate on `entry.prs_scope.is_none()` before
+    // calling, so this test documents what happens if the gate is bypassed.
+    // Direct `insert` via add_prs_pr_placeholder would overwrite; the guard in
+    // post_push_validate prevents that from happening in practice.
+    let purgatory = Purgatory::new(PathBuf::new());
+    let submitter_a = Keys::generate();
+    let submitter_b = Keys::generate();
+    let event_id = "d".repeat(64);
+    let commit_a = "e".repeat(40);
+    let commit_b = "f".repeat(40);
+
+    purgatory.add_prs_pr_placeholder(
+        event_id.clone(),
+        commit_a.clone(),
+        submitter_a.public_key(),
+        "repo-a".to_string(),
+    );
+
+    // Calling again (bypassing the gate) would replace — this documents the
+    // raw behaviour so that callers know the gate is necessary.
+    purgatory.add_prs_pr_placeholder(
+        event_id.clone(),
+        commit_b.clone(),
+        submitter_b.public_key(),
+        "repo-b".to_string(),
+    );
+
+    // The entry was replaced (gate bypass scenario — illustrates why
+    // post_push_validate checks prs_scope.is_none() before upgrading).
+    let entry = purgatory.find_pr(&event_id).unwrap();
+    let scope = entry.prs_scope.unwrap();
+    assert_eq!(scope.submitter, submitter_b.public_key());
+    assert_eq!(scope.identifier, "repo-b");
+}

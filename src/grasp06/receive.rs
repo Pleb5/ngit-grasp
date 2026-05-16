@@ -559,6 +559,36 @@ async fn post_push_validate(
                 "/prs/ post-push: {} validated against DB/purgatory",
                 ref_name
             );
+            // Edge case B2: a standard-endpoint push with the *wrong* commit
+            // may have created an un-scoped placeholder for this event_id
+            // before the /prs/ push arrived.  When the PR event eventually
+            // arrives it would find an un-scoped placeholder, enter the
+            // "supersedes" branch (because placeholder commit X ≠ event
+            // commit Y), discard the placeholder, and then fail to find
+            // commit Y in any announced repo — sending the event to
+            // purgatory with no trigger to release it.
+            //
+            // Fix: if the placeholder is un-scoped (no event, no scope),
+            // upgrade it in-place to a scoped placeholder referencing
+            // this /prs/ URL and the commit we just received.  The event
+            // arrival will then take the scope-match branch in
+            // PrEventPolicy::git_data_check, find commit Y in the /prs/
+            // repo, and mirror it (overwriting the incorrect ref) into
+            // every matching announced repo.
+            if let Some(entry) = purgatory.find_pr(event_id_hex) {
+                if entry.event.is_none() && entry.prs_scope.is_none() {
+                    purgatory.add_prs_pr_placeholder(
+                        event_id_hex.to_string(),
+                        pushed_commit.to_string(),
+                        *prs_constraints.submitter,
+                        prs_constraints.identifier.to_string(),
+                    );
+                    debug!(
+                        "/prs/ post-push: upgraded un-scoped placeholder to scoped for {} (commit {})",
+                        ref_name, pushed_commit
+                    );
+                }
+            }
         }
         NostrRefPreValidation::Unknown => {
             // No event known. Register a scoped placeholder so the
