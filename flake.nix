@@ -46,15 +46,14 @@
             };
           };
 
-          nativeBuildInputs = with pkgs; [ pkg-config ];
+          nativeBuildInputs = with pkgs; [ pkg-config git ];
 
           buildInputs = with pkgs; [ openssl ];
 
-          # Skip all integration tests during Nix build (require git in PATH)
-          # Integration tests run in dev environment and CI where git is available
+          # Run lib tests only; integration tests spawn a live relay and require
+          # network access not available in the Nix sandbox.
           doCheck = true;
-          cargoTestFlags =
-            [ "--lib" ]; # Only run unit tests, skip integration tests
+          cargoTestFlags = [ "--lib" ];
         };
       })) // {
         # NixOS module for deployment
