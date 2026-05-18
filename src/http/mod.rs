@@ -239,8 +239,12 @@ impl Service<Request<Incoming>> for HttpService {
 
                     let result: Result<Response<Full<Bytes>>, git::handlers::GitError> =
                         match (method_clone.as_ref(), subpath.as_str()) {
-                            // GET /info/refs?service=git-{upload,receive}-pack
-                            (m, sp) if m == Method::GET && sp.starts_with("info/refs") => {
+                            // GET|HEAD /info/refs?service=git-{upload,receive}-pack
+                            // HEAD must mirror GET headers with no body (RFC 9110 §9.3.2)
+                            (m, sp)
+                                if (m == Method::GET || m == Method::HEAD)
+                                    && sp.starts_with("info/refs") =>
+                            {
                                 let service = query
                                     .as_deref()
                                     .unwrap_or("")
@@ -317,6 +321,13 @@ impl Service<Request<Incoming>> for HttpService {
                     match result {
                         Ok(response) => {
                             let (parts, body) = response.into_parts();
+                            // RFC 9110 §9.3.2: HEAD response must have same headers as GET
+                            // but no body.
+                            let body = if method_clone == Method::HEAD {
+                                Full::new(Bytes::new())
+                            } else {
+                                body
+                            };
                             Ok(add_cors_headers(Response::builder().status(parts.status))
                                 .header(
                                     "content-type",
@@ -417,8 +428,12 @@ impl Service<Request<Incoming>> for HttpService {
                 };
 
                 let result = match (method.as_ref(), subpath.as_str()) {
-                    // GET /info/refs?service=git-upload-pack or git-receive-pack
-                    (m, sp) if m == Method::GET && sp.starts_with("info/refs") => {
+                    // GET|HEAD /info/refs?service=git-upload-pack or git-receive-pack
+                    // HEAD must mirror GET headers with no body (RFC 9110 §9.3.2)
+                    (m, sp)
+                        if (m == Method::GET || m == Method::HEAD)
+                            && sp.starts_with("info/refs") =>
+                    {
                         // Parse query string for service parameter
                         let service = query
                             .as_deref()
@@ -512,6 +527,13 @@ impl Service<Request<Incoming>> for HttpService {
                     Ok(response) => {
                         // Add CORS headers to successful Git responses
                         let (parts, body) = response.into_parts();
+                        // RFC 9110 §9.3.2: HEAD response must have same headers as GET
+                        // but no body.
+                        let body = if method == Method::HEAD {
+                            Full::new(Bytes::new())
+                        } else {
+                            body
+                        };
                         Ok(add_cors_headers(Response::builder().status(parts.status))
                             .header(
                                 "content-type",
