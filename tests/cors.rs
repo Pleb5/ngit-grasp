@@ -62,3 +62,52 @@ isolated_cors_test!(test_cors_allow_headers);
 isolated_cors_test!(test_cors_options_preflight);
 
 isolated_cors_test!(test_cors_on_real_repo);
+
+#[tokio::test]
+async fn test_cors_allows_git_smart_http_preflight_headers() {
+    let relay = TestRelay::start().await;
+    let url = format!(
+        "http://{}/npub1test/test.git/info/refs?service=git-upload-pack",
+        relay.domain()
+    );
+
+    let response = reqwest::Client::new()
+        .request(reqwest::Method::OPTIONS, &url)
+        .header("Origin", "https://budabit.club")
+        .header("Access-Control-Request-Method", "GET")
+        .header(
+            "Access-Control-Request-Headers",
+            "git-protocol, authorization, accept, content-encoding, x-requested-with",
+        )
+        .send()
+        .await
+        .expect("Failed to send OPTIONS preflight request");
+
+    let status = response.status();
+    let allow_headers = response
+        .headers()
+        .get("Access-Control-Allow-Headers")
+        .expect("Missing Access-Control-Allow-Headers")
+        .to_str()
+        .expect("Invalid Access-Control-Allow-Headers")
+        .to_string();
+
+    relay.stop().await;
+
+    assert_eq!(status, reqwest::StatusCode::NO_CONTENT);
+
+    for expected in [
+        "git-protocol",
+        "authorization",
+        "accept",
+        "content-encoding",
+        "x-requested-with",
+    ] {
+        assert!(
+            allow_headers
+                .split(',')
+                .any(|header| header.trim().eq_ignore_ascii_case(expected)),
+            "Expected Access-Control-Allow-Headers to include {expected}, got: {allow_headers}"
+        );
+    }
+}

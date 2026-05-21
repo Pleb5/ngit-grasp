@@ -33,8 +33,9 @@ use crate::sync::rejected_index::RejectedEventsIndex;
 
 /// CORS headers required by GRASP-01 specification (lines 40-47)
 const CORS_ALLOW_ORIGIN: &str = "*";
-const CORS_ALLOW_METHODS: &str = "GET, POST";
-const CORS_ALLOW_HEADERS: &str = "Content-Type";
+const CORS_ALLOW_METHODS: &str = "GET, POST, OPTIONS";
+const CORS_ALLOW_HEADERS: &str =
+    "Authorization, Content-Type, Git-Protocol, Accept, Content-Encoding, X-Requested-With";
 
 /// Embedded icon image (Grasp logo)
 const ICON_PNG: &[u8] = include_bytes!("../../static/icon.png");
